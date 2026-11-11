@@ -1,8 +1,8 @@
 # Tern 需求交付工作台：产品设计与实施计划
 
 - 日期：2026-11-11
-- 状态：产品方向已确认；本文为目标设计和执行计划，不表示功能已经实现。
-- 本轮授权：先生成方案与计划文档；尚未启动实现。
+- 状态：阶段 0＋1 已实施；实际协议、验证和限制见 [阶段记录](docs/PHASE_0_1.md)。其余阶段仍是目标设计，未宣称实现。
+- 本轮授权：阶段 0＋阶段 1；不提前实现需求池、完整看板和正式业务验收。
 - 适用环境：Windows Tern＋WSL Ubuntu＋omp。
 - 现有项目：`/home/jackie/code/workbench`；远端仓库：`git@github.com:Jackie733/workbench.git`。
 - 工作名称：需求交付工作台。暂不更改插件 ID `multi-model-workbench`，避免提前改变安装与数据身份。
@@ -482,7 +482,7 @@ acceptance.recorded
 
 ## 13. 参考与事实边界
 
-- 当前项目 `README.md`：旧版本说明、路径、历史验证与已知 Windows／WSL 边界。
+- 当前项目 `README.md` 与 `docs/PHASE_0_1.md`：当前使用和实际验证；`docs/LEGACY_WORKBENCH_2_0.md` 保留旧版本说明及历史边界。
 - [Tern 布局](https://docs.stencil.so/tern/guides/layout.md)
 - [Tern Window API](https://docs.stencil.so/tern/reference/api-window.md)
 - [Tern 原生输入](https://docs.stencil.so/tern/elements/input.md)
@@ -491,4 +491,4 @@ acceptance.recorded
 - [omp v18.18.7 扩展契约](https://github.com/can1357/oh-my-pi/blob/v18.18.7/docs/extensions.md)：历史研究所用固定版本，实现时需复核实际安装版本。
 - [Overseer](https://github.com/mmnavarr/overseer)：借鉴持久面板、渐进展开、状态展示与上下文操作；不照搬 macOS／Worktrunk 依赖或一 worktree 一 session 的默认产品流程。
 
-本文中的 schema、事件名称、生命周期和阶段验收是目标契约；不是对现有插件功能的陈述。当前文档交付不包括安装 extension、重载插件、修改配置或启动模型请求。
+本文的业务 schema、生命周期和后续阶段验收是目标契约；已实现的实时桥接以 [阶段记录](docs/PHASE_0_1.md) 为准。本轮未改全局模型／Provider 配置或凭据，没有向日常用户会话提交测试任务。

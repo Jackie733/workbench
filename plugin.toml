@@ -1,13 +1,13 @@
 schema = 1
 id = "multi-model-workbench"
-name = "多模型工作台"
-version = "2.0.0"
-description = "Task-first workspace with native forms, explicit plan approval and omp sessions."
+name = "需求交付工作台"
+version = "3.0.0"
+description = "Live native workbench bound to one existing omp session; explicit draft-safe prefill only."
 host = "host.luau"
 window = "window.luau"
 styles = ["styles.css"]
 
 [[blocks]]
-id = "task-form"
-title = "工作台任务"
+id = "live"
+title = "实时需求交付工作台"
 palette = false
