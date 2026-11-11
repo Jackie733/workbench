@@ -106,7 +106,7 @@ local function refresh(s)
             if data.state == "disconnected" then s.problem = "omp 已断开／退出（显示最后已知状态）"
             elseif now - data.updatedAt > live.staleMs or data.updatedAt > now + 2000
                 or (s.sequenceAt and tern.now() - s.sequenceAt > live.staleMs) then
-                s.problem = "连接已过期；最后更新 " .. tostring(data.updatedAt) .. " ms，禁止预填"
+                s.problem = "连接已过期；最后更新 " .. tostring(math.max(0, math.floor((now - data.updatedAt) / 1000))) .. " 秒前，禁止预填"
             end
         end
     end
@@ -262,7 +262,7 @@ tern.block.define("live", {
             table.insert(nodes, ui.node("scroll", {key = "events", max = {h = "6lines"}}, {
                 ui.text(#events > 0 and table.concat(events, "\n") or "尚无运行事件"),
             }))
-            table.insert(nodes, note("快照 #" .. tostring(data.sequence) .. " · 更新 " .. tostring(data.updatedAt) .. " ms · pid " .. tostring(data.pid)))
+            table.insert(nodes, note("连接正常 · 心跳持续（只表示会话仍在线，不代表任务进度）"))
         end
         return {main = ui.node("col", {role = "workbench.live", gap = "sm"}, nodes)}
     end,

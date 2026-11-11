@@ -10,6 +10,7 @@
 
 - [完整产品设计与分阶段计划](DESIGN_AND_IMPLEMENTATION_PLAN.md)
 - [阶段 0＋1 实际协议、激活方式与验证记录](docs/PHASE_0_1.md)
+- [阶段 1.5 收尾与阶段 2 存储层协议](docs/PHASE_2_STORAGE.md)
 - [阶段 0 领域、存储、迁移与恢复契约](docs/DOMAIN_CONTRACT.md)
 - [旧版 2.0.0 历史说明](docs/LEGACY_WORKBENCH_2_0.md)：仅供迁移参考，不再按其双角色启动流程使用。
 

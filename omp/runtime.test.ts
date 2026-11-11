@@ -1,4 +1,4 @@
-import { matchingOpenAck } from "./runtime";
+import { cleanupStaleRuntime, matchingOpenAck } from "./runtime";
 import { matchingPanes, windowKeys } from "./tern";
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -97,5 +97,40 @@ describe("exact native opening acknowledgment", () => {
     expect(() => windowKeys({ clients: [{ kind: "cli", window: "" }] })).toThrow();
     expect(matchingPanes({ panes: [{ pane: 1, title: "OMPWB:exact-extra" }, { pane: 2, title: "OMPWB:exact" }, { pane: 3, title: "OMPWB:exact" }] }, "OMPWB:exact")).toEqual([2, 3]);
     expect(() => matchingPanes({ panes: [{ pane: "3", title: "OMPWB:exact" }] }, "OMPWB:exact")).toThrow();
+  });
+});
+
+describe("abandoned runtime cleanup", () => {
+  test("removes only provably abandoned private instance directories", () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-cleanup-"));
+    fs.chmodSync(base, 0o700);
+    const deadPid = (() => {
+      for (let pid = 4_194_304; pid > 4; pid--) {
+        try { process.kill(pid, 0); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return pid; }
+      }
+      throw new Error("no unused pid");
+    })();
+    const old = new Date(Date.now() - 9 * 86_400_000);
+    const make = (name: string, pid: number, age: Date, marker: unknown = { instanceId: name, pid }) => {
+      const directory = path.join(base, name);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      fs.chmodSync(directory, 0o700);
+      fs.writeFileSync(path.join(directory, "open.omp-workbench.json"), JSON.stringify(marker));
+      fs.utimesSync(directory, age, age);
+      return directory;
+    };
+    const abandoned = make("abandoned-0001", deadPid, old);
+    const running = make("running-000002", process.pid, old);
+    const young = make("young-00000003", deadPid, new Date());
+    const wrongMarker = make("mismatch-00004", deadPid, old, { instanceId: "other", pid: deadPid });
+    const own = make("own-instance-5", deadPid, old);
+    const loose = path.join(base, "loose-0000006");
+    fs.mkdirSync(loose);
+    try {
+      expect(cleanupStaleRuntime(base, "own-instance-5", Date.now())).toEqual(["abandoned-0001"]);
+      expect(fs.existsSync(abandoned)).toBe(false);
+      for (const kept of [running, young, wrongMarker, own, loose]) expect(fs.existsSync(kept)).toBe(true);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 });

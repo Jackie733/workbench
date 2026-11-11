@@ -92,6 +92,42 @@ function syncDirectory(directory: string): void {
 	try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+function processAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; }
+	catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
+/**
+ * Remove only runtime directories this plugin can prove are its own, private and
+ * abandoned: exact instance-named 0700 directory, matching marker, dead pid and
+ * an old mtime. Anything unreadable or ambiguous is left alone.
+ */
+export function cleanupStaleRuntime(base: string, ownInstance: string, now = Date.now(), maxAgeMs = 7 * 86_400_000): string[] {
+	const removed: string[] = [];
+	let names: string[];
+	try { names = fs.readdirSync(base).slice(0, 256); } catch { return removed; }
+	for (const name of names) {
+		if (name === ownInstance || !/^[A-Za-z0-9_-]{8,64}$/.test(name)) continue;
+		const directory = path.join(base, name);
+		try {
+			const info = fs.lstatSync(directory);
+			if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid!() || (info.mode & 0o777) !== 0o700) continue;
+			if (now - info.mtimeMs < maxAgeMs) continue;
+			const markerPath = path.join(directory, "open.omp-workbench.json");
+			const markerInfo = fs.lstatSync(markerPath);
+			if (!markerInfo.isFile() || markerInfo.isSymbolicLink() || markerInfo.size > 16_384) continue;
+			const marker: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+			if (!marker || typeof marker !== "object" || Array.isArray(marker)) continue;
+			const value = marker as { instanceId?: unknown; pid?: unknown };
+			if (value.instanceId !== name || !Number.isSafeInteger(value.pid)) continue;
+			if (processAlive(value.pid as number)) continue;
+			fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2 });
+			removed.push(name);
+		} catch { /* leave anything we cannot prove is ours */ }
+	}
+	return removed;
+}
+
 /** Atomic, durable small JSON replacement; callers serialize synchronously. */
 export function atomicJson(file: string, value: unknown): void {
 	const temporary = `${file}.${randomUUID()}.tmp`;
@@ -175,6 +211,10 @@ export class Runtime {
 		privateDirectory(this.commands, true);
 		privateDirectory(this.receipts, true);
 		this.marker = path.join(this.directory, "open.omp-workbench.json");
+		const timer = setTimeout(() => {
+			try { cleanupStaleRuntime(base, this.instanceId); } catch { /* cleanup is best effort */ }
+		}, 1000);
+		timer.unref();
 	}
 
 	assertPrivate(): void {
