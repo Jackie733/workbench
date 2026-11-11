@@ -1,0 +1,13 @@
+schema = 1
+id = "multi-model-workbench"
+name = "多模型工作台"
+version = "2.0.0"
+description = "Task-first workspace with native forms, explicit plan approval and omp sessions."
+host = "host.luau"
+window = "window.luau"
+styles = ["styles.css"]
+
+[[blocks]]
+id = "task-form"
+title = "工作台任务"
+palette = false
