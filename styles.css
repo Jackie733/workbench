@@ -14,3 +14,18 @@
     min-width: 0;
     font-family: var(--sans);
 }
+[data-role='workbench.live'] .sf-split {
+    min-width: 0;
+}
+[data-role='workbench.live'] .sf-card,
+[data-role='workbench.live'] .sf-item {
+    min-width: 0;
+}
+[data-role='workbench.live'] [data-role='workbench.board.column'] {
+    flex: 1 1 22ch;
+    max-width: 36ch;
+}
+[data-role='workbench.live'] [data-role='workbench.detail'] {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}

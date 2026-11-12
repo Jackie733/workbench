@@ -28,6 +28,25 @@ local function integer(value, min)
 end
 local function text(value, max, required)
     if type(value) ~= "string" or #value > max or value:find("[%z\1-\8\11\12\14-\31\127]") then return false end
+    local index = 1
+    while index <= #value do
+        local byte = value:byte(index)
+        local count, minimum
+        if byte < 0x80 then count, minimum = 1, 0
+        elseif byte >= 0xC2 and byte <= 0xDF then count, minimum = 2, 0x80
+        elseif byte >= 0xE0 and byte <= 0xEF then count, minimum = 3, 0x800
+        elseif byte >= 0xF0 and byte <= 0xF4 then count, minimum = 4, 0x10000
+        else return false end
+        if index + count - 1 > #value then return false end
+        local code = byte % (2 ^ (8 - count - 1))
+        for offset = 1, count - 1 do
+            local nextByte = value:byte(index + offset)
+            if nextByte < 0x80 or nextByte > 0xBF then return false end
+            code = code * 64 + nextByte - 0x80
+        end
+        if code < minimum or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF) then return false end
+        index += count
+    end
     return not required or value:match("%S") ~= nil
 end
 local function keys(value, allowed)
@@ -92,36 +111,60 @@ function M.validateRequirement(value)
     if type(value.acceptanceCriteria) ~= "table" or #value.acceptanceCriteria > M.maxCriteria then
         return nil, "验收条件无效或过多"
     end
-    local criteria = {}
-    for index, item in value.acceptanceCriteria do
+    local criteria, criterionIds, count = tern.json.array(), {}, 0
+    for index in value.acceptanceCriteria do
+        if type(index) ~= "number" or index % 1 ~= 0 or index < 1 then return nil, "验收条件必须是连续数组" end
+        count += 1
+    end
+    if count ~= #value.acceptanceCriteria then return nil, "验收条件必须是连续数组" end
+    for index = 1, count do
+        local item = value.acceptanceCriteria[index]
+        if type(item) == "table" then
+            for key in item do
+                if key ~= "id" and key ~= "description" and key ~= "required" then return nil, "验收条件含未知字段" end
+            end
+        end
         local clean = criterion(item, index)
-        if not clean then return nil, "验收条件字段无效" end
+        if not clean or criterionIds[clean.id] then return nil, "验收条件字段无效或 ID 重复" end
+        criterionIds[clean.id] = true
         table.insert(criteria, clean)
     end
     if type(value.labels) ~= "table" or #value.labels > M.maxLabels then return nil, "标签无效或过多" end
-    for _, label in value.labels do
+    local labels, labelCount = tern.json.array(), 0
+    for index in value.labels do
+        if type(index) ~= "number" or index % 1 ~= 0 or index < 1 then return nil, "标签必须是连续数组" end
+        labelCount += 1
+    end
+    if labelCount ~= #value.labels then return nil, "标签必须是连续数组" end
+    for index = 1, labelCount do
+        local label = value.labels[index]
         if not text(label, 40, true) then return nil, "标签内容无效" end
+        table.insert(labels, label)
     end
     if value.blockedFrom ~= nil and not M.stages[value.blockedFrom] then return nil, "阻塞来源阶段无效" end
     if value.blockedReason ~= nil and not text(value.blockedReason, 2000, false) then return nil, "阻塞原因无效" end
     if value.extensions ~= nil and type(value.extensions) ~= "table" then return nil, "扩展字段无效" end
+    value.acceptanceCriteria = criteria
+    value.labels = labels
     return value
 end
 
 function M.newRequirement(project, fields)
     assert(M.validateProject(project), "项目记录无效")
-    local criteria = {}
+    local criteria = tern.json.array()
     for index, item in fields.criteria or {} do
         if type(item) == "string" then
-            criteria[index] = {id = "C" .. index, description = item, required = true}
+            table.insert(criteria, {id = "C" .. index, description = item, required = true})
         else
-            criteria[index] = {id = "C" .. index, description = item.description, required = item.required ~= false}
+            table.insert(criteria, {id = "C" .. index, description = item.description, required = item.required ~= false})
         end
     end
+    local labels = tern.json.array()
+    for _, label in fields.labels or {} do table.insert(labels, label) end
     local value = {schemaVersion = M.schemaVersion, requirementId = fields.id, projectId = project.projectId,
         number = M.displayNumber(project.nextNumber), revision = 1, title = fields.title, type = fields.type,
-        priority = fields.priority or "normal", stage = fields.stage or "backlog", goal = fields.goal,
-        scope = fields.scope or "", acceptanceCriteria = criteria, labels = fields.labels or {},
+        priority = fields.priority or "normal", stage = "backlog", goal = fields.goal,
+        scope = fields.scope or "", acceptanceCriteria = criteria, labels = labels,
         createdAt = fields.now, updatedAt = fields.now}
     if fields.blockedFrom ~= nil then value.blockedFrom = fields.blockedFrom end
     if fields.blockedReason ~= nil then value.blockedReason = fields.blockedReason end
@@ -169,17 +212,45 @@ function M.readProject(paths)
     return M.validateProject(value)
 end
 function M.readRequirements(paths)
-    local names = {}
-    pcall(function() names = tern.fs.list(paths.requirements) end)
-    local rows, failures = {}, {}
+    local project, projectProblem = M.readProject(paths)
+    if not project then return {}, {"project: " .. tostring(projectProblem)} end
+    local names, listProblem = {}, nil
+    local listed, result = pcall(function() return tern.fs.list(paths.requirements) end)
+    if listed then names = result else listProblem = tostring(result) end
+    if listProblem then return {}, {listProblem} end
+    local rows, failures, byNumber = {}, {}, {}
     for _, name in names do
         if M.token(name) then
             local path = join(join(paths.requirements, name), "requirement.json")
             local value, problem = readJson(path)
-            if value then value = M.validateRequirement(value) end
-            if value then table.insert(rows, value) else table.insert(failures, name .. ": " .. tostring(problem)) end
+            if value then
+                local valid, validationProblem = M.validateRequirement(value)
+                value, problem = valid, validationProblem
+            end
+            if value and value.projectId ~= project.projectId then value, problem = nil, "project_id_mismatch" end
+            if value and name ~= value.requirementId then value, problem = nil, "requirement_id_mismatch" end
+            if value and byNumber[value.number] then
+                local first = byNumber[value.number]
+                failures[#failures + 1] = first.requirementId .. ": duplicate_number"
+                failures[#failures + 1] = name .. ": duplicate_number"
+                for index, row in rows do if row == first then table.remove(rows, index); break end end
+                byNumber[value.number] = false
+            elseif value and byNumber[value.number] == false then
+                failures[#failures + 1] = name .. ": duplicate_number"
+            elseif value then
+                table.insert(rows, value)
+                byNumber[value.number] = value
+            else table.insert(failures, name .. ": " .. tostring(problem)) end
+        else
+            failures[#failures + 1] = tostring(name) .. ": invalid_requirement_directory"
         end
     end
+    local maxNumber = 0
+    for _, row in rows do
+        local number = tonumber(row.number:match("^REQ%-(%d+)$"))
+        if number and number > maxNumber then maxNumber = number end
+    end
+    if project.nextNumber <= maxNumber then failures[#failures + 1] = "project: next_number_behind_requirements" end
     return rows, failures
 end
 
@@ -187,17 +258,86 @@ end
 -- PowerShell, and the payload is published with a same-directory MoveFileEx.
 M.atomicScript = [==[
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $target=$env:OMPWB_TARGET
 $temp=$env:OMPWB_TEMP
 $lock=$env:OMPWB_LOCK
 $token=$env:OMPWB_TOKEN
 $expect=[int]$env:OMPWB_EXPECT
+$gate=$env:OMPWB_GATE
+$gateStream=$null
+$deadline=[DateTime]::UtcNow.AddSeconds(2)
+while (-not $gateStream -and [DateTime]::UtcNow -lt $deadline) {
+  try { $gateStream=[IO.File]::Open($gate,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::Write,[IO.FileShare]::None) }
+  catch { Start-Sleep -Milliseconds 25 }
+}
+if (-not $gateStream) {
+  if ($temp -and [IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+  exit 7
+}
+try {
 $l=$null
-if ([IO.File]::Exists($lock)) { try { $l=[IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { $l=$null } }
+if ([IO.File]::Exists($lock)) {
+  try { $l=[IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { exit 8 }
+  if ($null -eq $l -or $l -isnot [System.Management.Automation.PSCustomObject]) { exit 8 }
+}
+if ($null -ne $l) {
+  $lockKeys=@($l.PSObject.Properties.Name | Sort-Object) -join ','
+  if ($l.schemaVersion -isnot [int] -or $l.schemaVersion -ne 1 -or $l.token -notmatch '^[A-Za-z0-9_-]{1,96}$' -or
+    ($l.updatedAt -isnot [int] -and $l.updatedAt -isnot [long]) -or [long]$l.updatedAt -lt 0 -or
+    $null -eq $l.owner -or $l.owner -isnot [System.Management.Automation.PSCustomObject] -or
+    $lockKeys -ne 'owner,schemaVersion,token,updatedAt') { exit 8 }
+  $ownerKeys=@($l.owner.PSObject.Properties.Name | Sort-Object) -join ','
+  if ($ownerKeys -ne 'panel,window' -or $l.owner.window -isnot [string] -or
+    [string]::IsNullOrWhiteSpace($l.owner.window) -or $l.owner.window.Length -gt 128 -or
+    $l.owner.window -match '[\x00-\x1F\x7F]' -or
+    ($l.owner.panel -isnot [int] -and $l.owner.panel -isnot [long]) -or
+    [long]$l.owner.panel -lt 1 -or [long]$l.owner.panel -gt 9007199254740991) { exit 8 }
+}
+if ($env:OMPWB_MODE -eq 'claim') {
+  if ($l -and $l.token -ne $token) {
+    if ([long]$env:OMPWB_NOW - [long]$l.updatedAt -lt [long]$env:OMPWB_STALE) { exit 9 }
+    if ($env:OMPWB_TAKEOVER -ne '1') { exit 10 }
+  }
+  if (-not ('Wb.MoveFile' -as [type])) {
+    Add-Type -Namespace Wb -Name MoveFile -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string existing, string target, int flags);'
+  }
+  [IO.File]::WriteAllText($env:OMPWB_LOCK_TEMP,$env:OMPWB_LOCK_VALUE,[Text.UTF8Encoding]::new($false))
+  if (-not [Wb.MoveFile]::MoveFileEx($env:OMPWB_LOCK_TEMP,$lock,0x9)) { exit 6 }
+  exit 0
+}
+if ($env:OMPWB_MODE -eq 'renew' -or $env:OMPWB_MODE -eq 'release') {
+  if (-not $l -or $l.token -ne $token) { exit 2 }
+  if ($env:OMPWB_MODE -eq 'renew') {
+    if (-not ('Wb.MoveFile' -as [type])) {
+      Add-Type -Namespace Wb -Name MoveFile -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string existing, string target, int flags);'
+    }
+    [IO.File]::WriteAllText($env:OMPWB_LOCK_TEMP,$env:OMPWB_LOCK_VALUE,[Text.UTF8Encoding]::new($false))
+    if (-not [Wb.MoveFile]::MoveFileEx($env:OMPWB_LOCK_TEMP,$lock,0x9)) { exit 6 }
+  } else { [IO.File]::Delete($lock) }
+  exit 0
+}
 if (-not $l -or $l.token -ne $token) { exit 2 }
+if ($env:OMPWB_MODE -eq 'publish_directory') {
+  $source=$env:OMPWB_SOURCE
+  if ([IO.Directory]::Exists($target) -or [IO.File]::Exists($target)) { exit 11 }
+  if (-not [IO.Directory]::Exists($source) -or -not [IO.File]::Exists([IO.Path]::Combine($source,'requirement.json'))) { exit 12 }
+  if (-not ('Wb.MoveFile' -as [type])) {
+    Add-Type -Namespace Wb -Name MoveFile -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string existing, string target, int flags);'
+  }
+  if (-not [Wb.MoveFile]::MoveFileEx($source,$target,0x8)) {
+    if ([IO.Directory]::Exists($target) -or [IO.File]::Exists($target)) { exit 11 }
+    exit 6
+  }
+  exit 0
+}
 if ([IO.File]::Exists($target)) {
+  if ($expect -eq 0) { exit 3 }
   try { $cur=[IO.File]::ReadAllText($target) | ConvertFrom-Json } catch { exit 4 }
-  if ([int]$cur.revision -ne $expect) { exit 3 }
+  if ($cur -isnot [System.Management.Automation.PSCustomObject] -or
+    $cur.schemaVersion -ne 1 -or ($cur.revision -isnot [int] -and $cur.revision -isnot [long]) -or
+    [long]$cur.revision -lt 1) { exit 4 }
+  if ([long]$cur.revision -ne $expect) { exit 3 }
 } elseif ($expect -ne 0) { exit 3 }
 if (-not [IO.File]::Exists($temp)) { exit 5 }
 try {
@@ -208,14 +348,37 @@ try {
 } finally {
   if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
 }
+} finally {
+  if ($temp -and [IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+  if ($env:OMPWB_LOCK_TEMP -and [IO.File]::Exists($env:OMPWB_LOCK_TEMP)) { [IO.File]::Delete($env:OMPWB_LOCK_TEMP) }
+  if ($gateStream) { $gateStream.Dispose() }
+  # Keep the inert gate file: unlinking after release can race a waiter.
+}
 exit 0
 ]==]
-
+local reasons = {[2] = "lock_conflict", [3] = "revision_conflict", [4] = "corrupt_target",
+    [5] = "missing_payload", [6] = "publish_failed", [7] = "busy", [8] = "corrupt_lock",
+    [9] = "locked", [10] = "takeover_required", [11] = "publish_conflict", [12] = "missing_stage"}
+local function removeStage(stage)
+    pcall(tern.fs.remove, join(stage, "requirement.json"))
+    pcall(tern.fs.remove, stage)
+end
+local function publishDirectory(paths, source, target, token, cb)
+    local env = {OMPWB_MODE = "publish_directory", OMPWB_TARGET = target, OMPWB_SOURCE = source,
+        OMPWB_LOCK = paths.lock, OMPWB_GATE = paths.lock .. ".gate",
+        OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()), OMPWB_TOKEN = token}
+    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        if status == 0 then cb(true, nil, false, cx)
+        else cb(false, timedOut and "timeout" or reasons[status] or ("publish_failed:" .. tostring(stderr or ""):sub(1, 300)),
+            timedOut == true, cx) end
+    end)
+    if not spawned then cb(false, "process_failed:" .. tostring(errorValue), true) end
+end
 local function processRun(env, cb)
     local argv = {"powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", M.atomicScript}
     if cb then
-        tern.process.run(argv, {env = env, timeout_ms = 8000}, function(result)
-            cb(result.status, result.stderr, result.timed_out)
+        tern.process.run(argv, {env = env, timeout_ms = 8000}, function(result, cx)
+            cb(result.status, result.stderr, result.timed_out, cx)
         end)
     else
         local r = tern.process.run(argv, {env = env, timeout_ms = 8000})
@@ -223,78 +386,210 @@ local function processRun(env, cb)
     end
 end
 
-local reasons = {[2] = "lock_conflict", [3] = "revision_conflict", [4] = "corrupt_target", [5] = "missing_payload", [6] = "publish_failed"}
 
--- Test seam: the plugin never replaces this; regressions inject a fake runner.
+-- Keeps the native awaitable result when called without a callback.
 M.runProcess = processRun
 
 -- value must already be schema-valid; expectedRevision 0 means create.
 -- cb receives (ok, reason); without cb an awaitable ProcessResult is returned.
+local function allowedFile(paths, file, value)
+    if type(value) ~= "table" or type(file) ~= "string" then return false end
+    if file == paths.project then return M.validateProject(value) ~= nil end
+    local suffix, prefix = "\\requirement.json", paths.requirements .. "\\"
+    if file:sub(1, #prefix) ~= prefix or file:sub(-#suffix) ~= suffix then return false end
+    local id = file:sub(#prefix + 1, #file - #suffix)
+    return M.token(id) and id == value.requirementId and M.validateRequirement(value) ~= nil
+end
+
 function M.put(paths, file, value, expectedRevision, token, cb)
-    local payload = tern.json.encode(value)
-    if #payload > M.maxJson then error("记录超过大小上限") end
+    if not M.token(token) or not allowedFile(paths, file, value) then
+        if cb then cb(false, "invalid_path_or_record"); return end
+        error("拒绝非 workbench 文件或无效记录")
+    end
+    if not integer(expectedRevision, 0) then
+        if cb then cb(false, "invalid_revision"); return end
+        error("无效预期版本")
+    end
+    local encoded, payload = pcall(tern.json.encode, value)
+    if not encoded then if cb then cb(false, "encode_failed"); return end; error(payload) end
+    if #payload > M.maxJson then if cb then cb(false, "record_too_large"); return end; error("记录超过大小上限") end
     local temp = file .. ".tmp-" .. M.newId("w", tern.now())
-    tern.fs.write(temp, payload)
+    local wrote, writeError = pcall(tern.fs.write, temp, payload)
+    if not wrote then if cb then cb(false, "temp_write_failed:" .. tostring(writeError)); return end; return nil, writeError end
     local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
+        OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
         OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
     if not cb then return M.runProcess(env, nil) end
-    M.runProcess(env, function(status, stderr, timedOut)
-        if status == 0 then
-            cb(true)
-        else
-            local reason
-            if timedOut then reason = "timeout"
-            else reason = reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)) end
-            cb(false, reason)
-        end
+    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        if status == 0 then cb(true, nil, cx)
+        else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
     end)
+    if not spawned then cb(false, "process_failed:" .. tostring(errorValue)) end
+    if not spawned then pcall(tern.fs.remove, temp) end
 end
 
 local function lockValue(paths, token, owner, now)
     return {schemaVersion = 1, token = token, owner = owner, updatedAt = now}
 end
-function M.renewLock(paths, token, owner, now)
-    local current = readJson(paths.lock)
-    if current and current.token ~= token then return false, "lock_conflict" end
-    tern.fs.write(paths.lock, tern.json.encode(lockValue(paths, token, owner, now)))
-    return true
-end
-function M.releaseLock(paths, token)
-    local current = readJson(paths.lock)
-    if current and current.token == token then pcall(tern.fs.remove, paths.lock) end
-end
-
--- Callback form used by the plugin. The lock is taken first; a valid existing
--- project is returned after checking it belongs to the same root.
-function M.init(paths, opts, cb)
-    local function fail(reason, detail)
-        cb(nil, reason, detail)
-    end
-    local ok, problem = pcall(function()
-        tern.fs.mkdir(paths.store)
-        tern.fs.mkdir(paths.requirements)
+local function lockOperation(paths, mode, token, owner, now, takeover, cb)
+    local env = {OMPWB_MODE = mode, OMPWB_LOCK = paths.lock, OMPWB_GATE = paths.lock .. ".gate",
+        OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", now or 0),
+        OMPWB_TOKEN = token, OMPWB_NOW = tostring(now or 0), OMPWB_STALE = tostring(M.lockStaleMs),
+        OMPWB_TAKEOVER = takeover and "1" or "0",
+        OMPWB_LOCK_VALUE = tern.json.encode(lockValue(paths, token, owner, now or 0))}
+    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        local code = status == 0 and nil or (timedOut and "timeout" or reasons[status] or "lock_failed")
+        if cb then cb(status == 0, code and {code = code, detail = stderr} or nil, cx) end
     end)
+    if not spawned and cb then cb(false, {code = "process_failed", detail = tostring(errorValue)}) end
+end
+function M.renewLock(paths, token, owner, now, cb)
+    if not M.token(token) or type(owner) ~= "table" or not integer(now, 0) then
+        if cb then cb(false, {code = "invalid_lock_options"}) end
+        return
+    end
+    lockOperation(paths, "renew", token, owner, now, false, cb)
+end
+function M.releaseLock(paths, token, cb)
+    if not M.token(token) then if cb then cb(false, {code = "invalid_token"}) end; return end
+    lockOperation(paths, "release", token, {}, os.time() * 1000, false, cb)
+end
+function M.init(paths, opts, cb)
+    local function fail(code, detail, cx) cb(nil, {code = code, detail = detail}, cx) end
+    if type(opts) ~= "table" or not M.token(opts.token) or type(opts.owner) ~= "table" or not integer(opts.now, 0) then
+        fail("invalid_init_options"); return
+    end
+    local ok, problem = pcall(function() tern.fs.mkdir(paths.store); tern.fs.mkdir(paths.requirements) end)
     if not ok then fail("mkdir_failed", tostring(problem)); return end
-    local current = readJson(paths.lock)
-    if current and current.token ~= opts.token and type(current.updatedAt) == "number"
-        and opts.now - current.updatedAt < M.lockStaleMs then fail("locked", "另一窗口持有写入锁"); return end
-    local wrote = pcall(tern.fs.write, paths.lock, tern.json.encode(lockValue(paths, opts.token, opts.owner, opts.now)))
-    if not wrote then fail("lock_write_failed"); return end
-    local check = readJson(paths.lock)
-    if not check or check.token ~= opts.token then fail("lock_conflict"); return end
-
-    local project = readJson(paths.project)
+    local project, projectProblem = readJson(paths.project)
+    if projectProblem ~= "missing" and not project then fail("corrupt_project", projectProblem); return end
     if project then
         local valid, detail = M.validateProject(project)
         if not valid then fail("corrupt_project", detail); return end
         if project.root ~= opts.root then fail("project_root_mismatch"); return end
-        cb(valid)
-        return
+        if project.projectId ~= opts.projectId then fail("project_id_mismatch"); return end
+    else
+        local created, detail = pcall(M.newProject, {projectId = opts.projectId, root = opts.root, name = opts.name, now = opts.now})
+        if not created then fail("invalid_project_options", tostring(detail)); return end
+        project = detail
     end
-    local created = M.newProject({projectId = opts.projectId, root = opts.root, name = opts.name, now = opts.now})
-    M.put(paths, paths.project, created, 0, opts.token, function(okay, reason)
-        if okay then cb(created) else cb(nil, reason) end
+    if projectProblem == "missing" then
+        local listed, names = pcall(function() return tern.fs.list(paths.requirements) end)
+        if not listed then fail("requirements_list_failed", tostring(names)); return end
+        if #names > 0 then fail("orphan_requirements", "项目元数据缺失但需求目录非空"); return end
+    end
+    if projectProblem ~= "missing" then
+        local _, failures = M.readRequirements(paths)
+        if #failures > 0 then fail("corrupt_requirements", table.concat(failures, "; ")); return end
+    end
+    lockOperation(paths, "claim", opts.token, opts.owner, opts.now, opts.takeover == true, function(claimed, err, cx)
+        if not claimed then fail(err.code, err.detail, cx); return end
+        if projectProblem == "missing" then
+            M.put(paths, paths.project, project, 0, opts.token, function(saved, reason, freshCx)
+                if saved then cb(project, nil, freshCx) else fail(reason, nil, freshCx) end
+            end)
+        else cb(project, nil, cx) end
     end)
 end
-
+function M.create(paths, project, fields, token, cb)
+    if not M.token(token) then cb(nil, nil, {code = "invalid_token"}); return end
+    local current, problem = M.readProject(paths)
+    if not current then cb(nil, nil, {code = problem or "corrupt_project"}); return end
+    local _, failures = M.readRequirements(paths)
+    if #failures > 0 then cb(nil, nil, {code = "corrupt_requirements", detail = table.concat(failures, "; ")}); return end
+    if current.projectId ~= project.projectId or current.root ~= project.root then cb(nil, nil, {code = "project_mismatch"}); return end
+    local req
+    local okay, detail = pcall(function() req = M.newRequirement(current, fields) end)
+    if not okay then cb(nil, nil, {code = "invalid_requirement", detail = tostring(detail)}); return end
+    local reqPath = join(join(paths.requirements, req.requirementId), "requirement.json")
+    local existing, existingProblem = readJson(reqPath)
+    if existing then
+        local valid, why = M.validateRequirement(existing)
+        if not valid or existing.projectId ~= current.projectId then
+            cb(nil, nil, {code = "corrupt_requirement", detail = why})
+            return
+        end
+        local sameCriteria, sameLabels = #existing.acceptanceCriteria == #req.acceptanceCriteria,
+            #existing.labels == #req.labels
+        if sameCriteria then
+            for index, item in req.acceptanceCriteria do
+                local prior = existing.acceptanceCriteria[index]
+                if not prior or prior.id ~= item.id or prior.description ~= item.description or prior.required ~= item.required then
+                    sameCriteria = false
+                    break
+                end
+            end
+        end
+        if sameLabels then
+            for index, label in req.labels do
+                if existing.labels[index] ~= label then sameLabels = false; break end
+            end
+        end
+        if existing.title ~= req.title or existing.type ~= req.type or existing.priority ~= req.priority
+            or existing.goal ~= req.goal or existing.scope ~= req.scope or not sameCriteria or not sameLabels then
+            cb(nil, nil, {code = "requirement_id_conflict", detail = "ID 已存在且草稿内容不同"})
+        else cb(existing, current, nil) end
+        return
+    elseif existingProblem ~= "missing" then cb(nil, nil, {code = "corrupt_requirement", detail = existingProblem}); return end
+    local stage = join(paths.store, ".pending-" .. req.requirementId .. "-" .. M.newId("a", tern.now()))
+    local stageFile = join(stage, "requirement.json")
+    local encoded, payload = pcall(tern.json.encode, req)
+    if not encoded then cb(nil, nil, {code = "encode_failed", detail = tostring(payload)}); return end
+    if #payload > M.maxJson then cb(nil, nil, {code = "record_too_large"}); return end
+    local staged, stageProblem = pcall(function()
+        tern.fs.mkdir(stage)
+        tern.fs.write(stageFile, payload)
+    end)
+    if not staged then
+        removeStage(stage)
+        cb(nil, nil, {code = "stage_write_failed", detail = tostring(stageProblem)})
+        return
+    end
+    local allocated = M.allocate(current)
+    M.put(paths, paths.project, allocated, current.revision, token, function(saved, reason, cx)
+        if not saved then
+            if reason ~= "timeout" and not tostring(reason):match("^process_failed:") then removeStage(stage) end
+            cb(nil, nil, {code = reason}, cx)
+            return
+        end
+        publishDirectory(paths, stage, join(paths.requirements, req.requirementId), token,
+            function(published, why, uncertain, freshCx)
+                if published then cb(req, allocated, nil, freshCx)
+                else
+                    if not uncertain then removeStage(stage) end
+                    cb(nil, allocated, {code = why}, freshCx)
+                end
+            end)
+    end)
+end
+function M.update(paths, requirement, expectedRevision, token, cb)
+    if not M.token(token) then cb(nil, {code = "invalid_token"}); return end
+    if type(requirement) ~= "table" or not M.token(requirement.requirementId) then
+        cb(nil, {code = "invalid_requirement_id"}); return
+    end
+    if not integer(expectedRevision, 1) then cb(nil, {code = "invalid_revision"}); return end
+    local path = join(join(paths.requirements, requirement.requirementId), "requirement.json")
+    local current, problem = readJson(path)
+    if not current then cb(nil, {code = problem == "missing" and "missing_requirement" or "corrupt_requirement"}); return end
+    local valid, detail = M.validateRequirement(current)
+    if not valid or current.requirementId ~= requirement.requirementId then
+        cb(nil, {code = "corrupt_requirement", detail = detail}); return
+    end
+    local project, projectProblem = M.readProject(paths)
+    if not project then cb(nil, {code = "corrupt_project", detail = projectProblem}); return end
+    if current.projectId ~= project.projectId then cb(nil, {code = "project_mismatch"}); return end
+    local _, failures = M.readRequirements(paths)
+    if #failures > 0 then cb(nil, {code = "corrupt_requirements", detail = table.concat(failures, "; ")}); return end
+    local changed = {}
+    for key, value in current do changed[key] = value end
+    for _, key in {"title", "type", "priority", "goal", "scope", "acceptanceCriteria", "labels"} do
+        if requirement[key] ~= nil then changed[key] = requirement[key] end
+    end
+    changed.revision, changed.updatedAt = expectedRevision + 1, os.time() * 1000
+    local okay, validationProblem = M.validateRequirement(changed)
+    if not okay then cb(nil, {code = "invalid_requirement", detail = validationProblem}); return end
+    M.put(paths, path, changed, expectedRevision, token, function(saved, reason, cx)
+        if saved then cb(changed, nil, cx) else cb(nil, {code = reason}, cx) end
+    end)
+end
 return M

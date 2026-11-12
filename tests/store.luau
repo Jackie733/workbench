@@ -1,12 +1,11 @@
 --!strict
--- Phase 2 storage regression. Runs inside Tern's Luau VM (Carly lua):
---   return tern.json.encode(run(tern, repoUnc, tempUnc))
--- The fake process implements the same contract as the PowerShell CAS script so
--- this covers the production Lua boundary; the real script is smoke-tested once
--- through M.put without a callback.
+-- Real Tern/PowerShell regression. The harness passes an await helper;
+-- with no argument it yields a call slice, with an awaitable it awaits it.
 return function(tern, repo, tempRoot, yield)
-    yield = yield or function() end
+    assert(type(yield) == "function", "需要支持无参数协作式让出的 await helper")
+    yield()
     local Store = assert(loadstring(tern.fs.read(repo .. "\\lib\\store.luau", 262144)))()
+    yield()
     local failures, checks = {}, 0
     local function check(condition, message)
         checks = checks + 1
@@ -64,34 +63,20 @@ return function(tern, repo, tempRoot, yield)
     end, "拒绝超长目标")
     yield()
 
-    -- Init, lock freshness and takeover.
-    local realRunProcess = Store.runProcess
+    -- Storage operations use the production PowerShell transport, awaited by the harness.
+    local rawRun = Store.runProcess
     Store.runProcess = function(env, cb)
-        local function finish(code, detail)
-            cb(code, detail or "", false)
-        end
-        local lockRead, lock = pcall(function() return tern.json.decode(tern.fs.read(env.OMPWB_LOCK, 16384)) end)
-        if not lockRead or type(lock) ~= "table" or lock.token ~= env.OMPWB_TOKEN then return finish(2, "lock") end
-        local expect = tonumber(env.OMPWB_EXPECT)
-        if tern.fs.exists(env.OMPWB_TARGET) then
-            local read, current = pcall(function() return tern.json.decode(tern.fs.read(env.OMPWB_TARGET, 262144)) end)
-            if not read or type(current) ~= "table" then return finish(4, "corrupt") end
-            if current.revision ~= expect then return finish(3, "revision") end
-        elseif expect ~= 0 then
-            return finish(3, "revision")
-        end
-        local payload = tern.fs.read(env.OMPWB_TEMP, 262144)
-        tern.fs.write(env.OMPWB_TARGET, payload)
-        pcall(tern.fs.remove, env.OMPWB_TEMP)
-        return finish(0)
+        local result, freshCx = yield(rawRun(env, nil))
+        if cb then cb(result.status, result.stderr, result.timed_out, freshCx) end
+        return result
     end
-    local function initWith(token, now)
-        local projectOut, reason
+    local function initWith(token, now, takeover)
+        local projectOut, err
         Store.init(paths, {projectId = "proj-abc", root = linuxRoot, name = "测试项目", token = token,
-            owner = {window = "", panel = 1}, now = now}, function(value, problem)
-            projectOut, reason = value, problem
+            owner = {window = "store-test", panel = 1}, now = now, takeover = takeover}, function(value, problem)
+            projectOut, err = value, problem
         end)
-        return projectOut, reason
+        return projectOut, err and err.code
     end
     local created = initWith("token-a", 1000)
     check(created ~= nil, "首次初始化创建项目")
@@ -101,8 +86,10 @@ return function(tern, repo, tempRoot, yield)
     check(again ~= nil and again.revision == 1, "重复初始化不提升 revision")
     local locked, lockReason = initWith("token-b", 3000)
     check(locked == nil and lockReason == "locked", "新鲜锁拒绝另一写入者")
-    local taken = initWith("token-b", 18000)
-    check(taken ~= nil, "过期锁可被接管")
+    local stale, staleReason = initWith("token-b", 18000)
+    check(stale == nil and staleReason == "takeover_required", "过期锁要求明确接管")
+    local taken = initWith("token-b", 18000, true)
+    check(taken ~= nil, "显式接管过期锁")
     yield()
     tern.fs.write(paths.project, tern.json.encode({schemaVersion = 1, projectId = "proj-abc", root = "/other",
         name = "x", revision = 1, nextNumber = 1, createdAt = 1000}))
@@ -123,6 +110,24 @@ return function(tern, repo, tempRoot, yield)
     local staleToken
     Store.put(paths, paths.project, bumped, 2, "token-c", function(ok, reason) staleToken = reason end)
     checkEqual(staleToken, "lock_conflict", "错误锁 token 被拒绝")
+    local lockBytes = tern.fs.read(paths.lock)
+    local invalidOwner = tern.json.decode(lockBytes)
+    invalidOwner.owner = {}
+    local futureLock = tern.json.decode(lockBytes)
+    futureLock.schemaVersion = 2
+    for _, invalidLock in {"null", tern.json.encode(invalidOwner), tern.json.encode(futureLock)} do
+        tern.fs.write(paths.lock, invalidLock)
+        local rejected, rejection = initWith(token, 20000, true)
+        check(rejected == nil and rejection == "corrupt_lock", "未知或损坏锁不能通过接管被覆盖")
+        check(tern.fs.read(paths.lock) == invalidLock, "拒绝认领后锁原文保持不变")
+    end
+    tern.fs.write(paths.lock, lockBytes)
+    local projectBytes = tern.fs.read(paths.project)
+    tern.fs.write(paths.project, '{"revision":0}')
+    local refusedCreate, createConflict = put(bumped, 0)
+    check(refusedCreate == false and createConflict == "revision_conflict", "创建不能覆盖已存在的无效版本记录")
+    check(tern.fs.read(paths.project) == '{"revision":0}', "拒绝创建后保留无效目标原文")
+    tern.fs.write(paths.project, projectBytes)
     yield()
     local requirementPath = paths.requirements .. "\\req-1\\requirement.json"
     tern.fs.mkdir(paths.requirements .. "\\req-1")
@@ -132,16 +137,60 @@ return function(tern, repo, tempRoot, yield)
     local rows, problems = Store.readRequirements(paths)
     checkEqual(#rows, 1, "列出需求")
     checkEqual(#problems, 0, "无损坏需求")
+    local createDone, createdReq, createdProject, createError = false
+    Store.create(paths, Store.readProject(paths), {id = "req-real", title = "真实创建", type = "feature",
+        goal = "保存唯一编号", now = 22000}, token, function(req, updatedProject, err)
+        createdReq, createdProject, createError, createDone = req, updatedProject, err, true
+    end)
+    check(createDone and createdReq ~= nil, "真实 create 保存需求")
+    check(createdReq and createdReq.stage == "backlog" and createdReq.number ~= nil, "create 固定 backlog 并分配编号")
+    local repeatedDone, repeated
+    Store.create(paths, Store.readProject(paths), {id = "req-real", title = "真实创建", type = "feature",
+        goal = "保存唯一编号", now = 22001}, token, function(req) repeated, repeatedDone = req, true end)
+    check(repeatedDone, "稳定 ID 重试完成")
+    check(repeated and repeated.number == createdReq.number, "相同 requirementId 重试不产生重复编号")
+    local changedRetryDone, changedRetryError
+    Store.create(paths, Store.readProject(paths), {id = "req-real", title = "不同草稿", type = "feature",
+        goal = "保存唯一编号", now = 22002}, token, function(_, _, err)
+        changedRetryError, changedRetryDone = err, true
+    end)
+    check(changedRetryDone and changedRetryError.code == "requirement_id_conflict",
+        "相同 ID 的不一致重试保留现有数据并返回冲突")
+    local editDone, edited, editError = false
+    local changed = {}
+    for key, value in createdReq do changed[key] = value end
+    changed.title, changed.stage = "更新标题", "done"
+    Store.update(paths, changed, createdReq.revision, token, function(req, err)
+        edited, editError, editDone = req, err, true
+    end)
+    check(editDone and edited ~= nil, "真实 update 保存 revision CAS")
+    check(edited and edited.stage == "backlog", "普通 update 不能伪造 lifecycle stage")
+    local updateA, updateB, doneA, doneB
+    local changeA, changeB = {}, {}
+    check(edited and edited.updatedAt >= edited.createdAt and edited.updatedAt % 1 == 0,
+        "更新业务时间戳为 epoch 毫秒整数")
+    for key, value in edited do changeA[key], changeB[key] = value, value end
+    changeA.title, changeB.title = "并发 A", "并发 B"
+    Store.update(paths, changeA, edited.revision, token, function(req) updateA, doneA = req, true end)
+    Store.update(paths, changeB, edited.revision, token, function(req) updateB, doneB = req, true end)
+    check(doneA and doneB, "两次更新操作均返回")
+    check((updateA ~= nil) ~= (updateB ~= nil), "并发同 revision 仅一个 writer 成功")
     tern.fs.mkdir(paths.requirements .. "\\bad")
     tern.fs.write(paths.requirements .. "\\bad\\requirement.json", "{")
     local _, bad = Store.readRequirements(paths)
     checkEqual(#bad, 1, "损坏需求被报告而非吞掉")
+    Store.runProcess = rawRun
+    local realUpdate = Store.allocate(Store.readProject(paths))
+    local realResult = yield(Store.put(paths, paths.project, realUpdate, realUpdate.revision - 1, token))
+    check(realResult.status == 0, "真实 PowerShell CAS 写入")
+    local conflict = yield(Store.put(paths, paths.project, Store.allocate(realUpdate), realUpdate.revision - 1, token))
+    check(conflict.status == 3, "真实 PowerShell CAS 拒绝并发旧 revision")
+    local beforeCorrupt = tern.fs.read(paths.project, 262144)
     tern.fs.write(paths.project, "{")
-    local corrupt
-    Store.put(paths, paths.project, bumped, 2, token, function(ok, reason) corrupt = reason end)
-    checkEqual(corrupt, "corrupt_target", "损坏目标被拒绝")
-
-    Store.runProcess = realRunProcess
+    local corruptWrite = yield(Store.put(paths, paths.project, realUpdate, realUpdate.revision, token))
+    check(corruptWrite.status == 4, "真实 PowerShell 拒绝损坏目标")
+    check(tern.fs.read(paths.project, 262144) == "{", "损坏项目元数据保持原样")
+    tern.fs.write(paths.project, beforeCorrupt)
     pcall(tern.fs.remove, tempRoot)
     return {checks = checks, failures = failures}
 end

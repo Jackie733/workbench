@@ -77,6 +77,14 @@ local function width(cx, entry)
     local ratio = layout and find(layout.root)
     if ratio and ratio >= 0.2 and ratio <= 0.65 then tern.kv.set("live:width:" .. cx:window_key(), ratio) end
 end
+local function panelSource(cx, panel)
+    local payload = tern.kv.get("live:binding:" .. cx:window_key() .. ":" .. panel)
+    if type(payload) == "table" and type(payload.source) == "number" then return payload.source end
+    for _, entry in registry do
+        if entry.panel == panel then return entry.source end
+    end
+    return nil
+end
 local function open(cx, opened)
     local binding, location = opened.binding, opened.location
     local origin, problem = source(cx, binding)
@@ -96,20 +104,34 @@ local function open(cx, opened)
             registry[candidates[1].instance], registry[instance] = nil, entry
         end
     end
-    local payload = {binding = binding, location = location, source = origin.pane, window = cx:window_key()}
-    -- A reload can drop the registry while blocks keep running. Reconcile with
-    -- the actual panes so an existing workbench is adopted, never duplicated.
-    local livePanels = {}
-    for _, pane in cx.session:panes() do
-        if pane.tab == origin.tab and pane.kind == "plugin" and pane.block == live.kind and not pane.exited then
-            table.insert(livePanels, pane.pane)
+    if entry and isPanel(cx, entry) and entry.source == origin.pane then
+        local panel = cx.session:pane(entry.panel)
+        local ok, surface = pcall(function() return cx.session:surface(entry.panel, {nodes = 3, max_chars = 1000}) end)
+        -- A failed plugin load can leave a shell of the old block with no
+        -- surface. Recreate only this proven source's block, never a live view.
+        if panel.block == live.kind and ok and surface == nil then
+            cx.layout:close(entry.panel)
+            registry[instance], entry = nil, nil
         end
     end
-    table.sort(livePanels)
+    local payload = {binding = binding, location = location, source = origin.pane, window = cx:window_key()}
+    -- Reconcile only panels whose source identity is known. A block kind or
+    -- shared tab alone is not permission to adopt or close another panel.
+    local livePanels, unclaimed = {}, false
+    for _, pane in cx.session:panes() do
+        if pane.tab == origin.tab and pane.kind == "plugin" and pane.block == live.kind and not pane.exited then
+            local owner = panelSource(cx, pane.pane)
+            if owner == origin.pane then table.insert(livePanels, pane.pane)
+            elseif not owner then unclaimed = true end
+        end
+    end
     if #livePanels > 1 then
-        -- Only this plugin's block kind is touched; keep the newest pane.
-        for index = 1, #livePanels - 1 do cx.layout:close(livePanels[index]) end
-        livePanels = {livePanels[#livePanels]}
+        fail(cx, "此来源已有多个工作台；请保留一个后重试，不会自动关闭含草稿的面板")
+        return
+    end
+    if #livePanels == 0 and unclaimed and (not entry or not isPanel(cx, entry)) then
+        fail(cx, "发现来源未确认的旧工作台；请关闭旧面板后 /wb，不会猜测绑定或新建副本")
+        return
     end
     if #livePanels == 1 and (not entry or not isPanel(cx, entry) or entry.panel ~= livePanels[1]) then
         local adopted = livePanels[1]
@@ -140,6 +162,7 @@ local function open(cx, opened)
     if not pane then fail(cx, "原生工作台 block 不可用；请检查插件状态"); return end
     entry = {panel = pane, source = origin.pane, binding = binding, location = location}
     registry[instance] = entry
+    tern.kv.set("live:binding:" .. cx:window_key() .. ":" .. pane, payload)
     setHealth(cx, entry, origin)
     save(cx)
     cx.layout:focus(pane)

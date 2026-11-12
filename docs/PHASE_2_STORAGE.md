@@ -1,122 +1,95 @@
 # 阶段 1.5 与阶段 2 存储层
 
-日期：2026-11-11。状态：已实现并验证存储层；需求列表、详情和看板界面尚未实现，不宣称可用。
+日期：2026-11-11。阶段 2 已接入原生需求界面；本文记录实际存储协议，不代表方案批准、执行归属或验收已实现。
 
-## 1.5 收尾
+## 阶段 1.5
 
-- 面板不再显示每次心跳变化的 `sequence`/`pid`，改为静态“连接正常 · 心跳持续（只表示会话仍在线，不代表任务进度）”。过期时显示“最后更新 N 秒前”。
-- 创建桥接运行时 1 秒后，清理可证明已废弃的运行目录：名称合法、当前用户拥有、权限 0700、普通目录、marker 的 `instanceId` 与目录一致、PID 已不存在、目录 mtime 超过 7 天。无法证明或正在运行的一律不删。
-- 每个 omp 实例仍会新建自己的 `/tmp/omp-workbench-<uid>/<instanceId>/`；正常退出不会立即删除，避免误删排查证据。
+运行快照不再把心跳序号／PID 当进度展示。IPC 心跳留在用户私有 `/tmp/omp-workbench-<uid>/<instance>/`，不写入需求文件。旧运行目录只在身份、所有者、权限、PID 已不存在和超过 7 天均可核对时清理；无法证明废弃的不删。
 
-## 阶段 2 存储层范围
-
-本层只负责项目元数据与需求的持久化、校验和并发安全。它是后续需求池、详情和看板的基础，不含模型调用。
-
-数据位置：
+## 数据布局
 
 ```text
 <repo>/.omp/workbench/
   project.json
   lock.json
+  lock.json.gate
   requirements/<requirementId>/requirement.json
+  .pending-<requirementId>-<attemptNonce>/requirement.json
 ```
 
-不自动修改 `.gitignore` 或 `.git/info/exclude`。目录是否进入版本库由用户决定；界面阶段会在未忽略时提示。运行期 IPC 仍在 `/tmp`，不进入仓库。
+`.pending-*` 是明确创建期间准备的完整记录，不是正式需求，不在看板中冒充已保存。成功后整个目录移动到正式位置。中断、超时或发布结果不确定时可能保留供排查；不自动重放请求。
 
-### project.json
+初始化前提供两种明确选择：仅本机（向本仓库 `.git/info/exclude` 添加 `/.omp/workbench/`），或遵循项目 Git 规则（不修改规则）。保留既有排除内容，不改全局 Git 配置或 `.gitignore`；已有被跟踪的资料不会因忽略规则变成私有，选择仅本机时拒绝继续，不自动取消跟踪。忽略不是加密。
 
-```text
-schemaVersion=1, projectId, root(Linux 绝对路径), name,
-revision, nextNumber, createdAt
+只读打开不创建项目数据；初始化、取得编辑权、接管和保存均为显式操作。
+
+## Schema 1
+
+`project.json`：`schemaVersion, projectId, root, name, revision, nextNumber, createdAt`。
+
+`requirement.json`：`schemaVersion, requirementId, projectId, number, revision, title, type, priority, stage, goal, scope, acceptanceCriteria[], labels[], createdAt, updatedAt`，可选 `blockedFrom, blockedReason, extensions`。
+
+- ID 稳定随机生成，目录使用 requirementId，展示编号为 `REQ-%04d`。
+- 类型：`feature / bug / chore`；优先级：`low / normal / high / urgent`。
+- 阶段支持完整领域枚举，但新建固定为 `backlog`，普通编辑保留阶段和身份，不能伪造批准、实施或完成。
+- 时间为 Unix 毫秒整数；`tern.now()` 是单调计时，不用于业务或租约时间。
+- 当前文本上限按 UTF-8 字节：标题／项目名 200、目标／范围各 16000、每条验收描述 1000、标签 40。验收最多 32 条，标签最多 16 个。
+- 拒绝无效 UTF-8、非法枚举、未知正式字段、非连续数组、重复验收 ID、目录与记录身份不符、跨项目记录、重复展示编号和落后的 nextNumber。
+- 损坏或未知版本不会被当作空项目初始化；保留原文件并报告，只读等待处理。
+
+## 单写者与 CAS
+
+`lock.json` 保存 `schemaVersion=1, token, owner{window,panel}, updatedAt`。token 属于一个具体工作台，不由项目内多个窗口共用。
+
+所有认领、续租、释放和发布使用同一个 `lock.json.gate`，由 Windows `FileShare.None` 独占句柄覆盖检查和写入。句柄释放后保留空 gate 文件，避免删除再创建导致不同进程锁住不同文件。锁元数据通过同目录临时文件和 `MoveFileEx` 原子替换，UTF-8 无 BOM。
+
+- 其他 token 的锁在 15 秒内有效：`locked`，保持只读。
+- 过期后仍要求显式接管：`takeover_required`，不会自动抢占。
+- token 改变或锁缺失：拒绝续租／保存，不重新凭空生成锁。
+- 损坏锁（包括 JSON null、不完整 owner 或未知 schema）拒绝覆盖，接管也不能绕过。
+- 每次写入在 gate 内核对 token、目标版本和期望 revision。创建要求目标不存在；更新要求正整数版本严格相等。不采用最后写入覆盖。
+
+创建顺序：准备唯一完整 staging 目录 → 项目 CAS 消耗编号 → gate 内无替换地移动整个目录。取消回调或重载不会留下只有空目录的正式需求。跨这两个发布点不宣称事务：中断可消耗编号，允许空洞，不复用。相同稳定 ID 的相同资料重试返回已落盘记录；资料不同则返回 `requirement_id_conflict`，不悄悄清掉新版草稿。
+
+确定失败清理本次准备数据；超时、宿主重载等结果不确定时保留 staging。不自动迁移旧业务数据，不恢复批准，不触发模型调用。
+
+主要错误：`lock_conflict / revision_conflict / corrupt_target / corrupt_lock / locked / takeover_required / busy / publish_conflict / timeout`。错误保留草稿，不能以空列表或“保存成功”掩盖。
+
+## API
+
+- `paths / readProject / readRequirements`：定位与只读校验。
+- `init(paths, opts, cb(project,error,cx))`：显式初始化或取得编辑权；`takeover=true` 才允许接管过期租约。
+- `create(paths, project, fields, token, cb(requirement,project,error,cx))`。
+- `update(paths, requirement, expectedRevision, token, cb(requirement,error,cx))`。
+- `renewLock / releaseLock`：受 gate 保护的异步操作。
+- `runProcess(env,nil)` 保留原生 Awaitable，回归仅适配回调交付，不伪造写入器。
+
+## 本轮实际验证
+
+Windows Tern 0.9.16，WSL Ubuntu，omp 18.18.7；没有向模型发送测试提示。
+
+| 回归 | 检查数 | 结果 |
+| --- | ---: | --- |
+| `tests/store.luau`：真实初始化、显式接管、创建／编辑、稳定 ID、损坏保护及 CAS | 55 | 通过 |
+| `tests/concurrency.luau`：两个真实 PowerShell 同时保存／认领，失败者不能覆盖，临时正文清理 | 13 | 通过 |
+| `tests/recovery.luau`：真实编号落盘后取消回调，既有需求完整，显式重试与去重 | 9 | 通过 |
+
+在 Carly 中读取对应文件的返回函数，传入 `(tern, repoUNC, uniqueTempUNC, waitOne, waitAll)`。辅助函数：
+
+```lua
+local function waitOne(a)
+  return await(a or tern.process.run({"cmd.exe", "/d", "/c", "exit 0"}))
+end
+local function waitAll(items) return await_all(items) end
 ```
 
-- `projectId`、`requirementId` 为稳定随机标识，不使用目录名或标题。
-- `nextNumber` 分配展示编号 `REQ-%04d`。分配先更新项目，再写需求；失败时允许编号空洞，不重复使用。
-- 未知顶层字段拒绝；`extensions` 仅用于需求记录。
+无参数让出用于 Carly 的 50 ms 调用预算；宿主块预算为 2 秒。测试真实运行生产 PowerShell，不使用回显 CAS 的假写入器。当前未接入跨平台 CI。
 
-### requirement.json
+另实测隐私模块：中文路径、保留原排除内容、重复选择幂等、不修改项目规则的选项，以及已有跟踪资料拒绝被伪称私有。
 
-```text
-schemaVersion=1, requirementId, projectId, number, revision,
-title, type(feature|bug|chore), priority(low|normal|high|urgent),
-stage(backlog|clarifying|designing|awaiting_approval|implementing|
-      verifying|awaiting_acceptance|done|blocked|cancelled),
-goal, scope, acceptanceCriteria[], labels[], createdAt, updatedAt,
-blockedFrom?, blockedReason?
-```
+## 边界
 
-校验上限：标题 200 字符、目标／范围各 16000 字节、验收条件 32 条（每条描述 1000 字符）、标签 16 个（每个 40 字符）。拒绝控制字符、非法枚举、未知字段和超限内容。阶段转换门禁尚未接入本层。
-
-## 并发与原子性
-
-### 写入锁
-
-`lock.json`：
-
-```text
-schemaVersion=1, token, owner{window,panel}, updatedAt
-```
-
-- 初始化时先取锁：其他 token 且 `updatedAt` 在 15 秒内则返回 `locked`，不得写入。
-- 锁过期后允许接管，并在界面阶段记录原因。锁文件自身使用直接写入，写后立即回读校验 token，防止两个窗口同时认为成功。
-- 正常关闭时应释放；异常退出留下的锁在过期后可接管。
-
-### 每次写入的 CAS
-
-所有项目与需求写入都经过同一个 PowerShell 脚本：
-
-1. 读取锁，token 不匹配 → 退出码 2（`lock_conflict`）。
-2. 目标存在时解析其 `revision`，与调用方期望值不一致 → 3（`revision_conflict`）；目标不存在时要求期望值为 0。
-3. 目标损坏无法解析 → 4（`corrupt_target`）。
-4. 用 `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)` 在同一目录原子替换；临时文件不存在 → 5，发布失败 → 6。
-5. 失败时删除临时文件，不覆盖目标。
-
-负载先由 Lua 写入目标同目录临时文件，再交给 PowerShell 校验和发布，避免环境变量大小限制。脚本不接收需求正文作为命令行参数。
-
-已知竞态：两个窗口可能在极短时间内同时通过 Lua 侧锁检查；脚本内再次校验 token，仍不能提供跨文件事务。应用层必须串行化本窗口写入，不在同一项目多窗口同时编辑。
-
-## 实现
-
-| 文件 | 职责 |
-| --- | --- |
-| `lib/store.luau` | schema 校验、编号、路径、锁、CAS 写入、项目初始化、需求读取 |
-| `tests/store.luau` | 33 项生产逻辑回归；注入进程接缝，不依赖模型 |
-| `omp/runtime.ts` | 1.5 的废弃运行目录清理 |
-
-路径由扩展提供的 WSL 位置和项目 Linux 根目录构造为 `\\wsl.localhost\<distro>\...`；拒绝远程 host、相对路径和含反斜杠的 Linux 路径。
-
-## 验证
-
-自动：
-
-```sh
-bun test omp/runtime.test.ts   # 10 通过，含清理边界
-```
-
-Tern 内：
-
-```text
-run(tern, <仓库 UNC 路径>, <临时 UNC 路径>, yield)
-```
-
-`tests/store.luau` 的结果：33 项检查、0 失败。覆盖未知字段、超限、枚举、编号与 revision、路径拒绝、锁新鲜期与接管、根目录不匹配、CAS 冲突、错误 token、损坏目标、损坏需求报告。
-
-真实 PowerShell（WSL UNC 路径）：
-
-- 创建：状态 0。
-- 以旧 revision 更新：状态 0，落盘 revision 加 1。
-- 重复旧 revision：状态 3。
-- 错误锁 token：状态 2。
-- 真实初始化：创建项目；第二窗口立即初始化返回 `locked`；锁过期后可接管。
-
-`tests/store.luau` 尚未接入自动 CI，需要在真实 Tern 中手动运行；不要把它当作跨平台测试。
-
-## 未完成与风险
-
-- 需求列表、详情、看板、搜索和阶段门禁 UI 仍未实现。
-- PowerShell 每次调用都会 `Add-Type` 编译移动函数，单次写入有百毫秒级开销；批量导入需要合并写入。
-- 超长 UNC 路径（>260 字符）在部分 Windows 配置下可能失败；当前未做 `\\?\UNC` 前缀适配。
-- 锁是咨询性的；不宣称跨窗口强事务。
-- KV 中的按会话草稿和“已解除待确认”记录没有枚举/清理 API，目前不会自动过期；体积很小，但会缓慢累积。
-- 预填回执文件保留用于排查，当前无自动清理。
-- 不提供审计事件日志；阶段 5 再实现追加式审计。
+- 是同一台 Windows／WSL 的本地单写者协议，不是多人数据库或跨文件强事务，也不宣称断电持久保证。
+- PowerShell 启动、原生移动函数编译及续租有进程开销；没有新增常驻服务。
+- 未完成 staging 保留待排查，当前不自动过期删除；旧会话 KV 与 IPC 回执保留策略见阶段 1 记录。
+- 不提供正式方案版本、批准、代码证据、审计事件或人工验收；这些仍按后续阶段实施。

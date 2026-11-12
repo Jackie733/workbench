@@ -18,7 +18,7 @@ function M.path(path)
     if not host or (host:lower() ~= "wsl.localhost" and host:lower() ~= "wsl$") or not M.token(instance) then return nil end
     local linux = "/tmp/omp-workbench-" .. uid .. "/" .. instance
     local normalized = p:gsub("/", "\\")
-    return {marker = normalized, runtime = normalized:sub(1, #normalized - #"open.omp-workbench.json"), linux = linux, instanceId = instance, distro = distro}
+    return {marker = normalized, runtime = normalized:sub(1, #normalized - #"open.omp-workbench.json"), linux = linux, instanceId = instance, distro = distro, host = host}
 end
 function M.marker(data, location)
     if type(data) ~= "table" or data.schemaVersion ~= 1 or data.instanceId ~= location.instanceId

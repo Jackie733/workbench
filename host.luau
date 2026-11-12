@@ -1,6 +1,8 @@
 --!strict
-local ui = tern.ui
+local privacy = require("./lib/privacy")
 local live = require("./lib/live")
+local store = require("./lib/store")
+local ui = require("./lib/ui")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -21,27 +23,8 @@ local function point(text, offset)
     return index
 end
 local function byte(text, at) return utf8.offset(text, at + 1) or #text + 1 end
-local function clip(text, bound)
-    text = tostring(text or "未知")
-    if #text <= bound then return text end
-    local n = bound
-    while n > 0 and not utf8.len(text:sub(1, n)) do n -= 1 end
-    return text:sub(1, n) .. "…（节选）"
-end
-local function focus(cx) cx:frame({{"focus", "main.materials.text"}}) end
+local function focus(cx, target) cx:frame({{"focus", target or "main.workbench.runtime.materialsField.materials"}}) end
 local function draftKey(s) return "live:draft:" .. s.payload.binding.instanceId .. ":" .. s.payload.binding.sessionId end
-local function remember(s)
-    table.insert(s.history, {text = s.text, cursor = s.cursor, anchor = s.anchor})
-    if #s.history > 32 then table.remove(s.history, 1) end
-end
-local function replace(s, first, last, text, cursor)
-    text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
-    if not utf8.len(text) or text:find("[%z\1-\8\11\12\14-\31\127]") then s.error = "请输入有效文本，不含控制字符"; return end
-    local changed = s.text:sub(1, byte(s.text, first) - 1) .. text .. s.text:sub(byte(s.text, last))
-    if #changed > live.maxText then s.error = "资料最多 16 KiB（UTF-8）；不会截短后投递"; return end
-    if changed ~= s.text then remember(s) end
-    s.text, s.cursor, s.anchor, s.error = changed, cursor or first + utf8.len(text), nil, nil
-end
 local function persist(s)
     local data = {text = s.text, pending = s.pending, receipt = s.receipt}
     local encoded = tern.json.encode(data)
@@ -169,23 +152,396 @@ local function acknowledgeOpen(s, cx)
             cx:render()
         end)
 end
-local stateNames = {idle = "空闲", working = "工作中", waiting_user = "等待用户", disconnected = "已断开"}
-local receiptNames = {pending = "等待回执", prefilled = "已预填（未发送）", rejected = "已拒绝", delivery_unknown = "投递状态待核对"}
-local function note(text) return ui.text({ui.span(text, "muted")}) end
+local function projectKey(s)
+    return "workbench:project:" .. s.payload.location.distro .. ":" .. s.payload.binding.projectRoot
+end
+local function saveUi(s)
+    if not s.ui then return end
+    tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
+        priorityFilter = s.ui.priorityFilter, stageFilter = s.ui.stageFilter, query = s.ui.query,
+        queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode,
+        detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
+        mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey})
+end
+local function storageMessage(reason)
+    local code = type(reason) == "table" and reason.code or reason
+    local messages = {
+        locked = "另一个工作台正在编辑此项目；当前保持只读。",
+        takeover_required = "写入锁已过期；需要显式确认后接管。",
+        lock_conflict = "写入锁已改变；已拒绝覆盖。",
+        busy = "正在处理另一个安全写入；请稍后重试。",
+        revision_conflict = "此需求已在其他地方更新；草稿保留，请刷新并重新编辑。",
+        corrupt_target = "存储记录损坏；未覆盖原文件。",
+        corrupt_requirements = "需求列表包含损坏记录；当前只读，未覆盖任何文件。",
+        requirement_id_conflict = "需求标识冲突；草稿保留，请重试创建。",
+        corrupt_lock = "写入锁记录损坏；当前只读，未覆盖任何文件。",
+        timeout = "安全写入等待超时；结果待核对，草稿已保留。",
+        project_id_mismatch = "项目标识与现有存储不匹配；未覆盖任何文件。",
+        corrupt_project = "项目记录损坏；未覆盖原文件。",
+        project_root_mismatch = "此存储属于另一个项目根目录；未覆盖。",
+        invalid_json = "项目存储不是有效 JSON；未覆盖。",
+    }
+    if messages[code] then
+        local detail = type(reason) == "table" and reason.detail
+        return messages[code] .. (type(detail) == "string" and detail ~= "" and (" " .. detail) or "")
+    end
+    if type(reason) == "table" then
+        local detail = reason.detail
+        if type(detail) == "string" and detail ~= "" then return detail end
+        return type(code) == "string" and ("操作失败（" .. code .. "）") or "操作失败"
+    end
+    return tostring(reason or "操作失败")
+end
+local function refreshProject(s)
+    local u = s.ui
+    if not u or not u.paths then return end
+    u.loading = false
+    local project, failure = store.readProject(u.paths)
+    if not project then
+        if failure == "missing" then
+            u.project, u.requirements, u.byId, u.error, u.storageUnsafe = nil, {}, {}, nil, false
+        else
+            u.project, u.error, u.storageUnsafe = nil, storageMessage(failure), true
+        end
+        return
+    end
+    if project.root ~= s.payload.binding.projectRoot then
+        u.project, u.requirements, u.byId = nil, {}, {}
+        u.error, u.storageUnsafe, u.writable = "项目存储根目录与当前绑定不匹配；未修改任何文件。", true, false
+        return
+    end
+    u.storageUnsafe = false
+    u.project, u.error, u.requirements, u.byId = project, nil, {}, {}
+    local rows, failures = store.readRequirements(u.paths)
+    for _, r in rows do table.insert(u.requirements, r); u.byId[r.requirementId] = r end
+    if #failures > 0 then
+        u.error, u.storageUnsafe, u.writable = "有 " .. tostring(#failures) .. " 项需求无法安全读取；当前只读，未覆盖任何文件。", true, false
+    end
+    table.sort(u.requirements, function(a, b)
+        if u.sort == "number" then return a.number < b.number end
+        if u.sort == "priority" then
+            local rank = {urgent = 1, high = 2, normal = 3, low = 4}
+            if rank[a.priority] ~= rank[b.priority] then return rank[a.priority] < rank[b.priority] end
+        end
+        return a.updatedAt > b.updatedAt
+    end)
+    if u.selected and not u.byId[u.selected] then u.selected = nil end
+end
+local function scheduleProjectRefresh(s, cx)
+    local u = s.ui
+    if not u or not u.paths then return end
+    u.loading = true
+    tern.timer(30, function()
+        if not alive(cx) or s.ui ~= u then return end
+        refreshProject(s)
+        cx:render()
+    end)
+end
+local function draftFields(fields)
+    local clean = {}
+    for name, field in fields or {} do
+        if type(field) == "table" and type(field.text) == "string" then
+            clean[name] = {text = field.text, cursor = field.cursor, anchor = field.anchor}
+        end
+    end
+    return clean
+end
+local function loadWorkbench(s, cx)
+    local binding = s.payload.binding
+    local location = live.path(s.payload.location.marker)
+    local paths, failure = store.paths(location, binding.projectRoot)
+    local saved = tern.kv.get(projectKey(s))
+    local u = {paths = paths, requirements = {}, byId = {}, tab = type(saved) == "table" and saved.tab or "requirements",
+        selected = type(saved) == "table" and saved.selected or nil,
+        sort = type(saved) == "table" and saved.sort or "recent",
+        priorityFilter = type(saved) == "table" and saved.priorityFilter or "all",
+        stageFilter = type(saved) == "table" and saved.stageFilter or "all",
+        query = type(saved) == "table" and saved.query or "",
+        queryCursor = type(saved) == "table" and saved.queryCursor or nil,
+        privacyMode = type(saved) == "table" and saved.privacyMode or "local",
+        detailMode = type(saved) == "table" and saved.detailMode or false,
+        drafts = type(saved) == "table" and saved.drafts or {}, fields = {}, type = "feature",
+        priority = "normal", writable = false, busy = false, token = s.token,
+        formMode = type(saved) == "table" and saved.formMode == true or false,
+        mode = type(saved) == "table" and saved.mode or nil,
+        editing = type(saved) == "table" and saved.editing or nil,
+        draftKey = type(saved) == "table" and saved.draftKey or nil}
+    s.ui = u
+    for key, draft in u.drafts do
+        if type(draft) == "table" then
+            u.drafts[key] = {fields = draftFields(draft.fields), type = draft.type,
+                priority = draft.priority, baseRevision = draft.baseRevision, createId = draft.createId}
+        else u.drafts[key] = nil end
+    end
+    if u.formMode and u.draftKey then
+        local draft = u.drafts[u.draftKey]
+        if type(draft) == "table" then
+            u.fields, u.type, u.priority = draftFields(draft.fields), draft.type or "feature", draft.priority or "normal"
+            u.baseRevision, u.createId, u.dirty = draft.baseRevision, draft.createId, true
+        else u.formMode = false end
+    end
+    if not paths then u.error, u.storageUnsafe = "无法定位本机 WSL 项目存储：" .. tostring(failure), true; return end
+    u.queryCursor = u.queryCursor or utf8.len(u.query)
+    scheduleProjectRefresh(s, cx)
+end
+local function formFields(record)
+    local criteria = {}
+    for _, item in record and record.acceptanceCriteria or {} do table.insert(criteria, item.description) end
+    local values = {title = record and record.title or "", goal = record and record.goal or "",
+        scope = record and record.scope or "", criteria = table.concat(criteria, "\n"),
+        labels = record and table.concat(record.labels or {}, ", ") or ""}
+    local fields = {}
+    for name, value in values do fields[name] = {text = value, cursor = utf8.len(value), anchor = nil} end
+    return fields
+end
+local function openForm(s, mode, record)
+    local u = s.ui
+    u.mode, u.formMode, u.editing = mode, true, record and record.requirementId or nil
+    u.draftKey = record and record.requirementId or "new"
+    local saved = u.drafts[u.draftKey]
+    u.fields = type(saved) == "table" and draftFields(saved.fields) or formFields(record)
+    u.type = type(saved) == "table" and saved.type or (record and record.type or "feature")
+    u.priority = type(saved) == "table" and saved.priority or (record and record.priority or "normal")
+    u.baseRevision = type(saved) == "table" and saved.baseRevision or (record and record.revision or nil)
+    u.conflict = false
+    u.createId = mode == "new" and (type(saved) == "table" and saved.createId or store.newId("req", live.epoch())) or nil
+    u.dirty, u.formError, u.saving = type(saved) == "table" and saved.dirty or false, nil, false
+    u.drafts[u.draftKey] = {fields = draftFields(u.fields), type = u.type, priority = u.priority,
+        baseRevision = u.baseRevision, createId = u.createId}
+    saveUi(s)
+end
+local function persistForm(s)
+    local u = s.ui
+    local fields = {}
+    for name, field in u.fields do fields[name] = {text = field.text, cursor = field.cursor, anchor = field.anchor} end
+    u.drafts[u.draftKey] = {fields = fields, type = u.type, priority = u.priority,
+        baseRevision = u.baseRevision, createId = u.createId}
+    saveUi(s)
+end
+local function setWritable(s, writable)
+    s.ui.writable = writable
+    if writable then s.ui.lockRenewAt = live.epoch() + 5000 end
+end
+local function finishInit(s, cx, u, takeover)
+    local binding = s.payload.binding
+    local token = u.token or s.token or store.newId("wb", live.epoch())
+    u.token, s.token = token, token
+    cx:save()
+    store.init(u.paths, {token = token, owner = {window = s.payload.window, panel = s.panel},
+        projectId = u.project and u.project.projectId or store.newId("project", live.epoch()), root = binding.projectRoot,
+        name = binding.projectRoot:match("[^/]+$") or "项目", now = live.epoch(), takeover = takeover == true},
+        function(project, failure, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) or s.ui ~= u then return end
+            u.busy = false
+            if project then
+                u.project, u.error, u.takeoverAvailable = project, nil, false
+                setWritable(s, true)
+                refreshProject(s)
+                ctx:toast("success", "项目已准备", "需求只会在你明确保存后写入")
+            else
+                setWritable(s, false)
+                local code = type(failure) == "table" and failure.code or failure
+                u.error = storageMessage(failure or code or "初始化失败")
+                if code == "takeover_required" then
+                    u.takeoverAvailable = true
+                    u.notice = nil
+                elseif code == "locked" then
+                    u.takeoverAvailable = false
+                    u.notice = nil
+                end
+                if code == "corrupt_project" or code == "project_root_mismatch" then u.storageUnsafe = true end
+            end
+            ctx:render()
+        end)
+end
+local function initProject(s, cx, takeover, applyPrivacy)
+    local u = s.ui
+    if u.busy then return end
+    if not u.paths then u.error = "项目存储路径无效"; return end
+    u.busy, u.notice = true, nil
+    if applyPrivacy and not u.project then
+        privacy.apply(s.payload.location, s.payload.binding.projectRoot, u.privacyMode or "local", function(ok, failure, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) or s.ui ~= u then return end
+            if not ok then
+                u.busy = false
+                u.error = tostring(failure or "无法应用所选的本地隐私设置；尚未创建需求存储")
+                ctx:render()
+                return
+            end
+            finishInit(s, ctx, u, false)
+        end)
+    else finishInit(s, cx, u, takeover) end
+end
+local function formValue(s, name)
+    return s.ui.fields[name] and s.ui.fields[name].text or ""
+end
+local function splitLines(text)
+    local values = {}
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if line ~= "" then table.insert(values, line) end
+    end
+    return values
+end
+local function splitLabels(text)
+    local values, seen = {}, {}
+    for label in (text .. ","):gmatch("(.-),") do
+        label = label:gsub("^%s+", ""):gsub("%s+$", "")
+        if label ~= "" and not seen[label] then seen[label] = true; table.insert(values, label) end
+    end
+    return values
+end
+local function saveRequirement(s, cx)
+    local u = s.ui
+    if u.saving or not u.writable then return end
+    local fields = {title = formValue(s, "title"), goal = formValue(s, "goal"), scope = formValue(s, "scope"),
+        criteria = splitLines(formValue(s, "criteria")), labels = splitLabels(formValue(s, "labels")),
+        type = u.type, priority = u.priority, now = live.epoch()}
+    if fields.title:match("%S") == nil or fields.goal:match("%S") == nil then
+        u.formError = "标题和目标为必填项"
+        cx:render()
+        return
+    end
+    u.saving, u.formError, u.dirty = true, nil, true
+    persistForm(s)
+    if u.mode == "new" then
+        fields.id = u.createId
+        store.create(u.paths, u.project, fields, u.token, function(requirement, updatedProject, failure, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) or s.ui ~= u then return end
+            u.saving = false
+            if failure or not requirement then
+                u.formError = storageMessage(failure or "创建失败")
+            else
+                u.project = updatedProject or u.project
+                u.drafts[u.draftKey] = nil
+                u.formMode, u.dirty, u.formError = false, false, nil
+                refreshProject(s)
+                u.selected, u.detailMode = requirement.requirementId, true
+                ctx:toast("success", "需求已创建", requirement.number or "")
+                saveUi(s)
+            end
+            ctx:render()
+        end)
+    else
+        local original = u.byId[u.editing]
+        if not original then
+            u.saving, u.formError = false, "此需求已从磁盘移除；草稿仍已保留。请刷新后重新检查。"
+            cx:render()
+            return
+        end
+        local next = table.clone(original)
+        next.title, next.goal, next.scope = fields.title, fields.goal, fields.scope
+        next.type, next.priority, next.updatedAt = fields.type, fields.priority, fields.now
+        next.labels, next.acceptanceCriteria = fields.labels, {}
+        for i, value in fields.criteria do table.insert(next.acceptanceCriteria, {id = "C" .. i, description = value, required = true}) end
+        store.update(u.paths, next, u.baseRevision or original.revision, u.token, function(updated, failure, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) or s.ui ~= u then return end
+            u.saving = false
+            if failure or not updated then
+                local code = type(failure) == "table" and failure.code or failure
+                u.conflict = code == "revision_conflict"
+                u.formError = storageMessage(failure or "保存失败；草稿已保留")
+                if u.conflict then refreshProject(s) end
+                persistForm(s)
+            else
+                u.drafts[u.draftKey] = nil
+                u.formMode, u.dirty, u.formError, u.conflict = false, false, nil, false
+                refreshProject(s)
+                u.selected, u.detailMode = updated.requirementId, true
+                ctx:toast("success", "需求已保存", updated.number or "")
+                saveUi(s)
+            end
+            ctx:render()
+        end)
+    end
+    cx:render()
+end
+local function fieldName(id)
+    return id:match("%.f%-([%w]+)$") or (id:match("%.materials$") and "materials") or (id:match("%.search$") and "search")
+end
+local function bufferFor(s, name)
+    if name == "materials" then return s end
+    if name == "search" then
+        local u = s.ui
+        u.searchBuffer = u.searchBuffer or {text = u.query or "", cursor = u.queryCursor or utf8.len(u.query or ""), history = {}}
+        return u.searchBuffer
+    end
+    return s.ui.fields[name]
+end
+local function persistBuffer(s, name)
+    if name == "materials" then persist(s)
+    elseif name == "search" then
+        s.ui.query, s.ui.queryCursor = s.ui.searchBuffer.text, s.ui.searchBuffer.cursor
+        saveUi(s)
+    elseif s.ui.formMode then
+        s.ui.dirty = true
+        persistForm(s)
+    end
+end
+local function replaceBuffer(buffer, first, last, text, bound)
+    text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+    if not utf8.len(text) or text:find("[%z\1-\8\11\12\14-\31\127]") then return false, "请输入有效文本，不含控制字符" end
+    local changed = buffer.text:sub(1, byte(buffer.text, first) - 1) .. text .. buffer.text:sub(byte(buffer.text, last))
+    if #changed > (bound or 262144) then return false, "内容超过安全存储上限；不会截短" end
+    if changed ~= buffer.text then
+        buffer.history = buffer.history or {}
+        table.insert(buffer.history, {text = buffer.text, cursor = buffer.cursor, anchor = buffer.anchor})
+        if #buffer.history > 32 then table.remove(buffer.history, 1) end
+    end
+    buffer.text, buffer.cursor, buffer.anchor = changed, first + utf8.len(text), nil
+    return true
+end
+local function insertBuffer(s, target, buffer, first, last, text)
+    local ok, failure = replaceBuffer(buffer, first, last, text, target == "materials" and live.maxText or nil)
+    if target == "materials" then s.error = if ok then nil else failure end
+    return ok
+end
 tern.block.define("live", {
     font = "sans", features = {"edit", "undo"},
     init = function(cx, args, saved)
         local s = {panel = cx.pane, history = {}, serial = 1, scheduled = false,
-            lastOpenAttempt = type(saved) == "table" and saved.lastOpenAttempt or nil}
+            lastOpenAttempt = type(saved) == "table" and saved.lastOpenAttempt or nil,
+            token = type(saved) == "table" and saved.token or nil}
         local payload = tern.json.decode(args[1] or "")
         if type(saved) == "table" and type(saved.payload) == "table"
             and saved.payload.binding and payload.binding
             and saved.payload.binding.instanceId == payload.binding.instanceId then payload = saved.payload end
         bind(s, payload)
+        loadWorkbench(s, cx)
         local function tick()
             if not alive(cx) then return end
+            local priorPayload = s.payload
+            local priorRoot, priorDistro = priorPayload.binding.projectRoot, priorPayload.location.distro
             local ok, failure = pcall(refresh, s)
             if not ok then s.problem = "桥接读取失败：" .. tostring(failure) end
+            if priorPayload ~= s.payload and (priorRoot ~= s.payload.binding.projectRoot
+                or priorDistro ~= s.payload.location.distro) then
+                local old = s.ui
+                if old and old.writable then store.releaseLock(old.paths, old.token) end
+                s.token = nil
+                loadWorkbench(s, cx)
+            end
+            local u = s.ui
+            if u and u.writable and not u.renewing and live.epoch() >= (u.lockRenewAt or 0) then
+                u.renewing = true
+                store.renewLock(u.paths, u.token, {window = s.payload.window, panel = s.panel}, live.epoch(),
+                    function(renewed, reason, freshCx)
+                        local ctx = freshCx or cx
+                        if not alive(ctx) or s.ui ~= u then return end
+                        u.renewing = false
+                        if renewed then u.lockRenewAt = live.epoch() + 5000
+                        else
+                            setWritable(s, false)
+                            u.notice = nil
+                            u.error = storageMessage(reason or "续租失败")
+                        end
+                        ctx:render()
+                    end)
+            end
             acknowledgeOpen(s, cx)
             cx:render()
             tern.timer(500, tick)
@@ -195,126 +551,158 @@ tern.block.define("live", {
     end,
     title = function(s) return "工作台 · " .. (s.payload.binding.projectRoot:match("[^/]+$") or "项目") end,
     view = function(s, cx)
-        if not s.scheduled then s.scheduled = true; tern.timer(50, function() if alive(cx) then focus(cx) end end) end
-        local data, binding = s.snapshot, s.payload.binding
-        local nodes = {
-            ui.text({ui.span("实时需求交付工作台", "title")}),
-            note(binding.projectRoot),
-            ui.kv({{"会话", binding.sessionId}, {"来源", "pane " .. tostring(s.payload.source)},
-                {"状态", s.problem and "断开／失效" or (data and stateNames[data.state] or "正在连接")},
-                {"模型", data and data.model or "未知（不切换模型）"}}),
-        }
-        if s.problem then table.insert(nodes, ui.card("连接需要处理", {ui.text(clip(s.problem, 1000))}, {key = "problem", tone = "warning"})) end
-        if data then
-            local tool = data.currentTool
-            table.insert(nodes, note("当前工具：" .. (tool and clip(tool.toolName or tool.name, 160) or "无")))
-            if tool and tool.summary then table.insert(nodes, note(clip(tool.summary, 500))) end
-        end
-        table.insert(nodes, ui.node("field", {key = "materials", label = "资料草稿 · 完整内容将放入左侧 omp 输入框", error = s.error}, {
-            ui.node("editor", {key = "text", text = s.text, cursor = units(s.text, s.cursor),
-                anchor = s.anchor and units(s.text, s.anchor) or nil, maxLines = 7,
-                placeholder = "在这里记录中文需求、约束或验收条件。只有点击下方按钮才会预填；不会自动发送。", aria = "工作台资料草稿"}),
-        }))
-        table.insert(nodes, ui.button("预填到此会话（不发送）", {key = "prefill", variant = "primary",
-            disabled = s.pending ~= nil or s.problem ~= nil or not data or data.state ~= "idle", actions = {click = "prefill"}}))
-        table.insert(nodes, note("目标：" .. binding.sessionId .. " · " .. binding.projectRoot .. "\n保留现有 omp 草稿；冲突会拒绝。此处编辑、关闭、重载都不会自动投递。"))
-        if s.receipt then
-            table.insert(nodes, ui.card(receiptNames[s.receipt.status] or "回执", {
-                note(clip(s.receipt.reason, 1000)), note("请求 " .. tostring(s.receipt.requestId)),
-            }, {key = "receipt", tone = s.receipt.status == "prefilled" and "success" or "muted"}))
-            if s.pending and s.receipt.status == "delivery_unknown" then
-                local expired = type(s.pending.expiresAt) == "number" and live.epoch() > s.pending.expiresAt
-                table.insert(nodes, note("请先检查左侧 omp 输入框，确认是否已预填。解除只清除待确认锁，保留原回执，不发送或重试资料。请求有效期结束前不能解除。"))
-                table.insert(nodes, ui.button("已核对，解除待确认", {key = "acknowledge", variant = "quiet",
-                    disabled = not expired, actions = {click = "acknowledge-unknown"}}))
-            elseif s.receipt.acknowledgedAt then
-                table.insert(nodes, note("你已核对并解除待确认；原回执已保留。没有重发资料。"))
-            end
-        end
-        if data then
-            local plan = data.plan
-            if type(plan) == "table" then
-                local lines = {"已观测计划（不代表需求归属）：" .. tostring(plan.completed or "?") .. "/" .. tostring(plan.total or "?")}
-                if type(plan.phases) == "table" then
-                    for _, phase in plan.phases do
-                        if type(phase) == "table" then
-                            table.insert(lines, clip(phase.name, 160))
-                            if type(phase.tasks) == "table" then
-                                for _, task in phase.tasks do
-                                    if type(task) == "table" and #lines < 18 then table.insert(lines, "  " .. tostring(task.status or "未知") .. " · " .. clip(task.content, 300)) end
-                                end
-                            end
-                        end
-                        if #lines >= 18 then break end
-                    end
-                end
-                if plan.truncated then table.insert(lines, "桥接计划已截短；完整计划请查看 omp。") end
-                table.insert(nodes, ui.node("scroll", {key = "plan", max = {h = "5lines"}}, {ui.text(table.concat(lines, "\n"))}))
-            else table.insert(nodes, note("计划：尚无可观测的结构化计划（不猜测进度）")) end
-            if type(data.lastDelivery) == "table" then
-                table.insert(nodes, note("最后回复：assistant 候选，" .. tostring(data.lastDelivery.textBytes or "?") .. " 字节；未关联需求，不等于交付／验证／验收。"))
-            else table.insert(nodes, note("交付：尚无可观测候选")) end
-            local events = {}
-            for i = math.max(1, #data.recentEvents - 11), #data.recentEvents do
-                local ev = data.recentEvents[i]
-                if type(ev) == "table" then table.insert(events, "#" .. tostring(ev.sequence or "?") .. " " .. clip(ev.type, 100) .. " · " .. clip(ev.summary, 350)) end
-            end
-            table.insert(nodes, ui.node("scroll", {key = "events", max = {h = "6lines"}}, {
-                ui.text(#events > 0 and table.concat(events, "\n") or "尚无运行事件"),
-            }))
-            table.insert(nodes, note("连接正常 · 心跳持续（只表示会话仍在线，不代表任务进度）"))
-        end
-        return {main = ui.node("col", {role = "workbench.live", gap = "sm"}, nodes)}
+        s.ui.cols = cx.cols
+        local view = ui.build(s)
+        s.scheduled = true
+        return {main = view}
     end,
     key = function(s, key, cx)
         local name, modified = key.name, key.ctrl or key.meta
-        local length = utf8.len(s.text)
-        local first, last = math.min(s.anchor or s.cursor, s.cursor), math.max(s.anchor or s.cursor, s.cursor)
+        local target = s.focusTarget
+        local buffer = target and bufferFor(s, target)
+        if not buffer then return false end
+        if target ~= "materials" and target ~= "search" and s.ui.saving then return true end
+        local length = utf8.len(buffer.text)
+        local first, last = math.min(buffer.anchor or buffer.cursor, buffer.cursor), math.max(buffer.anchor or buffer.cursor, buffer.cursor)
         if modified and name:lower() == "z" then
-            local old = table.remove(s.history)
-            if old then s.text, s.cursor, s.anchor = old.text, old.cursor, old.anchor end
-        elseif modified and name:lower() == "a" then s.anchor, s.cursor = 0, length
+            local old = table.remove(buffer.history or {})
+            if old then buffer.text, buffer.cursor, buffer.anchor = old.text, old.cursor, old.anchor end
+        elseif modified and name:lower() == "a" then buffer.anchor, buffer.cursor = 0, length
         elseif modified and (name:lower() == "c" or name:lower() == "x") then
             if first == last then return false end
-            cx:copy(s.text:sub(byte(s.text, first), byte(s.text, last) - 1))
-            if name:lower() == "x" then replace(s, first, last, "") end
+            cx:copy(buffer.text:sub(byte(buffer.text, first), byte(buffer.text, last) - 1))
+            if name:lower() == "x" then insertBuffer(s, target, buffer, first, last, "") end
         elseif name == "left" or name == "right" or name == "home" or name == "end" then
-            local pos
-            if name == "home" then pos = 0 elseif name == "end" then pos = length
-            elseif not key.shift and first ~= last then pos = name == "left" and first or last
-            else pos = math.clamp(s.cursor + (name == "left" and -1 or 1), 0, length) end
-            s.anchor = key.shift and (s.anchor or s.cursor) or nil
-            s.cursor = pos
+            local cursorBefore = buffer.cursor
+            if name == "home" then buffer.cursor = 0
+            elseif name == "end" then buffer.cursor = length
+            elseif not key.shift and first ~= last then buffer.cursor = name == "left" and first or last
+            else buffer.cursor = math.clamp(buffer.cursor + (name == "left" and -1 or 1), 0, length) end
+            buffer.anchor = key.shift and (buffer.anchor or cursorBefore) or nil
         elseif name == "backspace" or name == "delete" then
-            if first == last then if name == "backspace" then first = math.max(0, first - 1) else last = math.min(length, last + 1) end end
-            replace(s, first, last, "")
-        elseif name == "enter" and not modified then replace(s, first, last, "\n")
-        elseif key.text and (name == "paste" or not modified) then replace(s, first, last, key.text)
+            if first == last then
+                if name == "backspace" then first = math.max(0, first - 1) else last = math.min(length, last + 1) end
+            end
+            insertBuffer(s, target, buffer, first, last, "")
+        elseif name == "enter" and not modified then
+            if target == "title" or target == "labels" or target == "search" then return false end
+            insertBuffer(s, target, buffer, first, last, "\n")
+        elseif key.text and (name == "paste" or not modified) then
+            insertBuffer(s, target, buffer, first, last, key.text)
         else return false end
-        focus(cx)
+        persistBuffer(s, target)
+        focus(cx, s.focusId)
         return true
     end,
     event = function(s, ev, cx)
-        if ev.ev == "edit" and ev.id == "main.materials.text" and ev.len == units(s.text, utf8.len(s.text)) then
-            replace(s, point(s.text, ev.from), point(s.text, ev.to), ev.text)
-            if not s.error then s.cursor = point(s.text, ev.cursor) end
+        if ev.ev == "focus" then
+            s.focusId = ev.id
+            s.focusTarget = fieldName(ev.id)
+            focus(cx, ev.id)
+        elseif ev.ev == "edit" then
+            local target = fieldName(ev.id)
+            if target ~= "materials" and target ~= "search" and s.ui.saving then return end
+            local buffer = target and bufferFor(s, target)
+            if buffer and ev.len == units(buffer.text, utf8.len(buffer.text)) then
+                local ok = insertBuffer(s, target, buffer, point(buffer.text, ev.from), point(buffer.text, ev.to), ev.text)
+                if ok then
+                    buffer.cursor = point(buffer.text, ev.cursor)
+                    s.focusId, s.focusTarget = ev.id, target
+                    if target == "materials" then persist(s)
+                    elseif target == "search" then
+                        s.ui.query, s.ui.queryCursor = buffer.text, buffer.cursor
+                        saveUi(s)
+                    else
+                        s.ui.dirty, s.ui.formError = true, nil
+                        persistForm(s)
+                    end
+                end
+            end
         elseif ev.ev == "undo" then
-            local old = table.remove(s.history)
-            if old then s.text, s.cursor, s.anchor = old.text, old.cursor, old.anchor end
-        elseif ev.ev == "action" and ev.act == "prefill" then prefill(s, cx)
-        elseif ev.ev == "action" and ev.act == "acknowledge-unknown" then
-            if s.pending and s.receipt and s.receipt.status == "delivery_unknown"
-                and type(s.pending.expiresAt) == "number" and live.epoch() > s.pending.expiresAt then
-                local acknowledgedAt = live.epoch()
-                tern.kv.set("live:acknowledged:" .. s.payload.binding.instanceId .. ":" .. s.pending.requestId,
-                    {schemaVersion = 1, instanceId = s.payload.binding.instanceId, sessionId = s.payload.binding.sessionId,
-                        receipt = s.receipt, acknowledgedAt = acknowledgedAt})
-                s.receipt.acknowledgedAt, s.pending, s.error = acknowledgedAt, nil, nil
+            local target = fieldName(ev.id)
+            if target ~= "materials" and target ~= "search" and s.ui.saving then return end
+            local buffer = target and bufferFor(s, target)
+            local old = buffer and buffer.history and table.remove(buffer.history)
+            if old then
+                buffer.text, buffer.cursor, buffer.anchor = old.text, old.cursor, old.anchor
+                persistBuffer(s, target)
+            end
+        elseif ev.ev == "select" and ev.id:match("%.tabs$") then
+            s.ui.tab, s.ui.detailMode = ev.item, false
+            saveUi(s)
+        elseif ev.ev == "select" and ev.id:match("%.requirements$") then
+            local id = tostring(ev.item):match("([^%.]+)$")
+            if s.ui.byId[id] then s.ui.selected, s.ui.detailMode = id, true; saveUi(s) end
+        elseif ev.ev == "change" then
+            local name = ev.id:match("%.([%w]+)$")
+            local value = ev.value
+            if s.ui.saving and (name == "type" or name == "priority") then return end
+            if name == "privacyMode" then s.ui.privacyMode = value; saveUi(s)
+            elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
+            elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
+            elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
+            elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
+            elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s) end
+        elseif ev.ev == "action" then
+            local act = ev.act
+            local req = type(act) == "string" and act:match("^requirement=(.+)$")
+            if req and s.ui.byId[req] then
+                s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirements", true
+                saveUi(s)
+            elseif act == "prefill" then prefill(s, cx)
+            elseif act == "acknowledge-unknown" then
+                if s.pending and s.receipt and s.receipt.status == "delivery_unknown"
+                    and type(s.pending.expiresAt) == "number" and live.epoch() > s.pending.expiresAt then
+                    local acknowledgedAt = live.epoch()
+                    tern.kv.set("live:acknowledged:" .. s.payload.binding.instanceId .. ":" .. s.pending.requestId,
+                        {schemaVersion = 1, instanceId = s.payload.binding.instanceId, sessionId = s.payload.binding.sessionId,
+                            receipt = s.receipt, acknowledgedAt = acknowledgedAt})
+                    s.receipt.acknowledgedAt, s.pending, s.error = acknowledgedAt, nil, nil
+                end
+            elseif act == "rebase" and s.ui.conflict and s.ui.editing and s.ui.byId[s.ui.editing] then
+                s.ui.baseRevision = s.ui.byId[s.ui.editing].revision
+                s.ui.conflict, s.ui.formError = false, nil
+                persistForm(s)
+            elseif act == "initialize" then initProject(s, cx, false, true)
+            elseif act == "enable-edit" then initProject(s, cx, false, false)
+            elseif act == "takeover" and s.ui.takeoverAvailable then initProject(s, cx, true, false)
+            elseif act == "reload" then s.ui.notice = nil; scheduleProjectRefresh(s, cx); saveUi(s)
+            elseif act == "new-requirement" and s.ui.writable then openForm(s, "new")
+            elseif act == "edit-requirement" and s.ui.writable and s.ui.selected then openForm(s, "edit", s.ui.byId[s.ui.selected])
+            elseif act == "save-requirement" then saveRequirement(s, cx)
+            elseif act == "back" then s.ui.formMode = false; s.ui.formError = nil; saveUi(s)
+            elseif act == "back-list" then s.ui.detailMode = false; saveUi(s)
+            elseif act == "prefill-selected" and s.ui.selected then
+                local r = s.ui.byId[s.ui.selected]
+                if r then
+                    local parts = {r.title, r.goal}
+                    if r.scope ~= "" then table.insert(parts, "范围：" .. r.scope) end
+                    for _, c in r.acceptanceCriteria do table.insert(parts, "验收：" .. c.description) end
+                    local selectedText = table.concat(parts, "\n")
+                    if s.pending then
+                        s.error = "已有待核对预填请求；不会替换资料草稿或重复投递。请先核对运行状态。"
+                        s.ui.tab = "runtime"
+                        saveUi(s)
+                    elseif s.text:match("%S") then
+                        s.error = "资料草稿已有内容；不会覆盖。请先在运行页明确清空草稿，再选用需求资料。"
+                        s.ui.tab = "runtime"
+                        saveUi(s)
+                    elseif #selectedText > live.maxText then
+                        s.error = "此需求资料超过 16 KiB；请在运行页选择要预填的内容。现有草稿未改变。"
+                    else
+                        s.text = selectedText
+                        s.cursor, s.anchor, s.error = utf8.len(s.text), nil, nil
+                        persist(s)
+                        s.ui.tab = "runtime"
+                        saveUi(s)
+                    end
+                end
             end
         end
     end,
     save = function(s)
         persist(s)
-        return {payload = s.payload, lastOpenAttempt = s.lastOpenAttempt}
+        saveUi(s)
+        return {payload = s.payload, lastOpenAttempt = s.lastOpenAttempt, token = s.token}
     end,
 })

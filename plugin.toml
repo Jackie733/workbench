@@ -1,8 +1,8 @@
 schema = 1
 id = "multi-model-workbench"
 name = "需求交付工作台"
-version = "3.0.0"
-description = "Live native workbench bound to one existing omp session; explicit draft-safe prefill only."
+version = "3.1.0"
+description = "Native project requirements, board and reload-safe drafts beside one existing omp session."
 host = "host.luau"
 window = "window.luau"
 styles = ["styles.css"]
