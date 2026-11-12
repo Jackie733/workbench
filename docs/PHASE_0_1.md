@@ -65,7 +65,7 @@ pid, cwd, projectRoot, openRequestId
 
 每次 `/wb` 产生全新 `openRequestId`。会话改变会使它失效。
 
-扩展把可见的 `OMPWB:<instanceId>` 放在原生 dock 和 title。title 仅为 CLI 路由提示：枚举真实 `clients.kind=window`，逐个显式 window key 检查，匹配不唯一则拒绝。插件仍必须独立读取对应原生 dock，精确证明标记，不能仅凭 title、聊天正文、焦点或目录绑定。
+扩展把可见的 `⚒ <项目目录名> · <instanceId 前 8 位>` 放在状态行（原生 dock 的独立文本节点）和 title：只显示项目目录名（不显示完整路径），完整 `instanceId` 仍是协议身份与私有运行目录。不再额外绘制输入框上方的重复行。title 仅为 CLI 路由提示：枚举真实 `clients.kind=window`，逐个显式 window key 检查，匹配不唯一则拒绝。插件仍必须独立读取对应原生 dock，精确证明标记，不能仅凭 title、聊天正文、焦点或目录绑定。若用户关闭状态行 hook 文本（`statusLine.showHookStatus=false`），dock 中不再出现该标记，`/wb` 失败关闭，不退回猜测。
 
 为避免每秒向无关 SSH 窗格发起同步读取，窗口先按精确 title 筛选候选，再读取候选的 dock。没有 title 或 dock 证明均失败关闭，不退回猜测。
 

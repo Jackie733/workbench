@@ -157,7 +157,8 @@ export default function workbench(pi: ExtensionAPI): void {
 
 	function renderSource(ctx: ExtensionContext): void {
 		if (!runtime) return;
-		ctx.ui.setWidget("omp-workbench-source", [runtime.sourceMarker], { placement: "aboveEditor" });
+		// The status line renders this exact text as its own dock node, which
+		// proves the source pane; no second above-editor line is needed.
 		ctx.ui.setStatus("omp-workbench-source", runtime.sourceMarker);
 		// A visible routing hint, never the plugin's proof of source identity.
 		ctx.ui.setTitle(runtime.sourceMarker);
@@ -176,10 +177,15 @@ export default function workbench(pi: ExtensionAPI): void {
 			tools.clear(); waits.clear(); awaitingAsyncWork = false;
 			event("session.changed", "Source session bound; prior-session commands will be rejected");
 		}
-		if (moved) { cwd = nextCwd; projectRoot = resolveProject(cwd); }
+		if (moved) {
+			cwd = nextCwd;
+			projectRoot = resolveProject(cwd);
+			runtime?.markSource(projectRoot, cwd);
+		}
 		if (changed || forceRestore) restoreObserved(ctx);
-		// omp clears extension widgets during native session switches.
-		if (changed || forceRestore) renderSource(ctx);
+		// omp clears extension widgets during native session switches; a moved
+		// project also renames the visible source title.
+		if (changed || moved || forceRestore) renderSource(ctx);
 		if (changed || moved) writeMarker();
 	}
 

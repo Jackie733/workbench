@@ -23,7 +23,9 @@ end
 function M.marker(data, location)
     if type(data) ~= "table" or data.schemaVersion ~= 1 or data.instanceId ~= location.instanceId
         or not M.token(data.sessionId) or not M.token(data.openRequestId) or data.runtimeDir ~= location.linux
-        or data.sourceMarker ~= "OMPWB:" .. data.instanceId
+        or type(data.sourceMarker) ~= "string" or #data.sourceMarker > 160
+        or data.sourceMarker:find("[%z\1-\31]")
+        or data.sourceMarker:sub(-8) ~= (data.instanceId:gsub("%-", "")):sub(1, 8)
         or type(data.projectRoot) ~= "string" or data.projectRoot:sub(1, 1) ~= "/"
         or type(data.cwd) ~= "string" or data.cwd:sub(1, 1) ~= "/"
         or #data.projectRoot > 2048 or #data.cwd > 2048 or data.projectRoot:find("[%z\1-\31]") or data.cwd:find("[%z\1-\31]") then

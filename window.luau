@@ -38,7 +38,7 @@ local function source(cx, binding, expectedPane)
         -- Title narrows initial discovery only; a bound pane may later be renamed.
         -- Health checks read that exact pane's dock, never unrelated/remote panes.
         if (pane.kind == "terminal" or pane.kind == "agent") and not pane.exited and (expectedPane or pane.title == binding.sourceMarker) then
-            local ok, surface = pcall(function() return cx.session:surface(pane.pane, {nodes = 200, max_chars = 10000, depth = 32}) end)
+            local ok, surface = pcall(function() return cx.session:surface(pane.pane, {nodes = 500, max_chars = 10000, depth = 32}) end)
             if ok and type(surface) == "table" and dockMarker(surface.dock, binding.sourceMarker) then table.insert(matches, pane) end
         end
     end

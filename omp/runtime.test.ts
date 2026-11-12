@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MAX_TEXT_BYTES, MAX_COMMAND_BYTES, prefillStateRejection, readCommand, validateCommand } from "./runtime";
+import { MAX_TEXT_BYTES, MAX_COMMAND_BYTES, prefillStateRejection, readCommand, sourceMarkerFor, SOURCE_ICON, validateCommand } from "./runtime";
 import { observeDelivery, observePlan } from "./index";
 
 const now = 1_800_000_000_000;
@@ -95,8 +95,27 @@ describe("exact native opening acknowledgment", () => {
   test("enumerates real windows including empty key but never uses approximate title matches", () => {
     expect(windowKeys({ clients: [{ kind: "cli", window: "wrong" }, { kind: "window", window: "" }, { kind: "window", window: "2" }] })).toEqual(["", "2"]);
     expect(() => windowKeys({ clients: [{ kind: "cli", window: "" }] })).toThrow();
-    expect(matchingPanes({ panes: [{ pane: 1, title: "OMPWB:exact-extra" }, { pane: 2, title: "OMPWB:exact" }, { pane: 3, title: "OMPWB:exact" }] }, "OMPWB:exact")).toEqual([2, 3]);
-    expect(() => matchingPanes({ panes: [{ pane: "3", title: "OMPWB:exact" }] }, "OMPWB:exact")).toThrow();
+    const title = sourceMarkerFor("/w/exact", "/w/exact", "exact000-0000-0000-0000-000000000000");
+    expect(matchingPanes({ panes: [{ pane: 1, title: `${title}-extra` }, { pane: 2, title }, { pane: 3, title }] }, title)).toEqual([2, 3]);
+    expect(() => matchingPanes({ panes: [{ pane: "3", title }] }, title)).toThrow();
+  });
+});
+
+describe("visible source title", () => {
+  const id = "d360cec8-439f-49ee-acc1-c29900b0c67e";
+  test("names the project directory, not the full path, and shortens the instance id", () => {
+    expect(sourceMarkerFor("/home/jackie/code/workbench", "/home/jackie/code/workbench/src", id)).toBe(`${SOURCE_ICON} workbench · d360cec8`);
+    expect(sourceMarkerFor(null, "/tmp/deep/api", id)).toBe(`${SOURCE_ICON} api · d360cec8`);
+  });
+  test("bounds the directory name, strips control characters and keeps a fallback name", () => {
+    expect(sourceMarkerFor(`/w/${"a".repeat(80)}`, "/w", id)).toBe(`${SOURCE_ICON} ${"a".repeat(32)} · d360cec8`);
+    expect(sourceMarkerFor("/w/a\u0000b\u001bc", "/w", id)).toBe(`${SOURCE_ICON} abc · d360cec8`);
+    expect(sourceMarkerFor("/", "/", id)).toBe(`${SOURCE_ICON} workbench · d360cec8`);
+  });
+  test("a near-match title never identifies the source pane", () => {
+    const title = sourceMarkerFor("/项目/工作台", "/项目/工作台", id);
+    expect(matchingPanes({ panes: [{ pane: 4, title: title.replace("d360cec8", "d360cec9") }] }, title)).toEqual([]);
+    expect(matchingPanes({ panes: [{ pane: 5, title }] }, title)).toEqual([5]);
   });
 });
 

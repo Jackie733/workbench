@@ -252,9 +252,22 @@ export function prefillStateRejection(source: PrefillSourceState): string | null
 	return null;
 }
 
+export const SOURCE_ICON = "⚒";
+
+/**
+ * Visible source title: workbench icon, project directory name (not the full
+ * path) and a shortened instance id. Routing still requires the exact native
+ * dock marker; the title alone never proves the source pane.
+ */
+export function sourceMarkerFor(projectRoot: string | null, cwd: string, instanceId: string): string {
+	const base = path.basename(projectRoot ?? cwd);
+	const name = Array.from(base.replace(/[\x00-\x1f\x7f]/g, "")).slice(0, 32).join("") || "workbench";
+	return `${SOURCE_ICON} ${name} · ${instanceId.replace(/-/g, "").slice(0, 8)}`;
+}
+
 export class Runtime {
 	readonly instanceId = randomUUID();
-	readonly sourceMarker = `OMPWB:${this.instanceId}`;
+	sourceMarker = sourceMarkerFor(null, "/", this.instanceId);
 	readonly directory: string;
 	readonly marker: string;
 	readonly commands: string;
@@ -275,6 +288,10 @@ export class Runtime {
 			try { cleanupStaleRuntime(base, this.instanceId); } catch { /* cleanup is best effort */ }
 		}, 1000);
 		timer.unref();
+	}
+
+	markSource(projectRoot: string | null, cwd: string): void {
+		this.sourceMarker = sourceMarkerFor(projectRoot, cwd, this.instanceId);
 	}
 
 	assertPrivate(): void {
