@@ -4,7 +4,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { MAX_TEXT_BYTES, type Activity, type InspectCommand } from "./runtime";
 
-export interface Baseline { head: string; fingerprint: string; dirty: boolean }
+export interface BaselineFile { path: string; status: string; sha256: string | null }
+export interface Baseline { head: string; fingerprint: string; dirty: boolean; files: BaselineFile[]; filesTruncated: boolean }
+export interface WorkspaceChange { capturedAt: number; head: string; fingerprint: string; dirty: boolean;
+	files: BaselineFile[]; filesTruncated: boolean; diff: string; diffSha256: string; diffTruncated: boolean;
+	commits: { hash: string; at: number; author: string; subject: string }[]; commitsTruncated: boolean }
 export interface Preview {
 	previewToken: string; text: string; sha256: string; requirementId: string;
 	requirementRevision: number; activity: Activity; baseline: Baseline;
@@ -96,6 +100,45 @@ function workflow(root: string, r: Record<string, unknown>): Record<string, unkn
 	return w;
 }
 
+const MAX_BASELINE_FILES = 256;
+const MAX_FILE_HASH_BYTES = 512 * 1024;
+const MAX_DIFF_BYTES = 48 * 1024;
+function workingFiles(root: string, status: Buffer): { files: BaselineFile[]; filesTruncated: boolean } {
+	const parts = status.toString("utf8").split("\0");
+	const files: BaselineFile[] = [];
+	let truncated = false;
+	let total = 0;
+	for (let i = 0; i < parts.length; i++) {
+		const entry = parts[i];
+		if (!entry) continue;
+		const code = entry.slice(0, 2);
+		const name = entry.slice(3);
+		if (code[0] === "R" || code[0] === "C") i++; // the original path follows a rename/copy entry
+		if (!name || name.length > 2048 || /[\x00-\x1f\x7f]/.test(name)) { truncated = true; continue; }
+		if (files.length >= MAX_BASELINE_FILES) { truncated = true; break; }
+		let sha256: string | null = null;
+		if (!code.includes("D")) {
+			try {
+				const absolute = path.join(root, name);
+				const info = fs.lstatSync(absolute);
+				if (info.isFile() && info.size <= MAX_FILE_HASH_BYTES && total + info.size <= 4 * 1024 * 1024) {
+					const fd = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+					try {
+						if (!fs.fstatSync(fd).isFile()) throw new Error("invalid_baseline_file");
+						const buffer = Buffer.alloc(info.size);
+						let n = 0;
+						while (n < buffer.length) { const got = fs.readSync(fd, buffer, n, buffer.length - n, null); if (!got) break; n += got; }
+						total += n;
+						sha256 = createHash("sha256").update(buffer.subarray(0, n)).digest("hex");
+					} finally { fs.closeSync(fd); }
+				}
+			} catch { sha256 = null; }
+		}
+		files.push({ path: name, status: code.replace(/ /g, "") || "?", sha256 });
+	}
+	return { files, filesTruncated: truncated };
+}
+
 /** A real pre-execution baseline; business metadata cannot invalidate its own approval. */
 export function gitBaseline(root: string): Baseline {
 	const args = { cwd: root, timeout: 3000, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] as const };
@@ -137,7 +180,48 @@ export function gitBaseline(root: string): Baseline {
 			digest.update(`file\0${fileBytes}\0${content.digest("hex")}`);
 		} finally { fs.closeSync(fd); }
 	}
-	return { head, fingerprint: digest.digest("hex"), dirty: status.length > 0 };
+	const snapshot = workingFiles(root, status);
+	return { head, fingerprint: digest.digest("hex"), dirty: status.length > 0, ...snapshot };
+}
+
+/** Observed since a real baseline. Attribution stays unknown: Git cannot prove task authorship. */
+export function workspaceChanges(root: string, since?: string): WorkspaceChange {
+	const args = { cwd: root, timeout: 5000, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] as const };
+	const git = (values: string[]) => execFileSync("git", values, args);
+	const baseline = gitBaseline(root);
+	const scope = ["--", ".", ":(exclude).omp/workbench"];
+	let diff = git(baseline.head ? ["diff", "--no-ext-diff", "--no-textconv", "HEAD", ...scope] : ["diff", "--no-ext-diff", "--no-textconv", ...scope]).toString("utf8");
+	let diffTruncated = false;
+	if (Buffer.byteLength(diff) > MAX_DIFF_BYTES) { diff = Buffer.from(diff).subarray(0, MAX_DIFF_BYTES).toString("utf8"); diffTruncated = true; }
+	const untracked = baseline.files.filter(file => file.status === "??").slice(0, 24);
+	for (const file of untracked) {
+		if (Buffer.byteLength(diff) >= MAX_DIFF_BYTES) { diffTruncated = true; break; }
+		let body: Buffer;
+		try { body = fs.readFileSync(path.join(root, file.path)); } catch { continue; }
+		const header = `\ndiff --git a/${file.path} b/${file.path}\nnew file mode 100644\n--- /dev/null\n+++ b/${file.path}\n`;
+		if (body.includes(0)) { diff += `${header}Binary file omitted from preview.\n`; continue; }
+		const text = body.subarray(0, 8192).toString("utf8");
+		if (body.length > 8192) diffTruncated = true;
+		diff += header + text.split("\n").map(line => `+${line}`).join("\n");
+		if (Buffer.byteLength(diff) > MAX_DIFF_BYTES) { diff = Buffer.from(diff).subarray(0, MAX_DIFF_BYTES).toString("utf8"); diffTruncated = true; break; }
+	}
+	const commits: WorkspaceChange["commits"] = [];
+	let commitsTruncated = false;
+	if (baseline.head) {
+		const range = since && /^[0-9a-f]{7,64}$/.test(since) ? `${since}..HEAD` : "HEAD";
+		const log = git(["log", "-n", "51", "--format=%H%x1f%at%x1f%an%x1f%s", range, "--"]).toString("utf8");
+		for (const line of log.split("\n")) {
+			if (!line) continue;
+			const [hash, at, author, subject] = line.split("\x1f");
+			if (commits.length >= 50) { commitsTruncated = true; break; }
+			if (!hash || !/^[0-9a-f]{40,64}$/.test(hash) || !Number.isSafeInteger(Number(at))) continue;
+			commits.push({ hash, at: Number(at), author: (author || "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200),
+				subject: (subject || "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 500) });
+		}
+	}
+	return { capturedAt: Date.now(), head: baseline.head, fingerprint: baseline.fingerprint, dirty: baseline.dirty,
+		files: baseline.files, filesTruncated: baseline.filesTruncated, diff,
+		diffSha256: createHash("sha256").update(diff).digest("hex"), diffTruncated, commits, commitsTruncated };
 }
 
 function approved(root: string, r: Record<string, unknown>, w: Record<string, unknown>, baseline: Baseline): Authorization {
@@ -172,6 +256,7 @@ export class Handoff {
 		const r = readRequirement(root, command.requirementId);
 		if (command.operation === "file") return { file: { path: command.path!, ...projectFile(root, command.path!) } };
 		if (command.operation === "baseline") return { baseline: gitBaseline(root) };
+		if (command.operation === "changes") return { changes: workspaceChanges(root, command.since) };
 		if (command.operation === "candidate") {
 			for (let i = branch.length - 1; i >= 0; i--) {
 				const entry = branch[i];

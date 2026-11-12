@@ -85,6 +85,13 @@ local function panelSource(cx, panel)
     end
     return nil
 end
+local tickHandle
+local tick
+local function rearm(cx)
+    if tickHandle then pcall(function() tickHandle.cancel() end) end
+    if not cx then return end
+    tickHandle = tern.timer(1000, function(fresh) tick(fresh or cx) end)
+end
 local function open(cx, opened)
     local binding, location = opened.binding, opened.location
     local origin, problem = source(cx, binding)
@@ -153,6 +160,7 @@ local function open(cx, opened)
         tern.kv.set("live:binding:" .. cx:window_key() .. ":" .. entry.panel, payload)
         setHealth(cx, entry, origin)
         save(cx)
+        rearm(cx)
         cx.layout:focus(entry.panel)
         return
     end
@@ -165,6 +173,7 @@ local function open(cx, opened)
     tern.kv.set("live:binding:" .. cx:window_key() .. ":" .. pane, payload)
     setHealth(cx, entry, origin)
     save(cx)
+    rearm(cx)
     cx.layout:focus(pane)
 end
 local function openPath(path, cx)
@@ -198,8 +207,9 @@ tern.command({id = "open", title = "恢复实时工作台（首次请在 omp 输
     end
     openPath(found[1].location.marker, cx)
 end})
-local function tick(cx)
+tick = function(cx)
     if not cx then return end
+    rearm(cx)
     local changed = false
     for instance, entry in registry do
         if isPanel(cx, entry) then
@@ -211,7 +221,6 @@ local function tick(cx)
         end
     end
     if changed then save(cx) end
-    tern.timer(1000, tick)
 end
 tern.on("pane_closed", function(ev, cx)
     local changed = false

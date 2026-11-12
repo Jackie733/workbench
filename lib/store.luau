@@ -434,6 +434,25 @@ function M.put(paths, file, value, expectedRevision, token, cb)
 end
 -- CAS publication for requirement-scoped workflow metadata. Paths are constrained
 -- to the corresponding requirement directory; publication uses the same gate.
+local function casPublish(paths, file, value, expectedRevision, token, cb)
+    local encoded, payload = pcall(tern.json.encode, value)
+    if not encoded then cb(false, "encode_failed"); return end
+    if #payload > M.maxJson then cb(false, "record_too_large"); return end
+    local directory = file:match("^(.*)\\[^\\]+$")
+    local made, mkdirError = pcall(tern.fs.mkdir, directory)
+    if not made then cb(false, "mkdir_failed:" .. tostring(mkdirError)); return end
+    local temp = file .. ".tmp-" .. M.newId("w", tern.now())
+    local wrote, writeError = pcall(tern.fs.write, temp, payload)
+    if not wrote then cb(false, "temp_write_failed:" .. tostring(writeError)); return end
+    local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
+        OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
+        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
+    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        if status == 0 then cb(true, nil, cx)
+        else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
+    end)
+    if not spawned then cb(false, "process_failed:" .. tostring(errorValue)); pcall(tern.fs.remove, temp) end
+end
 function M.putRecord(paths, file, value, expectedRevision, token, cb)
     local prefix = paths.requirements .. "\\"
     local id = type(file) == "string" and file:sub(1,#prefix)==prefix and file:sub(#prefix + 1):match("^([%w_%-]+)\\workflow%.json$")
@@ -447,20 +466,22 @@ function M.putRecord(paths, file, value, expectedRevision, token, cb)
     if not M.token(token) or not id or not valid or not integer(expectedRevision,0) or value.revision~=expectedRevision+1 then
         cb(false,"invalid_path_or_record");return
     end
-    local encoded, payload = pcall(tern.json.encode, value)
-    if not encoded then cb(false, "encode_failed"); return end
-    if #payload > M.maxJson then cb(false, "record_too_large"); return end
-    local temp = file .. ".tmp-" .. M.newId("w", tern.now())
-    local wrote, writeError = pcall(tern.fs.write, temp, payload)
-    if not wrote then cb(false, "temp_write_failed:" .. tostring(writeError)); return end
-    local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
-        OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
-        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
-    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
-        if status == 0 then cb(true, nil, cx)
-        else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
-    end)
-    if not spawned then cb(false, "process_failed:" .. tostring(errorValue)); pcall(tern.fs.remove, temp) end
+    casPublish(paths, file, value, expectedRevision, token, cb)
+end
+-- Plan, result and immutable verification records share the same requirement scope
+-- and gate. Evidence is create-only; mutable summaries require the exact prior revision.
+function M.putScoped(paths, file, value, expectedRevision, token, cb)
+    local prefix = paths.requirements .. "\\"
+    local relative = type(file) == "string" and file:sub(1, #prefix) == prefix and file:sub(#prefix + 1)
+    local id = relative and (relative:match("^([%w_%-]+)\\plan%.json$") or relative:match("^([%w_%-]+)\\results%.json$"))
+    local evidenceId = relative and relative:match("^([%w_%-]+)\\evidence\\verification%-[%w_%-]+%.json$")
+    local requirementId = id or evidenceId
+    local valid = type(value) == "table" and requirementId and value.requirementId == requirementId
+        and M.token(value.projectId) and value.schemaVersion == 1 and integer(value.revision, 1)
+    if valid and evidenceId then valid = expectedRevision == 0 and value.revision == 1
+    elseif valid then valid = integer(expectedRevision, 0) and value.revision == expectedRevision + 1 end
+    if not M.token(token) or not requirementId or not valid then cb(false, "invalid_path_or_record"); return end
+    casPublish(paths, file, value, expectedRevision, token, cb)
 end
 function M.putImmutableRecord(paths, file, value, token, cb)
     local prefix = paths.requirements .. "\\"

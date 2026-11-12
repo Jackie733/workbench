@@ -3,6 +3,8 @@ local privacy = require("./lib/privacy")
 local live = require("./lib/live")
 local store = require("./lib/store")
 local Workflow = require("./lib/workflow")
+local Results = require("./lib/results")
+local runview = require("./lib/runview")
 local ui = require("./lib/ui")
 local function invalidatePreview(h)
     if h.preview then h.preview.previewToken=nil;h.previewStale=true end
@@ -71,6 +73,7 @@ local function alive(cx)
     return false
 end
 local refreshHandoffReceipt
+local refreshTraceReceipt
 local function refresh(s)
     local p, now = s.payload, live.epoch()
     s.problem = nil
@@ -117,6 +120,7 @@ local function refresh(s)
         end
     end
     if refreshHandoffReceipt then refreshHandoffReceipt(s, s.cx) end
+    if refreshTraceReceipt then refreshTraceReceipt(s, s.cx) end
 end
 local function prefill(s, cx)
     refresh(s)
@@ -308,13 +312,55 @@ local function refreshHandoff(s)
     end
     if h.workflowError then h.error = h.workflowError end
 end
+local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
+local function traceSnapshot(t)
+    if not t then return nil end
+    local fields = {}
+    for name, field in t.fields or {} do
+        if type(field) == "table" and type(field.text) == "string" then
+            fields[name] = {text = field.text:sub(1, traceLimits[name] or 500), cursor = field.cursor, anchor = field.anchor}
+        end
+    end
+    return {fields = fields}
+end
+local function makeTrace(saved)
+    local fields = {}
+    for name, limit in traceLimits do
+        local item = type(saved) == "table" and type(saved.fields) == "table" and saved.fields[name]
+        fields[name] = {text = type(item) == "table" and type(item.text) == "string" and item.text:sub(1, limit) or "",
+            cursor = type(item) == "table" and type(item.cursor) == "number" and item.cursor or nil,
+            anchor = type(item) == "table" and type(item.anchor) == "number" and item.anchor or nil}
+    end
+    for name, field in fields do field.cursor = field.cursor or utf8.len(field.text) end
+    return {fields = fields, safe = true, busy = false}
+end
+local function refreshTrace(s)
+    local u, t = s.ui, s.ui and s.ui.trace
+    if not u or not t then return end
+    local requirement = u.selected and u.byId[u.selected]
+    t.error = nil
+    if not requirement then t.plan, t.results = nil, nil; return end
+    local plan, planError = Results.loadPlan(u.paths, requirement)
+    local results, resultsError = Results.loadResults(u.paths, requirement)
+    t.safe = plan ~= nil and results ~= nil
+    t.plan, t.results = plan, results
+    if not plan then t.error = "计划记录损坏：" .. storageMessage(planError or "请核对 plan.json") end
+    if not results then t.error = (t.error and (t.error .. "；") or "") .. "结果记录损坏：" .. storageMessage(resultsError or "请核对 results.json") end
+    if t.safe and t.fields.verifyCriteria.text == "" and #requirement.acceptanceCriteria > 0 then
+        local ids = {}
+        for _, criterion in requirement.acceptanceCriteria do table.insert(ids, criterion.id) end
+        t.fields.verifyCriteria.text = table.concat(ids, ", ")
+        t.fields.verifyCriteria.cursor = utf8.len(t.fields.verifyCriteria.text)
+    end
+end
 local function saveUi(s)
     if not s.ui then return end
     tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
         priorityFilter = s.ui.priorityFilter, stageFilter = s.ui.stageFilter, query = s.ui.query,
         queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode,
         detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
-        mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff)})
+        mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff),
+        trace = traceSnapshot(s.ui.trace)})
 end
 storageMessage = function(reason)
     local code = type(reason) == "table" and reason.code or reason
@@ -493,7 +539,8 @@ local function sendPreview(s, cx, prefillOnly)
     end
     local id = newRequestId(s)
     local pending = {requestId = id, activity = preview.activity, sessionId = s.payload.binding.sessionId,
-        instanceId = s.payload.binding.instanceId, payloadSha256 = preview.sha256, state = "recording_intent"}
+        instanceId = s.payload.binding.instanceId, payloadSha256 = preview.sha256, state = "recording_intent",
+        baseline = preview.activity == "implement" and preview.baseline or nil}
     h.pendingSend, h.error = pending, nil
     saveHandoffAndRender(s, cx)
     applyWorkflow(s, cx, "request", {requestId = id, activity = preview.activity, sessionId = pending.sessionId,
@@ -538,6 +585,23 @@ local function applySendReceipt(s, cx, receipt)
             pending.receiptApplied, pending.receiptAppliedStatus, pending.receiptPending = true, receipt.status, nil
             pending.state = receipt.status
             if receipt.status == "submitted" or receipt.status == "rejected" then h.pendingSend = nil end
+            local requirement = selectedRequirement(s)
+            if ok and receipt.status == "submitted" and pending.activity == "implement" and type(pending.baseline) == "table"
+                and requirement and u.writable and u.trace and u.trace.safe then
+                Results.recordBaseline(u.paths, requirement, u.token, pending.baseline, pending.requestId,
+                    function(saved, reason, freshCx)
+                        local resultCtx = freshCx or ctx
+                        if not alive(resultCtx) then return end
+                        if saved then
+                            refreshTrace(s)
+                            if s.ui.trace then
+                                s.ui.trace.notice = "已记录实施基线（请求 " .. pending.requestId .. "）；基线已有改动不视为本需求产出。"
+                            end
+                        else traceError(s, "实施基线未能保存：" .. storageMessage(reason or "请核对结果记录")) end
+                        saveUi(s)
+                        resultCtx:render()
+                    end)
+            end
         else
             handoffError(h, "发送回执尚未保存：" .. storageMessage(failure or "请刷新后核对，绝不会重发来源命令"))
         end
@@ -699,6 +763,252 @@ local function endHandoffWait(s,cx)
         finish(cx)
     end
 end
+local function traceError(s, text)
+    if s.ui and s.ui.trace then s.ui.trace.error = tostring(text or "操作失败") end
+end
+local function trim(text) return tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function clipBytes(text, limit)
+    text = text or ""
+    if #text <= limit then return text, false end
+    local cut = text:sub(1, limit)
+    while #cut > 0 and not utf8.len(cut) do cut = cut:sub(1, #cut - 1) end
+    return cut, true
+end
+local function parseCriteria(text, requirement)
+    local ids, seen = tern.json.array(), {}
+    for raw in (text .. ","):gmatch("(.-),") do
+        local id = trim(raw)
+        if id ~= "" and not seen[id] then
+            if not id:match("^[%w_%-]+$") or #id > 64 then return nil, "验收条件 ID 只能包含字母、数字、下划线和连字符" end
+            local found = false
+            for _, criterion in requirement.acceptanceCriteria or {} do if criterion.id == id then found = true; break end end
+            if not found then return nil, "验收条件 ID 不存在：" .. id end
+            seen[id] = true
+            table.insert(ids, id)
+        end
+    end
+    if #ids == 0 then return nil, "至少关联一个验收条件" end
+    if #ids > 32 then return nil, "验收条件数量超过 32 个上限" end
+    return ids, nil
+end
+local function issueTraceCommand(s, cx, operation, extra, purpose)
+    local u, t, requirement = s.ui, s.ui and s.ui.trace, selectedRequirement(s)
+    if not u or not t or not requirement then traceError(s, "请选择有效需求"); cx:render(); return end
+    if t.pending then traceError(s, "已有来源检查待核对；不会重复发送"); cx:render(); return end
+    if t.busy then traceError(s, "当前操作尚未完成"); cx:render(); return end
+    if not u.writable or not t.safe then traceError(s, "需要项目编辑权限和完整记录"); cx:render(); return end
+    local now, id = live.epoch(), newRequestId(s)
+    local command = {schemaVersion = 1, requestId = id, instanceId = s.payload.binding.instanceId,
+        sessionId = s.payload.binding.sessionId, kind = "inspect", operation = operation,
+        requirementId = requirement.requirementId, createdAt = now, expiresAt = now + 30000}
+    for key, value in extra or {} do command[key] = value end
+    t.pending = {requestId = id, purpose = purpose, operation = operation, requirementId = requirement.requirementId,
+        requirementRevision = requirement.revision, sessionId = s.payload.binding.sessionId,
+        instanceId = s.payload.binding.instanceId, createdAt = now, expiresAt = command.expiresAt}
+    t.error, t.busy, t.busyLabel = nil, true,
+        purpose == "verify_snapshot" and "正在读取验证前代码快照…" or "正在读取当前代码变化…"
+    saveUi(s)
+    cx:render()
+    local expectedPayload = s.payload
+    live.command(s.payload.location, command, function(_, failure, freshCx)
+        local ctx = freshCx or cx
+        if not alive(ctx) or s.payload ~= expectedPayload then return end
+        if failure then
+            t.pending, t.busy, t.busyLabel = nil, false, nil
+            t.error = "来源检查命令写入状态待核对；未执行验证、未写入新证据。请刷新后重试。"
+            saveUi(s)
+            ctx:render()
+        end
+    end)
+end
+local function startTraceVerification(s, cx, snapshot)
+    local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
+    local request = t.verifyRequest
+    if not request or not requirement then t.busy, t.busyLabel = false, nil; traceError(s, "验证请求上下文已丢失；未执行命令"); cx:render(); return end
+    t.verifyRequest = nil
+    local startedAt = live.epoch()
+    local id = store.newId("verification", startedAt)
+    local argv = {"wsl.exe", "-d", s.payload.location.distro, "--cd", s.payload.binding.projectRoot,
+        "--", "bash", "-lc", request.command}
+    local finished = false
+    local function finish(result, startError)
+        if finished or not alive(s.cx) then return end
+        finished = true
+        local endedAt = live.epoch()
+        local stdout, stderr = result and result.stdout or "", result and result.stderr or startError or ""
+        local timedOut = result and result.timed_out == true or false
+        local status = result and type(result.status) == "number" and result.status or nil
+        local exitCode = timedOut and nil or status
+        local outcome = timedOut or exitCode == nil and "unknown" or (exitCode == 0 and "passed" or "failed")
+        local fullOut, outTruncated = clipBytes(stdout, 16384)
+        local fullErr, errTruncated = clipBytes(stderr, 16384)
+        local outPreview = clipBytes(stdout, 400)
+        local errPreview = clipBytes(stderr, 400)
+        local verification = {id = id, command = request.command, cwd = s.payload.binding.projectRoot,
+            criterionIds = request.criterionIds, requirementRevision = requirement.revision,
+            codeSnapshotSha256 = snapshot.fingerprint, startedAt = startedAt, endedAt = endedAt,
+            exitCode = exitCode, timedOut = timedOut, result = outcome,
+            stdoutPreview = outPreview, stderrPreview = errPreview,
+            stdoutBytes = #stdout, stderrBytes = #stderr,
+            stdoutTruncated = outTruncated, stderrTruncated = errTruncated,
+            evidencePath = "evidence/" .. id .. ".json"}
+        local evidence = {stdout = fullOut, stderr = fullErr, stdoutBytes = #stdout, stderrBytes = #stderr,
+            stdoutTruncated = outTruncated, stderrTruncated = errTruncated}
+        Results.addVerification(u.paths, requirement, u.token, verification, evidence, t.results.revision,
+            function(saved, reason, freshCx)
+                local ctx = freshCx or cx
+                if not alive(ctx) then return end
+                t.busy, t.busyLabel = false, nil
+                if saved then
+                    t.results = saved
+                    t.notice = "验证已保存：" .. outcome .. " · 退出码 " .. tostring(exitCode) .. "；这不是人工验收。"
+                else
+                    t.error = "验证证据未能保存：" .. storageMessage(reason or "请核对结果记录")
+                end
+                saveUi(s)
+                ctx:render()
+                if saved then
+                    issueTraceCommand(s, ctx, "changes", {since = saved.baseline and saved.baseline.head or ""}, "after_verify")
+                end
+            end)
+    end
+    t.busy, t.busyLabel = true, "验证命令运行中（最长 180 秒）；退出码与输出将写入证据"
+    saveUi(s)
+    cx:render()
+    local ok, failure = pcall(tern.process.run, argv, {timeout_ms = 180000}, function(result) finish(result, nil) end)
+    if not ok then finish(nil, "验证命令无法启动：" .. tostring(failure)) end
+end
+local function acceptTraceChanges(s, cx, changes, purpose)
+    local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
+    local function finish(saved, failure, freshCx)
+        local ctx = freshCx or cx
+        if not alive(ctx) then return end
+        t.busy, t.busyLabel = false, nil
+        if saved then
+            t.results = saved
+            if purpose == "after_verify" then
+                if t.verifySnapshot and saved.changes and saved.changes.fingerprint ~= t.verifySnapshot then
+                    t.notice = "验证后代码已经变化；这次结果已失效，保留为历史证据。请重新验证。"
+                else t.notice = "当前代码快照已更新。" end
+            end
+        else t.error = "代码变化未能保存：" .. storageMessage(failure or "请核对结果记录") end
+        saveUi(s)
+        ctx:render()
+        if saved and purpose == "verify_snapshot" then
+            startTraceVerification(s, ctx, saved.changes)
+        end
+    end
+    if purpose == "verify_snapshot" then
+        Results.putChanges(u.paths, requirement, u.token, changes, t.results.revision, finish)
+    elseif u.writable then
+        Results.putChanges(u.paths, requirement, u.token, changes, t.results.revision, finish)
+    else
+        t.results.changes = changes
+        finish(t.results, nil)
+    end
+end
+local function handleTraceInspected(s, cx, pending, receipt)
+    local data = receipt.data
+    local changes = type(data) == "table" and data.changes
+    if type(changes) ~= "table" or not Results.validateChanges(changes) then
+        s.ui.trace.pending, s.ui.trace.busy, s.ui.trace.busyLabel = nil, false, nil
+        traceError(s, "代码变化回执无效；未执行验证、未写入新证据")
+        saveUi(s)
+        cx:render()
+        return
+    end
+    s.ui.trace.pending = nil
+    acceptTraceChanges(s, cx, changes, pending.purpose)
+end
+refreshTraceReceipt = function(s, cx)
+    local ok, problem = pcall(function()
+        local u, t = s.ui, s.ui and s.ui.trace
+        if not u or not t or not t.pending then return end
+        local pending = t.pending
+        local receipt = live.read(s.payload.location.runtime .. "receipts/" .. pending.requestId .. ".json", 262144)
+        if type(receipt) == "table" and receipt.schemaVersion == 1 and receipt.requestId == pending.requestId
+            and receipt.instanceId == pending.instanceId and receipt.sessionId == pending.sessionId then
+            if receipt.status == "inspected" then
+                handleTraceInspected(s, cx, pending, receipt)
+            elseif receipt.status == "rejected" or receipt.status == "delivery_unknown" then
+                t.pending, t.busy, t.busyLabel = nil, false, nil
+                t.error = "来源检查未完成：" .. tostring(receipt.reason or receipt.status) .. "；未执行验证、未写入新证据。"
+                saveUi(s)
+                cx:render()
+            end
+            return
+        end
+        if live.epoch() > pending.expiresAt then
+            t.pending, t.busy, t.busyLabel = nil, false, nil
+            t.error = "来源检查回执超时；未执行验证，也未写入新证据。"
+            saveUi(s)
+            cx:render()
+        end
+    end)
+    if not ok then
+        local t = s.ui and s.ui.trace
+        if t then
+            t.pending, t.busy, t.busyLabel = nil, false, nil
+            t.error = "处理代码变化回执失败：" .. tostring(problem)
+            saveUi(s)
+            cx:render()
+        end
+    end
+end
+local function applyTracePlan(s, cx, action, args)
+    local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
+    if not u or not t or not requirement then return end
+    if t.busy or t.pending then traceError(s, "当前操作尚未完成"); cx:render(); return end
+    t.error = nil
+    Results.applyPlan(u.paths, requirement, u.token, action, args, t.plan.revision, function(saved, reason, freshCx)
+        local ctx = freshCx or cx
+        if not alive(ctx) then return end
+        if saved then
+            t.plan = saved
+            if action == "add" then
+                t.fields.newStep.text, t.fields.newStep.cursor, t.fields.newStep.anchor = "", 0, nil
+            end
+            t.notice = action == "generate" and "已从验收条件生成稳定步骤。" or "计划已更新。"
+        else t.error = "计划未能保存：" .. storageMessage(reason or "请核对 plan.json") end
+        saveUi(s)
+        ctx:render()
+    end)
+end
+local function setTraceStepStatus(s, cx, index, status)
+    local t = s.ui.trace
+    local step = t.plan and t.plan.steps[tonumber(index)]
+    if not step or step.status == status then return end
+    if status == "blocked" and not trim(t.fields.blockReason.text):match("%S") then
+        traceError(s, "把步骤设为阻塞时必须在“阻塞说明”中填写原因")
+        cx:render()
+        return
+    end
+    applyTracePlan(s, cx, "status", {stepId = step.id, status = status, reason = trim(t.fields.blockReason.text)})
+end
+local function traceAction(s, act, cx)
+    local u, t = s.ui, s.ui and s.ui.trace
+    if not t then return end
+    if act == "results-refresh-changes" then
+        local baseline = t.results and t.results.baseline
+        issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "refresh")
+    elseif act == "results-run-verification" then
+        local command = trim(t.fields.verifyCommand.text)
+        if command == "" then traceError(s, "请填写要执行的验证命令"); cx:render(); return end
+        if #command > 4000 or not utf8.len(command) or command:find("[%z\1-\8\11\12\14-\31\127]") then
+            traceError(s, "验证命令必须是有效 UTF-8，且不超过 4000 字节"); cx:render(); return
+        end
+        local criteria, failure = parseCriteria(t.fields.verifyCriteria.text, selectedRequirement(s))
+        if not criteria then traceError(s, failure); cx:render(); return end
+        if not t.results then traceError(s, "结果记录尚未读取"); cx:render(); return end
+        t.verifyRequest = {command = command, criterionIds = criteria}
+        local baseline = t.results.baseline
+        issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "verify_snapshot")
+    elseif act == "results-plan-add" then
+        applyTracePlan(s, cx, "add", {title = trim(t.fields.newStep.text)})
+    elseif act == "results-plan-generate" then
+        applyTracePlan(s, cx, "generate", {})
+    end
+end
 local function handoffAction(s, act, cx)
     local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
     if act == "handoff-end-wait" then endHandoffWait(s,cx)
@@ -800,6 +1110,7 @@ local function refreshProject(s)
     end)
     if u.selected and not u.byId[u.selected] then u.selected = nil end
     refreshHandoff(s)
+    refreshTrace(s)
 end
 local function scheduleProjectRefresh(s, cx)
     local u = s.ui
@@ -807,7 +1118,11 @@ local function scheduleProjectRefresh(s, cx)
     u.loading = true
     tern.timer(30, function()
         if not alive(cx) or s.ui ~= u then return end
-        refreshProject(s)
+        local ok, problem = pcall(refreshProject, s)
+        if not ok then
+            u.loading, u.storageUnsafe = false, true
+            u.error = "读取项目记录失败：" .. tostring(problem)
+        end
         cx:render()
     end)
 end
@@ -840,7 +1155,8 @@ local function loadWorkbench(s, cx)
         mode = type(saved) == "table" and saved.mode or nil,
         editing = type(saved) == "table" and saved.editing or nil,
         draftKey = type(saved) == "table" and saved.draftKey or nil,
-        handoff = makeHandoff(type(saved) == "table" and saved.handoff or nil)}
+        handoff = makeHandoff(type(saved) == "table" and saved.handoff or nil),
+        trace = makeTrace(type(saved) == "table" and saved.trace or nil)}
     s.ui = u
     for key, draft in u.drafts do
         if type(draft) == "table" then
@@ -857,7 +1173,11 @@ local function loadWorkbench(s, cx)
     end
     if not paths then u.error, u.storageUnsafe = "无法定位本机 WSL 项目存储：" .. tostring(failure), true; return end
     u.queryCursor = u.queryCursor or utf8.len(u.query)
-    scheduleProjectRefresh(s, cx)
+    local ok, problem = pcall(refreshProject, s)
+    if not ok then
+        u.loading, u.storageUnsafe = false, true
+        u.error = "读取项目记录失败：" .. tostring(problem)
+    end
 end
 local function formFields(record)
     local criteria = {}
@@ -1041,11 +1361,23 @@ local function saveRequirement(s, cx)
     cx:render()
 end
 local function fieldName(id)
-    return id:match("%.f%-([%w]+)$") or id:match("%.h%-([%w]+)$")
-        or (id:match("%.materials$") and "materials") or (id:match("%.search$") and "search")
+    local form = id:match("%.f%-([%w]+)$") or id:match("%.h%-([%w]+)$")
+    if form then return form end
+    if id:match("%.materials$") then return "materials" end
+    if id:match("%.search$") then return "search" end
+    local last = id:match("%.([%w]+)$")
+    if last and traceLimits[last] then return last end
+    return nil
 end
 local function isHandoffField(s, name)
     return s.ui.handoff.fields[name] ~= nil
+end
+local function isTraceField(s, name)
+    return s.ui.trace and s.ui.trace.fields[name] ~= nil
+end
+local function traceEditorLocked(s)
+    local t = s.ui.trace
+    return not s.ui.writable or not t or not t.safe or t.busy
 end
 local function handoffEditorLocked(s, name)
     local h = s.ui.handoff
@@ -1053,6 +1385,7 @@ local function handoffEditorLocked(s, name)
 end
 local function bufferFor(s, name)
     if name == "materials" then return s end
+    if isTraceField(s, name) then return s.ui.trace.fields[name] end
     if name == "search" then
         local u = s.ui
         u.searchBuffer = u.searchBuffer or {text = u.query or "", cursor = u.queryCursor or utf8.len(u.query or ""), history = {}}
@@ -1063,6 +1396,7 @@ local function bufferFor(s, name)
 end
 local function persistBuffer(s, name)
     if name == "materials" then persist(s)
+    elseif isTraceField(s, name) then saveUi(s)
     elseif name == "search" then
         s.ui.query, s.ui.queryCursor = s.ui.searchBuffer.text, s.ui.searchBuffer.cursor
         saveUi(s)
@@ -1082,10 +1416,11 @@ local function replaceBuffer(buffer, first, last, text, bound)
     return true
 end
 local function insertBuffer(s, target, buffer, first, last, text)
-    local bound = target == "materials" and live.maxText or handoffLimits[target]
+    local bound = target == "materials" and live.maxText or handoffLimits[target] or traceLimits[target]
     local ok, failure = replaceBuffer(buffer, first, last, text, bound)
     if target == "materials" then s.error = if ok then nil else failure
-    elseif isHandoffField(s, target) then s.ui.handoff.error = if ok then nil else failure end
+    elseif isHandoffField(s, target) then s.ui.handoff.error = if ok then nil else failure
+    elseif isTraceField(s, target) then s.ui.trace.error = if ok then nil else failure end
     if ok and (target=="paths" or target=="excerpt") then invalidatePreview(s.ui.handoff) end
     return ok
 end
@@ -1101,7 +1436,8 @@ tern.block.define("live", {
             and saved.payload.binding and payload.binding
             and saved.payload.binding.instanceId == payload.binding.instanceId then payload = saved.payload end
         bind(s, payload)
-        loadWorkbench(s, cx)
+        local loaded, loadError = pcall(loadWorkbench, s, cx)
+        if not loaded then s.initError = tostring(loadError) end
         local function tick()
             if not alive(cx) then return end
             local priorPayload = s.payload
@@ -1141,6 +1477,12 @@ tern.block.define("live", {
     end,
     title = function(s) return "工作台 · " .. (s.payload.binding.projectRoot:match("[^/]+$") or "项目") end,
     view = function(s, cx)
+        if s.initError then
+            return {main = ui.node("col", {key = "workbench", role = "workbench.live", gap = "sm"}, {
+                ui.text({ui.span("工作台未能初始化", "title")}),
+                ui.text({ui.span(s.initError, "error")}),
+            })}
+        end
         s.ui.cols = cx.cols
         local view = ui.build(s)
         s.scheduled = true
@@ -1152,6 +1494,7 @@ tern.block.define("live", {
         local buffer = target and bufferFor(s, target)
         if not buffer then return false end
         if isHandoffField(s, target) and handoffEditorLocked(s, target) then return true end
+        if isTraceField(s, target) and traceEditorLocked(s) then return true end
         if target ~= "materials" and target ~= "search" and s.ui.saving then return true end
         local length = utf8.len(buffer.text)
         local first, last = math.min(buffer.anchor or buffer.cursor, buffer.cursor), math.max(buffer.anchor or buffer.cursor, buffer.cursor)
@@ -1193,6 +1536,7 @@ tern.block.define("live", {
         elseif ev.ev == "edit" then
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
+            if isTraceField(s, target) and traceEditorLocked(s) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             if buffer and ev.len == units(buffer.text, utf8.len(buffer.text)) then
@@ -1205,6 +1549,7 @@ tern.block.define("live", {
                         s.ui.query, s.ui.queryCursor = buffer.text, buffer.cursor
                         saveUi(s)
                     elseif isHandoffField(s, target) then saveUi(s)
+                    elseif isTraceField(s, target) then saveUi(s)
                     else
                         s.ui.dirty, s.ui.formError = true, nil
                         persistForm(s)
@@ -1214,6 +1559,7 @@ tern.block.define("live", {
         elseif ev.ev == "undo" then
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
+            if isTraceField(s, target) and traceEditorLocked(s) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             local old = buffer and buffer.history and table.remove(buffer.history)
@@ -1227,6 +1573,7 @@ tern.block.define("live", {
         elseif ev.ev == "select" and ev.id:match("%.tabs$") then
             s.ui.tab, s.ui.detailMode = ev.item, false
             if ev.item == "handoff" then refreshHandoff(s) end
+            if ev.item == "results" then refreshTrace(s) end
             saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.requirements$") then
             local id = tostring(ev.item):match("([^%.]+)$")
@@ -1236,11 +1583,14 @@ tern.block.define("live", {
             elseif s.ui.byId[id] then
                 s.ui.selected, s.ui.detailMode = id, true
                 refreshHandoff(s)
+                refreshTrace(s)
                 saveUi(s)
             end
         elseif ev.ev == "change" then
             local name = ev.id:match("%.([%w]+)$")
             local value = ev.value
+            local stepIndex = ev.id:match("%.status%-(%d+)$")
+            if stepIndex then setTraceStepStatus(s, cx, stepIndex, value); return end
             if s.ui.saving and (name == "type" or name == "priority") then return end
             if name == "privacyMode" then s.ui.privacyMode = value; saveUi(s)
             elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
@@ -1276,6 +1626,7 @@ tern.block.define("live", {
                     saveUi(s)
                 end
             elseif act == "open-handoff" or (type(act) == "string" and act:match("^handoff%-")) then handoffAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^results%-") then traceAction(s, act, cx)
             elseif act == "prefill" then prefill(s, cx)
             elseif act == "acknowledge-unknown" then
                 if s.pending and s.receipt and s.receipt.status == "delivery_unknown"

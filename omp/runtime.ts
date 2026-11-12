@@ -14,6 +14,7 @@ const COMMAND_FIELDS: Record<string,Record<string,true>> = {
 const INSPECT_FIELDS: Record<string,Record<string,true>> = {
 	preview:{operation:true,requirementId:true,activity:true,includeRequirement:true,paths:true,excerpt:true},
 	baseline:{operation:true,requirementId:true},candidate:{operation:true,requirementId:true},
+	changes:{operation:true,requirementId:true,since:true},
 	file:{operation:true,requirementId:true,path:true},
 };
 function materialText(value:unknown,required=false):value is string {
@@ -38,8 +39,9 @@ export interface PrefillCommand extends CommandIdentity {
 export type Activity = "clarify" | "design" | "implement";
 export interface InspectCommand extends CommandIdentity {
 	kind: "inspect";
-	operation: "preview" | "baseline" | "candidate" | "file";
+	operation: "preview" | "baseline" | "candidate" | "changes" | "file";
 	requirementId: string;
+	since?: string;
 	activity?: Activity;
 	includeRequirement?: boolean;
 	paths?: string[];
@@ -222,6 +224,8 @@ export function validateCommand(value: unknown, requestId: string, instanceId: s
 				|| !materialText(command.excerpt)) return "invalid_materials";
 		} else if (command.operation === "file") {
 			if (typeof command.path !== "string" || !command.path || command.path.length > 2048 || /[\x00-\x1f\x7f]/.test(command.path)) return "invalid_path";
+		} else if (command.operation === "changes") {
+			if (command.since !== undefined && (typeof command.since !== "string" || (command.since !== "" && !/^[0-9a-f]{7,64}$/.test(command.since)))) return "invalid_baseline";
 		} else if (command.operation !== "baseline" && command.operation !== "candidate") return "invalid_operation";
 	} else return "invalid_command";
 	const allowed=command.kind==="inspect" ? INSPECT_FIELDS[command.operation as string] : COMMAND_FIELDS[command.kind as string];

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { Handoff, gitBaseline, projectFile, requirementContent, type Preview } from "./handoff";
+import { Handoff, gitBaseline, projectFile, requirementContent, workspaceChanges, type Preview } from "./handoff";
 import { validateCommand, type InspectCommand } from "./runtime";
 
 const roots: string[] = [];
@@ -76,6 +76,52 @@ describe("explicit complete materials",()=>{
 		],now) as {candidate:{body:string;includesToolCalls:boolean}};
 		expect(data.candidate.body).toBe("候选全文");expect(data.candidate.includesToolCalls).toBe(true);
 		expect(fs.readFileSync(f.reqFile,"utf8")).toBe(before);expect(fs.existsSync(path.join(f.folder,"workflow.json"))).toBe(false);
+	});
+});
+
+describe("workspace changes are observed, never attributed to the task",()=>{
+	test("baseline records real dirty and untracked files; diff and commits are bounded evidence",()=>{
+		const root=fs.mkdtempSync(path.join(os.tmpdir(),"workbench-changes-")); roots.push(root);
+		execFileSync("git",["init","-q",root]);
+		execFileSync("git",["-C",root,"config","user.email","test@example.invalid"]);
+		execFileSync("git",["-C",root,"config","user.name","Workbench Test"]);
+		fs.writeFileSync(path.join(root,"a.txt"),"one\n");
+		execFileSync("git",["-C",root,"add","a.txt"]);
+		execFileSync("git",["-C",root,"commit","-qm","初始提交"]);
+		fs.writeFileSync(path.join(root,"a.txt"),"two\n");
+		fs.writeFileSync(path.join(root,"new.txt"),"untracked body\n");
+		fs.mkdirSync(path.join(root,".omp/workbench"),{recursive:true});
+		fs.writeFileSync(path.join(root,".omp/workbench/project.json"),"{\"revision\":1}\n");
+		const baseline=gitBaseline(root);
+		expect(baseline.dirty).toBe(true);
+		const current=Object.fromEntries(baseline.files.map(file=>[file.path,file]));
+		expect(current["a.txt"].status).toBe("M");
+		expect(current["new.txt"].status).toBe("??");
+		expect(current["a.txt"].sha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(current[".omp/workbench/project.json"]).toBeUndefined();
+		const changes=workspaceChanges(root,baseline.head);
+		expect(changes.diff).toContain("-one");
+		expect(changes.diff).toContain("+two");
+		expect(changes.diff).toContain("+untracked body");
+		expect(changes.diffSha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(changes.commits).toEqual([]);
+		execFileSync("git",["-C",root,"add","a.txt","new.txt"]);
+		execFileSync("git",["-C",root,"commit","-qm","实现改动"]);
+		const committed=workspaceChanges(root,baseline.head);
+		expect(committed.commits.map(commit=>commit.subject)).toEqual(["实现改动"]);
+		expect(committed.files).toEqual([]);
+		expect(committed.diff).toBe("");
+		fs.appendFileSync(path.join(root,"a.txt"),"later external edit\n");
+		const later=workspaceChanges(root,committed.head);
+		expect(later.dirty).toBe(true);
+		expect(later.files.find(file=>file.path==="a.txt")?.status).toBe("M");
+		expect(later.fingerprint).not.toBe(committed.fingerprint);
+	});
+	test("changes inspection enforces its exact command shape",()=>{
+		const accepted={...identity,kind:"inspect",operation:"changes",requirementId:"req-one",since:"a".repeat(40)};
+		expect(validateCommand(accepted,"inspect-one","source-one","session-one",now)).toBeNull();
+		expect(validateCommand({...accepted,since:"not-a-hash"},"inspect-one","source-one","session-one",now)).toBe("invalid_baseline");
+		expect(validateCommand({...accepted,path:"a.txt"},"inspect-one","source-one","session-one",now)).toBe("invalid_command");
 	});
 });
 
