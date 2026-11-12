@@ -1,5 +1,7 @@
 # Tern 多模型任务工作台
 
+> 3.5.0 清理说明：旧 2.0 实现模块（`lib/tasks.luau`、`lib/project.luau`、`lib/policy.luau`、`lib/view.luau`、`lib/text.luau`）及其回归脚本已删除，旧 KV 与旧方案文件保留但**不迁移、不读取**。Phase 6 决定不做历史数据迁移，见 [阶段 6 记录](PHASE_6.md)。
+
 > 2026-11-11 配置回退：当前全局只保留 `@default = openai-codex/gpt-6.1-sol`，不再定义下文的 `@design/@execute`。本插件代码保留，但其新建设计／执行会话流程依赖这些已撤销角色，暂不作为当前入口；请直接运行 `omp`。下文为回退前的 2.0.0 工作流说明。
 
 > 新方向已确认：一个现有 omp＋一个实时需求交付工作台。完整产品设计、生命周期、数据与事件契约、迁移和分阶段验收见 [产品设计与实施计划](../DESIGN_AND_IMPLEMENTATION_PLAN.md)。下方旧版流程仅作历史参考，不代表新设计。

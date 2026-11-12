@@ -1,8 +1,8 @@
 schema = 1
 id = "multi-model-workbench"
 name = "需求交付工作台"
-version = "3.4.0"
-description = "Requirements, plans, approvals, code evidence, reviews, human acceptance, audit and Markdown export beside one omp session."
+version = "3.5.0"
+description = "Requirements, plans, approvals, code evidence, reviews, human acceptance and audit beside one omp session; legacy data is intentionally not migrated."
 host = "host.luau"
 window = "window.luau"
 styles = ["styles.css"]
