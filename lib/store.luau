@@ -65,6 +65,14 @@ end
 function M.token(value)
     return type(value) == "string" and #value > 0 and #value <= 96 and value:match("^[%w_%-]+$") ~= nil
 end
+-- Tern 首个原生窗口的 key 就是空字符串；空字符串是真实身份，不是缺失。
+-- claim/renew 必须先用与读取端相同的规则校验，否则会写出自己读不回的锁。
+function M.lockOwner(value)
+    if type(value) ~= "table" then return false end
+    if not text(value.window, 128, false) then return false end
+    if value.window ~= "" and not value.window:match("%S") then return false end
+    return integer(value.panel, 1) and value.panel <= 9007199254740991
+end
 function M.displayNumber(number)
     return string.format("REQ-%04d", number)
 end
@@ -290,7 +298,8 @@ if ($null -ne $l) {
     $lockKeys -ne 'owner,schemaVersion,token,updatedAt') { exit 8 }
   $ownerKeys=@($l.owner.PSObject.Properties.Name | Sort-Object) -join ','
   if ($ownerKeys -ne 'panel,window' -or $l.owner.window -isnot [string] -or
-    [string]::IsNullOrWhiteSpace($l.owner.window) -or $l.owner.window.Length -gt 128 -or
+    $l.owner.window.Length -gt 128 -or
+    ($l.owner.window -ne '' -and [string]::IsNullOrWhiteSpace($l.owner.window)) -or
     $l.owner.window -match '[\x00-\x1F\x7F]' -or
     ($l.owner.panel -isnot [int] -and $l.owner.panel -isnot [long]) -or
     [long]$l.owner.panel -lt 1 -or [long]$l.owner.panel -gt 9007199254740991) { exit 8 }
@@ -530,7 +539,7 @@ local function lockOperation(paths, mode, token, owner, now, takeover, cb)
     if not spawned and cb then cb(false, {code = "process_failed", detail = tostring(errorValue)}) end
 end
 function M.renewLock(paths, token, owner, now, cb)
-    if not M.token(token) or type(owner) ~= "table" or not integer(now, 0) then
+    if not M.token(token) or not M.lockOwner(owner) or not integer(now, 0) then
         if cb then cb(false, {code = "invalid_lock_options"}) end
         return
     end
@@ -542,7 +551,7 @@ function M.releaseLock(paths, token, cb)
 end
 function M.init(paths, opts, cb)
     local function fail(code, detail, cx) cb(nil, {code = code, detail = detail}, cx) end
-    if type(opts) ~= "table" or not M.token(opts.token) or type(opts.owner) ~= "table" or not integer(opts.now, 0) then
+    if type(opts) ~= "table" or not M.token(opts.token) or not M.lockOwner(opts.owner) or not integer(opts.now, 0) then
         fail("invalid_init_options"); return
     end
     local ok, problem = pcall(function() tern.fs.mkdir(paths.store); tern.fs.mkdir(paths.requirements) end)

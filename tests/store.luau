@@ -29,6 +29,10 @@ return function(tern, repo, tempRoot, yield)
     check(Store.paths({host = "example.com", distro = "Ubuntu"}, "/home/a") == nil, "拒绝远程 host")
     check(Store.paths(loc, "relative") == nil, "拒绝相对路径")
     check(Store.paths(loc, "/home/a\\b") == nil, "拒绝含反斜杠的 Linux 路径")
+    check(Store.lockOwner({window = "", panel = 1}), "首窗口空 window 是合法锁身份")
+    check(not Store.lockOwner({window = "  ", panel = 1}), "空白 window 仍被拒绝")
+    check(not Store.lockOwner({window = "store-test", panel = 0}), "面板 ID 必须为正整数")
+    check(not Store.lockOwner({window = "store-test"}), "锁 owner 必须包含面板 ID")
 
     -- Schema and numbering, independent of I/O.
     local project = Store.newProject({projectId = "proj-abc", root = linuxRoot, name = "测试项目", now = 1000})
@@ -70,16 +74,19 @@ return function(tern, repo, tempRoot, yield)
         if cb then cb(result.status, result.stderr, result.timed_out, freshCx) end
         return result
     end
-    local function initWith(token, now, takeover)
+    local function initWith(token, now, takeover, ownerWindow)
         local projectOut, err
         Store.init(paths, {projectId = "proj-abc", root = linuxRoot, name = "测试项目", token = token,
-            owner = {window = "store-test", panel = 1}, now = now, takeover = takeover}, function(value, problem)
-            projectOut, err = value, problem
-        end)
+            owner = {window = ownerWindow == nil and "store-test" or ownerWindow, panel = 1}, now = now, takeover = takeover},
+            function(value, problem)
+                projectOut, err = value, problem
+            end)
         return projectOut, err and err.code
     end
-    local created = initWith("token-a", 1000)
+    -- Tern 首个原生窗口的 window key 是空字符串；锁必须能读回自己写下的身份。
+    local created = initWith("token-a", 1000, false, "")
     check(created ~= nil, "首次初始化创建项目")
+    checkEqual(tern.json.decode(tern.fs.read(paths.lock)).owner.window, "", "首窗口锁保存空 window 身份")
     local reread = Store.readProject(paths)
     check(reread ~= nil and reread.projectId == "proj-abc", "项目可从磁盘读回")
     local again = initWith("token-a", 2000)

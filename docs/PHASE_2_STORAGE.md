@@ -39,7 +39,7 @@
 
 ## 单写者与 CAS
 
-`lock.json` 保存 `schemaVersion=1, token, owner{window,panel}, updatedAt`。token 属于一个具体工作台，不由项目内多个窗口共用。
+`lock.json` 保存 `schemaVersion=1, token, owner{window,panel}, updatedAt`。token 属于一个具体工作台，不由项目内多个窗口共用。`window` 是 Tern 原生窗口 key：首个窗口的真实 key 就是空字符串，因此空字符串合法，不得当作缺失；`panel` 是正整数面板 ID。认领与续租先用与读取端相同的规则校验 owner，避免写出自己读不回的锁。
 
 所有认领、续租、释放和发布使用同一个 `lock.json.gate`，由 Windows `FileShare.None` 独占句柄覆盖检查和写入。句柄释放后保留空 gate 文件，避免删除再创建导致不同进程锁住不同文件。锁元数据通过同目录临时文件和 `MoveFileEx` 原子替换，UTF-8 无 BOM。
 
@@ -73,6 +73,8 @@ Windows Tern 0.9.16，WSL Ubuntu，omp 18.18.7；没有向模型发送测试提�
 | `tests/store.luau`：真实初始化、显式接管、创建／编辑、稳定 ID、损坏保护及 CAS | 55 | 通过 |
 | `tests/concurrency.luau`：两个真实 PowerShell 同时保存／认领，失败者不能覆盖，临时正文清理 | 13 | 通过 |
 | `tests/recovery.luau`：真实编号落盘后取消回调，既有需求完整，显式重试与去重 | 9 | 通过 |
+
+2026-11-12 修复首窗口空 key 写入后不可读的问题，新增 5 项检查（空 `window` 是合法身份、空白 `window` 与非法 `panel` 仍拒绝、首窗口初始化落盘身份）。真实 PowerShell 认领与后续 CAS 发布路径已用生产脚本单独验证（空 `window` 锁可写、可读回并完成发布）；完整 Luau 套件待下次在 Tern 内运行。
 
 在 Carly 中读取对应文件的返回函数，传入 `(tern, repoUNC, uniqueTempUNC, waitOne, waitAll)`。辅助函数：
 
