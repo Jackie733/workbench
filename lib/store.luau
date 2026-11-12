@@ -11,6 +11,7 @@ M.stages = {backlog = true, clarifying = true, designing = true, awaiting_approv
     implementing = true, verifying = true, awaiting_acceptance = true, done = true, blocked = true, cancelled = true}
 M.types = {feature = true, bug = true, chore = true}
 M.priorities = {low = true, normal = true, high = true, urgent = true}
+M.workflowStages = {backlog=true,clarifying=true,designing=true,awaiting_approval=true,implementing=true}
 M.maxGoal = 16000
 M.maxScope = 16000
 M.maxCriteria = 32
@@ -344,7 +345,11 @@ try {
   if (-not ('Wb.MoveFile' -as [type])) {
     Add-Type -Namespace Wb -Name MoveFile -MemberDefinition '[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string existing, string target, int flags);'
   }
-  if (-not [Wb.MoveFile]::MoveFileEx($temp, $target, 0x9)) { exit 6 }
+  $flags=if ($expect -eq 0) { 0x8 } else { 0x9 }
+  if (-not [Wb.MoveFile]::MoveFileEx($temp, $target, $flags)) {
+    if ($expect -eq 0 -and [IO.File]::Exists($target)) { exit 3 }
+    exit 6
+  }
 } finally {
   if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
 }
@@ -426,6 +431,65 @@ function M.put(paths, file, value, expectedRevision, token, cb)
     end)
     if not spawned then cb(false, "process_failed:" .. tostring(errorValue)) end
     if not spawned then pcall(tern.fs.remove, temp) end
+end
+-- CAS publication for requirement-scoped workflow metadata. Paths are constrained
+-- to the corresponding requirement directory; publication uses the same gate.
+function M.putRecord(paths, file, value, expectedRevision, token, cb)
+    local prefix = paths.requirements .. "\\"
+    local id = type(file) == "string" and file:sub(1,#prefix)==prefix and file:sub(#prefix + 1):match("^([%w_%-]+)\\workflow%.json$")
+    local allowed={schemaVersion=true,projectId=true,requirementId=true,revision=true,latestVersion=true,designs=true,
+        comments=true,approvals=true,approval=true,requests=true}
+    local valid=type(value)=="table" and value.requirementId==id and M.token(value.projectId)
+        and value.schemaVersion==1 and integer(value.revision,1) and integer(value.latestVersion,0)
+        and type(value.designs)=="table" and #value.designs==value.latestVersion
+        and type(value.comments)=="table" and type(value.approvals)=="table" and type(value.requests)=="table"
+    if valid then for key in value do if not allowed[key] then valid=false;break end end end
+    if not M.token(token) or not id or not valid or not integer(expectedRevision,0) or value.revision~=expectedRevision+1 then
+        cb(false,"invalid_path_or_record");return
+    end
+    local encoded, payload = pcall(tern.json.encode, value)
+    if not encoded then cb(false, "encode_failed"); return end
+    if #payload > M.maxJson then cb(false, "record_too_large"); return end
+    local temp = file .. ".tmp-" .. M.newId("w", tern.now())
+    local wrote, writeError = pcall(tern.fs.write, temp, payload)
+    if not wrote then cb(false, "temp_write_failed:" .. tostring(writeError)); return end
+    local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
+        OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
+        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
+    local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        if status == 0 then cb(true, nil, cx)
+        else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
+    end)
+    if not spawned then cb(false, "process_failed:" .. tostring(errorValue)); pcall(tern.fs.remove, temp) end
+end
+function M.putImmutableRecord(paths, file, value, token, cb)
+    local prefix = paths.requirements .. "\\"
+    if type(file) ~= "string" or file:sub(1,#prefix)~=prefix then cb(false,"invalid_path_or_record"); return end
+    local id, version = file:sub(#prefix + 1):match("^([%w_%-]+)\\designs\\v(%d+)%.json$")
+    if not M.token(token) or not id or type(value)~="table" or not integer(value.version,1)
+        or tonumber(version) ~= value.version or value.requirementId ~= id or not M.token(value.projectId)
+        or value.schemaVersion ~= 1 or type(value.body) ~= "string" or #value.body>16384
+        or type(value.sha256)~="string" or #value.sha256~=64 or not value.sha256:match("^[0-9a-f]+$")
+        or type(value.requirementSha256)~="string" or #value.requirementSha256~=64
+        or not value.requirementSha256:match("^[0-9a-f]+$") then
+        cb(false,"invalid_path_or_record"); return
+    end
+    local encoded, payload = pcall(tern.json.encode, value)
+    if not encoded then cb(false, "encode_failed"); return end
+    if #payload > M.maxJson then cb(false, "record_too_large"); return end
+    local directory = file:match("^(.*)\\[^\\]+$")
+    local made, mkdirError = pcall(tern.fs.mkdir,directory)
+    if not made then cb(false,"mkdir_failed:"..tostring(mkdirError));return end
+    local temp = file .. ".tmp-" .. M.newId("w", tern.now())
+    local wrote, why = pcall(tern.fs.write, temp, payload)
+    if not wrote then cb(false, "temp_write_failed:" .. tostring(why)); return end
+    local env = {OMPWB_TARGET=file, OMPWB_TEMP=temp, OMPWB_LOCK=paths.lock, OMPWB_GATE=paths.lock .. ".gate",
+        OMPWB_LOCK_TEMP=paths.lock .. ".tmp-" .. M.newId("l", tern.now()), OMPWB_TOKEN=token, OMPWB_EXPECT="0"}
+    local spawned, problem = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
+        if status == 0 then cb(true,nil,cx)
+        else cb(false,timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1,300)),cx) end
+    end)
+    if not spawned then pcall(tern.fs.remove,temp); cb(false,"process_failed:"..tostring(problem)) end
 end
 
 local function lockValue(paths, token, owner, now)
@@ -590,6 +654,19 @@ function M.update(paths, requirement, expectedRevision, token, cb)
     if not okay then cb(nil, {code = "invalid_requirement", detail = validationProblem}); return end
     M.put(paths, path, changed, expectedRevision, token, function(saved, reason, cx)
         if saved then cb(changed, nil, cx) else cb(nil, {code = reason}, cx) end
+    end)
+end
+function M.workflowStage(paths, requirement, stage, expectedRevision, token, cb)
+    if stage=="backlog" or not M.workflowStages[stage] or not M.token(token) then cb(nil,{code="invalid_stage_transition"}); return end
+    local file = join(join(paths.requirements,requirement.requirementId),"requirement.json")
+    local current,problem=readJson(file)
+    if not current or not M.validateRequirement(current) then cb(nil,{code="corrupt_requirement",detail=problem});return end
+    if current.revision~=expectedRevision or current.projectId~=requirement.projectId then cb(nil,{code="revision_conflict"});return end
+    if not M.workflowStages[current.stage] then cb(nil,{code="invalid_stage_transition"});return end
+    local nextReq={};for k,v in current do nextReq[k]=v end
+    nextReq.stage=stage;nextReq.revision=current.revision+1;nextReq.updatedAt=os.time()*1000
+    M.put(paths,file,nextReq,current.revision,token,function(ok,reason,cx)
+        if ok then cb(nextReq,nil,cx) else cb(nil,{code=reason},cx) end
     end)
 end
 return M

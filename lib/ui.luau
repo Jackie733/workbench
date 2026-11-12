@@ -1,5 +1,6 @@
 --!strict
 local ui = tern.ui
+local handoff = require("./handoff")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -115,7 +116,8 @@ local function detail(s, r)
     end
     if #(r.labels or {}) > 0 then table.insert(children, note("标签：" .. table.concat(r.labels, " · "))) end
     if s.formError then table.insert(children, ui.text({ui.span(s.formError, "error")})) end
-    local acts = {button("编辑", "edit-requirement", "primary", not s.writable), button("返回列表", "back-list")}
+    local acts = {button("编辑", "edit-requirement", "primary", not s.writable or s.handoff.pendingSend ~= nil),
+        button("资料 · 方案 · 批准", "open-handoff", "quiet"), button("返回列表", "back-list")}
     table.insert(acts, button("用作资料草稿", "prefill-selected"))
     table.insert(children, row("detailActions", acts))
     return ui.node("col", {key = "detail", role = "workbench.detail", gap = "sm"}, children)
@@ -241,7 +243,7 @@ function M.build(s)
             note(data and data.model and data.model:match("[^/]+$") or "模型未知"),
             data and data.currentTool and note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")) or note(""),
         }),
-        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
+        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料·方案·批准"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
     }
     if u.error then table.insert(nodes, ui.node("card", {key = "loadError", head = u.storageUnsafe and "项目存储异常" or "操作未完成", tone = "error"}, {ui.text(u.error), button("重新加载", "reload")})) end
     if u.notice then table.insert(nodes, ui.text({ui.span(u.notice, "warning")})) end
@@ -265,6 +267,10 @@ function M.build(s)
         if u.loading then table.insert(nodes, note("正在只读读取项目需求…"))
         elseif not u.project then table.insert(nodes, note("先初始化项目后，需求才会出现在看板。"))
         else table.insert(nodes, board(u)) end
+    elseif u.tab == "handoff" then
+        if u.loading then table.insert(nodes, note("正在读取当前需求与不可变方案版本…"))
+        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
+        else table.insert(nodes, handoff.build(s)) end
     elseif u.tab == "runtime" then
         table.insert(nodes, runtime(s))
     else

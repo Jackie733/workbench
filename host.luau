@@ -2,7 +2,11 @@
 local privacy = require("./lib/privacy")
 local live = require("./lib/live")
 local store = require("./lib/store")
+local Workflow = require("./lib/workflow")
 local ui = require("./lib/ui")
+local function invalidatePreview(h)
+    if h.preview then h.preview.previewToken=nil;h.previewStale=true end
+end
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -42,6 +46,13 @@ local function bind(s, payload)
     end
     if s.payload and s.payload.binding.instanceId == payload.binding.instanceId
         and s.payload.binding.sessionId == payload.binding.sessionId then s.payload = payload; return end
+    if s.payload and (s.payload.binding.instanceId ~= payload.binding.instanceId
+        or s.payload.binding.sessionId ~= payload.binding.sessionId) and s.ui and s.ui.handoff then
+        local handoff = s.ui.handoff
+        if handoff.preview then handoff.preview.previewToken = nil; handoff.previewStale = true end
+        handoff.baseline, handoff.baselineCheckedAt = nil, nil
+        if handoff.pending then handoff.pending.staleBinding = true end
+    end
     if s.payload then persist(s) end
     payload.location = location
     s.payload, s.snapshot, s.problem, s.error, s.history = payload, nil, "正在核对实时来源…", nil, {}
@@ -59,6 +70,7 @@ local function alive(cx)
     for _, pane in tern.pane.list() do if pane.pane == cx.pane then return true end end
     return false
 end
+local refreshHandoffReceipt
 local function refresh(s)
     local p, now = s.payload, live.epoch()
     s.problem = nil
@@ -104,10 +116,12 @@ local function refresh(s)
             s.receipt = {requestId = s.pending.requestId, status = "delivery_unknown", reason = "等待回执超时；请查看 omp 输入框，不会自动重发"}
         end
     end
+    if refreshHandoffReceipt then refreshHandoffReceipt(s, s.cx) end
 end
 local function prefill(s, cx)
     refresh(s)
     if s.pending then s.error = "已有待核对请求；不会重复投递"; return end
+    if s.ui.handoff and s.ui.handoff.pendingSend then s.error = "业务发送尚待核对；不会预填第二条消息"; return end
     if s.problem then s.error = s.problem; return end
     if not s.snapshot or s.snapshot.state ~= "idle" then s.error = "目标正在工作／等待输入；只在空闲时接受预填"; return end
     if not s.text:match("%S") then s.error = "先填写要预填的资料"; return end
@@ -155,15 +169,154 @@ end
 local function projectKey(s)
     return "workbench:project:" .. s.payload.location.distro .. ":" .. s.payload.binding.projectRoot
 end
+local storageMessage
+local function handoffSnapshot(h)
+    local fields = {}
+    for name, field in h.fields or {} do
+        if type(field) == "table" and type(field.text) == "string" then
+            fields[name] = {text = field.text, cursor = field.cursor, anchor = field.anchor}
+        end
+    end
+    local preview
+    if type(h.preview) == "table" then
+        preview = {text = h.preview.text, sha256 = h.preview.sha256, requirementId = h.preview.requirementId,
+            requirementRevision = h.preview.requirementRevision, activity = h.preview.activity,
+            baseline = h.preview.baseline, sources = h.preview.sources, designVersion = h.preview.designVersion}
+    end
+    return {tab = h.tab, fields = fields, includeRequirement = h.includeRequirement, activity = h.activity,
+        preview = preview, previewStale = preview ~= nil, baseline = h.baseline, baselineCheckedAt = h.baselineCheckedAt,
+        candidate = h.candidate, importedFile = h.importedFile, proposalSource = h.proposalSource,
+        pending = h.pending, pendingSend = h.pendingSend, sourceReceipt = h.sourceReceipt,
+        selectedVersion = h.selectedVersion, compareVersion = h.compareVersion}
+end
+local handoffLimits={paths=8192,excerpt=8192,proposal=16384,importPath=2048,comment=4000,directReason=2000,revokeReason=2000,ackReason=2000}
+local function handoffFields(saved)
+    local fields = {}
+    for name, limit in handoffLimits do
+        local item = type(saved) == "table" and saved[name]
+        local text = type(item) == "table" and item.text or ""
+        if type(text) ~= "string" or #text > limit or not utf8.len(text) then text = "" end
+        local length = utf8.len(text)
+        fields[name] = {text = text, cursor = type(item) == "table" and math.clamp(tonumber(item.cursor) or length, 0, length) or length,
+            anchor = type(item) == "table" and type(item.anchor) == "number" and math.clamp(item.anchor, 0, length) or nil}
+    end
+    return fields
+end
+local function makeHandoff(saved)
+    saved = type(saved) == "table" and saved or {}
+    local preview = type(saved.preview) == "table" and table.clone(saved.preview) or nil
+    if preview then preview.previewToken = nil end
+    local pending = type(saved.pending) == "table" and table.clone(saved.pending) or nil
+    if pending and not live.token(pending.requestId) then pending = nil end
+    local pendingSend = type(saved.pendingSend) == "table" and table.clone(saved.pendingSend) or nil
+    if pendingSend and not live.token(pendingSend.requestId) then pendingSend = nil end
+    if pendingSend then
+        pendingSend.receiptInFlight = nil
+        if pendingSend.receiptApplied == true and not pendingSend.receiptAppliedStatus then
+            pendingSend.receiptAppliedStatus = pendingSend.receiptStatus
+        end
+        if not pendingSend.receiptApplied and pendingSend.receiptStatus and not pendingSend.receiptPending then
+            pendingSend.receiptPending = {requestId = pendingSend.requestId, status = pendingSend.receiptStatus,
+                reason = pendingSend.receiptReason}
+        end
+    end
+    if pendingSend and pendingSend.state == "recording_intent" then pendingSend.state = "recovered_intent" end
+    return {tab = saved.tab or "materials", fields = handoffFields(saved.fields), includeRequirement = saved.includeRequirement ~= false,
+        activity = (saved.activity == "clarify" or saved.activity == "design" or saved.activity == "implement") and saved.activity or "design",
+        preview = preview, previewStale = preview ~= nil or saved.previewStale == true, baseline = saved.baseline,
+        baselineCheckedAt = saved.baselineCheckedAt, candidate = saved.candidate, importedFile = saved.importedFile,
+        proposalSource = saved.proposalSource, pending = pending, pendingSend = pendingSend,
+        sourceReceipt = saved.sourceReceipt, selectedVersion = saved.selectedVersion,
+        compareVersion = tonumber(saved.compareVersion) or 0,
+        safe = true, workflowBusy = false}
+end
+local function refreshHandoff(s)
+    local u, h = s.ui, s.ui and s.ui.handoff
+    if not u or not h then return end
+    local requirement = u.selected and u.byId[u.selected]
+    h.workflow, h.selectedDesign, h.compareDesign = nil, nil, nil
+    h.error, h.workflowError, h.safe = nil, nil, true
+    if not requirement then h.approvalValid, h.approvalReason = false, "先选择一项需求"; return end
+    if h.preview and (h.preview.requirementId~=requirement.requirementId or h.preview.requirementRevision~=requirement.revision) then
+        h.preview.previewToken=nil;h.previewStale=true
+    end
+    local workflow, failure = Workflow.load(u.paths, requirement)
+    if not workflow then
+        h.safe, h.error = false, storageMessage(failure or "工作流记录损坏；当前只读")
+        h.approvalValid, h.approvalReason = false, h.error
+        return
+    end
+    h.workflow = workflow
+    local requests, matched, newest = workflow.requests or {}, nil, nil
+    for _, request in requests do
+        if h.pendingSend and request.requestId == h.pendingSend.requestId then matched = request end
+        if not request.resolution and (request.status == "pending" or request.status == "delivery_unknown")
+            and (not newest or (request.createdAt or 0) > (newest.createdAt or 0)) then newest = request end
+    end
+    if not h.pendingSend and newest and live.token(newest.requestId) then
+        h.pendingSend = {requestId = newest.requestId, activity = newest.activity, sessionId = newest.sessionId,
+            instanceId = newest.instanceId, payloadSha256 = newest.payloadSha256, state = newest.status,
+            receiptApplied = newest.status == "delivery_unknown", receiptAppliedStatus = newest.status == "delivery_unknown" and "delivery_unknown" or nil,
+            receiptStatus = newest.status == "delivery_unknown" and "delivery_unknown" or nil, receiptReason = newest.reason}
+        matched = newest
+    end
+    if matched and h.pendingSend then
+        if matched.resolution or matched.status == "submitted" or matched.status == "rejected" then
+            h.pendingSend = nil
+            if h.pending and h.pending.requestId == matched.requestId then h.pending = nil end
+        elseif matched.status == "delivery_unknown" then
+            h.pendingSend.state, h.pendingSend.receiptApplied = "delivery_unknown", true
+            h.pendingSend.receiptAppliedStatus, h.pendingSend.receiptStatus = "delivery_unknown", "delivery_unknown"
+            h.pendingSend.receiptReason = matched.reason
+            h.pendingSend.receiptPending = nil
+        end
+    end
+    if h.pendingSend and not h.pending and h.pendingSend.state ~= "recording_intent" then
+        local request = matched
+        if request and (request.status == "pending" or request.status == "delivery_unknown") then
+            local created = request.createdAt or live.epoch()
+            h.pending = {requestId = request.requestId, purpose = "send", sessionId = request.sessionId,
+                instanceId = request.instanceId, requirementId = requirement.requirementId,
+                createdAt = created, expiresAt = created + 30000, recovered = true}
+        end
+    end
+    if h.pending and (h.pending.instanceId ~= s.payload.binding.instanceId
+        or h.pending.sessionId ~= s.payload.binding.sessionId) then h.pending.staleBinding = true end
+    local state = Workflow.approvalState(workflow, requirement)
+    local approvalReasons = {current = "当前授权有效；仍须生成并检查实施预览，再明确发送。",
+        not_approved = "尚无批准记录。", revoked = "当前授权已撤销。",
+        requirement_changed = "需求修订或内容摘要已改变；必须重新授权。",
+        newer_design = "已有更新的正式方案；必须批准最新版本。",
+        design_changed = "批准的正式方案校验不再匹配；必须重新授权。"}
+    h.approvalValid, h.approvalReason = state.valid, approvalReasons[state.reason] or tostring(state.reason)
+    local version, versionExists = tonumber(h.selectedVersion) or workflow.latestVersion, false
+    for _, item in workflow.designs or {} do if item.version == version then versionExists = true; break end end
+    if version > 0 and not versionExists then version = workflow.latestVersion; h.compareVersion = 0 end
+    h.selectedVersion = version
+    if version > 0 then
+        local design, designFailure = Workflow.readDesign(u.paths, requirement, version)
+        if not design then
+            h.safe, h.workflowError = false, storageMessage(designFailure or "正式方案版本损坏；当前只读")
+        else h.selectedDesign = design end
+    end
+    local compare = tonumber(h.compareVersion) or 0
+    if compare > 0 and compare ~= version then
+        local design, designFailure = Workflow.readDesign(u.paths, requirement, compare)
+        if not design then
+            h.safe, h.workflowError = false, storageMessage(designFailure or "比较用正式方案版本损坏；当前只读")
+        else h.compareDesign = design end
+    end
+    if h.workflowError then h.error = h.workflowError end
+end
 local function saveUi(s)
     if not s.ui then return end
     tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
         priorityFilter = s.ui.priorityFilter, stageFilter = s.ui.stageFilter, query = s.ui.query,
         queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode,
         detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
-        mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey})
+        mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff)})
 end
-local function storageMessage(reason)
+storageMessage = function(reason)
     local code = type(reason) == "table" and reason.code or reason
     local messages = {
         locked = "另一个工作台正在编辑此项目；当前保持只读。",
@@ -191,6 +344,426 @@ local function storageMessage(reason)
         return type(code) == "string" and ("操作失败（" .. code .. "）") or "操作失败"
     end
     return tostring(reason or "操作失败")
+end
+local function handoffError(h, text)
+    h.error = tostring(text or "操作失败")
+end
+local function newRequestId(s)
+    local id = store.newId("wb", live.epoch()) .. "-" .. tostring(s.serial or 1)
+    s.serial = (s.serial or 1) + 1
+    return id
+end
+local function selectedRequirement(s)
+    local u = s.ui
+    return u and u.selected and u.byId[u.selected] or nil
+end
+local function applyWorkflow(s, cx, action, args, completed)
+    local u, h = s.ui, s.ui and s.ui.handoff
+    local requirement = selectedRequirement(s)
+    if not u or not h or not requirement or not h.workflow or not h.safe or not u.writable then
+        handoffError(h or {}, "工作流不可写；请启用项目编辑并确认记录完整")
+        cx:render()
+        return
+    end
+    if h.pending and action ~= "receipt" and action ~= "acknowledge_unknown" then
+        handoffError(h, "已有来源请求待核对；不会修改方案或提交新操作")
+        cx:render()
+        return
+    end
+    if h.pendingSend and action ~= "receipt" and action ~= "acknowledge_unknown"
+        and not (action == "request" and h.pendingSend.state == "recording_intent") then
+        handoffError(h, "业务发送尚未核对；不会修改采用的方案或授权")
+        cx:render()
+        return
+    end
+    if h.workflowBusy then return end
+    h.workflowBusy, h.error = true, nil
+    local expected = h.workflow.revision or 0
+    local payload = s.payload
+    Workflow.apply(u.paths, requirement, u.token, action, args, expected, function(workflow, updated, failure, freshCx)
+        local ctx = freshCx or cx
+        if not alive(ctx) or s.ui ~= u or s.payload ~= payload then return end
+        h.workflowBusy = false
+        if failure or not workflow then
+            handoffError(h, storageMessage(failure or "工作流写入失败"))
+            if completed then completed(false, ctx, failure) end
+        else
+            h.workflow = workflow
+            if action=="adopt" or action=="approve" or action=="authorize_direct" or action=="revoke" then
+                if h.preview then h.preview.previewToken=nil;h.previewStale=true end
+            end
+            if updated then
+                u.byId[updated.requirementId] = updated
+                for index, row in u.requirements do
+                    if row.requirementId == updated.requirementId then u.requirements[index] = updated; break end
+                end
+            end
+            refreshHandoff(s)
+            if completed then completed(true, ctx, nil, workflow, updated) end
+        end
+        saveUi(s)
+        ctx:render()
+    end)
+end
+local function saveHandoffAndRender(s, cx)
+    saveUi(s)
+    if cx then cx:render() end
+end
+local function issueSourceCommand(s, cx, kind, fields, purpose, suppliedId)
+    local h = s.ui.handoff
+    if h.pending then handoffError(h, "已有来源命令待核对；不会自动重复发送"); cx:render(); return nil end
+    local now, id = live.epoch(), suppliedId or newRequestId(s)
+    local command = {schemaVersion = 1, requestId = id, instanceId = s.payload.binding.instanceId,
+        sessionId = s.payload.binding.sessionId, kind = kind, createdAt = now, expiresAt = now + 30000}
+    for key, value in fields do command[key] = value end
+    h.pending = {requestId = id, purpose = purpose, operation = fields.operation,
+        requirementId = fields.requirementId or s.ui.selected, path = fields.path, activity = fields.activity,
+        includeRequirement = fields.includeRequirement,
+        designVersion = fields.operation == "preview" and h.workflow and h.workflow.latestVersion or nil,
+        sessionId = s.payload.binding.sessionId, instanceId = s.payload.binding.instanceId,
+        requirementRevision = selectedRequirement(s) and selectedRequirement(s).revision,
+        createdAt = now, expiresAt = command.expiresAt}
+    h.error = nil
+    saveHandoffAndRender(s, cx)
+    local expected, expectedPayload = s.payload.binding.sessionId, s.payload
+    live.command(s.payload.location, command, function(_, failure, freshCx)
+        local ctx = freshCx or cx
+        if not alive(ctx) or s.payload ~= expectedPayload or s.payload.binding.sessionId ~= expected then return end
+        if failure then
+            h.error = "命令写入状态待核对；不会自动重试：" .. tostring(failure)
+            h.sourceReceipt = {requestId = id, status = "delivery_unknown", reason = h.error}
+        end
+        saveUi(s)
+        ctx:render()
+    end)
+    return id
+end
+local function cleanRelativePaths(text)
+    local paths = tern.json.array()
+    for raw in (text .. "\n"):gmatch("(.-)\n") do
+        local path = raw:gsub("^%s+", ""):gsub("%s+$", "")
+        if path ~= "" then
+            if path:sub(1, 1) == "/" or path:find("\\", 1, true) or path:match("^%a:") then
+                return nil, "仅接受项目相对路径；绝对路径不会传给来源端"
+            end
+            for part in path:gmatch("[^/]+") do
+                if part == "." or part == ".." then return nil, "路径不能包含 . 或 .. 组件" end
+            end
+            table.insert(paths, path)
+        end
+    end
+    return paths
+end
+local function inspect(s, cx, operation, extra)
+    local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
+    if not u.writable or not h.safe or not requirement then handoffError(h, "请启用项目编辑并选择有效需求"); cx:render(); return end
+    if s.problem then handoffError(h, s.problem); cx:render(); return end
+    if h.pending or h.pendingSend then handoffError(h, "已有请求待核对；不会重复请求"); cx:render(); return end
+    local fields = {operation = operation, requirementId = requirement.requirementId}
+    for key, value in extra or {} do fields[key] = value end
+    issueSourceCommand(s, cx, "inspect", fields, "inspect")
+end
+local function startPreview(s, cx)
+    local h = s.ui.handoff
+    local paths, failure = cleanRelativePaths(h.fields.paths.text)
+    if not paths then handoffError(h, failure); cx:render(); return end
+    if #h.fields.excerpt.text > 8192 then handoffError(h, "讨论摘录超过 8 KiB；不会截断"); cx:render(); return end
+    inspect(s, cx, "preview", {activity = h.activity, includeRequirement = h.includeRequirement,
+        paths = paths, excerpt = h.fields.excerpt.text})
+end
+local function sendPreview(s, cx, prefillOnly)
+    local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
+    local preview = h.preview
+    if not u.writable or not h.safe or not requirement then handoffError(h, "请启用项目编辑并选择有效需求"); cx:render(); return end
+    if s.problem then handoffError(h, s.problem); cx:render(); return end
+    if not preview or h.previewStale or type(preview.previewToken) ~= "string" or preview.previewToken == "" then
+        handoffError(h, "此预览令牌已失效；请显式重新生成完整预览"); cx:render(); return
+    end
+    if h.pending or h.pendingSend then handoffError(h, "已有请求待核对；不会重复发送"); cx:render(); return end
+    if not s.snapshot or s.snapshot.state ~= "idle" then handoffError(h, "目标 omp 当前非空闲；保留预览，不发送"); cx:render(); return end
+    if not prefillOnly and preview.activity == "implement" and not h.approvalValid then
+        handoffError(h, "实施未获当前有效批准；先批准正式方案，或单独记录直接实施授权"); cx:render(); return
+    end
+    if prefillOnly then
+        issueSourceCommand(s, cx, "prefill_preview", {previewToken = preview.previewToken}, "prefill")
+        return
+    end
+    if type(preview.sha256) ~= "string" or not preview.sha256:match("^[0-9a-f]+$") or #preview.sha256 ~= 64 then
+        handoffError(h, "预览缺少完整 SHA-256；请重新生成"); cx:render(); return
+    end
+    local id = newRequestId(s)
+    local pending = {requestId = id, activity = preview.activity, sessionId = s.payload.binding.sessionId,
+        instanceId = s.payload.binding.instanceId, payloadSha256 = preview.sha256, state = "recording_intent"}
+    h.pendingSend, h.error = pending, nil
+    saveHandoffAndRender(s, cx)
+    applyWorkflow(s, cx, "request", {requestId = id, activity = preview.activity, sessionId = pending.sessionId,
+        instanceId = pending.instanceId, payloadSha256 = preview.sha256}, function(ok, ctx, failure)
+        if not ok then
+            pending.state = "intent_unknown"
+            pending.reason = storageMessage(failure or "发送意图无法确认；来源命令未发送，也不会自动重试")
+            saveHandoffAndRender(s, ctx)
+            return
+        end
+        if s.payload.binding.sessionId ~= pending.sessionId or s.payload.binding.instanceId ~= pending.instanceId then
+            pending.state, pending.reason = "intent_only", "来源会话已改变；不会向新会话发送旧意图"
+            saveHandoffAndRender(s, ctx)
+            return
+        end
+        pending.state = "source_command"
+        issueSourceCommand(s, ctx, "send", {previewToken = preview.previewToken}, "send", id)
+    end)
+end
+local function applySendReceipt(s, cx, receipt)
+    local u, h = s.ui, s.ui.handoff
+    local pending = h.pendingSend
+    if not pending or pending.requestId ~= receipt.requestId then return end
+    local priorStatus = pending.receiptAppliedStatus
+    if pending.receiptApplied == true and not priorStatus then priorStatus = pending.receiptStatus end
+    if priorStatus == receipt.status or (priorStatus and (priorStatus ~= "delivery_unknown"
+        or (receipt.status ~= "submitted" and receipt.status ~= "rejected"))) then return end
+    if pending.receiptInFlight then return end
+    if receipt.status ~= "submitted" and receipt.status ~= "rejected" and receipt.status ~= "delivery_unknown" then return end
+    if not u.writable or not h.safe or not h.workflow then
+        handoffError(h, "发送回执待保存；请恢复项目写入权限后核对，不会重发来源命令")
+        return
+    end
+    local reason = type(receipt.reason) == "string" and #receipt.reason <= 1000 and receipt.reason:match("%S") and receipt.reason
+        or ("来源回执状态：" .. tostring(receipt.status) .. "（未提供详细原因）")
+    pending.receiptInFlight, pending.receiptStatus, pending.receiptReason = true, receipt.status, reason
+    pending.receiptPending = {requestId = pending.requestId, status = receipt.status, reason = reason}
+    saveUi(s)
+    applyWorkflow(s, cx, "receipt", {requestId = pending.requestId, status = receipt.status, reason = reason}, function(ok, ctx, failure)
+        pending.receiptInFlight = nil
+        if ok then
+            pending.receiptApplied, pending.receiptAppliedStatus, pending.receiptPending = true, receipt.status, nil
+            pending.state = receipt.status
+            if receipt.status == "submitted" or receipt.status == "rejected" then h.pendingSend = nil end
+        else
+            handoffError(h, "发送回执尚未保存：" .. storageMessage(failure or "请刷新后核对，绝不会重发来源命令"))
+        end
+        saveUi(s)
+        ctx:render()
+    end)
+end
+local function receiveInspected(s, cx, pending, receipt)
+    local h, data = s.ui.handoff, receipt.data
+    if type(data) ~= "table" then handoffError(h, "检查回执缺少受限结果数据"); return end
+    if pending.operation == "preview" then
+        local preview = data
+        if type(preview.text) ~= "string" or #preview.text > live.maxText or not utf8.len(preview.text)
+            or type(preview.previewToken) ~= "string" or #preview.previewToken == 0
+            or type(preview.sha256) ~= "string" or not preview.sha256:match("^[0-9a-f]+$") or #preview.sha256 ~= 64
+            or preview.requirementId ~= pending.requirementId or preview.requirementRevision ~= pending.requirementRevision
+            or preview.activity ~= pending.activity or type(preview.sources) ~= "table"
+            or (preview.designVersion ~= nil and preview.designVersion ~= pending.designVersion) then
+            handoffError(h, "完整预览回执身份、内容或 16 KiB 边界无效；未保存预览"); return
+        end
+        preview.designVersion = pending.designVersion or 0
+        h.preview, h.previewStale = preview, false
+    elseif pending.operation == "baseline" then
+        local baseline = data.baseline
+        if type(baseline) ~= "table" or type(baseline.head) ~= "string" or type(baseline.fingerprint) ~= "string"
+            or not baseline.fingerprint:match("^[0-9a-f]+$") or #baseline.fingerprint ~= 64 or type(baseline.dirty) ~= "boolean" then
+            handoffError(h, "Git 基线回执无效；不能作出授权决定"); return
+        end
+        h.baseline, h.baselineCheckedAt = baseline, receipt.updatedAt
+    elseif pending.operation == "candidate" then
+        local candidate = data.candidate
+        if type(candidate) ~= "table" or type(candidate.body) ~= "string" or #candidate.body > live.maxText or not utf8.len(candidate.body)
+            or type(candidate.entryId) ~= "string" or candidate.sessionId ~= pending.sessionId
+            or type(candidate.includesToolCalls) ~= "boolean" then
+            handoffError(h, "回复候选无效或超限；没有导入草稿"); return
+        end
+        h.candidate = candidate
+    elseif pending.operation == "file" then
+        local file = data.file
+        if type(file) ~= "table" or file.path ~= pending.path or type(file.body) ~= "string"
+            or #file.body > 16384 or not utf8.len(file.body) or type(file.sha256) ~= "string"
+            or not file.sha256:match("^[0-9a-f]+$") or #file.sha256 ~= 64 then
+            handoffError(h, "项目文件无效或超过 16 KiB；没有导入草稿"); return
+        end
+        h.importedFile = {path = file.path, body = file.body, sha256 = file.sha256}
+    end
+    h.error = nil
+end
+refreshHandoffReceipt = function(s, cx)
+    local u, h = s.ui, s.ui and s.ui.handoff
+    if not u or not h then return end
+    if not h.pending then
+        local pendingReceipt = h.pendingSend and h.pendingSend.receiptPending
+        if pendingReceipt and not h.pendingSend.receiptApplied then
+            refreshHandoff(s)
+            applySendReceipt(s, cx, pendingReceipt)
+        end
+        return
+    end
+    if h.pendingSend and h.pendingSend.receiptPending then
+        local pendingReceipt = h.pendingSend.receiptPending
+        refreshHandoff(s)
+        applySendReceipt(s, cx, pendingReceipt)
+        if not h.pending then return end
+    end
+    local pending = h.pending
+    if pending.instanceId and pending.instanceId ~= s.payload.binding.instanceId then return end
+    local receipt = live.read(s.payload.location.runtime .. "receipts/" .. pending.requestId .. ".json", 65536)
+    local expectedInstance, expectedSession = pending.instanceId or s.payload.binding.instanceId,
+        pending.sessionId or s.payload.binding.sessionId
+    if type(receipt) == "table" and receipt.schemaVersion == 1 and receipt.requestId == pending.requestId
+        and receipt.instanceId == expectedInstance and receipt.sessionId == expectedSession
+        and (receipt.status == "inspected" or receipt.status == "submitted" or receipt.status == "prefilled"
+            or receipt.status == "rejected" or receipt.status == "delivery_unknown") then
+        local prior = h.sourceReceipt
+        local changed = type(prior) ~= "table" or prior.requestId ~= receipt.requestId
+            or prior.status ~= receipt.status or prior.reason ~= receipt.reason
+        h.sourceReceipt = receipt
+        if pending.purpose == "send" and receipt.status == "delivery_unknown" then
+            if receipt.reason == "applying_request" then
+                pending.applying = true
+                h.error = "来源端已持久记录请求，正在调用 omp SDK；继续核对同一请求，不会重发"
+                if changed then saveUi(s) end
+                return
+            end
+            applySendReceipt(s, cx, receipt)
+            if changed then saveUi(s) end
+            return
+        end
+        h.pending = nil
+        if receipt.status == "inspected" then
+            receiveInspected(s, cx, pending, receipt)
+            if pending.staleBinding and pending.operation == "preview" and h.preview then
+                h.preview.previewToken = nil
+                h.previewStale = true
+                h.error = "此预览来自旧会话；令牌已清除，请在当前会话显式重新生成"
+            end
+        elseif pending.purpose == "send" then applySendReceipt(s, cx, receipt)
+        elseif receipt.status == "rejected" or receipt.status == "delivery_unknown" then
+            handoffError(h, receipt.reason or "来源端未完成请求；不会自动重试")
+        end
+        saveUi(s)
+        return
+    end
+    if type(pending.expiresAt) == "number" and live.epoch() > pending.expiresAt and not pending.timeoutShown then
+        local unknown = {schemaVersion = 1, requestId = pending.requestId, instanceId = expectedInstance,
+            sessionId = expectedSession, status = "delivery_unknown", reason = "等待来源回执超时；请求仍可由同一 ID 核对，不会重发"}
+        h.sourceReceipt, pending.timeoutShown = unknown, true
+        if pending.purpose == "send" then applySendReceipt(s, cx, unknown)
+        else handoffError(h, unknown.reason) end
+        saveUi(s)
+    end
+end
+local function adoptProposal(s, cx)
+    local h, text = s.ui.handoff, s.ui.handoff.fields.proposal.text
+    if #text == 0 or #text > 16384 or not utf8.len(text) then handoffError(h, "方案必须是完整有效 UTF-8，且不超过 16 KiB"); cx:render(); return end
+    local source = h.proposalSource or {kind = "manual"}
+    applyWorkflow(s, cx, "adopt", {body = text, source = source}, function(ok, ctx)
+        if ok then
+            h.proposalSource = nil
+            h.selectedVersion = h.workflow.latestVersion
+            h.compareVersion = 0
+            refreshHandoff(s)
+            saveUi(s)
+            ctx:toast("success", "已采用为正式方案", "版本 v" .. tostring(h.selectedVersion))
+        end
+    end)
+end
+local function endHandoffWait(s,cx)
+    local u,h=s.ui,s.ui.handoff
+    local pending=h.pendingSend or h.pending
+    local note=h.fields.ackReason.text
+    if not pending or not note:match("%S") or not u.writable or not h.safe or not h.workflow or h.workflowBusy then
+        handoffError(h,"请启用编辑并填写人工核对说明；此操作不会重发或取消任务");cx:render();return
+    end
+    local id=pending.requestId
+    local function finish(ctx)
+        local record
+        for _,r in h.workflow.requests do if r.requestId==id then record=r;break end end
+        local status=record and record.status or "delivery_unknown"
+        if status=="pending" then status="delivery_unknown" end
+        h.pending,h.pendingSend=nil,nil
+        invalidatePreview(h)
+        h.sourceReceipt={requestId=id,status=status,localOnly=true,
+            reason=(record and record.reason or "投递结果未确认").."\n人工结束等待："..note,
+            updatedAt=live.epoch()}
+        h.fields.ackReason.text,h.fields.ackReason.cursor,h.fields.ackReason.anchor="",0,nil
+        saveHandoffAndRender(s,ctx)
+    end
+    local recorded=false
+    for _,r in h.workflow.requests do if r.requestId==id then recorded=true;break end end
+    if h.pendingSend and recorded then
+        applyWorkflow(s,cx,"acknowledge_unknown",{requestId=id,note=note,clicked=true},function(ok,ctx)
+            if ok then finish(ctx) end
+        end)
+    else
+        -- No SEND is dispatched until a recorded intent succeeds. Read-only checks
+        -- and unconfirmed local intents can be dismissed without inventing a run.
+        finish(cx)
+    end
+end
+local function handoffAction(s, act, cx)
+    local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
+    if act == "handoff-end-wait" then endHandoffWait(s,cx)
+    elseif act == "handoff-preview" then startPreview(s, cx)
+    elseif act == "handoff-baseline" then inspect(s, cx, "baseline", {})
+    elseif act == "handoff-candidate" then inspect(s, cx, "candidate", {})
+    elseif act == "handoff-import-file" then
+        local path = h.fields.importPath.text:gsub("^%s+", ""):gsub("%s+$", "")
+        local paths, failure = cleanRelativePaths(path)
+        if not paths or #paths ~= 1 then handoffError(h, failure or "请输入恰好一个项目相对文件路径"); cx:render()
+        else inspect(s, cx, "file", {path = paths[1]}) end
+    elseif act == "handoff-import-file-content" then
+        local file = h.importedFile
+        if not h.safe or not u.writable or h.pending or h.pendingSend or not file
+            or type(file.body) ~= "string" or #file.body > 16384 or not utf8.len(file.body) then
+            handoffError(h, "项目文件不可导入；请核对记录、来源回执与文件内容"); cx:render()
+        elseif (h.fields.proposal.text or ""):match("%S") then
+            handoffError(h, "方案草稿已有内容；请先保存或清空草稿，再明确导入，现有内容已保留"); cx:render()
+        else
+            h.fields.proposal.text, h.fields.proposal.cursor, h.fields.proposal.anchor = file.body, utf8.len(file.body), nil
+            h.proposalSource, h.importedFile = {kind = "file", path = file.path}, nil
+            h.tab, h.error = "design", nil
+            saveHandoffAndRender(s, cx)
+        end
+    elseif act == "handoff-import-candidate" then
+        local candidate = h.candidate
+        if not h.safe or not u.writable or h.pending or h.pendingSend or not candidate
+            or type(candidate.body) ~= "string" or #candidate.body > 16384 or not utf8.len(candidate.body) then
+            handoffError(h, "回复候选不可导入；请核对记录、来源回执与内容上限"); cx:render()
+        elseif (h.fields.proposal.text or ""):match("%S") then
+            handoffError(h, "方案草稿已有内容；请先保存或清空草稿，再明确导入，现有内容已保留"); cx:render()
+        else
+            h.fields.proposal.text, h.fields.proposal.cursor, h.fields.proposal.anchor = candidate.body, utf8.len(candidate.body), nil
+            h.proposalSource = {kind = "assistant", entryId = candidate.entryId, sessionId = candidate.sessionId}
+            h.tab, h.error = "design", nil
+            saveHandoffAndRender(s, cx)
+        end
+    elseif act == "handoff-adopt" then adoptProposal(s, cx)
+    elseif act == "handoff-prefill" then sendPreview(s, cx, true)
+    elseif act == "handoff-send" then sendPreview(s, cx, false)
+    elseif act == "handoff-comment" and h.selectedDesign then
+        local text = h.fields.comment.text
+        if text:match("%S") then
+            applyWorkflow(s, cx, "comment", {designVersion = h.selectedDesign.version, text = text}, function(ok, ctx)
+                if ok then h.fields.comment.text, h.fields.comment.cursor = "", 0; saveUi(s); ctx:render() end
+            end)
+        end
+    elseif act == "handoff-approve" and h.selectedDesign then
+        if not h.baseline or not h.baselineCheckedAt then handoffError(h, "批准前必须通过来源命令检查当前 Git 基线"); cx:render()
+        else applyWorkflow(s, cx, "approve", {designVersion = h.selectedDesign.version, baseline = h.baseline, clicked = true}) end
+    elseif act == "handoff-revoke" and h.workflow and h.workflow.approval then
+        local reason = h.fields.revokeReason.text
+        if not reason:match("%S") then handoffError(h, "请填写撤销理由后再确认"); cx:render()
+        else applyWorkflow(s, cx, "revoke", {reason = reason}) end
+    elseif act == "handoff-authorize-direct" then
+        local reason = h.fields.directReason.text
+        if not h.baseline or not h.baselineCheckedAt then handoffError(h, "直接授权前必须通过来源命令检查当前 Git 基线"); cx:render()
+        elseif not reason:match("%S") or type(requirement.scope) ~= "string" or not requirement.scope:match("%S")
+            then handoffError(h, "直接实施必须明确填写授权理由，并在需求中提供范围"); cx:render()
+        else applyWorkflow(s, cx, "authorize_direct", {baseline = h.baseline, reason = reason, clicked = true}) end
+    elseif act == "open-handoff" then
+        u.tab, h.tab = "handoff", h.tab or "materials"
+        refreshHandoff(s)
+        saveUi(s)
+    end
 end
 local function refreshProject(s)
     local u = s.ui
@@ -226,6 +799,7 @@ local function refreshProject(s)
         return a.updatedAt > b.updatedAt
     end)
     if u.selected and not u.byId[u.selected] then u.selected = nil end
+    refreshHandoff(s)
 end
 local function scheduleProjectRefresh(s, cx)
     local u = s.ui
@@ -265,7 +839,8 @@ local function loadWorkbench(s, cx)
         formMode = type(saved) == "table" and saved.formMode == true or false,
         mode = type(saved) == "table" and saved.mode or nil,
         editing = type(saved) == "table" and saved.editing or nil,
-        draftKey = type(saved) == "table" and saved.draftKey or nil}
+        draftKey = type(saved) == "table" and saved.draftKey or nil,
+        handoff = makeHandoff(type(saved) == "table" and saved.handoff or nil)}
     s.ui = u
     for key, draft in u.drafts do
         if type(draft) == "table" then
@@ -396,6 +971,11 @@ end
 local function saveRequirement(s, cx)
     local u = s.ui
     if u.saving or not u.writable then return end
+    if u.handoff and u.handoff.pendingSend then
+        u.formError = "业务发送回执尚待核对；当前不可修改需求"
+        cx:render()
+        return
+    end
     local fields = {title = formValue(s, "title"), goal = formValue(s, "goal"), scope = formValue(s, "scope"),
         criteria = splitLines(formValue(s, "criteria")), labels = splitLabels(formValue(s, "labels")),
         type = u.type, priority = u.priority, now = live.epoch()}
@@ -461,7 +1041,15 @@ local function saveRequirement(s, cx)
     cx:render()
 end
 local function fieldName(id)
-    return id:match("%.f%-([%w]+)$") or (id:match("%.materials$") and "materials") or (id:match("%.search$") and "search")
+    return id:match("%.f%-([%w]+)$") or id:match("%.h%-([%w]+)$")
+        or (id:match("%.materials$") and "materials") or (id:match("%.search$") and "search")
+end
+local function isHandoffField(s, name)
+    return s.ui.handoff.fields[name] ~= nil
+end
+local function handoffEditorLocked(s, name)
+    local h = s.ui.handoff
+    return not s.ui.writable or not h.safe or h.workflowBusy or (name~="ackReason" and h.pendingSend ~= nil)
 end
 local function bufferFor(s, name)
     if name == "materials" then return s end
@@ -470,6 +1058,7 @@ local function bufferFor(s, name)
         u.searchBuffer = u.searchBuffer or {text = u.query or "", cursor = u.queryCursor or utf8.len(u.query or ""), history = {}}
         return u.searchBuffer
     end
+    if isHandoffField(s, name) then return s.ui.handoff.fields[name] end
     return s.ui.fields[name]
 end
 local function persistBuffer(s, name)
@@ -477,6 +1066,7 @@ local function persistBuffer(s, name)
     elseif name == "search" then
         s.ui.query, s.ui.queryCursor = s.ui.searchBuffer.text, s.ui.searchBuffer.cursor
         saveUi(s)
+    elseif isHandoffField(s, name) then saveUi(s)
     elseif s.ui.formMode then
         s.ui.dirty = true
         persistForm(s)
@@ -487,17 +1077,16 @@ local function replaceBuffer(buffer, first, last, text, bound)
     if not utf8.len(text) or text:find("[%z\1-\8\11\12\14-\31\127]") then return false, "请输入有效文本，不含控制字符" end
     local changed = buffer.text:sub(1, byte(buffer.text, first) - 1) .. text .. buffer.text:sub(byte(buffer.text, last))
     if #changed > (bound or 262144) then return false, "内容超过安全存储上限；不会截短" end
-    if changed ~= buffer.text then
-        buffer.history = buffer.history or {}
-        table.insert(buffer.history, {text = buffer.text, cursor = buffer.cursor, anchor = buffer.anchor})
-        if #buffer.history > 32 then table.remove(buffer.history, 1) end
-    end
+    if changed ~= buffer.text then buffer.history = {{text = buffer.text, cursor = buffer.cursor, anchor = buffer.anchor}} end
     buffer.text, buffer.cursor, buffer.anchor = changed, first + utf8.len(text), nil
     return true
 end
 local function insertBuffer(s, target, buffer, first, last, text)
-    local ok, failure = replaceBuffer(buffer, first, last, text, target == "materials" and live.maxText or nil)
-    if target == "materials" then s.error = if ok then nil else failure end
+    local bound = target == "materials" and live.maxText or handoffLimits[target]
+    local ok, failure = replaceBuffer(buffer, first, last, text, bound)
+    if target == "materials" then s.error = if ok then nil else failure
+    elseif isHandoffField(s, target) then s.ui.handoff.error = if ok then nil else failure end
+    if ok and (target=="paths" or target=="excerpt") then invalidatePreview(s.ui.handoff) end
     return ok
 end
 tern.block.define("live", {
@@ -506,6 +1095,7 @@ tern.block.define("live", {
         local s = {panel = cx.pane, history = {}, serial = 1, scheduled = false,
             lastOpenAttempt = type(saved) == "table" and saved.lastOpenAttempt or nil,
             token = type(saved) == "table" and saved.token or nil}
+        s.cx = cx
         local payload = tern.json.decode(args[1] or "")
         if type(saved) == "table" and type(saved.payload) == "table"
             and saved.payload.binding and payload.binding
@@ -561,6 +1151,7 @@ tern.block.define("live", {
         local target = s.focusTarget
         local buffer = target and bufferFor(s, target)
         if not buffer then return false end
+        if isHandoffField(s, target) and handoffEditorLocked(s, target) then return true end
         if target ~= "materials" and target ~= "search" and s.ui.saving then return true end
         local length = utf8.len(buffer.text)
         local first, last = math.min(buffer.anchor or buffer.cursor, buffer.cursor), math.max(buffer.anchor or buffer.cursor, buffer.cursor)
@@ -601,6 +1192,7 @@ tern.block.define("live", {
             focus(cx, ev.id)
         elseif ev.ev == "edit" then
             local target = fieldName(ev.id)
+            if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             if buffer and ev.len == units(buffer.text, utf8.len(buffer.text)) then
@@ -612,6 +1204,7 @@ tern.block.define("live", {
                     elseif target == "search" then
                         s.ui.query, s.ui.queryCursor = buffer.text, buffer.cursor
                         saveUi(s)
+                    elseif isHandoffField(s, target) then saveUi(s)
                     else
                         s.ui.dirty, s.ui.formError = true, nil
                         persistForm(s)
@@ -620,6 +1213,7 @@ tern.block.define("live", {
             end
         elseif ev.ev == "undo" then
             local target = fieldName(ev.id)
+            if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             local old = buffer and buffer.history and table.remove(buffer.history)
@@ -627,12 +1221,23 @@ tern.block.define("live", {
                 buffer.text, buffer.cursor, buffer.anchor = old.text, old.cursor, old.anchor
                 persistBuffer(s, target)
             end
+        elseif ev.ev == "select" and ev.id:match("%.handoffTabs$") then
+            s.ui.handoff.tab = ev.item
+            saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.tabs$") then
             s.ui.tab, s.ui.detailMode = ev.item, false
+            if ev.item == "handoff" then refreshHandoff(s) end
             saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.requirements$") then
             local id = tostring(ev.item):match("([^%.]+)$")
-            if s.ui.byId[id] then s.ui.selected, s.ui.detailMode = id, true; saveUi(s) end
+            local h = s.ui.handoff
+            if (h.pending or h.pendingSend) and id ~= s.ui.selected then
+                handoffError(h, "已有请求待核对；先完成同一需求的回执核对，不能切换工作依据")
+            elseif s.ui.byId[id] then
+                s.ui.selected, s.ui.detailMode = id, true
+                refreshHandoff(s)
+                saveUi(s)
+            end
         elseif ev.ev == "change" then
             local name = ev.id:match("%.([%w]+)$")
             local value = ev.value
@@ -642,13 +1247,35 @@ tern.block.define("live", {
             elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
             elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
             elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
-            elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s) end
+            elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s)
+            elseif name == "activity" then
+                if value == "clarify" or value == "design" or value == "implement" then
+                    s.ui.handoff.activity=value;invalidatePreview(s.ui.handoff);saveUi(s)
+                end
+            elseif name == "includeRequirement" then
+                s.ui.handoff.includeRequirement=value=="yes";invalidatePreview(s.ui.handoff);saveUi(s)
+            elseif name == "selectedVersion" then
+                s.ui.handoff.selectedVersion, s.ui.handoff.compareVersion = tonumber(value), 0
+                refreshHandoff(s)
+                saveUi(s)
+            elseif name == "compareVersion" then
+                s.ui.handoff.compareVersion = tonumber(value) or 0
+                refreshHandoff(s)
+                saveUi(s)
+            end
         elseif ev.ev == "action" then
             local act = ev.act
             local req = type(act) == "string" and act:match("^requirement=(.+)$")
             if req and s.ui.byId[req] then
-                s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirements", true
-                saveUi(s)
+                local h = s.ui.handoff
+                if (h.pending or h.pendingSend) and req ~= s.ui.selected then
+                    handoffError(h, "已有请求待核对；不能切换到另一项需求")
+                else
+                    s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirements", true
+                    refreshHandoff(s)
+                    saveUi(s)
+                end
+            elseif act == "open-handoff" or (type(act) == "string" and act:match("^handoff%-")) then handoffAction(s, act, cx)
             elseif act == "prefill" then prefill(s, cx)
             elseif act == "acknowledge-unknown" then
                 if s.pending and s.receipt and s.receipt.status == "delivery_unknown"

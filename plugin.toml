@@ -1,8 +1,8 @@
 schema = 1
 id = "multi-model-workbench"
 name = "需求交付工作台"
-version = "3.1.0"
-description = "Native project requirements, board and reload-safe drafts beside one existing omp session."
+version = "3.2.0"
+description = "Requirements, immutable design versions, approvals and explicit materials handoff beside one existing omp session."
 host = "host.luau"
 window = "window.luau"
 styles = ["styles.css"]

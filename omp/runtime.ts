@@ -7,25 +7,62 @@ export const MAX_TEXT_BYTES = 16_384;
 export const MAX_COMMAND_BYTES = 32_768;
 export const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/;
 
-export interface PrefillCommand {
+const IDENTITY_FIELDS: Record<string,true> = {schemaVersion:true,requestId:true,instanceId:true,sessionId:true,kind:true,createdAt:true,expiresAt:true};
+const COMMAND_FIELDS: Record<string,Record<string,true>> = {
+	prefill:{text:true},prefill_preview:{previewToken:true},send:{previewToken:true},
+};
+const INSPECT_FIELDS: Record<string,Record<string,true>> = {
+	preview:{operation:true,requirementId:true,activity:true,includeRequirement:true,paths:true,excerpt:true},
+	baseline:{operation:true,requirementId:true},candidate:{operation:true,requirementId:true},
+	file:{operation:true,requirementId:true,path:true},
+};
+function materialText(value:unknown,required=false):value is string {
+	return typeof value==="string" && (!required || !!value.trim())
+		&& Buffer.byteLength(value,"utf8")<=MAX_TEXT_BYTES && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value);
+}
+
+interface CommandIdentity {
 	schemaVersion: 1;
 	requestId: string;
 	instanceId: string;
 	sessionId: string;
-	kind: "prefill";
-	text: string;
 	createdAt: number;
 	expiresAt: number;
 }
+
+export interface PrefillCommand extends CommandIdentity {
+	kind: "prefill";
+	text: string;
+}
+
+export type Activity = "clarify" | "design" | "implement";
+export interface InspectCommand extends CommandIdentity {
+	kind: "inspect";
+	operation: "preview" | "baseline" | "candidate" | "file";
+	requirementId: string;
+	activity?: Activity;
+	includeRequirement?: boolean;
+	paths?: string[];
+	excerpt?: string;
+	path?: string;
+}
+
+export interface PreviewCommand extends CommandIdentity {
+	kind: "prefill_preview" | "send";
+	previewToken: string;
+}
+
+export type WorkbenchCommand = PrefillCommand | InspectCommand | PreviewCommand;
 
 export interface Receipt {
 	schemaVersion: 1;
 	requestId: string;
 	instanceId: string;
 	sessionId: string;
-	status: "prefilled" | "rejected" | "delivery_unknown";
+	status: "prefilled" | "inspected" | "submitted" | "rejected" | "delivery_unknown";
 	reason: string;
 	updatedAt: number;
+	data?: unknown;
 }
 
 export interface OpenedAck {
@@ -165,11 +202,30 @@ export function readCommand(file: string): unknown {
 
 export function validateCommand(value: unknown, requestId: string, instanceId: string, sessionId: string, now: number): string | null {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return "invalid_command";
-	const command = value as PrefillCommand;
-	if (command.schemaVersion !== 1 || command.kind !== "prefill" || command.requestId !== requestId) return "invalid_command";
+	const command = value as Record<string, unknown>;
+	if (command.schemaVersion !== 1 || command.requestId !== requestId || !REQUEST_ID.test(requestId)) return "invalid_command";
 	if (command.instanceId !== instanceId || command.sessionId !== sessionId) return "identity_mismatch";
-	if (typeof command.text !== "string" || !command.text.trim() || Buffer.byteLength(command.text, "utf8") > MAX_TEXT_BYTES || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(command.text)) return "invalid_text";
-	if (!Number.isSafeInteger(command.createdAt) || !Number.isSafeInteger(command.expiresAt) || command.createdAt > now || command.expiresAt <= now || command.expiresAt <= command.createdAt || command.expiresAt - command.createdAt > 30_000) return "expired_or_invalid_time";
+	if (!Number.isSafeInteger(command.createdAt) || !Number.isSafeInteger(command.expiresAt)
+		|| (command.createdAt as number) > now || (command.expiresAt as number) <= now
+		|| (command.expiresAt as number) <= (command.createdAt as number)
+		|| (command.expiresAt as number) - (command.createdAt as number) > 30_000) return "expired_or_invalid_time";
+	if (command.kind === "prefill") {
+		if (!materialText(command.text, true)) return "invalid_text";
+	} else if (command.kind === "prefill_preview" || command.kind === "send") {
+		if (typeof command.previewToken !== "string" || !REQUEST_ID.test(command.previewToken)) return "invalid_preview";
+	} else if (command.kind === "inspect") {
+		if (typeof command.requirementId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(command.requirementId)) return "invalid_requirement";
+		if (command.operation === "preview") {
+			if (!["clarify", "design", "implement"].includes(command.activity as string) || typeof command.includeRequirement !== "boolean"
+				|| !Array.isArray(command.paths) || command.paths.length > 16
+				|| command.paths.some(p => typeof p !== "string" || !p || p.length > 2048 || /[\x00-\x1f\x7f]/.test(p))
+				|| !materialText(command.excerpt)) return "invalid_materials";
+		} else if (command.operation === "file") {
+			if (typeof command.path !== "string" || !command.path || command.path.length > 2048 || /[\x00-\x1f\x7f]/.test(command.path)) return "invalid_path";
+		} else if (command.operation !== "baseline" && command.operation !== "candidate") return "invalid_operation";
+	} else return "invalid_command";
+	const allowed=command.kind==="inspect" ? INSPECT_FIELDS[command.operation as string] : COMMAND_FIELDS[command.kind as string];
+	for (const key in command) if (Object.hasOwn(command,key) && !Object.hasOwn(IDENTITY_FIELDS,key) && !Object.hasOwn(allowed,key)) return "invalid_command";
 	return null;
 }
 

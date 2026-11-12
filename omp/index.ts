@@ -2,8 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as path from "node:path";
-import { atomicJson, prefillStateRejection, readCommand, Runtime, validateCommand, waitForOpenAck, type PrefillCommand, type Receipt } from "./runtime";
+import { atomicJson, prefillStateRejection, readCommand, Runtime, validateCommand, waitForOpenAck, type WorkbenchCommand, type Receipt } from "./runtime";
 import { discoverSourceWindow } from "./tern";
+import { Handoff } from "./handoff";
 
 const HEARTBEAT_MS = 750;
 const EVENT_LIMIT = 80;
@@ -112,6 +113,8 @@ export default function workbench(pi: ExtensionAPI): void {
 	let model: string | null = null;
 	let errorReported = false;
 	let openRequestId: string | null = null;
+	let dispatchingRequest: string | null = null;
+	const handoff = new Handoff();
 	const tools = new Map<string, ObservedTool>();
 	const waits = new Set<string>();
 	const recentEvents: ObservedEvent[] = [];
@@ -165,9 +168,11 @@ export default function workbench(pi: ExtensionAPI): void {
 		const nextCwd = ctx.sessionManager.getCwd();
 		const changed = sessionId !== nextSession;
 		const moved = cwd !== nextCwd;
+		if (changed || moved) handoff.clear();
 		if (changed) {
 			sessionId = nextSession;
 			openRequestId = null;
+			dispatchingRequest = null;
 			tools.clear(); waits.clear(); awaitingAsyncWork = false;
 			event("session.changed", "Source session bound; prior-session commands will be rejected");
 		}
@@ -199,14 +204,14 @@ export default function workbench(pi: ExtensionAPI): void {
 		});
 	}
 
-	function draftRejection(ctx: ExtensionContext, command: PrefillCommand): string | null {
+	function draftRejection(ctx: ExtensionContext, command: WorkbenchCommand): string | null {
 		const invalid = validateCommand(command, command.requestId, runtime!.instanceId, ctx.sessionManager.getSessionId(), Date.now());
 		if (invalid) return invalid;
 		return prefillStateRejection({
 			available: !disconnected && ctx.agent.kind === "main" && ctx.mode === "tui" && ctx.hasUI && ctx.ui.supportsEditor === true,
 			projectReady: projectRoot !== null,
 			identityFresh: ctx.sessionManager.getCwd() === cwd && command.sessionId === sessionId,
-			busy: !ctx.isIdle() || ctx.hasPendingMessages() || tools.size > 0 || waits.size > 0 || awaitingAsyncWork,
+			busy: !ctx.isIdle() || ctx.hasPendingMessages() || tools.size > 0 || waits.size > 0 || awaitingAsyncWork || dispatchingRequest !== null,
 			planReview: ctx.getPendingPlanReview() !== undefined,
 			// Whitespace is still the user's draft; never trim this text.
 			draftText: ctx.ui.getEditorText(),
@@ -215,41 +220,96 @@ export default function workbench(pi: ExtensionAPI): void {
 
 	function processCommands(ctx: ExtensionContext): void {
 		if (!runtime || disconnected) return;
-		for (const name of runtime.pending()) {
+		const sourceRuntime = runtime;
+		for (const name of sourceRuntime.pending()) {
 			const requestId = name.slice(0, -5);
-			if (runtime.hasReceipt(requestId)) { runtime.removeCommand(name); continue; }
+			if (sourceRuntime.hasReceipt(requestId)) { sourceRuntime.removeCommand(name); continue; }
 			let value: unknown;
 			let reason: string | null = null;
-			try { value = readCommand(path.join(runtime.commands, name)); }
+			try { value = readCommand(path.join(sourceRuntime.commands, name)); }
 			catch { reason = "invalid_command_file"; }
-			reason ??= validateCommand(value, requestId, runtime.instanceId, ctx.sessionManager.getSessionId(), Date.now());
-			const command = value as PrefillCommand;
-			if (!reason) reason = draftRejection(ctx, command);
-			const receipt: Receipt = { schemaVersion: 1, requestId, instanceId: runtime.instanceId, sessionId: record(value) && typeof value.sessionId === "string" ? value.sessionId.slice(0, 128) : sessionId, status: "rejected", reason: reason ?? "", updatedAt: Date.now() };
+			reason ??= validateCommand(value, requestId, sourceRuntime.instanceId, ctx.sessionManager.getSessionId(), Date.now());
+			const command = value as WorkbenchCommand;
+			const receipt: Receipt = { schemaVersion: 1, requestId, instanceId: sourceRuntime.instanceId,
+				sessionId: record(value) && typeof value.sessionId === "string" ? value.sessionId.slice(0, 128) : sessionId,
+				status: "rejected", reason: reason ?? "", updatedAt: Date.now() };
 			if (reason) {
-				runtime.receipt(receipt);
-				event("prefill.rejected", `Prefill rejected: ${reason}`, { requestId });
-			} else {
-				// Persist a claim BEFORE the effect. A crash can leave an unknown receipt,
-				// never an unclaimed request that another poll would apply twice.
-				receipt.status = "delivery_unknown"; receipt.reason = "applying_prefill";
-				runtime.receipt(receipt);
-				// No await between final live identity/draft check and plain editor update.
-				const changed = draftRejection(ctx, command);
-				if (changed) { receipt.status = "rejected"; receipt.reason = changed; }
-				else {
-					try {
-						// Unlike smart paste, this never loads image paths or drains queued Enter.
-						// Existing attachment chips make getEditorText non-empty and reject above.
-						ctx.ui.setEditorText(command.text);
-						receipt.status = "prefilled"; receipt.reason = "awaiting_user_submission";
-					} catch { receipt.reason = "native_editor_outcome_unknown"; }
-				}
-				receipt.updatedAt = Date.now();
-				runtime.receipt(receipt);
-				event(`prefill.${receipt.status}`, receipt.status === "prefilled" ? "Prefilled input; not submitted" : `Prefill outcome: ${receipt.reason}`, { requestId });
+				sourceRuntime.receipt(receipt);
+				event("request.rejected", `Workbench request rejected: ${reason}`, { requestId });
+				sourceRuntime.removeCommand(name);
+				continue;
 			}
-			runtime.removeCommand(name);
+			if (command.kind === "inspect") {
+				try {
+					if (!projectRoot || ctx.sessionManager.getCwd() !== cwd || command.sessionId !== sessionId) throw new Error("source_changed");
+					receipt.data = handoff.inspect(command, projectRoot, sessionId, ctx.sessionManager.getBranch());
+					receipt.status = "inspected"; receipt.reason = "explicit_read_complete";
+				} catch (error) { receipt.reason = error instanceof Error ? safeText(error.message, 180) : "inspection_failed"; }
+				receipt.updatedAt = Date.now();
+				sourceRuntime.receipt(receipt);
+				event("materials.inspected", `Explicit inspection: ${receipt.status}`, { requestId });
+				sourceRuntime.removeCommand(name);
+				continue;
+			}
+			reason = draftRejection(ctx, command);
+			let text = "";
+			if (!reason) {
+				try {
+					text = command.kind === "prefill" ? command.text
+						: handoff.resolve(command.previewToken, projectRoot!, sessionId, sourceRuntime.instanceId, requestId, command.kind === "send").text;
+				} catch (error) { reason = error instanceof Error ? safeText(error.message, 180) : "preview_invalid"; }
+			}
+			if (reason) {
+				receipt.reason = reason;
+				sourceRuntime.receipt(receipt);
+				event("request.rejected", `Workbench request rejected: ${reason}`, { requestId });
+				sourceRuntime.removeCommand(name);
+				continue;
+			}
+			// The durable claim precedes every external effect. It is never replayed.
+			receipt.status = "delivery_unknown"; receipt.reason = "applying_request";
+			sourceRuntime.receipt(receipt);
+			let changed = draftRejection(ctx, command);
+			if (!changed && command.kind !== "prefill") {
+				try { text = handoff.resolve(command.previewToken, projectRoot!, sessionId, sourceRuntime.instanceId, requestId, command.kind === "send").text; }
+				catch (error) { changed = error instanceof Error ? safeText(error.message, 180) : "preview_invalid"; }
+			}
+			if (changed) {
+				receipt.status = "rejected"; receipt.reason = changed;
+				receipt.updatedAt = Date.now(); sourceRuntime.receipt(receipt);
+			} else if (command.kind === "send") {
+				handoff.consume(command.previewToken);
+				dispatchingRequest = requestId;
+				const finish = (status: Receipt["status"], result: string): void => {
+					receipt.status = status; receipt.reason = result; receipt.updatedAt = Date.now();
+					sourceRuntime.receipt(receipt);
+					if (sessionId === receipt.sessionId) {
+						event(`request.${status}`, result, { requestId });
+						if (currentContext) publish(currentContext);
+					}
+				};
+				try {
+					// No await between the final live gate and the bound SDK action.
+					// Omitting deliverAs starts only an idle prompt; busy sources were refused.
+					void pi.sendUserMessage(text).then(
+						() => finish("submitted", "submitted_to_existing_session"),
+						() => finish("delivery_unknown", "native_submission_outcome_unknown"),
+					).catch(() => failure(ctx)).finally(() => {
+						if (dispatchingRequest === requestId) dispatchingRequest = null;
+					});
+				} catch {
+					finish("delivery_unknown", "native_submission_outcome_unknown");
+					dispatchingRequest = null;
+				}
+			} else {
+				try {
+					ctx.ui.setEditorText(text);
+					receipt.status = "prefilled"; receipt.reason = "awaiting_user_submission";
+				} catch { receipt.reason = "native_editor_outcome_unknown"; }
+				receipt.updatedAt = Date.now(); sourceRuntime.receipt(receipt);
+				event(`prefill.${receipt.status}`, receipt.status === "prefilled" ? "Prefilled input; not submitted" : receipt.reason, { requestId });
+			}
+			sourceRuntime.removeCommand(name);
 		}
 	}
 

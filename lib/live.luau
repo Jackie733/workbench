@@ -69,22 +69,35 @@ try {
 ]==]
 local WRITE = [==[
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $p=$env:OMPWB_COMMAND
-$text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:OMPWB_PAYLOAD))
-if ($env:OMPWB_REPLACE -eq '1') {
- $ack=ConvertFrom-Json -InputObject $text
- $ack.updatedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
- $text=ConvertTo-Json -InputObject $ack -Compress
-}
 $tmp=$p+'.tmp-'+[Guid]::NewGuid().ToString('N')
 try {
+ if ($env:OMPWB_PAYLOAD_FILE) {
+  $f=[IO.File]::Open($env:OMPWB_PAYLOAD_FILE,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  try {
+   if ($f.Length -gt 32768) { throw 'Command exceeds 32 KiB' }
+   $f.Flush($true)
+  } finally { $f.Dispose() }
+  [IO.File]::Move($env:OMPWB_PAYLOAD_FILE,$p)
+  exit 0
+ }
+ $text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:OMPWB_PAYLOAD))
+ if ($env:OMPWB_REPLACE -eq '1') {
+  $ack=ConvertFrom-Json -InputObject $text
+  $ack.updatedAt=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $text=ConvertTo-Json -InputObject $ack -Compress
+ }
  $f=[IO.File]::Open($tmp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  try { $b=[Text.UTF8Encoding]::new($false).GetBytes($text); $f.Write($b,0,$b.Length); $f.Flush($true) } finally { $f.Dispose() }
  if ($env:OMPWB_REPLACE -eq '1') {
   Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class OmpWorkbenchRename { [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern bool MoveFileEx(string source, string target, int flags); }'
   if (-not [OmpWorkbenchRename]::MoveFileEx($tmp,$p,9)) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
  } else { [IO.File]::Move($tmp,$p) }
-} finally { if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } }
+} finally {
+ if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) }
+ if ($env:OMPWB_PAYLOAD_FILE -and [IO.File]::Exists($env:OMPWB_PAYLOAD_FILE)) { [IO.File]::Delete($env:OMPWB_PAYLOAD_FILE) }
+}
 ]==]
 local function process(script, env, callback)
     local ok, failure = pcall(function()
@@ -110,8 +123,17 @@ function M.openMarker(path, callback)
     end)
 end
 function M.command(location, command, callback)
-    process(WRITE, {OMPWB_COMMAND = location.runtime .. "commands\\" .. command.requestId .. ".json",
-        OMPWB_PAYLOAD = tern.base64.encode(tern.json.encode(command))}, callback)
+    local verified = type(location) == "table" and M.path(location.marker)
+    if not verified or type(command) ~= "table" or not M.token(command.requestId) or #command.requestId > 96 then
+        callback(nil, "请求身份无效；未发布命令", nil); return
+    end
+    local ok, payload = pcall(tern.json.encode, command)
+    if not ok or #payload > 32768 then callback(nil, "请求超过 32 KiB 或无法编码；未发布命令", nil); return end
+    local target = verified.runtime .. "commands\\" .. command.requestId .. ".json"
+    local input = target .. ".payload-" .. tostring(math.random(1, 2147483646))
+    local wrote, failure = pcall(tern.fs.write, input, payload)
+    if not wrote then callback(nil, tostring(failure), nil); return end
+    process(WRITE, {OMPWB_COMMAND = target, OMPWB_PAYLOAD_FILE = input}, callback)
 end
 function M.opened(location, acknowledgment, callback)
     process(WRITE, {OMPWB_COMMAND = location.runtime .. "opened.json", OMPWB_REPLACE = "1",
