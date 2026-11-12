@@ -74,6 +74,7 @@ local function alive(cx)
 end
 local refreshHandoffReceipt
 local refreshTraceReceipt
+local recordBaselineReference
 local function refresh(s)
     local p, now = s.payload, live.epoch()
     s.problem = nil
@@ -283,6 +284,10 @@ local function refreshHandoff(s)
                 instanceId = request.instanceId, requirementId = requirement.requirementId,
                 createdAt = created, expiresAt = created + 30000, recovered = true}
         end
+    end
+    if matched and matched.status == "submitted" and matched.activity == "implement"
+        and recordBaselineReference and h.workflow and h.workflow.approval and h.workflow.approval.baseline then
+        recordBaselineReference(s, matched.requestId, h.workflow.approval.baseline, s.cx)
     end
     if h.pending and (h.pending.instanceId ~= s.payload.binding.instanceId
         or h.pending.sessionId ~= s.payload.binding.sessionId) then h.pending.staleBinding = true end
@@ -560,6 +565,28 @@ local function sendPreview(s, cx, prefillOnly)
         issueSourceCommand(s, ctx, "send", {previewToken = preview.previewToken}, "send", id)
     end)
 end
+recordBaselineReference = function(s, requestId, baseline, cx)
+    local u = s.ui
+    if not u or not u.trace or type(baseline) ~= "table" or not requestId then return end
+    if u.trace.baselineAttempt == requestId then return end
+    local requirement = selectedRequirement(s)
+    if not requirement or not u.writable or not u.trace.safe or not u.token then return end
+    u.trace.baselineAttempt = requestId
+    Results.recordBaseline(u.paths, requirement, u.token, baseline, requestId, function(saved, reason, freshCx)
+        local ctx = freshCx or cx or s.cx
+        if not alive(ctx) then return end
+        if saved then
+            refreshTrace(s)
+            if s.ui.trace then
+                s.ui.trace.notice = "已记录实施基线（请求 " .. requestId .. "）；基线已有改动不视为本需求产出。"
+            end
+        else
+            s.ui.trace.error = "实施基线未能保存：" .. storageMessage(reason or "请核对结果记录")
+        end
+        saveUi(s)
+        ctx:render()
+    end)
+end
 local function applySendReceipt(s, cx, receipt)
     local u, h = s.ui, s.ui.handoff
     local pending = h.pendingSend
@@ -585,22 +612,8 @@ local function applySendReceipt(s, cx, receipt)
             pending.receiptApplied, pending.receiptAppliedStatus, pending.receiptPending = true, receipt.status, nil
             pending.state = receipt.status
             if receipt.status == "submitted" or receipt.status == "rejected" then h.pendingSend = nil end
-            local requirement = selectedRequirement(s)
-            if ok and receipt.status == "submitted" and pending.activity == "implement" and type(pending.baseline) == "table"
-                and requirement and u.writable and u.trace and u.trace.safe then
-                Results.recordBaseline(u.paths, requirement, u.token, pending.baseline, pending.requestId,
-                    function(saved, reason, freshCx)
-                        local resultCtx = freshCx or ctx
-                        if not alive(resultCtx) then return end
-                        if saved then
-                            refreshTrace(s)
-                            if s.ui.trace then
-                                s.ui.trace.notice = "已记录实施基线（请求 " .. pending.requestId .. "）；基线已有改动不视为本需求产出。"
-                            end
-                        else traceError(s, "实施基线未能保存：" .. storageMessage(reason or "请核对结果记录")) end
-                        saveUi(s)
-                        resultCtx:render()
-                    end)
+            if receipt.status == "submitted" and pending.activity == "implement" and type(pending.baseline) == "table" then
+                recordBaselineReference(s, pending.requestId, pending.baseline, ctx)
             end
         else
             handoffError(h, "发送回执尚未保存：" .. storageMessage(failure or "请刷新后核对，绝不会重发来源命令"))
