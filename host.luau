@@ -4,6 +4,8 @@ local live = require("./lib/live")
 local store = require("./lib/store")
 local Workflow = require("./lib/workflow")
 local Results = require("./lib/results")
+local Review = require("./lib/review")
+local Audit = require("./lib/audit")
 local runview = require("./lib/runview")
 local ui = require("./lib/ui")
 local function invalidatePreview(h)
@@ -138,6 +140,31 @@ local function prefill(s, cx)
     s.pending = {requestId = id, createdAt = now, expiresAt = command.expiresAt}
     s.receipt, s.error = {requestId = id, status = "pending", reason = "正在写入私有消息盒；不会按 Enter"}, nil
     -- Durable intent first. A reload or an uncertain write never reissues it.
+    persist(s)
+    local expected = s.payload
+    live.command(s.payload.location, command, function(_, failure)
+        if not alive(cx) or s.payload ~= expected then return end
+        if failure then
+            s.receipt = {requestId = id, status = "delivery_unknown", reason = "写入结果待核对；不自动重发：" .. failure}
+        elseif s.pending and s.pending.requestId == id then
+            s.receipt = {requestId = id, status = "pending", reason = "消息盒已原子写入，等待同一 omp 的回执"}
+        end
+        cx:render()
+    end)
+end
+local function prefillLiteral(s, cx, text)
+    refresh(s)
+    if s.pending then s.error = "已有待核对预填；不会重复投递"; cx:render(); return end
+    if s.ui.handoff and s.ui.handoff.pendingSend then s.error = "业务发送尚待核对；不会预填第二条消息"; cx:render(); return end
+    if s.problem then s.error = s.problem; cx:render(); return end
+    if not s.snapshot or s.snapshot.state ~= "idle" then s.error = "目标 omp 当前非空闲；只在空闲时预填"; cx:render(); return end
+    local now = live.epoch()
+    local id = string.format("wb-%.0f-%d-%d", now, math.random(1, 2147483646), s.serial)
+    s.serial += 1
+    local command = {schemaVersion = 1, requestId = id, instanceId = s.payload.binding.instanceId,
+        sessionId = s.payload.binding.sessionId, kind = "prefill", text = text, createdAt = now, expiresAt = now + 30000}
+    s.pending = {requestId = id, createdAt = now, expiresAt = command.expiresAt}
+    s.receipt, s.error = {requestId = id, status = "pending", reason = "正在写入私有消息盒；不会按 Enter"}, nil
     persist(s)
     local expected = s.payload
     live.command(s.payload.location, command, function(_, failure)
@@ -318,6 +345,7 @@ local function refreshHandoff(s)
     if h.workflowError then h.error = h.workflowError end
 end
 local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
+local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200}
 local function traceSnapshot(t)
     if not t then return nil end
     local fields = {}
@@ -339,6 +367,34 @@ local function makeTrace(saved)
     for name, field in fields do field.cursor = field.cursor or utf8.len(field.text) end
     return {fields = fields, safe = true, busy = false}
 end
+local function reviewSnapshot(v)
+    if not v then return nil end
+    local fields = {}
+    for name, limit in reviewLimits do
+        local field = v.fields and v.fields[name]
+        if type(field) == "table" and type(field.text) == "string" then
+            fields[name] = {text = field.text:sub(1, limit), cursor = field.cursor, anchor = field.anchor}
+        end
+    end
+    return {fields=fields, source=v.source, finding=v.finding, action=v.action}
+end
+local function makeReview(saved)
+    local fields = {}
+    for name, limit in reviewLimits do
+        local item = type(saved) == "table" and type(saved.fields) == "table" and saved.fields[name]
+        fields[name] = {text = type(item) == "table" and type(item.text) == "string" and item.text:sub(1, limit) or "",
+            cursor = type(item) == "table" and type(item.cursor) == "number" and item.cursor or nil,
+            anchor = type(item) == "table" and type(item.anchor) == "number" and item.anchor or nil}
+    end
+    for name, field in fields do field.cursor = field.cursor or utf8.len(field.text) end
+    return {fields=fields, source=type(saved)=="table" and saved.source or "native_review",
+        finding=type(saved)=="table" and type(saved.finding)=="string" and saved.finding or "",
+        action=type(saved)=="table" and saved.action or "resolved", safe=true, busy=false}
+end
+local function makeAudit(saved)
+    return {busy=false, events=tern.json.array(), eventsTruncated=false,
+        exportPath=type(saved)=="table" and type(saved.exportPath)=="string" and saved.exportPath:sub(1,2048) or nil}
+end
 local function refreshTrace(s)
     local u, t = s.ui, s.ui and s.ui.trace
     if not u or not t then return end
@@ -358,6 +414,52 @@ local function refreshTrace(s)
         t.fields.verifyCriteria.cursor = utf8.len(t.fields.verifyCriteria.text)
     end
 end
+local function refreshAudit(s)
+    local u, a = s.ui, s.ui and s.ui.audit
+    if not u or not a then return end
+    local requirement = u.selected and u.byId[u.selected]
+    a.error = nil
+    if not requirement then a.events = tern.json.array(); a.markdown = nil; return end
+    local workflow, workflowError = Workflow.load(u.paths, requirement)
+    local plan, planError = Results.loadPlan(u.paths, requirement)
+    local results, resultsError = Results.loadResults(u.paths, requirement)
+    local reviews, reviewError = Review.load(u.paths, requirement)
+    if not workflow or not plan or not results or not reviews then
+        a.events = tern.json.array()
+        a.markdown = nil
+        a.error = "审计记录无法完整读取：" .. storageMessage(workflowError or planError or resultsError or reviewError or "未知错误")
+        return
+    end
+    a.events, a.eventsTruncated = Audit.timeline(requirement, workflow, plan, results, reviews)
+    a.markdown = Audit.markdown(requirement, workflow, plan, results, reviews)
+    if #a.markdown > 131072 then
+        a.markdown = nil
+        a.error = "导出内容超过 128 KiB；未生成不完整的导出。请缩小记录后再试。"
+    end
+end
+local function refreshReview(s)
+    local u, v = s.ui, s.ui and s.ui.review
+    if not u or not v then return end
+    local requirement = u.selected and u.byId[u.selected]
+    v.error = nil
+    if not requirement then v.data = nil; return end
+    local data, problem = Review.load(u.paths, requirement)
+    if not data then
+        v.safe, v.data = false, nil
+        v.error = "审查记录损坏：" .. storageMessage(problem or "请核对 reviews.json")
+        return
+    end
+    v.safe, v.data = true, data
+    local valid, first = false, nil
+    for _, review in data.reviews do
+        for _, finding in review.findings do
+            local key = review.id .. "|" .. finding.id
+            if not first then first = key end
+            if v.finding == key then valid = true end
+        end
+    end
+    if not valid then v.finding = first or "" end
+end
 local function saveUi(s)
     if not s.ui then return end
     tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
@@ -365,7 +467,7 @@ local function saveUi(s)
         queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode,
         detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
         mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff),
-        trace = traceSnapshot(s.ui.trace)})
+        trace = traceSnapshot(s.ui.trace), review = reviewSnapshot(s.ui.review), audit = {exportPath = s.ui.audit and s.ui.audit.exportPath or nil}})
 end
 storageMessage = function(reason)
     local code = type(reason) == "table" and reason.code or reason
@@ -384,6 +486,13 @@ storageMessage = function(reason)
         corrupt_project = "项目记录损坏；未覆盖原文件。",
         project_root_mismatch = "此存储属于另一个项目根目录；未覆盖。",
         invalid_json = "项目存储不是有效 JSON；未覆盖。",
+        corrupt_reviews = "审查记录损坏；未覆盖原文件。",
+        review_limit = "审查记录已达到上限；未丢弃任何旧记录。",
+        acceptance_limit = "人工验收记录已达到上限；未丢弃旧决定。",
+        reopening_limit = "重新打开记录已达到上限。",
+        review_event_limit = "单次审查的处置事件已达到上限。",
+        invalid_stage_transition = "当前阶段不允许此人工转换；请刷新后核对。",
+        missing_acceptance = "找不到可重新打开的人工接受记录。",
     }
     if messages[code] then
         local detail = type(reason) == "table" and reason.detail
@@ -1124,6 +1233,211 @@ local function refreshProject(s)
     if u.selected and not u.byId[u.selected] then u.selected = nil end
     refreshHandoff(s)
     refreshTrace(s)
+    refreshReview(s)
+    if u.tab == "audit" then refreshAudit(s) end
+end
+local function parseFindings(text)
+    local findings = tern.json.array()
+    for raw in (text .. "\n"):gmatch("(.-)\n") do
+        local line = trim(raw)
+        if line ~= "" then
+            local level, description = line:match("^([%a_]+)%s*|%s*(.+)$")
+            if not level or not description then return nil, "发现格式无效：每行必须是“严重度|描述”" end
+            level = level:lower()
+            if level ~= "blocking" and level ~= "major" and level ~= "minor" and level ~= "note" then
+                return nil, "发现严重度无效：" .. level
+            end
+            if #description > 4000 or not utf8.len(description) then return nil, "发现描述无效或超过 4000 字节" end
+            table.insert(findings, {severity=level, description=description})
+        end
+    end
+    if #findings > 50 then return nil, "单次审查最多 50 项发现" end
+    return findings, nil
+end
+local function currentVerificationIds(results, requirement, snapshot, passedOnly)
+    local ids = tern.json.array()
+    for _, verification in results and results.verifications or {} do
+        if verification.requirementRevision == requirement.revision and verification.codeSnapshotSha256 == snapshot
+            and (not passedOnly or verification.result == "passed") then
+            table.insert(ids, verification.id)
+        end
+    end
+    return ids
+end
+local function reviewNotice(s, text)
+    s.ui.review.notice = text
+end
+local function reviewFail(s, cx, text)
+    s.ui.review.busy = false
+    s.ui.review.error = tostring(text or "操作失败")
+    saveUi(s)
+    cx:render()
+end
+local function requireReviewWrite(s, cx)
+    if not s.ui or not s.ui.review or not s.ui.review.safe then reviewFail(s, cx, "审查记录不可用；当前只读"); return false end
+    if not s.ui.writable then reviewFail(s, cx, "需要项目编辑锁"); return false end
+    if s.ui.review.busy then return false end
+    return true
+end
+local function reviewAction(s, act, cx)
+    local u, v, requirement = s.ui, s.ui and s.ui.review, selectedRequirement(s)
+    if not u or not v or not requirement then return end
+    if act == "review-open-native" then prefillLiteral(s, cx, "/review"); return end
+    if not requireReviewWrite(s, cx) then return end
+    v.error, v.notice = nil, nil
+    if act == "review-create" then
+        local findings, failure = parseFindings(v.fields.reviewFindings.text)
+        if not findings then reviewFail(s, cx, failure); return end
+        local snapshot = u.trace and u.trace.results and u.trace.results.changes and u.trace.results.changes.fingerprint
+        if not snapshot then reviewFail(s, cx, "请先在结果页读取当前代码变化；审查必须绑定代码快照"); return end
+        v.busy = true
+        saveUi(s); cx:render()
+        Review.createReview(u.paths, requirement, u.token, {source=v.source, scope=trim(v.fields.reviewScope.text),
+            codeSnapshotSha256=snapshot, findings=findings}, v.data.revision, function(saved, reason, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) then return end
+            v.busy = false
+            if saved then
+                v.data = saved
+                local created = saved.reviews[#saved.reviews]
+                if created and created.findings[1] then v.finding = created.id .. "|" .. created.findings[1].id end
+                v.fields.reviewFindings.text, v.fields.reviewFindings.cursor, v.fields.reviewFindings.anchor = "", 0, nil
+                v.notice = "审查已记录并绑定当前代码快照。"
+                refreshAudit(s)
+            else v.error = "审查未能保存：" .. storageMessage(reason or "请核对 reviews.json") end
+            saveUi(s); ctx:render()
+        end)
+    elseif act == "review-dispose" then
+        local reviewId, findingId = v.finding:match("^([^|]+)|([^|]+)$")
+        if not reviewId or not findingId then reviewFail(s, cx, "请选择一个发现"); return end
+        local reason = trim(v.fields.reviewReason.text)
+        if reason == "" then reviewFail(s, cx, "请填写处置理由"); return end
+        v.busy = true
+        saveUi(s); cx:render()
+        Review.disposeFinding(u.paths, requirement, u.token, {reviewId=reviewId, findingId=findingId,
+            action=v.action, reason=reason}, v.data.revision, function(saved, problem, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) then return end
+            v.busy = false
+            if saved then
+                v.data = saved
+                v.fields.reviewReason.text, v.fields.reviewReason.cursor, v.fields.reviewReason.anchor = "", 0, nil
+                v.notice = "发现处置已追加；旧事件保留。"
+                refreshAudit(s)
+            else v.error = "发现处置未能保存：" .. storageMessage(problem or "请核对 reviews.json") end
+            saveUi(s); ctx:render()
+        end)
+    elseif act == "review-accept" then
+        if requirement.stage ~= "implementing" and requirement.stage ~= "verifying" and requirement.stage ~= "awaiting_acceptance" then
+            reviewFail(s, cx, "当前阶段不允许接受；请先重新实施或刷新需求"); return
+        end
+        local gate = Review.acceptanceGate(requirement, u.trace and u.trace.results, v.data)
+        if not gate.ok then reviewFail(s, cx, table.concat(gate.problems, "；")); return end
+        local reviewIds = tern.json.array()
+        for _, review in v.data.reviews do table.insert(reviewIds, review.id) end
+        v.busy = true
+        saveUi(s); cx:render()
+        Review.recordAcceptance(u.paths, requirement, u.token, {decision="accepted", codeSnapshotSha256=gate.snapshot,
+            verificationIds=currentVerificationIds(u.trace.results, requirement, gate.snapshot, true),
+            reviewIds=reviewIds, comment=trim(v.fields.reviewComment.text)}, v.data.revision, function(saved, problem, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) then return end
+            if not saved then reviewFail(s, ctx, "人工接受未能保存：" .. storageMessage(problem or "请核对 reviews.json")); return end
+            v.data = saved
+            store.advanceStage(u.paths, requirement, "done", requirement.revision, u.token, function(updated, stageReason, stageCx)
+                local final = stageCx or ctx
+                if not alive(final) then return end
+                v.busy = false
+                if updated then
+                    refreshProject(s)
+                    reviewNotice(s, "人工接受已记录；需求完成。审查与验收历史保留。")
+                else
+                    refreshProject(s)
+                    s.ui.review.error = "验收记录已保存，但阶段更新失败：" .. storageMessage(stageReason or "请核对需求记录")
+                end
+                saveUi(s); final:render()
+            end)
+        end)
+    elseif act == "review-reject" then
+        if requirement.stage ~= "implementing" and requirement.stage ~= "verifying" and requirement.stage ~= "awaiting_acceptance" then
+            reviewFail(s, cx, "当前阶段不允许驳回；已完成需求请使用重新打开"); return
+        end
+        local reason = trim(v.fields.reviewReject.text)
+        if reason == "" then reviewFail(s, cx, "请填写驳回原因"); return end
+        local snapshot = u.trace and u.trace.results and u.trace.results.changes and u.trace.results.changes.fingerprint
+        if not snapshot then reviewFail(s, cx, "缺少当前代码快照；无法记录驳回"); return end
+        local reviewIds = tern.json.array()
+        for _, review in v.data.reviews do table.insert(reviewIds, review.id) end
+        v.busy = true
+        saveUi(s); cx:render()
+        Review.recordAcceptance(u.paths, requirement, u.token, {decision="rejected", codeSnapshotSha256=snapshot,
+            verificationIds=currentVerificationIds(u.trace.results, requirement, snapshot, false),
+            reviewIds=reviewIds, comment=reason}, v.data.revision, function(saved, problem, freshCx)
+            local ctx = freshCx or cx
+            if not alive(ctx) then return end
+            if not saved then reviewFail(s, ctx, "驳回未能保存：" .. storageMessage(problem or "请核对 reviews.json")); return end
+            v.data = saved
+            local function finishStage(updated, stageReason, stageCx)
+                local final = stageCx or ctx
+                if not alive(final) then return end
+                v.busy = false
+                if updated then refreshProject(s); reviewNotice(s, "人工驳回已记录；需求退回实施中。")
+                else s.ui.review.error = "驳回已记录，但阶段更新失败：" .. storageMessage(stageReason or "请核对需求记录") end
+                saveUi(s); final:render()
+            end
+            if requirement.stage == "implementing" then finishStage(requirement, nil, ctx)
+            else store.advanceStage(u.paths, requirement, "implementing", requirement.revision, u.token, finishStage) end
+        end)
+    elseif act == "review-reopen" then
+        local reason = trim(v.fields.reviewReopen.text)
+        if reason == "" then reviewFail(s, cx, "请填写重新打开原因"); return end
+        local latest = Review.latestAcceptance(v.data)
+        if not latest or latest.decision ~= "accepted" then reviewFail(s, cx, "没有可重新打开的人工接受记录"); return end
+        v.busy = true
+        saveUi(s); cx:render()
+        Review.recordReopen(u.paths, requirement, u.token, {acceptanceId=latest.id, reason=reason}, v.data.revision,
+            function(saved, problem, freshCx)
+                local ctx = freshCx or cx
+                if not alive(ctx) then return end
+                if not saved then reviewFail(s, ctx, "重新打开未能保存：" .. storageMessage(problem or "请核对 reviews.json")); return end
+                v.data = saved
+                store.advanceStage(u.paths, requirement, "clarifying", requirement.revision, u.token, function(updated, stageReason, stageCx)
+                    local final = stageCx or ctx
+                    if not alive(final) then return end
+                    v.busy = false
+                    if updated then refreshProject(s); reviewNotice(s, "需求已重新打开；旧验收历史保留。")
+                    else s.ui.review.error = "重新打开已记录，但阶段更新失败：" .. storageMessage(stageReason or "请核对需求记录") end
+                    saveUi(s); final:render()
+                end)
+            end)
+    else
+        reviewFail(s, cx, "未知审查操作")
+    end
+end
+local function auditAction(s, act, cx)
+    local u, a, requirement = s.ui, s.ui and s.ui.audit, selectedRequirement(s)
+    if not u or not a or not requirement then return end
+    if act == "audit-refresh" then
+        refreshAudit(s)
+        saveUi(s); cx:render()
+        return
+    end
+    if not a.markdown then a.error = "没有可导出的审计内容"; cx:render(); return end
+    if act == "audit-copy" then
+        local ok, failure = pcall(function() cx:copy(a.markdown) end)
+        if ok then a.notice = "Markdown 已复制到剪贴板。" else a.error = "复制失败：" .. tostring(failure) end
+    elseif act == "audit-write" then
+        local directory = u.paths.store .. "\\exports"
+        local file = directory .. "\\" .. requirement.number .. "-audit-" .. tostring(live.epoch()) .. ".md"
+        local made, mkdirError = pcall(tern.fs.mkdir, directory)
+        if not made then a.error = "导出目录创建失败：" .. tostring(mkdirError); cx:render(); return end
+        local wrote, writeError = pcall(tern.fs.write, file, a.markdown)
+        if wrote then
+            a.exportPath = file
+            a.notice = "审计 Markdown 已写入项目导出目录。"
+        else a.error = "导出写入失败：" .. tostring(writeError) end
+    end
+    saveUi(s); cx:render()
 end
 local function scheduleProjectRefresh(s, cx)
     local u = s.ui
@@ -1169,7 +1483,9 @@ local function loadWorkbench(s, cx)
         editing = type(saved) == "table" and saved.editing or nil,
         draftKey = type(saved) == "table" and saved.draftKey or nil,
         handoff = makeHandoff(type(saved) == "table" and saved.handoff or nil),
-        trace = makeTrace(type(saved) == "table" and saved.trace or nil)}
+        trace = makeTrace(type(saved) == "table" and saved.trace or nil),
+        review = makeReview(type(saved) == "table" and saved.review or nil),
+        audit = makeAudit(type(saved) == "table" and saved.audit or nil)}
     s.ui = u
     for key, draft in u.drafts do
         if type(draft) == "table" then
@@ -1379,7 +1695,7 @@ local function fieldName(id)
     if id:match("%.materials$") then return "materials" end
     if id:match("%.search$") then return "search" end
     local last = id:match("%.([%w]+)$")
-    if last and traceLimits[last] then return last end
+    if last and (traceLimits[last] or reviewLimits[last]) then return last end
     return nil
 end
 local function isHandoffField(s, name)
@@ -1388,9 +1704,16 @@ end
 local function isTraceField(s, name)
     return s.ui.trace and s.ui.trace.fields[name] ~= nil
 end
+local function isReviewField(s, name)
+    return s.ui.review and s.ui.review.fields[name] ~= nil
+end
 local function traceEditorLocked(s)
     local t = s.ui.trace
     return not s.ui.writable or not t or not t.safe or t.busy
+end
+local function reviewEditorLocked(s)
+    local v = s.ui.review
+    return not s.ui.writable or not v or not v.safe or v.busy
 end
 local function handoffEditorLocked(s, name)
     local h = s.ui.handoff
@@ -1399,6 +1722,7 @@ end
 local function bufferFor(s, name)
     if name == "materials" then return s end
     if isTraceField(s, name) then return s.ui.trace.fields[name] end
+    if isReviewField(s, name) then return s.ui.review.fields[name] end
     if name == "search" then
         local u = s.ui
         u.searchBuffer = u.searchBuffer or {text = u.query or "", cursor = u.queryCursor or utf8.len(u.query or ""), history = {}}
@@ -1410,6 +1734,7 @@ end
 local function persistBuffer(s, name)
     if name == "materials" then persist(s)
     elseif isTraceField(s, name) then saveUi(s)
+    elseif isReviewField(s, name) then saveUi(s)
     elseif name == "search" then
         s.ui.query, s.ui.queryCursor = s.ui.searchBuffer.text, s.ui.searchBuffer.cursor
         saveUi(s)
@@ -1429,11 +1754,12 @@ local function replaceBuffer(buffer, first, last, text, bound)
     return true
 end
 local function insertBuffer(s, target, buffer, first, last, text)
-    local bound = target == "materials" and live.maxText or handoffLimits[target] or traceLimits[target]
+    local bound = target == "materials" and live.maxText or handoffLimits[target] or traceLimits[target] or reviewLimits[target]
     local ok, failure = replaceBuffer(buffer, first, last, text, bound)
     if target == "materials" then s.error = if ok then nil else failure
     elseif isHandoffField(s, target) then s.ui.handoff.error = if ok then nil else failure
-    elseif isTraceField(s, target) then s.ui.trace.error = if ok then nil else failure end
+    elseif isTraceField(s, target) then s.ui.trace.error = if ok then nil else failure
+    elseif isReviewField(s, target) then s.ui.review.error = if ok then nil else failure end
     if ok and (target=="paths" or target=="excerpt") then invalidatePreview(s.ui.handoff) end
     return ok
 end
@@ -1508,6 +1834,7 @@ tern.block.define("live", {
         if not buffer then return false end
         if isHandoffField(s, target) and handoffEditorLocked(s, target) then return true end
         if isTraceField(s, target) and traceEditorLocked(s) then return true end
+        if isReviewField(s, target) and reviewEditorLocked(s) then return true end
         if target ~= "materials" and target ~= "search" and s.ui.saving then return true end
         local length = utf8.len(buffer.text)
         local first, last = math.min(buffer.anchor or buffer.cursor, buffer.cursor), math.max(buffer.anchor or buffer.cursor, buffer.cursor)
@@ -1550,6 +1877,7 @@ tern.block.define("live", {
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if isTraceField(s, target) and traceEditorLocked(s) then return end
+            if isReviewField(s, target) and reviewEditorLocked(s) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             if buffer and ev.len == units(buffer.text, utf8.len(buffer.text)) then
@@ -1563,6 +1891,7 @@ tern.block.define("live", {
                         saveUi(s)
                     elseif isHandoffField(s, target) then saveUi(s)
                     elseif isTraceField(s, target) then saveUi(s)
+                    elseif isReviewField(s, target) then saveUi(s)
                     else
                         s.ui.dirty, s.ui.formError = true, nil
                         persistForm(s)
@@ -1573,6 +1902,7 @@ tern.block.define("live", {
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if isTraceField(s, target) and traceEditorLocked(s) then return end
+            if isReviewField(s, target) and reviewEditorLocked(s) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             local old = buffer and buffer.history and table.remove(buffer.history)
@@ -1587,6 +1917,8 @@ tern.block.define("live", {
             s.ui.tab, s.ui.detailMode = ev.item, false
             if ev.item == "handoff" then refreshHandoff(s) end
             if ev.item == "results" then refreshTrace(s) end
+            if ev.item == "review" then refreshReview(s) end
+            if ev.item == "audit" then refreshReview(s); refreshAudit(s) end
             saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.requirements$") then
             local id = tostring(ev.item):match("([^%.]+)$")
@@ -1597,6 +1929,8 @@ tern.block.define("live", {
                 s.ui.selected, s.ui.detailMode = id, true
                 refreshHandoff(s)
                 refreshTrace(s)
+                refreshReview(s)
+                if s.ui.tab == "audit" then refreshAudit(s) end
                 saveUi(s)
             end
         elseif ev.ev == "change" then
@@ -1606,6 +1940,9 @@ tern.block.define("live", {
             if stepIndex then setTraceStepStatus(s, cx, stepIndex, value); return end
             if s.ui.saving and (name == "type" or name == "priority") then return end
             if name == "privacyMode" then s.ui.privacyMode = value; saveUi(s)
+            elseif name == "rvSource" then s.ui.review.source = value; saveUi(s)
+            elseif name == "rvFinding" then s.ui.review.finding = value; saveUi(s)
+            elseif name == "rvAction" then s.ui.review.action = value; saveUi(s)
             elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
             elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
             elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
@@ -1640,6 +1977,8 @@ tern.block.define("live", {
                 end
             elseif act == "open-handoff" or (type(act) == "string" and act:match("^handoff%-")) then handoffAction(s, act, cx)
             elseif type(act) == "string" and act:match("^results%-") then traceAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^review%-") then reviewAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^audit%-") then auditAction(s, act, cx)
             elseif act == "prefill" then prefill(s, cx)
             elseif act == "acknowledge-unknown" then
                 if s.pending and s.receipt and s.receipt.status == "delivery_unknown"

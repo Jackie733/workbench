@@ -473,7 +473,8 @@ end
 function M.putScoped(paths, file, value, expectedRevision, token, cb)
     local prefix = paths.requirements .. "\\"
     local relative = type(file) == "string" and file:sub(1, #prefix) == prefix and file:sub(#prefix + 1)
-    local id = relative and (relative:match("^([%w_%-]+)\\plan%.json$") or relative:match("^([%w_%-]+)\\results%.json$"))
+    local id = relative and (relative:match("^([%w_%-]+)\\plan%.json$") or relative:match("^([%w_%-]+)\\results%.json$")
+        or relative:match("^([%w_%-]+)\\reviews%.json$"))
     local evidenceId = relative and relative:match("^([%w_%-]+)\\evidence\\verification%-[%w_%-]+%.json$")
     local requirementId = id or evidenceId
     local valid = type(value) == "table" and requirementId and value.requirementId == requirementId
@@ -684,6 +685,28 @@ function M.workflowStage(paths, requirement, stage, expectedRevision, token, cb)
     if not current or not M.validateRequirement(current) then cb(nil,{code="corrupt_requirement",detail=problem});return end
     if current.revision~=expectedRevision or current.projectId~=requirement.projectId then cb(nil,{code="revision_conflict"});return end
     if not M.workflowStages[current.stage] then cb(nil,{code="invalid_stage_transition"});return end
+    local nextReq={};for k,v in current do nextReq[k]=v end
+    nextReq.stage=stage;nextReq.revision=current.revision+1;nextReq.updatedAt=os.time()*1000
+    M.put(paths,file,nextReq,current.revision,token,function(ok,reason,cx)
+        if ok then cb(nextReq,nil,cx) else cb(nil,{code=reason},cx) end
+    end)
+end
+local reviewTransitions = {
+    verifying = {implementing=true},
+    awaiting_acceptance = {implementing=true,verifying=true},
+    implementing = {verifying=true,awaiting_acceptance=true},
+    done = {awaiting_acceptance=true,implementing=true,verifying=true},
+    clarifying = {done=true},
+}
+-- Human review/acceptance transitions. Kept separate from workflow actions so
+-- a terminal requirement cannot silently adopt or approve new designs.
+function M.advanceStage(paths, requirement, stage, expectedRevision, token, cb)
+    if not M.token(token) or not reviewTransitions[stage] then cb(nil,{code="invalid_stage_transition"}); return end
+    local file = join(join(paths.requirements,requirement.requirementId),"requirement.json")
+    local current,problem=readJson(file)
+    if not current or not M.validateRequirement(current) then cb(nil,{code="corrupt_requirement",detail=problem});return end
+    if current.revision~=expectedRevision or current.projectId~=requirement.projectId then cb(nil,{code="revision_conflict"});return end
+    if not reviewTransitions[stage][current.stage] then cb(nil,{code="invalid_stage_transition"});return end
     local nextReq={};for k,v in current do nextReq[k]=v end
     nextReq.stage=stage;nextReq.revision=current.revision+1;nextReq.updatedAt=os.time()*1000
     M.put(paths,file,nextReq,current.revision,token,function(ok,reason,cx)

@@ -2,6 +2,8 @@
 local ui = tern.ui
 local handoff = require("./handoff")
 local runview = require("./runview")
+local reviewview = require("./reviewview")
+local auditview = require("./auditview")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -244,7 +246,7 @@ function M.build(s)
             note(data and data.model and data.model:match("[^/]+$") or "模型未知"),
             data and data.currentTool and note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")) or note(""),
         }),
-        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料·方案·批准"},{id="results",label="结果"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
+        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料·方案·批准"},{id="results",label="结果"},{id="review",label="审查·验收"},{id="audit",label="审计"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
     }
     if u.error then table.insert(nodes, ui.node("card", {key = "loadError", head = u.storageUnsafe and "项目存储异常" or "操作未完成", tone = "error"}, {ui.text(u.error), button("重新加载", "reload")})) end
     if u.notice then table.insert(nodes, ui.text({ui.span(u.notice, "warning")})) end
@@ -276,6 +278,14 @@ function M.build(s)
         if u.loading then table.insert(nodes, note("正在读取计划、代码变化与验证证据…"))
         elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
         else table.insert(nodes, runview.build(s)) end
+    elseif u.tab == "review" then
+        if u.loading then table.insert(nodes, note("正在读取审查与验收记录…"))
+        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
+        else table.insert(nodes, reviewview.build(s)) end
+    elseif u.tab == "audit" then
+        if u.loading then table.insert(nodes, note("正在读取审计时间线…"))
+        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
+        else table.insert(nodes, auditview.build(s)) end
     elseif u.tab == "runtime" then
         table.insert(nodes, runtime(s))
     else
