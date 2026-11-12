@@ -13,11 +13,22 @@ end
 local M = {}
 local function note(text) return ui.text({ui.span(text or "", "muted")}) end
 local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "quiet", size = "sm", disabled = disabled,
+    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
         actions = {click = action}})
 end
 local function row(key, children)
     return ui.node("row", {key = key, gap = "sm", wrap = true}, children)
+end
+local function choices(name, label, value, options, disabled)
+    local chips = {}
+    for _, option in options do
+        local selected = value == option.value
+        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
+            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
+            actions = {click = "change:" .. name .. "=" .. option.value}}))
+    end
+    return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
+        {row(name, chips)})
 end
 local function editor(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
@@ -33,13 +44,19 @@ function M.build(s)
     local editable = writable and h.pending == nil and h.pendingSend == nil
     if not r then return ui.node("empty", {key = "handoffNoRequirement", title = "先选择需求", text = "资料、正式方案和批准记录都绑定到当前选中的需求。"}) end
     local tabs = ui.node("tabs", {key = "handoffTabs", active = h.tab or "materials", items = {
-        {id = "materials", label = "资料"}, {id = "design", label = "方案"}, {id = "approval", label = "批准"}}})
+        {id = "materials", label = "① 资料"}, {id = "design", label = "② 方案"}, {id = "approval", label = "③ 批准"}}})
+    local guides = {
+        materials = "① 资料：选择文件与讨论摘录 → 生成完整预览 → 只预填，或明确发送并开始推理。",
+        design = "② 方案：写草稿或导入项目文件 → 明确采用为正式版本；回复候选不会自动采用。",
+        approval = "③ 批准：先检查 Git 基线 → 批准最新方案，或使用独立的直接实施授权。",
+    }
     local head = ui.card(r.number .. " · " .. r.title, {
+        note(guides[h.tab or "materials"]),
         note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage) .. " · 项目 " .. s.payload.binding.projectRoot),
         note("当前目标 omp 会话：" .. s.payload.binding.sessionId .. " · 实例 " .. s.payload.binding.instanceId),
     }, {key = "handoffTarget", tone = "muted"})
     local nodes = {head, tabs}
-    if s.problem then table.insert(nodes,ui.text({ui.span(s.problem.."；请在原 omp 再次 /wb，资料已保留。","warning")})) end
+    if s.problem then table.insert(nodes,ui.text({ui.span(s.problem.."；资料已保留，不会自动重发。","warning")})) end
     if h.error then table.insert(nodes, ui.text({ui.span(h.error, "error")})) end
     if h.notice then table.insert(nodes, ui.text({ui.span(h.notice, "warning")})) end
     if h.pending then
@@ -68,16 +85,15 @@ function M.build(s)
         local readonly = not editable
         table.insert(nodes, editor("paths", "项目相对文件路径 · 每行一个", h.fields.paths.text,
             h.fields.paths.cursor, h.fields.paths.anchor, 4, readonly, "例如 src/app.ts；不接受绝对路径或 shell 片段"))
-        table.insert(nodes, ui.node("field", {key = "requirementToggle", label = "把完整需求加入资料预览"}, {
-            ui.node("select", {key = "includeRequirement", value = h.includeRequirement and "yes" or "no", disabled = not editable,
-                options = {{value = "yes", label = "包含当前需求"}, {value = "no", label = "不包含需求"}}})}))
-        table.insert(nodes, ui.node("field", {key = "activityField", label = "本次明确意图"}, {
-            ui.node("select", {key = "activity", value = h.activity, disabled = not editable,
-                options = {{value = "clarify", label = "澄清"}, {value = "design", label = "设计"}, {value = "implement", label = "实施"}}})}))
+        table.insert(nodes, choices("includeRequirement", "把完整需求加入资料预览", h.includeRequirement and "yes" or "no",
+            {{value = "yes", label = "包含当前需求"}, {value = "no", label = "不包含需求"}}, not editable))
+        table.insert(nodes, choices("activity", "本次明确意图", h.activity,
+            {{value = "clarify", label = "澄清"}, {value = "design", label = "设计"}, {value = "implement", label = "实施"}}, not editable))
         table.insert(nodes, editor("excerpt", "选中的讨论摘录", h.fields.excerpt.text,
             h.fields.excerpt.cursor, h.fields.excerpt.anchor, 6, not editable, "仅发送你明确选择的讨论片段；不会读取整个聊天记录"))
         table.insert(nodes, row("previewActions", {
-            button("生成完整资料预览", "handoff-preview", "primary", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
+            button(h.preview and "重新生成完整预览" or "生成完整资料预览", "handoff-preview",
+                h.preview and "default" or "primary", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
             button("检查当前 Git 基线", "handoff-baseline", "quiet", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
         }))
         local preview = h.preview
@@ -92,7 +108,7 @@ function M.build(s)
                 h.previewStale and ui.text({ui.span("此预览来自上次运行；来源令牌已失效。请显式重新生成预览。", "warning")}) or note("SHA-256：" .. tostring(preview.sha256)),
                 ui.node("scroll", {key = "fullPreview", max = {h = "22lines"}}, {ui.text(preview.text)}),
                 row("previewDelivery", {
-                    button("只预填到 omp（不发送）", "handoff-prefill", "quiet", h.previewStale or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
+                    button("只预填到 omp（不发送）", "handoff-prefill", "default", h.previewStale or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
                     button("明确发送并开始推理", "handoff-send", "primary", h.previewStale or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil
                         or not s.snapshot or s.snapshot.state ~= "idle" or (preview.activity == "implement" and not h.approvalValid)),
                 }),
@@ -134,11 +150,9 @@ function M.build(s)
             end
             if not current then h.selectedVersion = workflow.latestVersion end
             local diffOptions = {{value = "0", label = "不比较"}}
-            for _, version in versions do table.insert(diffOptions, {value = tostring(version.version), label = "与 v" .. tostring(version.version) .. " 比较"}) end
-            table.insert(nodes, row("versionSelectors", {
-                ui.node("field", {key = "selectedVersionField", label = "读取完整不可变版本"}, {ui.node("select", {key = "selectedVersion", value = tostring(h.selectedVersion or workflow.latestVersion), options = options})}),
-                ui.node("field", {key = "compareVersionField", label = "真实逐行差异"}, {ui.node("select", {key = "compareVersion", value = tostring(h.compareVersion or 0), options = diffOptions})}),
-            }))
+            for _, version in versions do table.insert(diffOptions, {value = tostring(version.version), label = "对比 v" .. tostring(version.version)}) end
+            table.insert(nodes, choices("selectedVersion", "读取完整不可变版本", tostring(h.selectedVersion or workflow.latestVersion), options, false))
+            table.insert(nodes, choices("compareVersion", "真实逐行差异", tostring(h.compareVersion or 0), diffOptions, false))
             if h.selectedDesign then
                 table.insert(nodes, ui.card("正式方案 v" .. tostring(h.selectedDesign.version) .. " · SHA-256 " .. tostring(h.selectedDesign.sha256), {
                     note("需求修订 " .. tostring(h.selectedDesign.requirementRevision) .. " · 来源 " .. tostring(h.selectedDesign.source and h.selectedDesign.source.kind or "unknown")
@@ -180,7 +194,7 @@ function M.build(s)
         table.insert(nodes, row("approveActions", {
             button("明确批准当前最新方案", "handoff-approve", "primary", not writable or not h.baseline or not h.baselineCheckedAt or not h.selectedDesign
                 or h.selectedDesign.version ~= (wf and wf.latestVersion) or h.pendingSend ~= nil),
-            button("明确撤销当前批准", "handoff-revoke", "quiet", not writable or not wf or not wf.approval or h.pendingSend ~= nil or #h.fields.revokeReason.text == 0),
+            button("明确撤销当前批准", "handoff-revoke", "danger", not writable or not wf or not wf.approval or h.pendingSend ~= nil or #h.fields.revokeReason.text == 0),
         }))
         local criteria, scope = {}, type(r.scope) == "string" and r.scope or ""
         for _, item in r.acceptanceCriteria or {} do table.insert(criteria, "• " .. item.description) end

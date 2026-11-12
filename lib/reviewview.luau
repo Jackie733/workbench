@@ -16,10 +16,20 @@ local severityNames = {blocking = "阻断", major = "重要", minor = "次要", 
 local stateNames = {open = "未处置", resolved = "已解决", waived = "已豁免"}
 local function note(text) return ui.text({ui.span(text or "", "muted")}) end
 local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "quiet", size = "sm", disabled = disabled,
+    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
         actions = {click = action}})
 end
 local function row(key, children) return ui.node("row", {key = key, gap = "sm", wrap = true}, children) end
+local function choices(name, label, value, options, disabled)
+    local chips = {}
+    for _, option in options do
+        local selected = value == option.value
+        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
+            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
+            actions = {click = "change:" .. name .. "=" .. option.value}}))
+    end
+    return ui.node("field", {key = name .. "Field", label = label}, {row(name, chips)})
+end
 local function field(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
     return ui.node("field", {key = "reviewField-" .. key, label = label, help = placeholder}, {
@@ -28,6 +38,13 @@ local function field(key, label, text, cursor, anchor, lines, readonly, placehol
             placeholder = placeholder, aria = label, variant = "field"})})
 end
 local function latestAcceptance(data) return data and data.acceptances and data.acceptances[#data.acceptances] end
+local function optionsForFindings(items)
+    local list = {}
+    for _, review in items or {} do
+        for _, finding in review.findings or {} do table.insert(list, review.id .. "|" .. finding.id) end
+    end
+    return list
+end
 function M.build(s)
     local u, r = s.ui, s.ui.byId[s.ui.selected]
     local v = u.review
@@ -39,8 +56,8 @@ function M.build(s)
     local snapshot = trace and trace.results and trace.results.changes and trace.results.changes.fingerprint
     local nodes = {
         ui.card(r.number .. " · " .. r.title, {
+            note("顺序：记录审查 → 处置发现 → 人工验收。没有发现也可以验收；阻断发现必须处置。"),
             note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage) .. " · 项目 " .. s.payload.binding.projectRoot),
-            note("审查发现会绑定记录时的代码快照；处置只追加事件，不覆盖旧记录。"),
         }, {key = "reviewTarget", tone = "muted"}),
     }
     if v.error then table.insert(nodes, ui.text({ui.span(v.error, "error")})) end
@@ -56,15 +73,10 @@ function M.build(s)
     }))
     table.insert(nodes, ui.card("记录一次审查", {
         note("来源和范围由你填写；发现每行使用“严重度|描述”，严重度可选 blocking/major/minor/note。没有发现时留空。"),
-        row("reviewSource", {
-            ui.node("field", {key = "reviewSourceField", label = "来源"}, {
-                ui.node("select", {key = "rvSource", value = v.source, size = "sm", disabled = not writable, options = {
-                    {value = "native_review", label = "omp 原生审查"}, {value = "manual", label = "人工审查"},
-                    {value = "external", label = "外部审查"}}}),
-            }),
-            ui.node("field", {key = "reviewSnapshotField", label = "代码快照"}, {
-                note(snapshot and snapshot:sub(1, 16) or "尚未读取代码变化"),}),
-        }),
+        choices("rvSource", "来源", v.source, {
+            {value = "native_review", label = "omp 原生审查"}, {value = "manual", label = "人工审查"},
+            {value = "external", label = "外部审查"}}, not writable),
+        note(snapshot and ("审查将绑定当前代码快照 " .. snapshot:sub(1, 16)) or "尚未读取代码变化；先到“实施与验证”读取。"),
         field("reviewScope", "审查范围", v.fields.reviewScope.text, v.fields.reviewScope.cursor, v.fields.reviewScope.anchor, 3, not writable,
             "例如：未提交改动 / 分支 main...HEAD / 指定文件与验收条件"),
         field("reviewFindings", "发现 · 每行“严重度|描述”", v.fields.reviewFindings.text, v.fields.reviewFindings.cursor, v.fields.reviewFindings.anchor,
@@ -83,8 +95,15 @@ function M.build(s)
             local findingRows = {}
             for _, finding in review.findings do
                 local state, reason = Review.findingState(review, finding.id)
-                table.insert(findingRows, ui.text("[" .. severityNames[finding.severity] .. "] " .. finding.description
-                    .. " · " .. stateNames[state] .. (reason and (" · " .. reason) or "")))
+                local key = review.id .. "|" .. finding.id
+                local selected = v.finding == key
+                table.insert(findingRows, row("finding-" .. finding.id, {
+                    ui.text("[" .. severityNames[finding.severity] .. "] " .. finding.description
+                        .. " · " .. stateNames[state] .. (reason and (" · " .. reason) or "")),
+                    ui.button(selected and "已选中" or "选中处置", {key = "pick-" .. finding.id, size = "sm",
+                        variant = selected and "primary" or "default", on = selected,
+                        actions = {click = "review-pick=" .. key}}),
+                }))
             end
             if #findingRows == 0 then table.insert(findingRows, note("无发现（干净审查）")) end
             table.insert(cards, ui.card((sourceNames[review.source] or review.source) .. " · " .. review.id, {
@@ -95,26 +114,25 @@ function M.build(s)
         end
         table.insert(nodes, ui.node("section", {key = "reviewHistory", head = "审查记录 · " .. tostring(#items), collapsible = true, collapsed = false}, cards))
     end
-    local options, selected = {}, v.finding
+    local hasFindings = #optionsForFindings(items) > 0
+    local selectedFinding = nil
     for _, review in items do
         for _, finding in review.findings do
-            local state = Review.findingState(review, finding.id)
-            table.insert(options, {value = review.id .. "|" .. finding.id,
-                label = severityNames[finding.severity] .. " · " .. finding.description:sub(1, 48) .. " · " .. stateNames[state]})
+            if v.finding == review.id .. "|" .. finding.id then
+                selectedFinding = "[" .. severityNames[finding.severity] .. "] " .. finding.description
+            end
         end
     end
     table.insert(nodes, ui.card("追加发现处置", {
-        ui.node("field", {key = "reviewFindingField", label = "选择发现"}, {
-            ui.node("select", {key = "rvFinding", value = selected, size = "sm", disabled = not writable or #options == 0, options = options}),
-        }),
-        ui.node("field", {key = "reviewActionField", label = "处置"}, {
-            ui.node("select", {key = "rvAction", value = v.action, size = "sm", disabled = not writable, options = {
-                {value = "resolved", label = "已解决"}, {value = "waived", label = "明确豁免"}, {value = "reopened", label = "重新打开"}}}),
-        }),
+        note(selectedFinding and ("已选发现：" .. selectedFinding) or (hasFindings and "先在上方“审查记录”里选择一条发现。" or "没有可处置的发现。")),
+        choices("rvAction", "处置", v.action, {
+            {value = "resolved", label = "已解决"}, {value = "waived", label = "明确豁免"}, {value = "reopened", label = "重新打开"}}, not writable),
         field("reviewReason", "处置理由", v.fields.reviewReason.text, v.fields.reviewReason.cursor, v.fields.reviewReason.anchor, 3, not writable,
             "必须记录理由；豁免也保留在这里"),
-        button("追加处置事件", "review-dispose", "quiet",
-            not writable or #options == 0 or not v.fields.reviewReason.text:match("%S")),
+        button("追加处置事件", "review-dispose", "primary",
+            (not writable and "只读或记录未就绪") or (not hasFindings and "没有可处置的发现")
+            or (not selectedFinding and "先在上方选择一条发现")
+            or (not v.fields.reviewReason.text:match("%S") and "先填写处置理由") or false),
     }, {key = "reviewDisposition", tone = "muted"}))
 
     local gate = Review.acceptanceGate(r, trace and trace.results, data)
@@ -133,15 +151,18 @@ function M.build(s)
     table.insert(gateNodes, field("reviewComment", "验收说明", v.fields.reviewComment.text, v.fields.reviewComment.cursor, v.fields.reviewComment.anchor,
         3, not writable, "接受时可留空；说明会写入验收历史"))
     table.insert(gateNodes, row("acceptActions", {
-        button("人工接受并完成", "review-accept", "primary", not writable or not canDecide or not gate.ok),
+        button("人工接受并完成", "review-accept", "primary",
+            (not writable and "只读或记录未就绪") or (not canDecide and "当前阶段不能验收") or (not gate.ok and "门禁未通过：先满足上方条件") or false),
     }))
     table.insert(gateNodes, field("reviewReject", "驳回原因", v.fields.reviewReject.text, v.fields.reviewReject.cursor,
         v.fields.reviewReject.anchor, 3, not writable, "驳回会记录人工决定，并把需求退回实施中"))
     table.insert(gateNodes, row("rejectActions", {
-        button("人工驳回", "review-reject", "quiet", not writable or not canDecide or not snapshot
-            or not v.fields.reviewReject.text:match("%S")),
-        button("重新打开已完成需求", "review-reopen", "quiet", not writable or r.stage ~= "done"
-            or not v.fields.reviewReopen.text:match("%S")),
+        button("人工驳回", "review-reject", "danger", (not writable and "只读或记录未就绪")
+            or (not canDecide and "当前阶段不能驳回") or (not snapshot and "先读取代码快照")
+            or (not v.fields.reviewReject.text:match("%S") and "先填写驳回原因") or false),
+        button("重新打开已完成需求", "review-reopen", "default", (not writable and "只读或记录未就绪")
+            or (r.stage ~= "done" and "只有已完成需求可以重新打开")
+            or (not v.fields.reviewReopen.text:match("%S") and "先填写重新打开原因") or false),
     }))
     table.insert(gateNodes, field("reviewReopen", "重新打开原因", v.fields.reviewReopen.text, v.fields.reviewReopen.cursor,
         v.fields.reviewReopen.anchor, 3, not writable, "保留已完成历史；重新打开后回到澄清中"))

@@ -13,7 +13,7 @@ end
 local M = {}
 local function note(text) return ui.text({ui.span(text or "", "muted")}) end
 local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "quiet", size = "sm", disabled = disabled,
+    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
         actions = {click = action}})
 end
 function M.build(s)
@@ -31,8 +31,8 @@ function M.build(s)
     local events = Audit.filter(a.events or {}, query)
     local nodes = {
         ui.card("审计 · " .. r.number .. " · " .. r.title, {
-            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)
-                .. " · 事件按时间倒序；来源是项目内需求、方案、批准、计划、代码观察、验证、审查与人工验收记录。"),
+            note("按时间倒序汇总需求、方案、批准、计划、代码观察、验证、审查与人工验收记录；用于核对，不是防篡改日志。"),
+            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)),
             note("本地文件仍可被用户修改；这不是防篡改日志，也不能证明操作者身份。"),
         }, {key = "auditTarget", tone = "muted"}),
     }
@@ -43,8 +43,8 @@ function M.build(s)
             placeholder = "按类型、摘要或引用检索当前需求", aria = "审计检索", variant = "field", icon = "search"}),
     }))
     table.insert(nodes, ui.node("row", {key = "auditActions", gap = "sm", wrap = true}, {
-        button("刷新审计", "audit-refresh", "quiet", not writable),
-        button("复制 Markdown", "audit-copy", "quiet", not writable or not a.markdown),
+        button("刷新审计", "audit-refresh", "default", not writable),
+        button("复制 Markdown", "audit-copy", "default", not writable or not a.markdown),
         button("写入项目导出文件", "audit-write", "primary", not writable or not a.markdown),
     }))
     table.insert(nodes, note("导出只包含应用内记录：不包含验证 stdout/stderr、聊天记录、认证信息或凭据；不宣称本地文件不可修改。"))

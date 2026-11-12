@@ -26,12 +26,28 @@ local types = {feature = "功能", bug = "缺陷", chore = "维护"}
 local tones = {backlog = "muted", clarifying = "accent", designing = "accent", awaiting_approval = "pending",
     implementing = "accent", verifying = "accent", awaiting_acceptance = "pending", done = "success", blocked = "warning", cancelled = "muted"}
 local function note(s) return ui.text({ui.span(s or "", "muted")}) end
+-- Secondary actions stay visible: a bare "quiet" button is a discoverability trap.
 local function button(label, act, variant, disabled)
-    return ui.button(label, {key = act, variant = variant or "quiet", size = "sm", disabled = disabled, actions = {click = act}})
+    return ui.button(label, {key = act, variant = variant or "default", size = "sm", disabled = disabled,
+        actions = {click = act}})
 end
 local function row(key, children, props)
     props = props or {}; props.key = key; props.gap = props.gap or "sm"; props.wrap = true
     return ui.node("row", props, children)
+end
+-- A visible set of choices instead of a popup: no menu can be clipped by a split,
+-- and the selected state is readable at a glance. Actions replay the same change
+-- names the select controls used, through `change:<name>=<value>`.
+local function choices(name, label, value, options, disabled)
+    local chips = {}
+    for _, option in options do
+        local selected = tostring(value) == tostring(option.value)
+        table.insert(chips, ui.button(option.label, {key = name .. "-" .. tostring(option.value),
+            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
+            actions = {click = "change:" .. name .. "=" .. tostring(option.value)}}))
+    end
+    return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
+        {row(name, chips, {gap = "xs"})})
 end
 local function excerpt(text, bound)
     text = tostring(text or "")
@@ -52,9 +68,9 @@ local function requirements(s)
     return visible
 end
 local function rowItem(r)
-    local n = ui.node("item", {key = r.requirementId, label = r.title, detail = (r.number or "") .. " · " .. (stageNames[r.stage] or r.stage),
+    return ui.node("item", {key = r.requirementId, label = r.title, icon = "chevron",
+        detail = (r.number or "") .. " · " .. (stageNames[r.stage] or r.stage),
         value = priorities[r.priority] or r.priority, tone = tones[r.stage]})
-    return n
 end
 local function fieldEditor(s, key, label, placeholder, multiline)
     local f = s.fields[key] or {text = "", cursor = 0}
@@ -66,16 +82,17 @@ local function fieldEditor(s, key, label, placeholder, multiline)
     return ui.node("field", {key = "wrap-" .. key, label = label, required = key == "title" or key == "goal"}, {editor})
 end
 local function form(s)
-    local nodes = {ui.text({ui.span(s.mode == "new" and "新建需求" or "编辑需求", "title")})}
-    table.insert(nodes, fieldEditor(s, "title", "标题", "一句话描述要解决的问题", false))
-    table.insert(nodes, row("classification", {
-        ui.node("field", {key = "typeField", label = "类型"}, {ui.node("select", {key = "type", value = s.type, disabled = not s.writable or s.saving, options = {
-            {value = "feature", label = "功能"}, {value = "bug", label = "缺陷"}, {value = "chore", label = "维护"}}})}),
-        ui.node("field", {key = "priorityField", label = "优先级"}, {ui.node("select", {key = "priority", value = s.priority, disabled = not s.writable or s.saving, options = {
-            {value = "low", label = "低"}, {value = "normal", label = "普通"}, {value = "high", label = "高"}, {value = "urgent", label = "紧急"}}})}),
-    }))
-    table.insert(nodes, fieldEditor(s, "goal", "目标", "希望达成的结果", true))
-    table.insert(nodes, fieldEditor(s, "scope", "范围", "包含与不包含的内容", true))
+    local locked = not s.writable and "只读模式：先在页首取得编辑权" or (s.saving == true and "正在保存，暂不能修改" or false)
+    local nodes = {ui.text({ui.span(s.mode == "new" and "新建需求" or "编辑需求", "title")}),
+        note(s.mode == "new" and "先写清目标与验收条件；创建后按“资料 → 方案 → 批准 → 实施 → 验收”推进。"
+            or "保存会生成新的修订；正在进行的批准和证据会按内容摘要失效。")}
+    table.insert(nodes, fieldEditor(s, "title", "标题 · 必填", "一句话描述要解决的问题", false))
+    table.insert(nodes, choices("type", "类型", s.type, {
+        {value = "feature", label = "功能"}, {value = "bug", label = "缺陷"}, {value = "chore", label = "维护"}}, locked))
+    table.insert(nodes, choices("priority", "优先级", s.priority, {
+        {value = "low", label = "低"}, {value = "normal", label = "普通"}, {value = "high", label = "高"}, {value = "urgent", label = "紧急"}}, locked))
+    table.insert(nodes, fieldEditor(s, "goal", "目标 · 必填", "希望达成的结果", true))
+    table.insert(nodes, fieldEditor(s, "scope", "范围", "包含与不包含的内容；直接授权实施时必须填写", true))
     table.insert(nodes, fieldEditor(s, "criteria", "验收条件 · 每行一条", "可验证的结果，每行一条", true))
     table.insert(nodes, fieldEditor(s, "labels", "标签 · 逗号分隔", "例如：界面, 存储", false))
     if s.formError then table.insert(nodes, ui.text({ui.span(s.formError, "error")})) end
@@ -97,58 +114,115 @@ local function form(s)
         }, {key = "conflict", tone = "warning"}))
     end
     local saving = s.saving == true
-    local formActions = {button(s.mode == "new" and "创建需求" or "保存修改", "save-requirement", "primary", not s.writable or saving or s.conflict)}
-    if s.conflict then table.insert(formActions, button("保留整份草稿，基于此版本继续", "rebase", "quiet", saving)) end
-    table.insert(formActions, button("返回", "back", "quiet", saving))
+    local saveReason = if not s.writable then "只读模式：先在页首取得编辑权"
+        elseif saving then "正在保存"
+        elseif s.conflict then "磁盘上已有更新版本；先选择保留草稿或返回核对"
+        else false
+    local formActions = {button(s.mode == "new" and "创建需求" or "保存修改", "save-requirement", "primary", saveReason)}
+    if s.conflict then table.insert(formActions, button("保留整份草稿，基于此版本继续", "rebase", "default", saving)) end
+    table.insert(formActions, button("取消并返回", "back", "quiet", saving))
     table.insert(nodes, row("formActions", formActions))
     if s.dirty then table.insert(nodes, note(s.saving and "正在保存…" or "草稿已保留在此项目；尚未写入需求文件。")) end
     return ui.node("col", {key = "form", role = "workbench.form", gap = "sm"}, nodes)
 end
+local stepOrder = {backlog = 1, clarifying = 2, designing = 3, awaiting_approval = 4, implementing = 5,
+    verifying = 5, awaiting_acceptance = 6, done = 6, blocked = 2, cancelled = 1}
+local steps = {
+    {tab = "requirements", label = "需求", help = "澄清目标、范围与验收条件"},
+    {tab = "handoff", sub = "materials", label = "资料", help = "带入文件与讨论，生成完整预览"},
+    {tab = "handoff", sub = "design", label = "方案", help = "编写并采用正式版本"},
+    {tab = "handoff", sub = "approval", label = "批准", help = "检查 Git 基线并批准方案"},
+    {tab = "results", label = "实施与验证", help = "计划、代码变化与验证证据"},
+    {tab = "review", label = "审查与验收", help = "处置发现并人工验收"},
+}
+local nextActions = {
+    backlog = {label = "开始澄清", tab = "handoff", sub = "materials"},
+    clarifying = {label = "准备资料并生成预览", tab = "handoff", sub = "materials"},
+    designing = {label = "编写并采用方案", tab = "handoff", sub = "design"},
+    awaiting_approval = {label = "检查并批准方案", tab = "handoff", sub = "approval"},
+    implementing = {label = "查看实施计划与代码变化", tab = "results"},
+    verifying = {label = "查看验证证据", tab = "results"},
+    awaiting_acceptance = {label = "去审查并人工验收", tab = "review"},
+    done = {label = "查看审计记录", tab = "audit"},
+    blocked = {label = "查看阻塞原因", tab = "requirements"},
+    cancelled = {label = "查看审计记录", tab = "audit"},
+}
+local function openAction(target)
+    return "wb-open-" .. target.tab .. (target.sub and ("-" .. target.sub) or "")
+end
+-- The stepper is navigation, not a gate: every step is clickable, the current one
+-- is primary, and completed ones carry a check so the path already taken is visible.
+local function workflowSteps(r)
+    local current = stepOrder[r.stage] or 1
+    local chips = {}
+    for index, item in steps do
+        table.insert(chips, ui.button((index < current and "✓ " or "") .. item.label, {
+            key = "workflow-step-" .. tostring(index), size = "sm", title = item.help,
+            variant = index == current and "primary" or "default", on = index == current,
+            actions = {click = openAction(item)}}))
+    end
+    return ui.node("field", {key = "workflowSteps", label = "交付流程",
+        help = "点击步骤可切换页面；主按钮始终是当前建议动作。"}, {row("workflowStepRow", chips, {gap = "xs"})})
+end
 local function detail(s, r)
     if not r then return ui.node("empty", {key = "noSelection", variant = "inline", title = "选择一项需求", text = "从列表或看板选择需求以查看详情。"}) end
+    local nextStep = nextActions[r.stage] or {label = "继续处理", tab = "requirements"}
+    local editingReason = not s.writable and "只读模式：先在页首取得编辑权"
+        or (s.handoff.pendingSend ~= nil and "已有业务请求待核对；完成核对前不能修改需求" or false)
     local children = {
-        row("detailTitle", {ui.text({ui.span(r.title, "title")}), ui.badge(stageNames[r.stage] or r.stage, tones[r.stage] or "muted")} ),
-        note((r.number or "") .. " · " .. (types[r.type] or r.type) .. " · 优先级 " .. (priorities[r.priority] or r.priority)),
-        ui.node("rule", {}),
-        ui.text({ui.span("目标", "strong")}), ui.md(r.goal or ""),
+        row("detailTitle", {ui.text({ui.span(r.title, "title")}), ui.badge(stageNames[r.stage] or r.stage, tones[r.stage] or "muted")}),
+        note((r.number or "") .. " · " .. (types[r.type] or r.type) .. " · 优先级 " .. (priorities[r.priority] or r.priority)
+            .. " · 第 " .. tostring(math.min(stepOrder[r.stage] or 1, #steps)) .. " / " .. tostring(#steps) .. " 步"),
+        workflowSteps(r),
+        row("detailPrimary", {ui.button(nextStep.label, {key = "next-step", variant = "primary", size = "sm",
+            actions = {click = openAction(nextStep)}})}),
     }
+    if r.stage == "blocked" and r.blockedReason then
+        table.insert(children, ui.card("当前被阻塞", {ui.text(r.blockedReason),
+            button("回到资料页补充澄清", openAction({tab = "handoff", sub = "materials"}), "default")}, {key = "blockedReason", tone = "warning"}))
+    end
+    table.insert(children, ui.node("rule", {}))
+    table.insert(children, ui.text({ui.span("目标", "strong")})); table.insert(children, ui.md(r.goal or ""))
     if r.scope and r.scope ~= "" then table.insert(children, ui.text({ui.span("范围", "strong")})); table.insert(children, ui.md(r.scope)) end
     if #(r.acceptanceCriteria or {}) > 0 then
         table.insert(children, ui.text({ui.span("验收条件", "strong")}))
         for _, c in r.acceptanceCriteria do table.insert(children, ui.text("• " .. c.description)) end
+    else
+        table.insert(children, ui.text({ui.span("尚无验收条件；批准与验收会因缺少可验证结果而受阻。", "warning")}))
     end
     if #(r.labels or {}) > 0 then table.insert(children, note("标签：" .. table.concat(r.labels, " · "))) end
     if s.formError then table.insert(children, ui.text({ui.span(s.formError, "error")})) end
-    local acts = {button("编辑", "edit-requirement", "primary", not s.writable or s.handoff.pendingSend ~= nil),
-        button("资料 · 方案 · 批准", "open-handoff", "quiet"), button("返回列表", "back-list")}
-    table.insert(acts, button("用作资料草稿", "prefill-selected"))
-    table.insert(children, row("detailActions", acts))
+    table.insert(children, row("detailActions", {
+        button("编辑需求", "edit-requirement", "default", editingReason),
+        button("用作资料草稿", "prefill-selected", "default"),
+        button("返回需求列表", "back-list", "quiet"),
+    }))
     return ui.node("col", {key = "detail", role = "workbench.detail", gap = "sm"}, children)
 end
 local function listView(s)
     local visible = requirements(s)
+    if s.detailMode and s.selected and s.byId[s.selected] then return detail(s, s.byId[s.selected]) end
     local listChildren = {}
     for _, r in visible do table.insert(listChildren, rowItem(r)) end
-    local listPath = s.detailMode and (s.cols or 0) >= 100 and "main.masterDetail.listView.requirements." or "main.listView.requirements."
-    local selectedKey = s.selected and listPath .. s.selected or nil
-    local items = ui.node("list", {key = "requirements", selected = selectedKey, max = {lines = 12}, empty = "没有匹配的需求"}, listChildren)
-    local controls = row("filters", {
-        ui.node("input", {key = "search", text = s.query or "", cursor = units(s.query or "", s.queryCursor or utf8.len(s.query or "")), placeholder = "搜索标题、目标、标签", aria = "搜索需求", variant = "field", icon = "search"}),
-        ui.node("select", {key = "priorityFilter", value = s.priorityFilter or "all", label = "优先级", size = "sm", options = {
-            {value = "all", label = "全部优先级"}, {value = "urgent", label = "紧急"}, {value = "high", label = "高"}, {value = "normal", label = "普通"}, {value = "low", label = "低"}}}),
-        ui.node("select", {key = "stageFilter", value = s.stageFilter or "all", label = "阶段", size = "sm", options = (function() local o = {{value="all",label="全部阶段"}}; for _, st in stages do table.insert(o,{value=st[1],label=st[2]}) end; return o end)()}),
-    })
-    if s.cols and s.cols < 100 and s.detailMode and s.selected then return detail(s, s.byId[s.selected]) end
+    local items = ui.node("list", {key = "requirements", selected = s.selected, max = {lines = 12},
+        empty = "没有匹配的需求；调整筛选或新建一项"}, listChildren)
+    local stageOptions = {{value = "all", label = "全部阶段"}}
+    for _, stage in stages do table.insert(stageOptions, {value = stage[1], label = stage[2]}) end
+    local listHead = {ui.text({ui.span("需求", "title"), ui.span(" · " .. tostring(#visible), "muted")})}
+    if s.writable then table.insert(listHead, button("新建需求", "new-requirement", "primary")) end
     local list = ui.node("col", {key = "listView", role = "workbench.list", gap = "sm"}, {
-        row("listHead", {ui.text({ui.span("需求", "title"), ui.span("  " .. tostring(#visible), "muted")}),
-            s.writable and button("新建需求", "new-requirement", "primary") or note("只读模式；可从页首启用编辑")}),
-        row("sort", {note("排序"), ui.node("select", {key = "sort", value = s.sort or "recent", size = "sm", options = {
-            {value = "recent", label = "最近更新"}, {value = "number", label = "编号"}, {value = "priority", label = "优先级"}}})}),
-        controls, items,
+        row("listHead", listHead),
+        note("点击需求进入详情；详情页的主按钮是当前建议动作，流程条可随时切换页面。"),
+        ui.node("input", {key = "search", text = s.query or "", cursor = units(s.query or "", s.queryCursor or utf8.len(s.query or "")),
+            placeholder = "搜索标题、目标、标签", aria = "搜索需求", variant = "field", icon = "search"}),
+        choices("priorityFilter", "按优先级筛选", s.priorityFilter or "all", {
+            {value = "all", label = "全部"}, {value = "urgent", label = "紧急"}, {value = "high", label = "高"},
+            {value = "normal", label = "普通"}, {value = "low", label = "低"}}),
+        choices("stageFilter", "按阶段筛选", s.stageFilter or "all", stageOptions),
+        choices("sort", "排序", s.sort or "recent", {
+            {value = "recent", label = "最近更新"}, {value = "number", label = "编号"}, {value = "priority", label = "优先级"}}),
+        items,
     })
-    if s.detailMode and s.selected and s.byId[s.selected] then
-        return ui.node("split", {key = "masterDetail", sizes = {0.42, 0.58}, min = {w = "34ch"}}, {list, detail(s, s.byId[s.selected])})
-    end
     return list
 end
 local function board(s)
@@ -170,13 +244,19 @@ local function board(s)
     for _, r in visible do
         if r.stage == "blocked" or r.stage == "cancelled" then table.insert(secondary, card(r)) end
     end
-    local filters = row("boardFilters", {
-        ui.node("input", {key = "search", text = s.query or "", cursor = units(s.query or "", s.queryCursor or utf8.len(s.query or "")), placeholder = "搜索标题、目标、标签", aria = "搜索需求", variant = "field", icon = "search"}),
-        ui.node("select", {key = "priorityFilter", value = s.priorityFilter or "all", label = "优先级", size = "sm", options = {
-            {value = "all", label = "全部优先级"}, {value = "urgent", label = "紧急"}, {value = "high", label = "高"}, {value = "normal", label = "普通"}, {value = "low", label = "低"}}}),
-        ui.node("select", {key = "stageFilter", value = s.stageFilter or "all", label = "阶段", size = "sm", options = (function() local o = {{value="all",label="全部阶段"}}; for _, st in stages do table.insert(o,{value=st[1],label=st[2]}) end; return o end)()}),
-    })
-    local content = {filters, ui.node("scroll", {key = "boardScroll", max = {h = "70lines"}}, {
+    local stageOptions = {{value = "all", label = "全部阶段"}}
+    for _, stage in stages do table.insert(stageOptions, {value = stage[1], label = stage[2]}) end
+    local filters = {
+        ui.node("input", {key = "search", text = s.query or "", cursor = units(s.query or "", s.queryCursor or utf8.len(s.query or "")),
+            placeholder = "搜索标题、目标、标签", aria = "搜索需求", variant = "field", icon = "search"}),
+        choices("priorityFilter", "按优先级筛选", s.priorityFilter or "all", {
+            {value = "all", label = "全部"}, {value = "urgent", label = "紧急"}, {value = "high", label = "高"},
+            {value = "normal", label = "普通"}, {value = "low", label = "低"}}),
+        choices("stageFilter", "按阶段筛选", s.stageFilter or "all", stageOptions),
+    }
+    local content = {note("看板只展示前 8 个阶段；点击卡片进入详情。已阻塞与已取消放在下方折叠区。"),
+        ui.node("row", {key = "boardFilters", gap = "sm", wrap = true, align = "end"}, filters),
+        ui.node("scroll", {key = "boardScroll", max = {h = "70lines"}}, {
         ui.node("row", {key = "board", gap = "md", align = "start", wrap = true}, cols),
     })}
     if #secondary > 0 then table.insert(content, ui.node("section", {key = "exceptions", head = "已阻塞 / 已取消 · " .. tostring(#secondary), collapsible = true, collapsed = true}, secondary)) end
@@ -234,36 +314,61 @@ function M.build(s)
     local data = s.snapshot
     local status = s.problem and "omp 连接异常" or (data and ({idle = "omp 空闲", working = "omp 工作中", waiting_user = "omp 等待输入", disconnected = "omp 已断开"})[data.state] or "omp 连接中")
     local statusTone = s.problem and "warning" or (data and data.state == "idle" and "success" or "pending")
+    local headerActions = {}
+    if not u.writable and u.project and not u.takeoverAvailable then
+        table.insert(headerActions, button("启用编辑", "enable-edit", "primary",
+            u.storageUnsafe and "项目存储异常；先核对文件" or (u.busy and "正在处理上一步" or false)))
+    end
+    table.insert(headerActions, button("刷新", "reload", "default"))
+    local session = {ui.badge(status, statusTone), note(data and data.model and data.model:match("[^/]+$") or "模型未知")}
+    if data and data.currentTool then
+        table.insert(session, note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")))
+    end
     local nodes = {
         row("pageHeader", {ui.node("col", {gap = "xs"}, {
             ui.text({ui.span("Tern 工作台", "title")}),
             ui.text({ui.span(u.project and (u.project.name or u.project.root:match("[^/]+$")) or (s.payload.binding.projectRoot:match("[^/]+$") or "项目"), "muted")}),
-        }), ui.badge(u.loading and "读取中" or (u.writable and "可编辑" or (u.project and "只读" or "未初始化")), u.loading and "pending" or (u.writable and "success" or "muted")),
-        not u.writable and u.project and button("启用编辑", "enable-edit", "quiet", u.storageUnsafe) or note(""),
-        button("刷新", "reload"), u.takeoverAvailable and button("接管写入锁", "takeover", "quiet") or note("")}),
-        row("sessionSummary", {
-            ui.badge(status, statusTone),
-            note(data and data.model and data.model:match("[^/]+$") or "模型未知"),
-            data and data.currentTool and note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")) or note(""),
-        }),
-        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料·方案·批准"},{id="results",label="结果"},{id="review",label="审查·验收"},{id="audit",label="审计"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
+        }), ui.badge(u.loading and "读取中" or (u.writable and "可编辑" or (u.project and "只读" or "未初始化")),
+            u.loading and "pending" or (u.writable and "success" or "muted")),
+        ui.node("row", {key = "headerActions", gap = "xs", wrap = true}, headerActions)}),
+        row("sessionSummary", session),
+        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料与批准"},{id="results",label="实施与验证"},{id="review",label="审查与验收"},{id="audit",label="审计"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
     }
-    if u.error then table.insert(nodes, ui.node("card", {key = "loadError", head = u.storageUnsafe and "项目存储异常" or "操作未完成", tone = "error"}, {ui.text(u.error), button("重新加载", "reload")})) end
+    if u.error then
+        local actions = {}
+        if u.takeoverAvailable then
+            table.insert(actions, button(u.project and "接管编辑权" or "接管并初始化",
+                u.project and "takeover" or "takeover-initialize", "primary"))
+        end
+        table.insert(actions, button("重新加载", "reload", "default"))
+        local errorChildren = {ui.text(u.error)}
+        if u.takeoverAvailable then
+            table.insert(errorChildren, note("接管只更换写入者，不删除、不覆盖任何需求文件；原锁过期后才可用。"))
+        end
+        table.insert(errorChildren, ui.node("row", {key = "errorActions", gap = "xs", wrap = true}, actions))
+        table.insert(nodes, ui.node("card", {key = "loadError", head = u.storageUnsafe and "项目存储异常" or "操作未完成", tone = "error"}, errorChildren))
+    end
     if u.notice then table.insert(nodes, ui.text({ui.span(u.notice, "warning")})) end
     if u.tab == "requirements" then
         if u.loading then table.insert(nodes, note("正在只读读取项目需求…"))
         elseif u.formMode then table.insert(nodes, form(u))
         elseif not u.project then
-            table.insert(nodes, ui.node("empty", {key = "initialize", title = "此项目尚未初始化", text = "初始化会在项目 .omp/workbench 下创建需求存储。选择“仅本机”会更新本机 .git/info/exclude；选择遵循项目规则则不修改忽略配置。"}, {
-                ui.node("field", {key = "privacyField", label = "存储与隐私"}, {ui.node("select", {key = "privacyMode", value = u.privacyMode or "local", options = {
-                    {value = "local", label = "仅本机：加入 .git/info/exclude"},
-                    {value = "tracked", label = "遵循项目 Git 规则（不修改）"}}})}),
-                note("本机排除不是加密。你可选遵循项目规则以便按既有配置共享需求数据。"),
-                button("我已了解，初始化项目", "initialize", "primary", u.busy or u.storageUnsafe),
+            local takeover = u.takeoverAvailable == true
+            table.insert(nodes, ui.node("empty", {key = "initialize", title = "初始化需求存储",
+                text = "在项目 .omp/workbench 下创建需求文件。只在你点击后写入，不读取聊天记录或旧数据。"}, {
+                choices("privacyMode", "存储与隐私", u.privacyMode or "local", {
+                    {value = "local", label = "仅本机（推荐）"}, {value = "tracked", label = "遵循项目 Git 规则"}}),
+                note("仅本机会把 /.omp/workbench/ 加入本机 .git/info/exclude；不是加密。遵循项目规则则不修改忽略配置。"),
+                takeover and ui.text({ui.span("上次的工作台实例留下了过期写锁。接管后继续初始化，不会删除任何需求。", "warning")}) or note("初始化只创建缺失的项目文件；已有需求不会被覆盖。"),
+                button(takeover and "接管并初始化" or "初始化项目",
+                    takeover and "takeover-initialize" or "initialize", "primary",
+                    u.busy and "正在处理上一步" or (u.storageUnsafe and "存储异常；先核对 .omp/workbench 文件" or false)),
             }))
         elseif #u.requirements == 0 then
-            table.insert(nodes, ui.node("empty", {key = "empty", title = "还没有需求", text = "创建第一项需求，之后可在列表与看板中查看。"}, {
-                u.writable and button("新建需求", "new-requirement", "primary") or note("只读模式；可从页首启用编辑"),
+            table.insert(nodes, ui.node("empty", {key = "empty", title = "还没有需求",
+                text = "创建第一项需求；之后按“资料 → 方案 → 批准 → 实施 → 审查验收”推进。"}, {
+                u.writable and button("创建第一项需求", "new-requirement", "primary")
+                    or button("启用编辑", "enable-edit", "primary", "只读模式：先取得编辑权才能创建需求"),
             }))
         else table.insert(nodes, listView(u)) end
     elseif u.tab == "board" then

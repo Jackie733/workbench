@@ -29,3 +29,15 @@
     min-width: 0;
     overflow-wrap: anywhere;
 }
+[data-role='workbench.live'] .sf-field {
+    min-width: 0;
+}
+[data-role='workbench.live'] [data-role='workbench.choices'] .sf-row {
+    row-gap: 4px;
+}
+[data-role='workbench.live'] .sf-select-menu {
+    z-index: 400;
+}
+[data-role='workbench.live'] .sf-empty {
+    max-width: 46ch;
+}

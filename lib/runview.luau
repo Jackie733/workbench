@@ -15,11 +15,21 @@ local stepNames = {pending = "待开始", active = "进行中", done = "完成",
 local stateTones = {passed = "success", failed = "error", unknown = "warning", stale = "warning"}
 local function note(text) return ui.text({ui.span(text or "", "muted")}) end
 local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "quiet", size = "sm", disabled = disabled,
+    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
         actions = {click = action}})
 end
 local function row(key, children)
     return ui.node("row", {key = key, gap = "sm", wrap = true}, children)
+end
+local function choices(name, label, value, options, disabled)
+    local chips = {}
+    for _, option in options do
+        local selected = value == option.value
+        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
+            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
+            actions = {click = "change:" .. name .. "=" .. option.value}}))
+    end
+    return ui.node("field", {key = name .. "Field", label = label}, {row(name, chips)})
 end
 local function field(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
@@ -47,8 +57,9 @@ function M.build(s)
     local writable = u.writable and t.safe and not t.busy
     local nodes = {
         ui.card(r.number .. " · " .. r.title, {
-            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)),
-            note("计划、差异和验证只记录观察结果；Git 与命令退出码不证明某项改动一定由本需求产生，也不等于人工验收。"),
+            note("① 计划 → ② 代码变化 → ③ 验证证据。退出码不等于验收；验收在“审查与验收”页由你明确触发。"),
+            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)
+                .. " · 观察不能证明代码一定由本需求产生。"),
         }, {key = "traceTarget", tone = "muted"}),
     }
     if t.error then table.insert(nodes, ui.text({ui.span(t.error, "error")})) end
@@ -73,11 +84,8 @@ function M.build(s)
             end
             table.insert(items, ui.card(step.title, {
                 note("步骤 " .. tostring(step.id) .. " · 更新 " .. tostring(step.updatedAt)),
-                row("stepState-" .. tostring(index), {
-                    ui.node("select", {key = "status-" .. tostring(index), value = step.status, size = "sm",
-                        disabled = not writable, options = statusOptions}),
-                    step.reason and note("阻塞原因：" .. step.reason) or note(""),
-                }),
+                choices("status-" .. tostring(index), "状态", step.status, statusOptions, not writable),
+                step.reason and note("阻塞原因：" .. step.reason) or note(""),
             }, {key = "step-" .. tostring(index), tone = step.status == "blocked" and "warning" or (step.status == "done" and "success" or "muted")}))
         end
         table.insert(nodes, ui.card("实施计划 · 已完成 " .. tostring(done) .. " / 共 " .. tostring(#plan.steps),
@@ -173,7 +181,9 @@ function M.build(s)
         end)()))
     table.insert(nodes, note("命令通过 wsl.exe 在项目根目录交给 bash 执行；退出码与输出会保存为证据。退出码 0 不等于验收通过。"))
     table.insert(nodes, button(t.busy and "正在记录…" or "先取代码快照，再运行验证", "results-run-verification", "primary",
-        not writable or t.pending ~= nil or not t.fields.verifyCommand.text:match("%S") or not t.results))
+        (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
+            or (not t.fields.verifyCommand.text:match("%S") and "先填写验证命令")
+            or (not t.results and "先读取代码变化，取得快照") or false))
 
     local verifications = t.results and t.results.verifications or {}
     if #verifications > 0 then

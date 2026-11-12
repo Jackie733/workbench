@@ -1283,6 +1283,19 @@ local function reviewAction(s, act, cx)
     local u, v, requirement = s.ui, s.ui and s.ui.review, selectedRequirement(s)
     if not u or not v or not requirement then return end
     if act == "review-open-native" then prefillLiteral(s, cx, "/review"); return end
+    if type(act) == "string" and act:match("^review%-pick=") then
+        local picked = act:match("^review%-pick=(.+)$")
+        for _, review in v.data and v.data.reviews or {} do
+            for _, finding in review.findings or {} do
+                if picked == review.id .. "|" .. finding.id then
+                    v.finding = picked
+                    saveUi(s); cx:render()
+                    return
+                end
+            end
+        end
+        return
+    end
     if not requireReviewWrite(s, cx) then return end
     v.error, v.notice = nil, nil
     if act == "review-create" then
@@ -1763,6 +1776,49 @@ local function insertBuffer(s, target, buffer, first, last, text)
     if ok and (target=="paths" or target=="excerpt") then invalidatePreview(s.ui.handoff) end
     return ok
 end
+-- One handler for popup selects and visible choice chips: both carry the same
+-- field name, so the UI can drop a clipping dropdown without changing state code.
+local function applyChange(s, cx, name, value)
+    local stepIndex = type(name) == "string" and name:match("^status%-(%d+)$")
+    if stepIndex then setTraceStepStatus(s, cx, stepIndex, value); return end
+    if s.ui.saving and (name == "type" or name == "priority") then return end
+    if name == "privacyMode" then s.ui.privacyMode = value; saveUi(s)
+    elseif name == "rvSource" then s.ui.review.source = value; saveUi(s)
+    elseif name == "rvFinding" then s.ui.review.finding = value; saveUi(s)
+    elseif name == "rvAction" then s.ui.review.action = value; saveUi(s)
+    elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
+    elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
+    elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
+    elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
+    elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s)
+    elseif name == "activity" then
+        if value == "clarify" or value == "design" or value == "implement" then
+            s.ui.handoff.activity = value; invalidatePreview(s.ui.handoff); saveUi(s)
+        end
+    elseif name == "includeRequirement" then
+        s.ui.handoff.includeRequirement = value == "yes"; invalidatePreview(s.ui.handoff); saveUi(s)
+    elseif name == "selectedVersion" then
+        s.ui.handoff.selectedVersion, s.ui.handoff.compareVersion = tonumber(value), 0
+        refreshHandoff(s)
+        saveUi(s)
+    elseif name == "compareVersion" then
+        s.ui.handoff.compareVersion = tonumber(value) or 0
+        refreshHandoff(s)
+        saveUi(s)
+    end
+end
+local function openPage(s, tab, sub)
+    if tab ~= "requirements" and tab ~= "board" and tab ~= "handoff" and tab ~= "results"
+        and tab ~= "review" and tab ~= "audit" and tab ~= "runtime" and tab ~= "diagnostics" then return end
+    s.ui.tab, s.ui.detailMode = tab, false
+    if tab == "handoff" then
+        if sub == "materials" or sub == "design" or sub == "approval" then s.ui.handoff.tab = sub end
+        refreshHandoff(s)
+    elseif tab == "results" then refreshTrace(s)
+    elseif tab == "review" then refreshReview(s)
+    elseif tab == "audit" then refreshReview(s); refreshAudit(s) end
+    saveUi(s)
+end
 tern.block.define("live", {
     font = "sans", features = {"edit", "undo"},
     init = function(cx, args, saved)
@@ -1934,37 +1990,21 @@ tern.block.define("live", {
                 saveUi(s)
             end
         elseif ev.ev == "change" then
-            local name = ev.id:match("%.([%w]+)$")
-            local value = ev.value
-            local stepIndex = ev.id:match("%.status%-(%d+)$")
-            if stepIndex then setTraceStepStatus(s, cx, stepIndex, value); return end
-            if s.ui.saving and (name == "type" or name == "priority") then return end
-            if name == "privacyMode" then s.ui.privacyMode = value; saveUi(s)
-            elseif name == "rvSource" then s.ui.review.source = value; saveUi(s)
-            elseif name == "rvFinding" then s.ui.review.finding = value; saveUi(s)
-            elseif name == "rvAction" then s.ui.review.action = value; saveUi(s)
-            elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
-            elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
-            elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
-            elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
-            elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s)
-            elseif name == "activity" then
-                if value == "clarify" or value == "design" or value == "implement" then
-                    s.ui.handoff.activity=value;invalidatePreview(s.ui.handoff);saveUi(s)
-                end
-            elseif name == "includeRequirement" then
-                s.ui.handoff.includeRequirement=value=="yes";invalidatePreview(s.ui.handoff);saveUi(s)
-            elseif name == "selectedVersion" then
-                s.ui.handoff.selectedVersion, s.ui.handoff.compareVersion = tonumber(value), 0
-                refreshHandoff(s)
-                saveUi(s)
-            elseif name == "compareVersion" then
-                s.ui.handoff.compareVersion = tonumber(value) or 0
-                refreshHandoff(s)
-                saveUi(s)
-            end
+            local name = ev.id and ev.id:match("%.([%w%-]+)$")
+            local stepName = ev.id and ev.id:match("%.status%-(%d+)$")
+            if stepName then applyChange(s, cx, "status-" .. stepName, ev.value)
+            elseif name then applyChange(s, cx, name, ev.value) end
         elseif ev.ev == "action" then
             local act = ev.act
+            local changeName, changeValue = type(act) == "string" and act:match("^change:([%w%-_]+)=(.*)$")
+            if changeName then applyChange(s, cx, changeName, changeValue); return end
+            local route = type(act) == "string" and act:match("^wb%-open%-([%w%-_]+)$")
+            if route then
+                local sub = route:match("^handoff%-(%w+)$")
+                if sub and sub ~= "materials" and sub ~= "design" and sub ~= "approval" then sub = nil end
+                openPage(s, sub and "handoff" or route, sub)
+                return
+            end
             local req = type(act) == "string" and act:match("^requirement=(.+)$")
             if req and s.ui.byId[req] then
                 local h = s.ui.handoff
@@ -1996,6 +2036,7 @@ tern.block.define("live", {
             elseif act == "initialize" then initProject(s, cx, false, true)
             elseif act == "enable-edit" then initProject(s, cx, false, false)
             elseif act == "takeover" and s.ui.takeoverAvailable then initProject(s, cx, true, false)
+            elseif act == "takeover-initialize" and s.ui.takeoverAvailable then initProject(s, cx, true, true)
             elseif act == "reload" then s.ui.notice = nil; scheduleProjectRefresh(s, cx); saveUi(s)
             elseif act == "new-requirement" and s.ui.writable then openForm(s, "new")
             elseif act == "edit-requirement" and s.ui.writable and s.ui.selected then openForm(s, "edit", s.ui.byId[s.ui.selected])
