@@ -1,3 +1,8 @@
+/* Workbench visual system — a calm, dense delivery instrument.
+   Scoped to the block and derived from Tern's theme variables so light/dark
+   and custom themes keep working. Badge tints use relative colors from the
+   semantic tone (never --ok-fill/--bad-fill, which are solid meter fills). */
+
 [data-role='workbench.live'] {
     font-family: var(--sans);
     font-size: 13px;
@@ -5,39 +10,194 @@
     color: var(--t1);
     padding: 8px 6px;
     min-width: 0;
+    --wb-line: var(--line, rgba(128, 128, 128, .28));
+    --wb-line-soft: var(--line, rgba(128, 128, 128, .16));
+    --wb-surface: var(--card, var(--panel, var(--bg, #ffffff)));
+    --wb-well: var(--well, var(--bg2, rgba(128, 128, 128, .07)));
+    --wb-chip: var(--chip-bg, rgba(128, 128, 128, .12));
+    --wb-accent: var(--accent, #0969da);
+    --wb-accent-tint: var(--accent-tint, rgba(9, 105, 218, .12));
+    --wb-ok: var(--ok, var(--good, #1a7f37));
+    --wb-warn: var(--warn, #9a6700);
+    --wb-bad: var(--bad, var(--err, #cf222e));
+    --wb-radius: 8px;
 }
-[data-role='workbench.live'] .sf-text {
-    font-family: var(--sans);
-    overflow-wrap: anywhere;
-}
-[data-role='workbench.live'] .sf-editor {
-    min-width: 0;
-    font-family: var(--sans);
-}
-[data-role='workbench.live'] .sf-split {
-    min-width: 0;
-}
+
+/* Layout guards: splits must never force horizontal overflow. */
+[data-role='workbench.live'] .sf-text { font-family: var(--sans); overflow-wrap: anywhere; }
+[data-role='workbench.live'] .sf-editor { min-width: 0; font-family: var(--sans); }
+[data-role='workbench.live'] .sf-split { min-width: 0; }
 [data-role='workbench.live'] .sf-card,
-[data-role='workbench.live'] .sf-item {
+[data-role='workbench.live'] .sf-item { min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.board.column'] { flex: 1 1 22ch; max-width: 36ch; }
+[data-role='workbench.live'] [data-role='workbench.detail'] { min-width: 0; overflow-wrap: anywhere; }
+[data-role='workbench.live'] .sf-field { min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.choices'] .sf-row { row-gap: 4px; }
+[data-role='workbench.live'] .sf-select-menu { z-index: 400; }
+[data-role='workbench.live'] .sf-empty { max-width: 46ch; }
+
+/* Typography hierarchy */
+[data-role='workbench.live'] .sf-text .title { font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+[data-role='workbench.live'] .sf-text .strong { font-weight: 600; }
+[data-role='workbench.live'] .sf-text .muted { color: var(--t3, var(--muted)); }
+[data-role='workbench.live'] .sf-card-head { font-weight: 600; letter-spacing: .015em; }
+[data-role='workbench.live'] .sf-card-meta { font-size: 11.5px; color: var(--t3, var(--muted)); }
+[data-role='workbench.live'] .sf-field-lbl { font-size: 11.5px; font-weight: 550; color: var(--t2); letter-spacing: .02em; }
+[data-role='workbench.live'] .sf-field-note { font-size: 11px; color: var(--t3, var(--muted)); }
+[data-role='workbench.live'] .sf-section-head { font-size: 12px; font-weight: 550; color: var(--t2); }
+
+/* Cards: quiet surface, hairline border, tone band on the left */
+[data-role='workbench.live'] .sf-card {
+    background: var(--wb-surface);
+    border: 1px solid var(--wb-line-soft);
+    border-left: 3px solid var(--wb-line);
+    border-radius: var(--wb-radius);
+}
+[data-role='workbench.live'] .sf-card[data-tone='accent'] { border-left-color: var(--wb-accent); }
+[data-role='workbench.live'] .sf-card[data-tone='success'] { border-left-color: var(--wb-ok); }
+[data-role='workbench.live'] .sf-card[data-tone='warning'],
+[data-role='workbench.live'] .sf-card[data-tone='pending'] { border-left-color: var(--wb-warn); }
+[data-role='workbench.live'] .sf-card[data-tone='error'],
+[data-role='workbench.live'] .sf-card[data-tone='bad'] { border-left-color: var(--wb-bad); }
+[data-role='workbench.live'] .sf-card[data-tone='muted'] { border-left-color: var(--wb-line); }
+
+/* Context bar: pinned while the page scrolls; identity and action share a row */
+[data-role='workbench.live'] [data-role='workbench.context'] {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--wb-surface);
+    box-shadow: 0 1px 0 var(--wb-line-soft);
+}
+[data-role='workbench.live'] [data-role='workbench.context'] .sf-card-head { font-size: 13.5px; }
+[data-role='workbench.live'] [data-role='workbench.contextMeta'] { align-items: center; }
+[data-role='workbench.live'] [data-role='workbench.contextMeta'] > .sf-button { margin-left: auto; }
+[data-role='workbench.live'] [data-role='workbench.panelTools'] > .sf-button { margin-left: auto; }
+
+/* Stepper: pill chips, the taken path reads at a glance */
+[data-role='workbench.live'] [data-role='workbench.stepper'] .sf-button { border-radius: 999px; }
+
+/* Status strip */
+[data-role='workbench.live'] [data-role='workbench.status'] { align-items: center; }
+
+/* Badges: semantic text on a relative-color tint of the same hue.
+   Tern's default already pairs --tc with a 10% tint; these keep that contract
+   for the tones the workbench uses, without touching solid fill variables. */
+[data-role='workbench.live'] .sf-badge[data-tone='success'] {
+    color: var(--wb-ok);
+    background: rgba(26, 127, 55, .12);
+    background: rgb(from var(--wb-ok) r g b / 12%);
+    box-shadow: inset 0 0 0 1px rgb(from var(--wb-ok) r g b / 25%);
+}
+[data-role='workbench.live'] .sf-badge[data-tone='warning'],
+[data-role='workbench.live'] .sf-badge[data-tone='pending'] {
+    color: var(--wb-warn);
+    background: rgba(154, 103, 0, .12);
+    background: rgb(from var(--wb-warn) r g b / 12%);
+    box-shadow: inset 0 0 0 1px rgb(from var(--wb-warn) r g b / 25%);
+}
+[data-role='workbench.live'] .sf-badge[data-tone='error'],
+[data-role='workbench.live'] .sf-badge[data-tone='bad'] {
+    color: var(--wb-bad);
+    background: rgba(207, 34, 46, .1);
+    background: rgb(from var(--wb-bad) r g b / 10%);
+    box-shadow: inset 0 0 0 1px rgb(from var(--wb-bad) r g b / 25%);
+}
+[data-role='workbench.live'] .sf-badge[data-tone='accent'] {
+    color: var(--wb-accent);
+    background: rgba(9, 105, 218, .1);
+    background: rgb(from var(--wb-accent) r g b / 10%);
+    box-shadow: inset 0 0 0 1px rgb(from var(--wb-accent) r g b / 25%);
+}
+[data-role='workbench.live'] .sf-badge[data-tone='muted'] {
+    color: var(--t2);
+    background: var(--wb-chip);
+    box-shadow: inset 0 0 0 1px var(--wb-line-soft);
+}
+
+/* Stats: Tern's strip hides a 17px left indent with clip-path, which cuts the
+   first tile once tiles carry their own surface. Undo it and let tiles grow. */
+[data-role='workbench.live'] .sf-stats { margin-left: 0; clip-path: none; gap: 6px; row-gap: 6px; }
+[data-role='workbench.live'] .sf-stat {
+    flex: 1 1 110px;
+    background: var(--wb-well);
+    border: 1px solid var(--wb-line-soft);
+    border-radius: 6px;
+    padding: 6px 10px;
     min-width: 0;
 }
-[data-role='workbench.live'] [data-role='workbench.board.column'] {
-    flex: 1 1 22ch;
-    max-width: 36ch;
+[data-role='workbench.live'] .sf-stat-label { font-size: 11px; color: var(--t3, var(--muted)); letter-spacing: .03em; }
+[data-role='workbench.live'] .sf-stat-value { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 24px; }
+[data-role='workbench.live'] .sf-stat-sub { font-size: 11px; color: var(--t3, var(--muted)); }
+
+/* Spatial composition: two-column task grids that stack when the pane is narrow */
+[data-role='workbench.live'] [data-role='workbench.recordLeft'] { flex: 1 1 260px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.recordRight'] { flex: 1 1 300px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.gateEvidence'] { flex: 1 1 300px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.gateDecide'] { flex: 1 1 240px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.dispositionWhat'] { flex: 1 1 220px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.dispositionHow'] { flex: 1 1 260px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.gateDecide'] .sf-button[data-variant='primary'] { width: 100%; }
+[data-role='workbench.live'] [data-role='workbench.findingsBuilder'] .sf-input { flex: 1 1 160px; min-width: 0; }
+[data-role='workbench.live'] [data-role='workbench.findingsBuilder'] > .sf-row { align-items: center; }
+
+/* Tables: dense hairline rows */
+[data-role='workbench.live'] .sf-table { width: 100%; border-collapse: collapse; }
+[data-role='workbench.live'] .sf-table th {
+    font-size: 11px; font-weight: 550; color: var(--t3, var(--muted));
+    text-align: start; padding: 3px 8px; border-bottom: 1px solid var(--wb-line);
 }
-[data-role='workbench.live'] [data-role='workbench.detail'] {
-    min-width: 0;
-    overflow-wrap: anywhere;
+[data-role='workbench.live'] .sf-table td { padding: 5px 8px; border-bottom: 1px solid var(--wb-line-soft); vertical-align: middle; }
+[data-role='workbench.live'] .sf-table tr:last-child td { border-bottom: none; }
+[data-role='workbench.live'] .sf-table tbody tr:hover td { background: var(--wb-chip); }
+[data-role='workbench.live'] .sf-table tr[aria-selected='true'] td { background: var(--wb-accent-tint); }
+
+/* Buttons: keep the theme's primary/danger faces; refine shape and feedback */
+[data-role='workbench.live'] .sf-button {
+    border-radius: 6px;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease;
 }
-[data-role='workbench.live'] .sf-field {
-    min-width: 0;
+[data-role='workbench.live'] .sf-button[data-variant='quiet']:hover { background: var(--wb-chip); }
+[data-role='workbench.live'] .sf-button:focus-visible,
+[data-role='workbench.live'] .sf-input:focus-visible,
+[data-role='workbench.live'] .sf-editor:focus-visible {
+    outline: 2px solid var(--wb-accent);
+    outline-offset: 1px;
 }
-[data-role='workbench.live'] [data-role='workbench.choices'] .sf-row {
-    row-gap: 4px;
+[data-role='workbench.live'] .sf-button[disabled] { opacity: .55; }
+
+/* Choice chips read as a segmented set */
+[data-role='workbench.live'] [data-role='workbench.choices'] .sf-button,
+[data-role='workbench.live'] [data-role='workbench.findingsBuilder'] .sf-button { border-radius: 999px; }
+
+/* Fields: well surface, accent focus */
+[data-role='workbench.live'] .sf-input,
+[data-role='workbench.live'] .sf-editor {
+    background: var(--wb-well);
+    border: 1px solid var(--wb-line-soft);
+    border-radius: 6px;
 }
-[data-role='workbench.live'] .sf-select-menu {
-    z-index: 400;
+[data-role='workbench.live'] .sf-field:focus-within .sf-input,
+[data-role='workbench.live'] .sf-field:focus-within .sf-editor { border-color: var(--wb-accent); }
+
+/* Inline disposition panels */
+[data-role='workbench.live'] [data-role='workbench.disposition'] { background: var(--wb-well); }
+
+/* Custom scrollbars: thin, theme-aware */
+[data-role='workbench.live'] .sf-scroll-bar { width: 6px; height: 6px; }
+[data-role='workbench.live'] .sf-scroll-thumb { background: var(--wb-line); border-radius: 3px; }
+[data-role='workbench.live'] .sf-scroll-thumb:hover { background: var(--t3, var(--muted)); }
+[data-role='workbench.live'] .sf-scroll-view::-webkit-scrollbar { width: 6px; height: 6px; }
+[data-role='workbench.live'] .sf-scroll-view::-webkit-scrollbar-track { background: transparent; }
+[data-role='workbench.live'] .sf-scroll-view::-webkit-scrollbar-thumb { background: var(--wb-line); border-radius: 3px; }
+[data-role='workbench.live'] .sf-scroll-view::-webkit-scrollbar-thumb:hover { background: var(--t3, var(--muted)); }
+
+/* Accessibility: motion and contrast preferences */
+@media (prefers-reduced-motion: reduce) {
+    [data-role='workbench.live'] * { transition: none !important; animation: none !important; }
 }
-[data-role='workbench.live'] .sf-empty {
-    max-width: 46ch;
+@media (forced-colors: active) {
+    [data-role='workbench.live'] .sf-card,
+    [data-role='workbench.live'] .sf-button,
+    [data-role='workbench.live'] .sf-stat { border: 1px solid CanvasText; }
 }

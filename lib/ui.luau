@@ -1,5 +1,6 @@
 --!strict
 local ui = tern.ui
+local context = require("./context")
 local handoff = require("./handoff")
 local runview = require("./runview")
 local reviewview = require("./reviewview")
@@ -14,17 +15,8 @@ local function units(text, position)
     return n
 end
 local M = {}
-local stages = {
-    {"backlog", "待整理"}, {"clarifying", "澄清中"}, {"designing", "设计中"},
-    {"awaiting_approval", "待批准"}, {"implementing", "实施中"}, {"verifying", "验证中"},
-    {"awaiting_acceptance", "待验收"}, {"done", "已完成"}, {"blocked", "已阻塞"}, {"cancelled", "已取消"},
-}
-local stageNames = {}
-for _, stage in stages do stageNames[stage[1]] = stage[2] end
-local priorities = {low = "低", normal = "普通", high = "高", urgent = "紧急"}
-local types = {feature = "功能", bug = "缺陷", chore = "维护"}
-local tones = {backlog = "muted", clarifying = "accent", designing = "accent", awaiting_approval = "pending",
-    implementing = "accent", verifying = "accent", awaiting_acceptance = "pending", done = "success", blocked = "warning", cancelled = "muted"}
+local stages, stageNames = context.stages, context.stageNames
+local priorities, types, tones = context.priorities, context.types, context.tones
 local function note(s) return ui.text({ui.span(s or "", "muted")}) end
 -- Secondary actions stay visible: a bare "quiet" button is a discoverability trap.
 local function button(label, act, variant, disabled)
@@ -125,44 +117,11 @@ local function form(s)
     if s.dirty then table.insert(nodes, note(s.saving and "正在保存…" or "草稿已保留在此项目；尚未写入需求文件。")) end
     return ui.node("col", {key = "form", role = "workbench.form", gap = "sm"}, nodes)
 end
-local stepOrder = {backlog = 1, clarifying = 2, designing = 3, awaiting_approval = 4, implementing = 5,
-    verifying = 5, awaiting_acceptance = 6, done = 6, blocked = 2, cancelled = 1}
-local steps = {
-    {tab = "requirements", label = "需求", help = "澄清目标、范围与验收条件"},
-    {tab = "handoff", sub = "materials", label = "资料", help = "带入文件与讨论，生成完整预览"},
-    {tab = "handoff", sub = "design", label = "方案", help = "编写并采用正式版本"},
-    {tab = "handoff", sub = "approval", label = "批准", help = "检查 Git 基线并批准方案"},
-    {tab = "results", label = "实施与验证", help = "计划、代码变化与验证证据"},
-    {tab = "review", label = "审查与验收", help = "处置发现并人工验收"},
-}
-local nextActions = {
-    backlog = {label = "开始澄清", tab = "handoff", sub = "materials"},
-    clarifying = {label = "准备资料并生成预览", tab = "handoff", sub = "materials"},
-    designing = {label = "编写并采用方案", tab = "handoff", sub = "design"},
-    awaiting_approval = {label = "检查并批准方案", tab = "handoff", sub = "approval"},
-    implementing = {label = "查看实施计划与代码变化", tab = "results"},
-    verifying = {label = "查看验证证据", tab = "results"},
-    awaiting_acceptance = {label = "去审查并人工验收", tab = "review"},
-    done = {label = "查看审计记录", tab = "audit"},
-    blocked = {label = "查看阻塞原因", tab = "requirements"},
-    cancelled = {label = "查看审计记录", tab = "audit"},
-}
-local function openAction(target)
-    return "wb-open-" .. target.tab .. (target.sub and ("-" .. target.sub) or "")
-end
--- The stepper is navigation, not a gate: every step is clickable, the current one
--- is primary, and completed ones carry a check so the path already taken is visible.
+local stepOrder, steps, nextActions = context.stepOrder, context.steps, context.nextActions
+local openAction = context.openAction
 local function workflowSteps(r)
-    local current = stepOrder[r.stage] or 1
-    local chips = {}
-    for index, item in steps do
-        table.insert(chips, ui.button((index < current and "✓ " or "") .. item.label, {
-            key = "workflow-step-" .. tostring(index), size = "sm", title = item.help,
-            variant = index == current and "primary" or "default", on = index == current,
-            actions = {click = openAction(item)}}))
-    end
     return ui.node("field", {key = "workflowSteps", label = "交付流程",
-        help = "点击步骤可切换页面；主按钮始终是当前建议动作。"}, {row("workflowStepRow", chips, {gap = "xs"})})
+        help = "点击步骤可切换页面；主按钮始终是当前建议动作。"}, {context.stepper(r)})
 end
 local function detail(s, r)
     if not r then return ui.node("empty", {key = "noSelection", variant = "inline", title = "选择一项需求", text = "从列表或看板选择需求以查看详情。"}) end
@@ -237,7 +196,7 @@ local function board(s)
         local cards = {}
         for _, r in visible do if r.stage == stage[1] then table.insert(cards, card(r)) end end
         table.insert(cols, ui.node("col", {key = "stage-" .. stage[1], min = {w = "22ch"}, role = "workbench.board.column"}, {
-            row("stageHead", {ui.text({ui.span(stage[2], "strong")}), ui.badge(tostring(#cards), tones[stage[1]] or "muted")}),
+            row("stageHead-" .. stage[1], {ui.text({ui.span(stage[2], "strong")}), ui.badge(tostring(#cards), tones[stage[1]] or "muted")}),
             #cards == 0 and note("暂无需求") or ui.node("col", {gap = "xs"}, cards),
         }))
     end
@@ -337,10 +296,11 @@ function M.build(s)
     if u.error then
         local actions = {}
         if u.takeoverAvailable then
-            table.insert(actions, button(u.project and "接管编辑权" or "接管并初始化",
-                u.project and "takeover" or "takeover-initialize", "primary"))
+            table.insert(actions, ui.button(u.project and "接管编辑权" or "接管并初始化",
+                {key = u.project and "error-takeover" or "error-takeover-initialize", variant = "primary", size = "sm",
+                    actions = {click = u.project and "takeover" or "takeover-initialize"}}))
         end
-        table.insert(actions, button("重新加载", "reload", "default"))
+        table.insert(actions, ui.button("重新加载", {key = "error-reload", variant = "default", size = "sm", actions = {click = "reload"}}))
         local errorChildren = {ui.text(u.error)}
         if u.takeoverAvailable then
             table.insert(errorChildren, note("接管只更换写入者，不删除、不覆盖任何需求文件；原锁过期后才可用。"))
@@ -360,15 +320,17 @@ function M.build(s)
                     {value = "local", label = "仅本机（推荐）"}, {value = "tracked", label = "遵循项目 Git 规则"}}),
                 note("仅本机会把 /.omp/workbench/ 加入本机 .git/info/exclude；不是加密。遵循项目规则则不修改忽略配置。"),
                 takeover and ui.text({ui.span("上次的工作台实例留下了过期写锁。接管后继续初始化，不会删除任何需求。", "warning")}) or note("初始化只创建缺失的项目文件；已有需求不会被覆盖。"),
-                button(takeover and "接管并初始化" or "初始化项目",
-                    takeover and "takeover-initialize" or "initialize", "primary",
-                    u.busy and "正在处理上一步" or (u.storageUnsafe and "存储异常；先核对 .omp/workbench 文件" or false)),
+                ui.button(takeover and "接管并初始化" or "初始化项目",
+                    {key = takeover and "takeover-initialize" or "initialize-action", variant = "primary", size = "sm",
+                        disabled = u.busy and "正在处理上一步" or (u.storageUnsafe and "存储异常；先核对 .omp/workbench 文件" or false),
+                        actions = {click = takeover and "takeover-initialize" or "initialize"}}),
             }))
         elseif #u.requirements == 0 then
             table.insert(nodes, ui.node("empty", {key = "empty", title = "还没有需求",
                 text = "创建第一项需求；之后按“资料 → 方案 → 批准 → 实施 → 审查验收”推进。"}, {
                 u.writable and button("创建第一项需求", "new-requirement", "primary")
-                    or button("启用编辑", "enable-edit", "primary", "只读模式：先取得编辑权才能创建需求"),
+                    or ui.button("启用编辑", {key = "empty-enable-edit", variant = "primary", size = "sm",
+                        disabled = "只读模式：先取得编辑权才能创建需求", actions = {click = "enable-edit"}}),
             }))
         else table.insert(nodes, listView(u)) end
     elseif u.tab == "board" then

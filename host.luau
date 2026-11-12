@@ -345,7 +345,7 @@ local function refreshHandoff(s)
     if h.workflowError then h.error = h.workflowError end
 end
 local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
-local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200}
+local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200, findingDraft=4000}
 local function traceSnapshot(t)
     if not t then return nil end
     local fields = {}
@@ -376,7 +376,7 @@ local function reviewSnapshot(v)
             fields[name] = {text = field.text:sub(1, limit), cursor = field.cursor, anchor = field.anchor}
         end
     end
-    return {fields=fields, source=v.source, finding=v.finding, action=v.action}
+    return {fields=fields, source=v.source, finding=v.finding, action=v.action, panel=v.panel, draftSeverity=v.draftSeverity}
 end
 local function makeReview(saved)
     local fields = {}
@@ -387,9 +387,14 @@ local function makeReview(saved)
             anchor = type(item) == "table" and type(item.anchor) == "number" and item.anchor or nil}
     end
     for name, field in fields do field.cursor = field.cursor or utf8.len(field.text) end
+    local savedPanel = type(saved) == "table" and saved.panel or nil
+    local savedSeverity = type(saved) == "table" and saved.draftSeverity or nil
     return {fields=fields, source=type(saved)=="table" and saved.source or "native_review",
         finding=type(saved)=="table" and type(saved.finding)=="string" and saved.finding or "",
-        action=type(saved)=="table" and saved.action or "resolved", safe=true, busy=false}
+        action=type(saved)=="table" and saved.action or "resolved",
+        panel=(savedPanel == "reject" or savedPanel == "reopen" or savedPanel == "dispose") and savedPanel or "",
+        draftSeverity=(savedSeverity == "blocking" or savedSeverity == "major" or savedSeverity == "minor" or savedSeverity == "note") and savedSeverity or "major",
+        safe=true, busy=false}
 end
 local function makeAudit(saved)
     return {busy=false, events=tern.json.array(), eventsTruncated=false,
@@ -1296,6 +1301,72 @@ local function reviewAction(s, act, cx)
         end
         return
     end
+    if act == "review-cancel" then
+        v.panel = ""
+        saveUi(s); cx:render()
+        return
+    end
+    if type(act) == "string" and act:match("^review%-toggle=") then
+        local name = act:match("^review%-toggle=(%w+)$")
+        if name == "reject" or name == "reopen" or name == "dispose" then
+            v.panel = if v.panel == name then "" else name
+            saveUi(s); cx:render()
+        end
+        return
+    end
+    if type(act) == "string" and act:match("^review%-inline=") then
+        local picked = act:match("^review%-inline=(.+)$")
+        for _, review in v.data and v.data.reviews or {} do
+            for _, finding in review.findings or {} do
+                if picked == review.id .. "|" .. finding.id then
+                    v.finding, v.panel = picked, "dispose"
+                    saveUi(s); cx:render()
+                    return
+                end
+            end
+        end
+        return
+    end
+    if act == "review-add-finding" or (type(act) == "string" and act:match("^review%-remove%-finding=")) then
+        if not u.writable or not v.safe or v.busy then reviewFail(s, cx, "只读或记录未就绪；不能修改发现草稿"); return end
+        v.error = nil
+        if act == "review-add-finding" then
+            local description = trim(v.fields.findingDraft.text)
+            if description == "" then reviewFail(s, cx, "先填写发现描述"); return end
+            if description:find("\n") or description:find("[%z\1-\8\11\12\14-\31\127]")
+                or not utf8.len(description) or #description > 4000 then
+                reviewFail(s, cx, "发现描述必须是单行有效 UTF-8，且不超过 4000 字节"); return
+            end
+            local count = 0
+            for raw in (v.fields.reviewFindings.text .. "\n"):gmatch("(.-)\n") do
+                if trim(raw) ~= "" then count += 1 end
+            end
+            if count >= 50 then reviewFail(s, cx, "单次审查最多 50 项发现"); return end
+            local line = v.draftSeverity .. "|" .. description
+            if #v.fields.reviewFindings.text + #line + 1 > reviewLimits.reviewFindings then
+                reviewFail(s, cx, "发现草稿超过 8 KiB 上限；未添加"); return
+            end
+            local prefix = v.fields.reviewFindings.text
+            if prefix ~= "" and prefix:sub(-1) ~= "\n" then prefix ..= "\n" end
+            v.fields.reviewFindings.text = prefix .. line .. "\n"
+            v.fields.reviewFindings.cursor, v.fields.reviewFindings.anchor = utf8.len(v.fields.reviewFindings.text), nil
+            v.fields.findingDraft.text, v.fields.findingDraft.cursor, v.fields.findingDraft.anchor = "", 0, nil
+        else
+            local index = tonumber(act:match("^review%-remove%-finding=(%d+)$"))
+            if not index then return end
+            local kept, n = {}, 0
+            for raw in (v.fields.reviewFindings.text .. "\n"):gmatch("(.-)\n") do
+                if trim(raw) ~= "" then
+                    n += 1
+                    if n ~= index then table.insert(kept, raw) end
+                end
+            end
+            v.fields.reviewFindings.text = if #kept > 0 then table.concat(kept, "\n") .. "\n" else ""
+            v.fields.reviewFindings.cursor, v.fields.reviewFindings.anchor = utf8.len(v.fields.reviewFindings.text), nil
+        end
+        saveUi(s); cx:render()
+        return
+    end
     if not requireReviewWrite(s, cx) then return end
     v.error, v.notice = nil, nil
     if act == "review-create" then
@@ -1335,6 +1406,7 @@ local function reviewAction(s, act, cx)
             if saved then
                 v.data = saved
                 v.fields.reviewReason.text, v.fields.reviewReason.cursor, v.fields.reviewReason.anchor = "", 0, nil
+                v.panel = ""
                 v.notice = "发现处置已追加；旧事件保留。"
                 refreshAudit(s)
             else v.error = "发现处置未能保存：" .. storageMessage(problem or "请核对 reviews.json") end
@@ -1786,6 +1858,10 @@ local function applyChange(s, cx, name, value)
     elseif name == "rvSource" then s.ui.review.source = value; saveUi(s)
     elseif name == "rvFinding" then s.ui.review.finding = value; saveUi(s)
     elseif name == "rvAction" then s.ui.review.action = value; saveUi(s)
+    elseif name == "draftSeverity" then
+        if value == "blocking" or value == "major" or value == "minor" or value == "note" then
+            s.ui.review.draftSeverity = value; saveUi(s)
+        end
     elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
     elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
     elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
@@ -1916,6 +1992,7 @@ tern.block.define("live", {
             insertBuffer(s, target, buffer, first, last, "")
         elseif name == "enter" and not modified then
             if target == "title" or target == "labels" or target == "search" then return false end
+            if target == "findingDraft" then reviewAction(s, "review-add-finding", cx); return true end
             insertBuffer(s, target, buffer, first, last, "\n")
         elseif key.text and (name == "paste" or not modified) then
             insertBuffer(s, target, buffer, first, last, key.text)
@@ -1989,6 +2066,16 @@ tern.block.define("live", {
                 if s.ui.tab == "audit" then refreshAudit(s) end
                 saveUi(s)
             end
+        elseif ev.ev == "select" and type(ev.item) == "string" and ev.item:match("^review%-[%w_-]+|finding%-[%w_-]+$") then
+            local v = s.ui.review
+            for _, review in v and v.data and v.data.reviews or {} do
+                for _, finding in review.findings or {} do
+                    if ev.item == review.id .. "|" .. finding.id then
+                        v.finding = ev.item
+                        saveUi(s)
+                    end
+                end
+            end
         elseif ev.ev == "change" then
             local name = ev.id and ev.id:match("%.([%w%-]+)$")
             local stepName = ev.id and ev.id:match("%.status%-(%d+)$")
@@ -1996,7 +2083,9 @@ tern.block.define("live", {
             elseif name then applyChange(s, cx, name, ev.value) end
         elseif ev.ev == "action" then
             local act = ev.act
-            local changeName, changeValue = type(act) == "string" and act:match("^change:([%w%-_]+)=(.*)$")
+            -- Luau `and` truncates to one value; match separately so the value survives.
+            local changeName, changeValue
+            if type(act) == "string" then changeName, changeValue = act:match("^change:([%w%-_]+)=(.*)$") end
             if changeName then applyChange(s, cx, changeName, changeValue); return end
             local route = type(act) == "string" and act:match("^wb%-open%-([%w%-_]+)$")
             if route then
