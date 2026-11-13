@@ -9,6 +9,7 @@ local Validity = require("./lib/validity")
 local auditview = require("./lib/auditview")
 local Audit = require("./lib/audit")
 local context = require("./lib/context")
+local Batch = require("./lib/batch")
 local runview = require("./lib/runview")
 local ui = require("./lib/ui")
 local function invalidatePreview(h)
@@ -1205,6 +1206,17 @@ local function issueTraceCommand(s, cx, operation, extra, purpose)
         end
     end)
 end
+local function beginTraceVerification(s, cx, command, criterionIds)
+    local t = s.ui.trace
+    if not t or not t.results then
+        if t then traceError(s, "结果记录尚未读取；未执行命令") end
+        cx:render()
+        return
+    end
+    t.verifyRequest = {command = command, criterionIds = criterionIds}
+    local baseline = t.results.baseline
+    issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "verify_snapshot")
+end
 local function startTraceVerification(s, cx, snapshot)
     local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
     local request = t.verifyRequest
@@ -1262,6 +1274,9 @@ local function startTraceVerification(s, cx, snapshot)
     local ok, failure = pcall(tern.process.run, argv, {timeout_ms = 180000}, function(result) finish(result, nil) end)
     if not ok then finish(nil, "验证命令无法启动：" .. tostring(failure)) end
 end
+local batchReasons = {not_passed = "首个命令未通过或结果未知", code_changed = "验证后代码已变化",
+    time_limit = "总时长超过 10 分钟", cancelled = "已按请求停止", completed = "全部命令通过",
+    source_error = "来源请求失败"}
 local function acceptTraceChanges(s, cx, changes, purpose)
     local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
     local function finish(saved, failure, freshCx)
@@ -1276,10 +1291,34 @@ local function acceptTraceChanges(s, cx, changes, purpose)
                 else t.notice = "当前代码快照已更新。" end
             end
         else t.error = "代码变化未能保存：" .. storageMessage(failure or "请核对结果记录") end
+        local followup
+        if saved and purpose == "verify_snapshot" then
+            if t.batch and t.batch.state == "running" and t.batch.stopRequested then
+                Batch.advance(t.batch, {result = "unknown"})
+                t.notice = "批量已停止（取消）；后续命令未运行。"
+            else
+                followup = "verify"
+            end
+        elseif saved and purpose == "after_verify" and t.batch and t.batch.state == "running" then
+            local verification = saved.verifications and saved.verifications[#saved.verifications]
+            local changed = t.verifySnapshot and saved.changes and saved.changes.fingerprint ~= t.verifySnapshot
+            local decision = Batch.advance(t.batch, {result = verification and verification.result or "unknown",
+                codeChanged = changed == true, elapsedMs = live.epoch() - t.batch.startedAt})
+            if decision.action == "next" then
+                t.notice = (t.notice or "") .. " 批量继续第 " .. tostring(t.batch.index) .. " / "
+                    .. tostring(#t.batch.entries) .. " 条。"
+                followup = decision.entry
+            else
+                t.notice = "批量结束：" .. (batchReasons[t.batch.stopReason] or tostring(t.batch.stopReason))
+                    .. "；剩余 " .. tostring(Batch.remaining(t.batch)) .. " 条未运行。"
+            end
+        end
         saveUi(s)
         ctx:render()
-        if saved and purpose == "verify_snapshot" then
+        if followup == "verify" then
             startTraceVerification(s, ctx, saved.changes)
+        elseif type(followup) == "table" then
+            beginTraceVerification(s, ctx, followup.command, followup.criterionIds)
         end
     end
     if purpose == "verify_snapshot" then
@@ -1411,9 +1450,57 @@ local function traceAction(s, act, cx)
             traceError(s, "命令或条件在预览后已变化；请重新预览后再运行"); cx:render(); return
         end
         t.runPreview = nil
-        t.verifyRequest = {command = command, criterionIds = criteria}
-        local baseline = t.results.baseline
-        issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "verify_snapshot")
+        beginTraceVerification(s, cx, command, criteria)
+    elseif act == "results-batch-add" then
+        local command = trim(t.fields.verifyCommand.text)
+        local preview = t.runPreview
+        if not preview or preview.command ~= command or preview.criteriaText ~= t.fields.verifyCriteria.text then
+            traceError(s, "加入批量前先生成匹配当前命令与条件的预览"); cx:render(); return
+        end
+        if t.batch and t.batch.state == "running" then
+            traceError(s, "批量正在运行；不能修改队列"); cx:render(); return
+        end
+        t.batchEntries = t.batchEntries or {}
+        local entry, failure = Batch.add(t.batchEntries, command, preview.criterionIds, live.epoch())
+        if not entry then
+            traceError(s, failure == "batch_limit" and "批量最多 5 条" or "命令无效，无法加入批量"); cx:render(); return
+        end
+        t.notice = "已加入批量队列（第 " .. tostring(#t.batchEntries) .. " 条）；尚未运行。"
+        saveUi(s); cx:render()
+    elseif type(act) == "string" and act:match("^results%-batch%-remove=") then
+        if t.batch and t.batch.state == "running" then
+            traceError(s, "批量正在运行；不能修改队列"); cx:render(); return
+        end
+        local index = tonumber(act:match("=([%d]+)$"))
+        if Batch.remove(t.batchEntries or {}, index) then
+            t.notice = "已从批量队列移除第 " .. tostring(index) .. " 条。"
+        else
+            traceError(s, "找不到要移除的队列条目"); 
+        end
+        saveUi(s); cx:render()
+    elseif act == "results-batch-start" then
+        if t.batch and t.batch.state == "running" then
+            traceError(s, "已有批量在运行；不会并行或重复启动"); cx:render(); return
+        end
+        local frozen, failure = Batch.freeze(t.batchEntries or {}, live.epoch())
+        if not frozen then
+            traceError(s, failure == "empty_batch" and "批量队列为空" or "批量队列无效"); cx:render(); return
+        end
+        if not u.writable or not t.safe or t.pending then
+            traceError(s, "需要项目编辑权限且没有待核对来源请求"); cx:render(); return
+        end
+        t.batch = frozen
+        local entry = Batch.current(frozen)
+        t.notice = "批量开始：共 " .. tostring(#frozen.entries) .. " 条；首个非通过或代码变化即停止，不自动重试。"
+        saveUi(s); cx:render()
+        beginTraceVerification(s, cx, entry.command, entry.criterionIds)
+    elseif act == "results-batch-stop" then
+        if not t.batch or t.batch.state ~= "running" then
+            traceError(s, "没有正在运行的批量"); cx:render(); return
+        end
+        Batch.requestStop(t.batch)
+        t.notice = "已请求停止调度：当前命令可能仍在运行，其真实结果会保留；剩余命令不会执行。"
+        saveUi(s); cx:render()
     elseif act == "results-plan-add" then
         applyTracePlan(s, cx, "add", {title = trim(t.fields.newStep.text)})
     elseif act == "results-plan-generate" then

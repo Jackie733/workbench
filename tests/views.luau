@@ -109,7 +109,7 @@ return function(tern, repo)
         ["handoff-candidate"] = true, ["handoff-import-file"] = true, ["handoff-import-file-content"] = true,
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
         ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true,
-        ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
+        ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-batch-add"] = true, ["results-batch-start"] = true, ["results-batch-stop"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
@@ -127,6 +127,7 @@ return function(tern, repo)
         if act:match("^wb%-open%-[%w%-_]+$") then return true end
         if act:match("^requirement=.+$") then return true end
         if act:match("^results%-use%-candidate=%d+$") then return true end
+        if act:match("^results%-batch%-remove=%d+$") then return true end
         if act:match("^review%-toggle=") then return act == "review-toggle=reject" or act == "review-toggle=reopen" or act == "review-toggle=dispose" end
         if act:match("^review%-inline=.+$") then return true end
         if act:match("^review%-remove%-finding=%d+$") then return true end
@@ -381,6 +382,12 @@ return function(tern, repo)
     check(findByKey(deliveryView, "results-run-verification").p.disabled == false, "匹配的预览应允许确认运行")
     delivery.ui.trace.fields.verifyCommand.text = "npm run build"
     check(findByKey(ui.build(delivery), "results-run-verification").p.disabled ~= false, "命令变化后必须重新预览")
+    delivery.ui.trace.batchEntries = {{command = "npm run test", criterionIds = {"C1"}}, {command = "npm run lint", criterionIds = {}}}
+    delivery.ui.trace.batch = {entries = delivery.ui.trace.batchEntries, index = 1, startedAt = 0, state = "running"}
+    local batchView = ui.build(delivery)
+    check(findByKey(batchView, "batchCard") ~= nil, "交付页应显示批量队列")
+    check(findByKey(batchView, "results-batch-add").p.disabled ~= false, "运行中不得修改批量队列")
+    check(findByKey(batchView, "results-batch-stop").p.disabled == false, "运行中应可请求停止调度")
 
     -- Approval diff: changed content is a warning, identical content is muted,
     -- and an unreadable snapshot is explicitly unavailable.

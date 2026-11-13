@@ -227,6 +227,29 @@ return function(tern, def, cx, payloadJson)
     check(s.ui.trace.fields.verifyCommand.text == "npm run test", "选择候选只应填入草稿")
     check(s.ui.trace.runPreview == nil, "选择候选后仍需重新预览")
 
+    -- Batch: queueing needs a matching preview, starts serially, refuses a second
+    -- start, and stop only requests that no further command be scheduled.
+    s.ui.trace.fields.verifyCommand.text = "npm run test"
+    s.ui.trace.fields.verifyCriteria.text = "C1"
+    action(s, "results-preview-verification")
+    action(s, "results-batch-add")
+    check(#(s.ui.trace.batchEntries or {}) == 1, "匹配的预览可加入批量队列")
+    s.ui.trace.runPreview = nil
+    action(s, "results-batch-add")
+    check(#(s.ui.trace.batchEntries or {}) == 1 and s.ui.trace.error ~= nil, "没有匹配预览时不得加入队列")
+    s.ui.trace.error = nil
+    action(s, "results-batch-start")
+    check(s.ui.trace.batch ~= nil and s.ui.trace.batch.state == "running", "批量应开始运行")
+    check(s.ui.trace.verifyRequest ~= nil and s.ui.trace.verifyRequest.command == "npm run test",
+        "批量应先读取首个命令的快照")
+    action(s, "results-batch-start")
+    check(s.ui.trace.error ~= nil and s.ui.trace.error:find("运行", 1, true) ~= nil, "不得并行启动第二个批量")
+    s.ui.trace.error = nil
+    action(s, "results-batch-stop")
+    check(s.ui.trace.batch.stopRequested == true, "停止只应请求结束调度")
+    s.ui.trace.batch, s.ui.trace.batchEntries, s.ui.trace.verifyRequest = nil, nil, nil
+    s.ui.trace.pending, s.ui.trace.busy, s.ui.trace.busyLabel = nil, false, nil
+
     -- Activity export writes only its event index into the project export folder.
     s.ui.writable = true
     check(#s.ui.activity.events > 0, "活动事件应可用于导出")

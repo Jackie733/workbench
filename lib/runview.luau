@@ -2,6 +2,7 @@
 local ui = tern.ui
 local Results = require("./results")
 local Validity = require("./validity")
+local Batch = require("./batch")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -246,6 +247,44 @@ function M.build(s)
                 or (not preview and "先预览确切命令")
                 or (not matches and "命令或条件在预览后已变化，请重新预览") or false),
     }))
+
+    local batchEntries = t.batchEntries or {}
+    local batch = t.batch
+    local running = batch ~= nil and batch.state == "running"
+    local batchChildren = {}
+    for index, entry in batchEntries do
+        table.insert(batchChildren, row("batchEntry-" .. tostring(index), {
+            ui.text(tostring(index) .. ". " .. entry.command),
+            note("条件：" .. (#entry.criterionIds > 0 and table.concat(entry.criterionIds, ", ") or "未关联")),
+            button("移除", "results-batch-remove=" .. tostring(index), "quiet", running),
+        }))
+    end
+    if #batchChildren == 0 then table.insert(batchChildren, note("队列为空：先生成预览，再加入当前命令与条件。")) end
+    if batch then
+        local stateNames = {running = "运行中", stopped = "已停止", completed = "已完成"}
+        local status = (stateNames[batch.state] or batch.state) .. " · 第 " .. tostring(math.min(batch.index, #batch.entries))
+            .. " / " .. tostring(#batch.entries) .. " 条"
+        if batch.stopReason then status = status .. " · " .. batch.stopReason end
+        table.insert(batchChildren, ui.text({
+            ui.span(status, batch.state == "completed" and "success" or (batch.state == "stopped" and "warning" or "muted")),
+            ui.span(" · 剩余未运行 " .. tostring(Batch.remaining(batch)) .. " 条", "muted"),
+        }))
+    end
+    table.insert(batchChildren, row("batchActions", {
+        button("加入批量队列", "results-batch-add", "default",
+            running and "批量运行中不能修改队列"
+                or ((not preview or not matches) and "先预览匹配的命令与条件")
+                or (#batchEntries >= Batch.MAX_ENTRIES and "队列已满（最多 5 条）") or false),
+        button("开始批量", "results-batch-start", "primary",
+            running and "已有批量在运行" or (#batchEntries == 0 and "队列为空")
+                or (t.pending ~= nil and "已有来源请求待核对") or (not writable and "只读或记录未就绪") or false),
+        button("停止调度", "results-batch-stop", "danger", (not running and "没有正在运行的批量") or false),
+    }))
+    table.insert(batchChildren, note("串行执行、最多 5 条、总时长 10 分钟；首个非通过或结果未知即停止，代码变化也会停止。"
+        .. "不并行、不自动重试、不续跑；重载后批量状态丢弃，已完成证据仍保留。"))
+    table.insert(nodes, ui.card("批量验证 · 可选", {
+        ui.node("col", {key = "batchBody", gap = "sm"}, batchChildren),
+    }, {key = "batchCard", tone = running and "warning" or "muted"}))
 
     local verifications = t.results and t.results.verifications or {}
     if #verifications > 0 then
