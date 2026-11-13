@@ -7,6 +7,12 @@ local function push(events, at, kind, summary, ref)
     if type(at) ~= "number" or at < 0 then return end
     table.insert(events, {at=at, kind=kind, summary=summary, ref=ref or ""})
 end
+local function importSummary(item)
+    local links = {}
+    for index, id in item.sourceIds do table.insert(links, id .. " → " .. item.entityIds[index]) end
+    return "外部 JSON 声明（非认证原生审查） · 导入 " .. item.id .. " · SHA-256 " .. item.sha256
+        .. (item.reviewId and (" · 审查 " .. item.reviewId) or "") .. " · 映射 " .. table.concat(links, ", ")
+end
 function M.timeline(req, workflow, plan, results, reviews)
     local events = {}
     push(events, req.createdAt, "需求", "创建 " .. tostring(req.number) .. " · " .. tostring(req.title), req.requirementId)
@@ -32,7 +38,12 @@ function M.timeline(req, workflow, plan, results, reviews)
         push(events, plan.updatedAt, "计划", "修订 " .. tostring(plan.revision) .. " · " .. tostring(plan.changeReason), "plan")
         for _, step in plan.steps do
             push(events, step.updatedAt, "计划步骤", tostring(step.id) .. " · " .. tostring(step.status) .. " · " .. tostring(step.title)
-                .. (step.reason and (" · " .. step.reason) or ""), tostring(step.id))
+                .. (step.reason and (" · " .. step.reason) or "")
+                .. " · 条件 " .. table.concat(step.criterionIds or {}, ", ")
+                .. " · 文件 " .. table.concat(step.filePaths or {}, ", ") .. "（建议链接，不是证据）", tostring(step.id))
+        end
+        for _, item in plan.candidateImports or {} do
+            push(events, plan.updatedAt, "计划候选采用", importSummary(item), item.id)
         end
     end
     if results then
@@ -51,6 +62,11 @@ function M.timeline(req, workflow, plan, results, reviews)
         for _, event in review.events do
             push(events, event.at, "发现处置", tostring(event.action) .. " · " .. tostring(event.findingId) .. " · " .. tostring(event.reason), tostring(event.findingId))
         end
+    end
+    for _, item in reviews and reviews.candidateImports or {} do
+        local at = req.updatedAt
+        for _, review in reviews.reviews do if review.id == item.reviewId then at = review.createdAt; break end end
+        push(events, at, "审查候选采用", importSummary(item), item.id)
     end
     for _, acceptance in reviews and reviews.acceptances or {} do
         push(events, acceptance.createdAt, "人工验收", tostring(acceptance.decision) .. " · " .. Context.identity(acceptance)
@@ -115,7 +131,10 @@ function M.markdown(req, workflow, plan, results, reviews)
     for _, step in plan and plan.steps or {} do
         line(out, "- " .. tostring(step.id) .. " · " .. tostring(step.status) .. " · " .. tostring(step.title)
             .. (step.reason and (" · 原因：" .. step.reason) or ""))
+        line(out, "  - 条件 ID：" .. table.concat(step.criterionIds or {}, ", "))
+        line(out, "  - 文件路径：" .. table.concat(step.filePaths or {}, ", ") .. "（建议链接，不构成证据）")
     end
+    for _, item in plan and plan.candidateImports or {} do line(out, "- " .. importSummary(item)) end
     blank(out)
     line(out, "## 代码观察（不含差异正文）"); blank(out)
     if results and results.baseline then
@@ -137,6 +156,7 @@ function M.markdown(req, workflow, plan, results, reviews)
     end
     blank(out)
     line(out, "## 审查"); blank(out)
+    for _, item in reviews and reviews.candidateImports or {} do line(out, "- " .. importSummary(item)) end
     for _, review in reviews and reviews.reviews or {} do
         line(out, "### " .. tostring(review.id) .. " · " .. tostring(review.source))
         line(out, "- 范围：" .. tostring(review.scope))
@@ -162,6 +182,7 @@ function M.markdown(req, workflow, plan, results, reviews)
     blank(out)
     line(out, "---")
     line(out, "本导出由项目工作台记录生成；不包含验证命令的 stdout/stderr、聊天记录、认证信息或凭据。")
+    line(out, "候选导入只导出 ID、原始文件摘要、稳定映射及建议链接，不导出完整候选文件；外部声明不是认证的原生审查或验证证据。")
     line(out, "本地文件仍可被用户修改；工作台不宣称此记录不可篡改。")
     return table.concat(out, "\n") .. "\n"
 end

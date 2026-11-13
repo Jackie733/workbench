@@ -113,7 +113,7 @@ files[Review.path(paths, req)] = serde.encode("json", {schemaVersion=1, projectI
 local reviewed
 Review.createReview(paths, req, "owner", {source="manual", scope="全量", codeSnapshotSha256=SHA, findings={}}, 1,
     function(value, err) reviewed, problem=value, err end)
-check(reviewed and reviewed.schemaVersion == 2 and problem == nil, "新审查升级容器并保留验收历史")
+check(reviewed and reviewed.schemaVersion == 3 and problem == nil, "新审查升级容器并保留验收历史")
 check(reviewed and reviewed.reviews[1].requirementContentRevision == 2, "审查绑定当前内容身份")
 check(reviewed and reviewed.acceptances[1].requirementContentRevision == nil, "旧验收不补造身份")
 local accepted

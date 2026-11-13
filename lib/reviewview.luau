@@ -3,6 +3,7 @@ local ui = tern.ui
 local Review = require("./review")
 local Validity = require("./validity")
 local Context = require("./context")
+local Runview = require("./runview")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -203,6 +204,8 @@ local function findingsTable(v, review, writable)
             {text = stateNames[state] or state, dot = stateTones[state] or "muted", title = reason},
             {button = {text = "处置", act = "review-inline=" .. key, variant = "default",
                 disabled = not writable and "只读或记录未就绪" or false}},
+            {button = {text = "修复交接草稿", act = "review-fix-draft=" .. key, variant = "quiet",
+                disabled = not writable and "只读或记录未就绪" or false}},
         }})
     end
     return ui.table({
@@ -210,6 +213,7 @@ local function findingsTable(v, review, writable)
         {id = "description", head = "发现", grow = 1, truncate = "end"},
         {id = "state", head = "状态", priority = 2},
         {id = "act", head = "", align = "end", priority = 1},
+        {id = "fix", head = "", align = "end", priority = 1},
     }, rows, {key = "findingsTable" .. review.id, role = "workbench.findings", selectable = true, selected = v.finding})
 end
 local function dispositionPanel(v, writable)
@@ -264,6 +268,11 @@ local function findingsCard(v, writable)
             }))
         end
         if #items > 10 then table.insert(children, note("仅显示最近 10 次审查；共 " .. tostring(#items) .. " 次。")) end
+    end
+    for _, imported in v.data and v.data.candidateImports or {} do
+        table.insert(children, note("外部 JSON 导入 " .. imported.id .. " · SHA-256 " .. imported.sha256
+            .. " · 审查 " .. imported.reviewId .. " · 映射 " .. table.concat(imported.sourceIds, ", ")
+            .. " → " .. table.concat(imported.entityIds, ", ") .. "；不是已认证的原生审查"))
     end
     local panel = v.panel == "dispose" and dispositionPanel(v, writable) or nil
     if panel then table.insert(children, panel) end
@@ -398,6 +407,7 @@ function M.build(s)
     if v.error then table.insert(nodes, ui.text({ui.span(v.error, "error")})) end
     if v.notice then table.insert(nodes, ui.text({ui.span(v.notice, "warning")})) end
     table.insert(nodes, recordCard(s, v, writable, snapshot))
+    table.insert(nodes, Runview.candidatePanel(s, "review"))
     table.insert(nodes, findingsCard(v, writable))
     table.insert(nodes, acceptanceCard(s, v, r, writable, snapshot))
     local history = historyCard(v)

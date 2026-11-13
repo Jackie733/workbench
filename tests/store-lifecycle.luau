@@ -55,7 +55,10 @@ return function(source, json)
             local current = files[env.OMPWB_TARGET] and read(env.OMPWB_TARGET)
             if current and (expected == 0 or current.revision ~= expected) then status=3
             elseif not current and expected ~= 0 then status=3
-            elseif current and current.schemaVersion ~= 1 and not (current.schemaVersion == 2 and env.OMPWB_SCHEMA2 == "1") then status=4
+            elseif current and current.schemaVersion ~= 1
+                and not (current.schemaVersion == 2 and env.OMPWB_SCHEMA2 == "1")
+                and not (current.schemaVersion == 3 and env.OMPWB_SCHEMA3 == "1"
+                    and env.OMPWB_TARGET:sub(-13) == "\\reviews.json") then status=4
             elseif not files[env.OMPWB_TEMP] then status=5
             else files[env.OMPWB_TARGET] = files[env.OMPWB_TEMP] end
         end
@@ -265,14 +268,18 @@ return function(source, json)
         Store.putScoped(paths,paths.requirements.."\\req-1\\"..name,value,expected or 0,"owner",function(a,b) saved,err=a,b end)
         return saved,err
     end
-    for _,name in {"results","reviews","plan","resources"} do
-        local value={schemaVersion=2,projectId="project-1",requirementId="req-1",revision=1}
-        local ok,err=scoped(name..".json",value)
-        equal(ok,name=="results" or name=="reviews","scoped schema2 is restricted to results/reviews")
-        if name=="results" or name=="reviews" then
-            value.revision=2;check(scoped(name..".json",value,1),"existing schema2 passes atomic schema gate")
-            value.revision=3;value.unknown=true;equal(select(2,scoped(name..".json",value,2)),"invalid_path_or_record","scoped unknown top-level fields rejected")
-        else equal(err,"invalid_path_or_record","plan/resources remain schema1") end
+    for _,case in {{"results",2},{"reviews",2},{"reviews",3},{"plan",2},{"resources",1}} do
+        local name,version=case[1],case[2]
+        files[paths.requirements.."\\req-1\\"..name..".json"]=nil
+        local value={schemaVersion=version,projectId="project-1",requirementId="req-1",revision=1}
+        if name=="plan" or version==3 then value.candidateImports={} end
+        check(scoped(name..".json",value),"scoped accepted version "..name..tostring(version))
+        value.revision=2
+        check(scoped(name..".json",value,1),"existing version passes exact atomic schema gate")
+        value.revision=3;value.unknown=true
+        equal(select(2,scoped(name..".json",value,2)),"invalid_path_or_record","scoped unknown top-level fields rejected")
+        value.unknown=nil;value.schemaVersion=(name=="reviews" and 4 or name=="resources" and 2 or 3)
+        equal(select(2,scoped(name..".json",value,2)),"invalid_path_or_record","future per-file schema rejected")
     end
     local old=workflow(1)
     old.latestVersion=1

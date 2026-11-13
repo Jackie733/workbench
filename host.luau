@@ -5,6 +5,7 @@ local store = require("./lib/store")
 local Workflow = require("./lib/workflow")
 local Results = require("./lib/results")
 local Review = require("./lib/review")
+local Candidates = require("./lib/candidates")
 local Validity = require("./lib/validity")
 local auditview = require("./lib/auditview")
 local Audit = require("./lib/audit")
@@ -49,6 +50,12 @@ local function bind(s, payload)
     assert(location and live.marker(payload.binding, location), "工作台绑定身份无效")
     assert(type(payload.source) == "number" and type(payload.window) == "string", "来源证明无效")
     if s.payload and s.payload.source ~= payload.source then error("不能把面板交给另一个来源 pane") end
+    if s.payload and s.ui and (s.payload.binding.instanceId ~= payload.binding.instanceId
+        or s.payload.binding.sessionId ~= payload.binding.sessionId
+        or s.payload.binding.openRequestId ~= payload.binding.openRequestId
+        or s.payload.binding.projectRoot ~= payload.binding.projectRoot) then
+        s.ui.imports = {}
+    end
     if not s.payload or s.payload.binding.openRequestId ~= payload.binding.openRequestId then
         s.openRequestedAt = tern.now()
         if s.payload then s.lastOpenAttempt = nil end
@@ -451,8 +458,25 @@ local function refreshHandoff(s)
     end
     if h.workflowError then h.error = h.workflowError end
 end
-local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
-local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, lifecycleReason=2000, auditQuery=200, activityQuery=200, findingDraft=4000}
+local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000,
+    planImportPath = 2048, stepCriteria = 2200, stepFiles = 8192}
+local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, lifecycleReason=2000, auditQuery=200, activityQuery=200, findingDraft=4000, reviewImportPath=2048}
+local function importPathSnapshot(state, name)
+    local drafts = table.clone(state.importPaths or {})
+    if state.importRequirement then drafts[state.importRequirement] = state.fields[name].text end
+    return drafts
+end
+local function scopeImport(s, state, name)
+    local id = s.ui.selected
+    if state.importRequirement == id then return end
+    state.importPaths = state.importPaths or {}
+    if state.importRequirement then state.importPaths[state.importRequirement] = state.fields[name].text end
+    local text = id and state.importPaths[id] or ""
+    if type(text) ~= "string" or #text > 2048 or not utf8.len(text) then text = "" end
+    state.fields[name] = {text = text, cursor = utf8.len(text)}
+    state.importRequirement = id
+    s.ui.imports = {}
+end
 local function traceSnapshot(t)
     if not t then return nil end
     local fields = {}
@@ -461,7 +485,11 @@ local function traceSnapshot(t)
             fields[name] = {text = field.text:sub(1, traceLimits[name] or 500), cursor = field.cursor, anchor = field.anchor}
         end
     end
-    return {fields = fields}
+    local linkDrafts = table.clone(t.linkDrafts or {})
+    if t.selectedStep and t.stepRequirement then
+        linkDrafts[t.stepRequirement .. "|" .. t.selectedStep] = {criteria=t.fields.stepCriteria.text, files=t.fields.stepFiles.text}
+    end
+    return {fields = fields, importPaths = importPathSnapshot(t, "planImportPath"), linkDrafts=linkDrafts}
 end
 local function makeTrace(saved)
     local fields = {}
@@ -472,7 +500,9 @@ local function makeTrace(saved)
             anchor = type(item) == "table" and type(item.anchor) == "number" and item.anchor or nil}
     end
     for name, field in fields do field.cursor = field.cursor or utf8.len(field.text) end
-    return {fields = fields, safe = true, busy = false}
+    return {fields = fields, safe = true, busy = false,
+        importPaths = type(saved) == "table" and type(saved.importPaths) == "table" and saved.importPaths or {},
+        linkDrafts = type(saved) == "table" and type(saved.linkDrafts) == "table" and saved.linkDrafts or {}}
 end
 local function reviewSnapshot(v)
     if not v then return nil end
@@ -484,7 +514,7 @@ local function reviewSnapshot(v)
         end
     end
     return {fields=fields, source=v.source, finding=v.finding, action=v.action, panel=v.panel, draftSeverity=v.draftSeverity,
-        reasonDrafts=v.reasonDrafts, draftRequirement=v.draftRequirement}
+        reasonDrafts=v.reasonDrafts, draftRequirement=v.draftRequirement, importPaths=importPathSnapshot(v, "reviewImportPath")}
 end
 local function makeReview(saved)
     local fields = {}
@@ -504,6 +534,7 @@ local function makeReview(saved)
         draftSeverity=(savedSeverity == "blocking" or savedSeverity == "major" or savedSeverity == "minor" or savedSeverity == "note") and savedSeverity or "major",
         reasonDrafts=type(saved)=="table" and type(saved.reasonDrafts)=="table" and saved.reasonDrafts or {},
         draftRequirement=type(saved)=="table" and saved.draftRequirement or nil,
+        importPaths=type(saved)=="table" and type(saved.importPaths)=="table" and saved.importPaths or {},
         safe=true, busy=false}
 end
 local function makeAudit(saved)
@@ -586,6 +617,14 @@ end
 local function refreshTrace(s)
     local u, t = s.ui, s.ui and s.ui.trace
     if not u or not t then return end
+    scopeImport(s, t, "planImportPath")
+    if t.stepRequirement ~= u.selected then
+        if t.selectedStep and t.stepRequirement then
+            t.linkDrafts[t.stepRequirement .. "|" .. t.selectedStep] = {criteria=t.fields.stepCriteria.text, files=t.fields.stepFiles.text}
+        end
+        t.selectedStep, t.stepRequirement = nil, u.selected
+        t.fields.stepCriteria, t.fields.stepFiles = {text="", cursor=0}, {text="", cursor=0}
+    end
     local requirement = u.selected and u.byId[u.selected]
     t.error = nil
     t.candidates, t.candidatesReady = nil, false
@@ -634,6 +673,7 @@ end
 local function refreshReview(s)
     local u, v = s.ui, s.ui and s.ui.review
     if not u or not v then return end
+    scopeImport(s, v, "reviewImportPath")
     local requirement = u.selected and u.byId[u.selected]
     local id = requirement and requirement.requirementId
     if v.draftRequirement ~= id then
@@ -698,6 +738,11 @@ storageMessage = function(reason)
         review_event_limit = "单次审查的处置事件已达到上限。",
         invalid_stage_transition = "当前阶段不允许此人工转换；请刷新后核对。",
         missing_acceptance = "找不到可重新打开的人工接受记录。",
+        invalid_candidate = "外部 JSON 声明格式无效；没有采用。",
+        candidate_stale = "候选的需求、计划或代码快照已变化；请显式重新预览。",
+        candidate_wrong_target = "候选不属于当前项目或需求；没有采用。",
+        candidate_criterion_missing = "候选关联的验收条件已不存在；没有采用。",
+        candidate_conflict = "此导入 ID 已用于不同的文件摘要；没有重复采用。",
     }
     if messages[code] then
         local detail = type(reason) == "table" and reason.detail
@@ -1240,9 +1285,12 @@ local function issueTraceCommand(s, cx, operation, extra, purpose)
     t.pending = {requestId = id, purpose = purpose, operation = operation, requirementId = requirement.requirementId,
         requirementRevision = requirement.revision, sessionId = s.payload.binding.sessionId,
         instanceId = s.payload.binding.instanceId, projectRoot = s.payload.binding.projectRoot,
+        openRequestId = s.payload.binding.openRequestId,
         createdAt = now, expiresAt = command.expiresAt}
     t.error, t.busy, t.busyLabel = nil, true,
-        purpose == "verify_snapshot" and "正在读取验证前代码快照…" or "正在读取当前代码变化…"
+        purpose == "candidate_file" and "正在读取外部 JSON 候选文件…"
+        or purpose == "candidate_changes" and "正在核对候选代码快照…"
+        or purpose == "verify_snapshot" and "正在读取验证前代码快照…" or "正在读取当前代码变化…"
     saveUi(s)
     cx:render()
     local expectedPayload = s.payload
@@ -1250,12 +1298,188 @@ local function issueTraceCommand(s, cx, operation, extra, purpose)
         local ctx = freshCx or cx
         if not alive(ctx) or s.payload ~= expectedPayload then return end
         if failure then
+            if t.importRequest then
+                t.importRequest.ready, t.importRequest.adopting = false, false
+                local state = t.importRequest.kind == "review" and s.ui.review or t
+                state.error = "来源检查命令写入失败；不会自动重试或采用，请显式重新预览。"
+            end
             t.pending, t.busy, t.busyLabel = nil, false, nil
+            t.importRequest = nil
             t.error = "来源检查命令写入状态待核对；未执行验证、未写入新证据。请刷新后重试。"
             saveUi(s)
             ctx:render()
         end
     end)
+end
+-- Import bodies and frozen callbacks are ephemeral, never part of traceSnapshot.
+local function candidateSlot(s, kind)
+    local u, req = s.ui, selectedRequirement(s)
+    if not req then return nil end
+    u.imports = u.imports or {}
+    u.imports[req.requirementId] = u.imports[req.requirementId] or {}
+    return u.imports[req.requirementId], kind
+end
+local function candidateContext(s, request)
+    local u, req = s.ui, selectedRequirement(s)
+    if not request or not req or u ~= request.ui or u.paths ~= request.paths
+        or req.projectId ~= request.requirement.projectId or req.requirementId ~= request.requirement.requirementId
+        or req.revision ~= request.requirement.revision or store.contentRevision(req) ~= request.contentRevision
+        or Workflow.requirementContent(req) ~= Workflow.requirementContent(request.requirement)
+        or s.payload.binding.projectRoot ~= request.root or s.payload.location.distro ~= request.distro
+        or s.payload.binding.instanceId ~= request.instanceId or s.payload.binding.sessionId ~= request.sessionId
+        or s.payload.binding.openRequestId ~= request.openRequestId then return false end
+    local state = request.kind == "plan" and u.trace or u.review
+    local name = request.kind == "plan" and "planImportPath" or "reviewImportPath"
+    if state.fields[name].text ~= request.pathText then return false end
+    local slots = u.imports and u.imports[req.requirementId]
+    if not slots or slots[request.kind] ~= request then return false end
+    local rows, problems = store.readRequirements(request.paths)
+    if #problems > 0 then return false end
+    local found = false
+    for _, current in rows do
+        if current.requirementId == req.requirementId then
+            found = current.projectId == req.projectId and current.revision == request.requirement.revision
+                and store.contentRevision(current) == request.contentRevision
+                and Workflow.requirementContent(current) == Workflow.requirementContent(request.requirement)
+        end
+    end
+    local plan = Results.loadPlan(request.paths, request.requirement)
+    local reviews = Review.load(request.paths, request.requirement)
+    return found and plan ~= nil and reviews ~= nil and plan.revision == request.planRevision
+        and (request.kind ~= "review" or reviews.revision == request.expected)
+end
+local function candidateFail(s, cx, request, message)
+    local t = s.ui.trace
+    t.pending, t.busy, t.busyLabel, t.importRequest = nil, false, nil, nil
+    if request then request.ready, request.adopting = false, false; request.error = message end
+    local state = request and request.kind == "review" and s.ui.review or t
+    state.error = message .. "；不会自动重试或采用，请显式重新预览。"
+    saveUi(s); cx:render()
+end
+local function candidateAction(s, cx, kind, adopt)
+    local u, t, req = s.ui, s.ui.trace, selectedRequirement(s)
+    local state = kind == "plan" and t or u.review
+    if not req or not u.writable or not t.safe or not state.safe or s.problem or u.dirty
+        or t.pending or t.busy or u.review.busy or u.handoff.pending or u.handoff.pendingSend
+        or u.handoff.workflowBusy then
+        state.error = "记录只读、来源不可用或已有操作待核对；没有请求或采用。"; cx:render(); return
+    end
+    local slots = candidateSlot(s, kind)
+    local request = slots and slots[kind]
+    if adopt then
+        if not request or not request.ready or request.adopting or not candidateContext(s, request) then
+            if request then request.ready = false end
+            state.error = "没有匹配当前需求、绑定和计划的候选预览；请显式重新预览。"; cx:render(); return
+        end
+        request.adopting, request.ready = true, false
+    else
+        local name = kind == "plan" and "planImportPath" or "reviewImportPath"
+        local pathText = state.fields[name].text
+        local path = trim(pathText)
+        if not Candidates.path(path) then state.error = "请输入安全的项目相对 JSON 文件路径。"; cx:render(); return end
+        local plan, planError = Results.loadPlan(u.paths, req)
+        local reviews, reviewError = Review.load(u.paths, req)
+        if not plan or not reviews then state.error = storageMessage(planError or reviewError); cx:render(); return end
+        local frozen = tern.json.decode(tern.json.encode(req))
+        request = {kind=kind, path=path, pathText=pathText, ui=u, paths=u.paths, token=u.token,
+            requirement=frozen, contentRevision=store.contentRevision(frozen), planRevision=plan.revision,
+            expected=kind == "plan" and plan.revision or reviews.revision,
+            root=s.payload.binding.projectRoot, distro=s.payload.location.distro,
+            instanceId=s.payload.binding.instanceId, sessionId=s.payload.binding.sessionId,
+            openRequestId=s.payload.binding.openRequestId}
+        slots[kind] = request
+    end
+    state.error, state.notice = nil, nil
+    t.importRequest = request
+    issueTraceCommand(s, cx, "file", {path=request.path}, "candidate_file")
+end
+local function receiveCandidate(s, cx, pending, receipt)
+    local u, t, request = s.ui, s.ui.trace, s.ui.trace.importRequest
+    if not candidateContext(s, request) or pending.openRequestId ~= s.payload.binding.openRequestId
+        or not u.writable or s.problem or u.dirty or u.review.busy
+        or u.handoff.pending or u.handoff.pendingSend or u.handoff.workflowBusy then
+        candidateFail(s, cx, request, "需求、绑定、计划或草稿已变化，拒绝候选"); return
+    end
+    local data = receipt.data
+    if pending.purpose == "candidate_file" then
+        local file = type(data) == "table" and data.file
+        if type(file) ~= "table" or file.path ~= request.path or type(file.body) ~= "string"
+            or #file.body > 16384 or not utf8.len(file.body) or type(file.sha256) ~= "string"
+            or #file.sha256 ~= 64 or not file.sha256:match("^[0-9a-f]+$") then
+            candidateFail(s, cx, request, "项目文件回执无效或超过 16 KiB"); return
+        end
+        if request.adopting then
+            if file.sha256 ~= request.sha256 or file.body ~= request.body then
+                candidateFail(s, cx, request, "候选文件在预览后已变化"); return
+            end
+        else
+            local candidate, problem = Candidates.decode(file.body)
+            if not candidate or candidate.kind ~= request.kind then
+                candidateFail(s, cx, request, storageMessage(problem or {code="invalid_candidate", detail="候选类型不匹配"})); return
+            end
+            request.body, request.sha256, request.candidate = file.body, file.sha256, candidate
+        end
+        t.pending, t.busy, t.busyLabel = nil, false, nil
+        local results = Results.loadResults(request.paths, request.requirement)
+        if not results then candidateFail(s, cx, request, "结果记录无法读取"); return end
+        issueTraceCommand(s, cx, "changes", {since=results.baseline and results.baseline.head or ""}, "candidate_changes")
+        return
+    end
+    local changes = type(data) == "table" and data.changes
+    if type(changes) ~= "table" or not Results.validateChanges(changes) then
+        candidateFail(s, cx, request, "代码快照回执无效"); return
+    end
+    local plan = Results.loadPlan(request.paths, request.requirement)
+    local current, problem = Candidates.current(request.candidate, request.requirement, plan, changes.fingerprint)
+    if not current then candidateFail(s, cx, request, storageMessage(problem)); return end
+    t.pending = nil
+    if not request.adopting then
+        request.ready, request.snapshot = true, changes.fingerprint
+        t.busy, t.busyLabel, t.importRequest = false, nil, nil
+        local state = request.kind == "plan" and t or u.review
+        state.notice = "完整外部 JSON 候选已预览；尚未写入计划、审查或证据。只有明确采用才会追加。"
+        saveUi(s); cx:render(); return
+    end
+    if changes.fingerprint ~= request.snapshot then candidateFail(s, cx, request, "代码快照在预览后已变化"); return end
+    local results = Results.loadResults(request.paths, request.requirement)
+    if not results then candidateFail(s, cx, request, "结果记录无法读取"); return end
+    -- Adoption alone may persist the freshly observed snapshot. It creates no
+    -- verification evidence and never imports declared candidate results.
+    Results.putChanges(request.paths, request.requirement, request.token, changes, results.revision,
+        function(saved, second, third, fourth)
+            local failure = not saved and (third or second)
+            local ctx = (saved and third or fourth) or cx
+            if not alive(ctx) then return end
+            if not saved or not candidateContext(s, request) then
+                candidateFail(s, ctx, request, saved and "快照保存期间上下文已变化" or storageMessage(failure)); return
+            end
+            t.results = saved
+            local function finish(adopted, reason, finalCx)
+                local final = finalCx or ctx
+                if not alive(final) then return end
+                if not adopted then candidateFail(s, final, request, storageMessage(reason)); return end
+                t.busy, t.busyLabel, t.importRequest = false, nil, nil
+                request.adopting, request.ready, request.adopted = false, false, true
+                if s.ui == u and u.selected == request.requirement.requirementId
+                    and s.payload.binding.instanceId == request.instanceId and s.payload.binding.sessionId == request.sessionId
+                    and s.payload.binding.openRequestId == request.openRequestId then
+                    local state = request.kind == "plan" and t or u.review
+                    if request.kind == "plan" then t.plan = adopted else u.review.data = adopted end
+                    state.notice = "外部 JSON 声明已明确采用（重复 ID/摘要由存储幂等核对）；未授权、未发送，也未作出人工验收。"
+                    refreshAudit(s)
+                end
+                saveUi(s); final:render()
+            end
+            if request.kind == "review" then
+                Review.adoptCandidate(request.paths, request.requirement, request.token, request.candidate,
+                    request.sha256, request.expected, finish)
+            else
+                Results.adoptCandidate(request.paths, request.requirement, request.token, request.candidate,
+                    request.sha256, request.expected, function(adopted, second, third, fourth)
+                        finish(adopted, not adopted and (third or second), (adopted and third or fourth))
+                    end)
+            end
+        end)
 end
 local function verificationContext(s, request)
     local req = selectedRequirement(s)
@@ -1428,6 +1652,9 @@ local function acceptTraceChanges(s, cx, changes, purpose)
     end
 end
 local function handleTraceInspected(s, cx, pending, receipt)
+    if pending.purpose == "candidate_file" or pending.purpose == "candidate_changes" then
+        receiveCandidate(s, cx, pending, receipt); return
+    end
     local t, req = s.ui.trace, selectedRequirement(s)
     if not req or pending.requirementId ~= req.requirementId or pending.requirementRevision ~= req.revision
         or pending.instanceId ~= s.payload.binding.instanceId or pending.sessionId ~= s.payload.binding.sessionId
@@ -1460,7 +1687,10 @@ refreshTraceReceipt = function(s, cx)
             if receipt.status == "inspected" then
                 handleTraceInspected(s, cx, pending, receipt)
             elseif receipt.status == "rejected" or receipt.status == "delivery_unknown" then
+                if t.importRequest then candidateFail(s, cx, t.importRequest, "来源检查未完成：" .. tostring(receipt.reason or receipt.status)); return end
                 t.pending, t.busy, t.busyLabel = nil, false, nil
+                if t.importRequest then t.importRequest.ready, t.importRequest.adopting = false, false end
+                t.importRequest = nil
                 t.error = "来源检查未完成：" .. tostring(receipt.reason or receipt.status) .. "；未执行验证、未写入新证据。"
                 saveUi(s)
                 cx:render()
@@ -1468,7 +1698,10 @@ refreshTraceReceipt = function(s, cx)
             return
         end
         if live.epoch() > pending.expiresAt then
+            if t.importRequest then candidateFail(s, cx, t.importRequest, "候选来源检查回执超时"); return end
             t.pending, t.busy, t.busyLabel = nil, false, nil
+            if t.importRequest then t.importRequest.ready, t.importRequest.adopting = false, false end
+            t.importRequest = nil
             t.error = "来源检查回执超时；未执行验证，也未写入新证据。"
             saveUi(s)
             cx:render()
@@ -1477,7 +1710,10 @@ refreshTraceReceipt = function(s, cx)
     if not ok then
         local t = s.ui and s.ui.trace
         if t then
+            if t.importRequest then candidateFail(s, cx, t.importRequest, "处理候选回执失败：" .. tostring(problem)); return end
             t.pending, t.busy, t.busyLabel = nil, false, nil
+            if t.importRequest then t.importRequest.ready, t.importRequest.adopting = false, false end
+            t.importRequest = nil
             t.error = "处理代码变化回执失败：" .. tostring(problem)
             saveUi(s)
             cx:render()
@@ -1487,11 +1723,15 @@ end
 local function applyTracePlan(s, cx, action, args)
     local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
     if not u or not t or not requirement then return end
-    if t.busy or t.pending then traceError(s, "当前操作尚未完成"); cx:render(); return end
-    t.error = nil
-    Results.applyPlan(u.paths, requirement, u.token, action, args, t.plan.revision, function(saved, reason, freshCx)
-        local ctx = freshCx or cx
+    if t.busy or t.pending or not u.writable or not t.safe or not t.plan then traceError(s, "当前操作尚未完成或记录不可写"); cx:render(); return end
+    t.error, t.busy = nil, true
+    local target = requirement.requirementId
+    Results.applyPlan(u.paths, requirement, u.token, action, args, t.plan.revision, function(saved, second, third, fourth)
+        local reason = not saved and (third or second)
+        local ctx = (saved and third or fourth) or cx
         if not alive(ctx) then return end
+        t.busy = false
+        if s.ui ~= u or u.selected ~= target then saveUi(s); ctx:render(); return end
         if saved then
             t.plan = saved
             if action == "add" then
@@ -1517,6 +1757,45 @@ end
 local function traceAction(s, act, cx)
     local u, t = s.ui, s.ui and s.ui.trace
     if not t then return end
+    if act == "results-import-preview" then candidateAction(s, cx, "plan", false); return end
+    if act == "results-import-adopt" then candidateAction(s, cx, "plan", true); return end
+    if type(act) == "string" and act:match("^results%-link%-pick=") then
+        if t.busy or t.pending then traceError(s, "当前操作尚未完成"); cx:render(); return end
+        local id = act:match("^results%-link%-pick=(.+)$")
+        for _, step in t.plan and t.plan.steps or {} do
+            if step.id == id then
+                t.linkDrafts = t.linkDrafts or {}
+                local key = tostring(u.selected) .. "|" .. id
+                if t.selectedStep then
+                    t.linkDrafts[tostring(u.selected) .. "|" .. t.selectedStep] = {criteria=t.fields.stepCriteria.text, files=t.fields.stepFiles.text}
+                end
+                local draft = t.linkDrafts[key]
+                local criteria = draft and draft.criteria or table.concat(step.criterionIds or {}, ", ")
+                local files = draft and draft.files or table.concat(step.filePaths or {}, "\n")
+                t.selectedStep = id
+                t.fields.stepCriteria, t.fields.stepFiles = {text=criteria, cursor=utf8.len(criteria)}, {text=files, cursor=utf8.len(files)}
+                saveUi(s); cx:render(); return
+            end
+        end
+        return
+    end
+    if act == "results-plan-links" then
+        local criteria, seen = tern.json.array(), {}
+        for raw in (t.fields.stepCriteria.text .. ","):gmatch("(.-),") do
+            local id = trim(raw)
+            if id ~= "" then
+                if seen[id] then traceError(s, "关联条件 ID 重复"); cx:render(); return end
+                seen[id] = true; table.insert(criteria, id)
+            end
+        end
+        local files = tern.json.array()
+        for raw in (t.fields.stepFiles.text .. "\n"):gmatch("(.-)\n") do
+            local path = trim(raw)
+            if path ~= "" then table.insert(files, path) end
+        end
+        if not t.selectedStep or not Candidates.links(criteria, files) then traceError(s, "选择稳定步骤并填写有效条件 ID / 项目相对文件路径"); cx:render(); return end
+        applyTracePlan(s, cx, "links", {stepId=t.selectedStep, criterionIds=criteria, filePaths=files}); return
+    end
     if act == "results-refresh-changes" then
         local baseline = t.results and t.results.baseline
         issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "refresh")
@@ -1863,6 +2142,40 @@ local function reviewAction(s, act, cx)
     local u, v, requirement = s.ui, s.ui and s.ui.review, selectedRequirement(s)
     if not u or not v or not requirement then return end
     if act == "review-open-native" then prefillLiteral(s, cx, "/review"); return end
+    if act == "review-import-preview" then candidateAction(s, cx, "review", false); return end
+    if act == "review-import-adopt" then candidateAction(s, cx, "review", true); return end
+    if type(act) == "string" and act:match("^review%-fix%-draft=") then
+        local h = u.handoff
+        if not u.writable or not v.safe or v.busy or u.trace.busy or u.trace.pending
+            or not h.safe or h.workflowBusy or h.pending or h.pendingSend then
+            reviewFail(s, cx, "只读、忙碌或存在待核对交接；没有生成修复草稿"); return
+        end
+        for _, name in handoffDraftFields do
+            if h.fields[name] and h.fields[name].text:match("%S") then
+                reviewFail(s, cx, "已有交接草稿，已保留；请先保存或清空后再生成修复草稿"); return
+            end
+        end
+        if h.preview or h.candidate or h.importedFile then reviewFail(s, cx, "已有交接预览或导入草稿，已保留"); return end
+        local key = act:match("^review%-fix%-draft=(.+)$")
+        for _, review in v.data and v.data.reviews or {} do
+            for _, finding in review.findings do
+                if key == review.id .. "|" .. finding.id then
+                    local text = "修复交接草稿（不是授权或证据）\n需求 ID：" .. requirement.requirementId
+                        .. "\n审查 ID：" .. review.id .. "\n发现 ID：" .. finding.id
+                        .. "\n审查代码快照：" .. review.codeSnapshotSha256
+                        .. "\n[" .. finding.severity .. "] " .. finding.description
+                        .. "\n仅针对该发现准备实施；请重新核对当前代码、正式方案与批准。发现状态没有改变。"
+                    h.fields.excerpt = {text=text, cursor=utf8.len(text)}
+                    h.activity, h.panel, h.includeRequirement = "implement", true, true
+                    invalidatePreview(h)
+                    u.tab, u.detailMode = "design", true
+                    v.notice = "只生成修复交接草稿；未授权、未发送、未处置发现。"
+                    saveUi(s); cx:render(); return
+                end
+            end
+        end
+        reviewFail(s, cx, "发现已不存在；没有生成草稿"); return
+    end
     if type(act) == "string" and act:match("^review%-pick=") then
         local picked = act:match("^review%-pick=(.+)$")
         for _, review in v.data and v.data.reviews or {} do
@@ -2470,6 +2783,10 @@ local function insertBuffer(s, target, buffer, first, last, text)
     elseif isTraceField(s, target) then s.ui.trace.error = if ok then nil else failure
     elseif isReviewField(s, target) then s.ui.review.error = if ok then nil else failure end
     if ok and (target=="paths" or target=="excerpt") then invalidatePreview(s.ui.handoff) end
+    if ok and (target == "planImportPath" or target == "reviewImportPath") then
+        local slots = s.ui.imports and s.ui.imports[s.ui.selected]
+        if slots then slots[target == "planImportPath" and "plan" or "review"] = nil end
+    end
     return ok
 end
 -- One handler for popup selects and visible choice chips: both carry the same
@@ -2680,6 +2997,7 @@ tern.block.define("live", {
             local old = buffer and buffer.history and table.remove(buffer.history)
             if old then
                 buffer.text, buffer.cursor, buffer.anchor = old.text, old.cursor, old.anchor
+                if target == "planImportPath" or target == "reviewImportPath" then s.ui.imports = {} end
                 persistBuffer(s, target)
             end
         elseif ev.ev == "select" and ev.id:match("%.handoffTabs$") then

@@ -35,6 +35,7 @@ function M.build(s)
             note("按时间倒序汇总需求、方案、批准、计划、代码观察、验证、审查与人工验收记录；用于核对，不是防篡改日志。"),
             note(Context.identity(r) .. " · 阶段 " .. tostring(r.stage)),
             note("本地文件仍可被用户修改；这不是防篡改日志，也不能证明操作者身份。"),
+            note("外部候选采用显示导入 ID、原始文件 SHA-256 与稳定映射；计划的条件/文件链接仅供核对，不构成证据。"),
         }, {key = "auditTarget", tone = "muted"}),
     }
     if a.error then table.insert(nodes, ui.text({ui.span(a.error, "error")})) end
@@ -48,7 +49,7 @@ function M.build(s)
         button("复制 Markdown", "audit-copy", "default", not writable or not a.markdown),
         button("写入项目导出文件", "audit-write", "primary", not writable or not a.markdown),
     }))
-    table.insert(nodes, note("导出只包含应用内记录：不包含验证 stdout/stderr、聊天记录、认证信息或凭据；不宣称本地文件不可修改。"))
+    table.insert(nodes, note("导出只包含应用内记录与候选采用来源清单：不包含完整候选文件、验证 stdout/stderr、聊天记录、认证信息或凭据；不宣称本地文件不可修改。"))
     local rows = {}
     for index, event in events do
         if index <= 120 then

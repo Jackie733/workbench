@@ -163,7 +163,7 @@ local payload = {
 local test = require("./host-review")
 local result = test(stub, holder.def, cx, serde.encode("json", payload),
     {store=loadModule(repo .. "/lib/store.luau"), results=loadModule(repo .. "/lib/results.luau"),
-        live=loadModule(repo .. "/lib/live.luau")})
+        live=loadModule(repo .. "/lib/live.luau"), review=loadModule(repo .. "/lib/review.luau")})
 for _, failure in result.failures do print("FAIL " .. failure) end
 print(string.format("%d checks, %d failures", result.checks, #result.failures))
 if #result.failures > 0 then error("host review contract violated") end

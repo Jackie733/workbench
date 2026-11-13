@@ -1,6 +1,6 @@
 # 变更记录
 
-## 未发布 — 重设计 R0-R4b
+## 未发布 — 重设计 R0-R5
 
 - 新增 `lib/validity.luau`：批准、证据有效性、验收条件覆盖、发现状态与验收门禁的唯一只读评估；批准原因文案随之集中。
 - `results.effectiveState`、`review.findingState`／`acceptanceGate`、`workflow.approvalState`、审查页覆盖与计数、宿主批准文案与验收证据选择全部委派该模块；领域写入、schema 与修订语义不变。
@@ -23,6 +23,8 @@
 - Requirement／workflow／正式方案／results／验证 evidence／reviews 读 1/2、新写 2；project／plan／resources／锁／IPC 保持 1。正常写入时升级，不批量改写，不允许手改版本号降级。
 - 修复验证异步归属与超时：启动前冻结需求、项目、会话、代码快照与内容身份；漂移拒绝执行，完成后写回原需求；超时保存字符串 `unknown` 和空退出码，不再误写布尔值。
 - R4b 回归及隔离 Tern 原生 PowerShell 工作流通过；重设计真实窗口、IME、完整升级恢复验收仍未完成。详见 [R4b 实施记录](docs/REDESIGN_R4B_DESIGN.md#9-实施与验证记录)。
+- R5：新增严格的项目内 JSON 审查／计划候选：完整范围声明、稳定来源 ID、精确需求／计划／代码快照身份；解析、预览与采用分离，预览不写领域，采用追加审查或待办步骤并保留来源映射。同一候选重放幂等，同 ID 不同指纹冲突。计划步骤可维护显式条件／文件关联；从发现准备修复只生成不覆盖的实施交接草稿。可选增量审查未启用，完整零发现不能清除历史阻断。
+- 计划新写 schema 2、reviews 新写 schema 3；旧容器与条目只读兼容，采用清单与人工历史保留，未知版本或字段拒绝。修复采用路径对受保护 JSON 数组的深拷贝兼容问题。
 - 新增原生生命周期验收 `tests/native-lifecycle.luau`：真实 Tern／PowerShell 下 20 项通过，覆盖混合版本、四种转换、CAS 后回调丢失与重复操作拒绝、未知版本字节保留及旧读取器拒绝 v2；不冒称断电恢复或真实 IME 验收。
 - 测试：新增 `tests/validity.luau`／`tests/run-validity.luau`（53 项）；视图 1051 项、宿主交互 55 项、Bun 28 项通过。详见 [R0 记录](docs/REDESIGN_R0.md) 与 [R1 记录](docs/REDESIGN_R1.md)。
 

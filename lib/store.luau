@@ -405,8 +405,12 @@ if ($env:OMPWB_MODE -eq 'publish_directory') {
 if ([IO.File]::Exists($target)) {
   if ($expect -eq 0) { exit 3 }
   try { $cur=[IO.File]::ReadAllText($target) | ConvertFrom-Json } catch { exit 4 }
+  $schema2Target=$target -match '\\(requirement|workflow|plan|results|reviews)\.json$' -or $target -match '\\evidence\\verification-[A-Za-z0-9_-]+\.json$'
+  $schema3Target=$target -match '\\reviews\.json$'
   if ($cur -isnot [System.Management.Automation.PSCustomObject] -or
-    ($cur.schemaVersion -ne 1 -and -not ($env:OMPWB_SCHEMA2 -eq '1' -and $cur.schemaVersion -eq 2)) -or
+    ($cur.schemaVersion -ne 1 -and
+      -not ($env:OMPWB_SCHEMA2 -eq '1' -and $schema2Target -and $cur.schemaVersion -eq 2) -and
+      -not ($env:OMPWB_SCHEMA3 -eq '1' -and $schema3Target -and $cur.schemaVersion -eq 3)) -or
     ($cur.revision -isnot [int] -and $cur.revision -isnot [long]) -or [long]$cur.revision -lt 1) { exit 4 }
   if ([long]$cur.revision -ne $expect) { exit 3 }
 } elseif ($expect -ne 0) { exit 3 }
@@ -552,8 +556,9 @@ local function casPublish(paths, file, value, expectedRevision, token, cb)
     local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
         OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
         OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision),
-        OMPWB_SCHEMA2 = (file:match("\\workflow%.json$") or file:match("\\results%.json$")
-            or file:match("\\reviews%.json$") or file:match("\\evidence\\")) and "1" or "0"}
+        OMPWB_SCHEMA2 = (file:match("\\workflow%.json$") or file:match("\\plan%.json$") or file:match("\\results%.json$")
+            or file:match("\\reviews%.json$") or file:match("\\evidence\\")) and "1" or "0",
+        OMPWB_SCHEMA3 = file:match("\\reviews%.json$") and "1" or "0"}
     local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
         if status == 0 then cb(true, nil, cx)
         else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
@@ -660,10 +665,10 @@ end
 -- Plan, result and immutable verification records share the same requirement scope
 -- and gate. Evidence is create-only; mutable summaries require the exact prior revision.
 local scopedKeys = {
-    plan = {schemaVersion=true,projectId=true,requirementId=true,revision=true,designVersion=true,steps=true,changeReason=true,updatedAt=true},
+    plan = {schemaVersion=true,projectId=true,requirementId=true,revision=true,designVersion=true,steps=true,changeReason=true,updatedAt=true,candidateImports=true},
     resources = {schemaVersion=true,projectId=true,requirementId=true,revision=true,resources=true,updatedAt=true},
     results = {schemaVersion=true,projectId=true,requirementId=true,revision=true,baseline=true,changes=true,verifications=true},
-    reviews = {schemaVersion=true,projectId=true,requirementId=true,revision=true,reviews=true,acceptances=true,reopenings=true},
+    reviews = {schemaVersion=true,projectId=true,requirementId=true,revision=true,reviews=true,acceptances=true,reopenings=true,candidateImports=true},
     evidence = {schemaVersion=true,projectId=true,requirementId=true,revision=true,id=true,command=true,cwd=true,criterionIds=true,
         requirementRevision=true,requirementContentRevision=true,codeSnapshotSha256=true,startedAt=true,endedAt=true,exitCode=true,
         timedOut=true,result=true,stdout=true,stderr=true,stdoutBytes=true,stderrBytes=true,stdoutTruncated=true,stderrTruncated=true},
@@ -685,8 +690,14 @@ function M.putScoped(paths, file, value, expectedRevision, token, cb)
     local kind = evidenceId and "evidence" or (relative and relative:match("\\([%a]+)%.json$"))
     local valid = type(value) == "table" and requirementId and value.requirementId == requirementId
         and M.token(value.projectId) and integer(value.revision, 1) and scopedKeys[kind] and keys(value, scopedKeys[kind])
-        and (value.schemaVersion == 1 or (value.schemaVersion == 2 and kind ~= "plan" and kind ~= "resources"))
-        and identityTree(value, value.schemaVersion)
+        and (value.schemaVersion == 1 or (value.schemaVersion == 2 and kind ~= "resources")
+            or (value.schemaVersion == 3 and kind == "reviews"))
+        and identityTree(value, value.schemaVersion == 3 and 2 or value.schemaVersion)
+        and ((kind ~= "plan" and kind ~= "reviews" and value.candidateImports == nil)
+            or (kind == "plan" and ((value.schemaVersion == 1 and value.candidateImports == nil)
+                or (value.schemaVersion == 2 and array(value.candidateImports, 40))))
+            or (kind == "reviews" and ((value.schemaVersion < 3 and value.candidateImports == nil)
+                or (value.schemaVersion == 3 and array(value.candidateImports, 50)))))
         and (not evidenceId or value.schemaVersion == 1 or integer(value.requirementContentRevision, 1))
     if valid and evidenceId then valid = expectedRevision == 0 and value.revision == 1
     elseif valid then valid = integer(expectedRevision, 0) and value.revision == expectedRevision + 1 end

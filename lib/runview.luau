@@ -52,6 +52,57 @@ local function fileAttribution(baseline, file)
     if prior.sha256 ~= nil and file.sha256 ~= nil and prior.sha256 == file.sha256 then return "基线时已存在，内容未变" end
     return "与基线改动混合"
 end
+-- Shared import surface: raw bounded artifact remains fully inspectable, but
+-- declared results never become evidence and only a separate click adopts.
+function M.candidatePanel(s, kind)
+    local u, r = s.ui, s.ui.byId[s.ui.selected]
+    local t = u.trace
+    local state = kind == "plan" and t or u.review
+    local name = kind == "plan" and "planImportPath" or "reviewImportPath"
+    local input = state.fields[name] or {text="", cursor=0}
+    local request = u.imports and u.imports[r.requirementId] and u.imports[r.requirementId][kind]
+    local prefix = kind == "plan" and "results" or "review"
+    local disabled = not u.writable or not state.safe or not t or not t.safe or t.busy or t.pending ~= nil
+        or u.review.busy or s.problem ~= nil or u.dirty or u.handoff.pending ~= nil
+        or u.handoff.pendingSend ~= nil or u.handoff.workflowBusy
+    local snapshot = t and t.results and t.results.changes and t.results.changes.fingerprint
+    local metadata = "projectId: " .. tostring(r.projectId) .. "\nrequirementId: " .. tostring(r.requirementId)
+        .. "\nrequirementRevision: " .. tostring(r.revision)
+        .. "\nrequirementContentRevision: " .. tostring(r.contentRevision or r.revision)
+        .. "\nplanRevision: " .. tostring(t and t.plan and t.plan.revision or 0)
+        .. "\ncodeSnapshotSha256: " .. tostring(snapshot or "尚未读取；先读取当前代码变化")
+    local nodes = {
+        note("外部 JSON 声明，不是已认证的原生审查（external JSON declaration, not authenticated native review）。"
+            .. "只接受 complete=true 的完整范围声明；不解析模型回复，不自动请求、采用、授权或发送。"),
+        ui.node("section", {key=kind .. "CandidateIdentity", head="当前候选目标身份（完整可复制）", collapsible=true, collapsed=true}, {
+            ui.node("editor", {key=kind .. "CandidateMetadata", text=metadata, readonly=true, maxLines=8, aria="候选目标元数据"}),
+            note("候选必须逐项匹配这些精确值；若尚无快照，先在实施与验证读取代码变化。预览和采用还会重新读取当前快照。"),
+        }),
+        field(name, "项目 JSON 候选路径", input.text, input.cursor, input.anchor, 2, disabled,
+            "项目内相对路径；完整 UTF-8 JSON 最大 16 KiB。路径草稿按需求保存，预览与待采用状态不跨重载恢复。"),
+        row(kind .. "ImportActions", {
+            button("读取并预览 JSON 候选", prefix .. "-import-preview", "default", disabled or not input.text:match("%S")),
+            button("明确采用并追加", prefix .. "-import-adopt", "primary",
+                disabled or not request or not request.ready or request.adopted == true),
+        }),
+        note("预览不写业务记录；采用前重新读取同一文件与代码快照，任何身份、计划、文件摘要或代码漂移都拒绝。失败不会自动重试。"),
+    }
+    if request then
+        if request.error then table.insert(nodes, ui.text({ui.span(request.error, "error")})) end
+        if request.body then
+            table.insert(nodes, note("来源文件：" .. request.path .. " · 原始文件 SHA-256：" .. request.sha256))
+            table.insert(nodes, note("冻结绑定：" .. request.instanceId .. " / " .. request.sessionId
+                .. " / " .. tostring(request.openRequestId) .. " · " .. request.root))
+            table.insert(nodes, note(request.adopted and "已处理；不会重复派发此预览。"
+                or request.ready and "已完成完整预览，等待你明确采用。" or "检查中或已失效；不能采用。"))
+            table.insert(nodes, ui.node("editor", {key=kind .. "CandidateBody", text=request.body, readonly=true,
+                lang="json", maxLines=18, aria="完整候选 JSON（含所有条目、链接、范围和身份）"}))
+            table.insert(nodes, note("上方为完整文件，未截断。scope / complete 是外部声明，不是已验证覆盖；计划条件/文件链接仅作建议，不构成证据。"))
+        end
+    end
+    return ui.card(kind == "plan" and "外部计划 JSON · 预览后明确追加" or "外部审查 JSON · 预览后明确采用",
+        nodes, {key=kind .. "CandidateImport", tone="muted"})
+end
 function M.build(s)
     local u, r = s.ui, s.ui.byId[s.ui.selected]
     local t = u.trace
@@ -65,6 +116,7 @@ function M.build(s)
                 .. " · 观察不能证明代码一定由本需求产生。"),
         }, {key = "traceTarget", tone = "muted"}),
     }
+    table.insert(nodes, M.candidatePanel(s, "plan"))
     if t.error then table.insert(nodes, ui.text({ui.span(t.error, "error")})) end
     if t.notice then table.insert(nodes, ui.text({ui.span(t.notice, "warning")})) end
     if s.problem then table.insert(nodes, note(s.problem .. "；保留最后读取的计划与结果。")) end
@@ -87,6 +139,9 @@ function M.build(s)
             end
             table.insert(items, ui.card(step.title, {
                 note("步骤 " .. tostring(step.id) .. " · 更新 " .. tostring(step.updatedAt)),
+                note("关联条件：" .. table.concat(step.criterionIds or {}, ", ") .. " · 文件：" .. table.concat(step.filePaths or {}, ", ")
+                    .. "（建议链接，不是证据）"),
+                button("编辑条件 / 文件链接", "results-link-pick=" .. step.id, "quiet", not writable),
                 choices("status-" .. tostring(index), "状态", step.status, statusOptions, not writable),
                 step.reason and note("阻塞原因：" .. step.reason) or note(""),
             }, {key = "step-" .. tostring(index), tone = step.status == "blocked" and "warning" or (step.status == "done" and "success" or "muted")}))
@@ -108,6 +163,20 @@ function M.build(s)
         }))
         table.insert(nodes, field("blockReason", "阻塞说明", t.fields.blockReason.text, t.fields.blockReason.cursor, t.fields.blockReason.anchor,
             3, not writable, "把某步骤设为阻塞时必填；会保存在该步骤"))
+        if t.selectedStep then
+            local criteria, files = t.fields.stepCriteria, t.fields.stepFiles
+            table.insert(nodes, ui.card("编辑稳定步骤链接 · " .. t.selectedStep, {
+                field("stepCriteria", "验收条件 ID · 逗号分隔（可为空）", criteria.text, criteria.cursor, criteria.anchor,
+                    3, not writable, "只链接当前存在的稳定条件 ID；不会从标题推断"),
+                field("stepFiles", "项目相对文件路径 · 每行一个（可为空）", files.text, files.cursor, files.anchor,
+                    5, not writable, "仅作计划建议，不构成验证证据；禁止控制目录和不安全路径"),
+                button("明确保存链接", "results-plan-links", "primary", not writable),
+            }, {key="stepLinkEditor", tone="muted"}))
+        end
+        for index, imported in plan.candidateImports or {} do
+            table.insert(nodes, note("外部计划导入 " .. imported.id .. " · SHA-256 " .. imported.sha256
+                .. " · 映射 " .. table.concat(imported.sourceIds, ", ") .. " → " .. table.concat(imported.entityIds, ", ")))
+        end
     end
 
     local baseline = t.results and t.results.baseline

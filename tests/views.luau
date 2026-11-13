@@ -87,7 +87,7 @@ return function(tern, repo)
                     data = {schemaVersion = 1, projectId = "project-1", requirementId = "req-1", revision = 1,
                         resources = {{id = "resource-1", path = "AGENTS.md", kind = "context", addedAt = 1}},
                         updatedAt = 1}},
-                trace = {fields = fields({"verifyCommand", "verifyCriteria", "newStep", "blockReason"}),
+                trace = {fields = fields({"verifyCommand", "verifyCriteria", "newStep", "blockReason", "planImportPath", "stepCriteria", "stepFiles"}),
                     safe = true, busy = false, error = nil, notice = nil, pending = nil,
                     plan = {revision = 1, steps = {{id = "S1", title = "实现入口", status = "active", updatedAt = 1700000000000}}},
                     results = {baseline = {head = "abc123", fingerprint = SHA, files = {}, dirty = false,
@@ -95,7 +95,7 @@ return function(tern, repo)
                         changes = {head = "abc123", fingerprint = SHA, files = {}, commits = {}, diff = "",
                             capturedAt = 1700000000000, filesTruncated = false, commitsTruncated = false, diffTruncated = false},
                         verifications = {}}},
-                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "lifecycleReason", "auditQuery", "activityQuery", "findingDraft"}),
+                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "lifecycleReason", "auditQuery", "activityQuery", "findingDraft", "reviewImportPath"}),
                     source = "native_review", finding = "", action = "resolved", panel = "", draftSeverity = "major",
                     safe = true, busy = false, data = reviewsData(), error = nil, notice = nil},
                 audit = {busy = false, events = {}, eventsTruncated = false, markdown = "# 审计", exportPath = nil, error = nil, notice = nil},
@@ -117,6 +117,7 @@ return function(tern, repo)
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
     simpleActions["lifecycle-confirm"], simpleActions["lifecycle-dismiss"] = true, true
+    for _, act in {"review-import-preview", "review-import-adopt", "results-import-preview", "results-import-adopt", "results-plan-links"} do simpleActions[act] = true end
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
         resourceKind = true, layout = true, priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
         compareVersion = true, privacyMode = true}
@@ -124,6 +125,8 @@ return function(tern, repo)
         reviewReject = true, reviewReopen = true, auditQuery = true, activityQuery = true, findingDraft = true,
         lifecycleReason = true,
         verifyCommand = true, verifyCriteria = true, newStep = true, blockReason = true,
+        planImportPath = true, reviewImportPath = true, stepCriteria = true, stepFiles = true,
+        planCandidateMetadata = true, reviewCandidateMetadata = true, planCandidateBody = true, reviewCandidateBody = true,
         materials = true, search = true, diff = true}
     local function validAction(act)
         if type(act) ~= "string" then return false end
@@ -136,6 +139,8 @@ return function(tern, repo)
             or act:match("=(%w+)$") == "cancel" or act:match("=(%w+)$") == "reopen" end
         if act:match("^results%-use%-candidate=%d+$") then return true end
         if act:match("^results%-batch%-remove=%d+$") then return true end
+        if act:match("^results%-link%-pick=[%w_%-]+$") then return true end
+        if act:match("^review%-fix%-draft=.+$") then return true end
         if act:match("^resources%-remove=[%w_%-]+$") then return true end
         if act:match("^review%-toggle=") then return act == "review-toggle=reject" or act == "review-toggle=reopen" or act == "review-toggle=dispose" end
         if act:match("^review%-inline=.+$") then return true end
@@ -482,5 +487,41 @@ return function(tern, repo)
         check(findByKey(view, "lifecycle-open=reopen") ~= nil and findByKey(view, "lifecycle-open=cancel") == nil,
             "终态需求只能明确重新打开")
     end
+    local imported = copy(baseState())
+    local importReq = imported.ui.byId["req-1"]
+    imported.ui.imports = {["req-1"]={review={path="review.json", sha256=SHA,
+        instanceId="instance-1", sessionId="session-1", openRequestId="open-1", root="/tmp/demo-project",
+        ready=true, body=string.rep(" ", 14000) .. "{\"complete\":true,\"scope\":\"完整范围末尾\"}"}}}
+    imported.ui.review.fields.reviewImportPath = buffer("review.json")
+    local importedView = reviewview.build(imported)
+    validateTree("完整候选预览", importedView)
+    check(findByKey(importedView, "reviewCandidateBody").p.text == imported.ui.imports["req-1"].review.body,
+        "候选预览必须显示完整受限原文，不得截断尾部条目")
+    local meta = findByKey(importedView, "reviewCandidateMetadata").p.text
+    check(meta:find(importReq.projectId, 1, true) ~= nil and meta:find("requirementRevision: 3", 1, true) ~= nil
+        and meta:find("requirementContentRevision: 3", 1, true) ~= nil and meta:find(SHA, 1, true) ~= nil
+        and meta:find("planRevision: 1", 1, true) ~= nil, "导入旁必须有完整可复制的精确目标身份和快照")
+    check(findByKey(importedView, "review-import-adopt").p.disabled == false, "完整匹配预览允许明确采用")
+    imported.ui.trace.busy = true
+    check(findByKey(reviewview.build(imported), "review-import-adopt").p.disabled ~= false, "来源检查期间不可重复采用")
+    imported.ui.trace.busy = false
+    imported.ui.imports["req-1"].review.ready = false
+    check(findByKey(reviewview.build(imported), "review-import-adopt").p.disabled ~= false, "失效候选不可采用")
+    local plan = imported.ui.trace.plan
+    plan.updatedAt, plan.changeReason = 1700000000000, "external import"
+    plan.steps[1].criterionIds, plan.steps[1].filePaths = {"C1"}, {"src/login.ts"}
+    plan.candidateImports = {{id="external-plan-1", sha256=SHA, sourceIds={"external-step"}, entityIds={"S1"}}}
+    imported.ui.review.data.candidateImports = {{id="external-review-1", sha256=SHA, sourceIds={"external-finding"},
+        entityIds={"finding-1"}, reviewId="review-aaa"}}
+    imported.ui.tab, imported.ui.trace.selectedStep = "delivery", "S1"
+    local linked = ui.build(imported)
+    validateTree("稳定链接编辑", linked)
+    check(findByKey(linked, "stepLinkEditor") ~= nil and findByKey(linked, "results-plan-links") ~= nil,
+        "所选稳定步骤应有显式条件/文件链接编辑器")
+    local markdown = Audit.markdown(importReq, nil, plan, nil, imported.ui.review.data)
+    check(markdown:find("external-plan-1", 1, true) ~= nil and markdown:find("external-review-1", 1, true) ~= nil
+        and markdown:find(SHA, 1, true) ~= nil and markdown:find("external-finding → finding-1", 1, true) ~= nil
+        and markdown:find("src/login.ts", 1, true) ~= nil, "导出必须有导入摘要、稳定映射及显式链接")
+    check(markdown:find("完整范围末尾", 1, true) == nil, "导出不得包含完整候选文件")
     return {checks = checks, failures = failures}
 end

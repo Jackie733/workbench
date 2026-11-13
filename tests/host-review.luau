@@ -442,6 +442,190 @@ return function(tern, def, cx, payloadJson, modules)
     receipt(pending, snapshot)
     check(#launches == 1 and #recorded == 1, "磁盘需求发生仅实体修订漂移时也必须拒绝执行")
     tern.fs.write(reqPath, originalJson)
+    -- Candidate imports use the existing inspect channel, never generic handoff
+    -- file state. Domain callbacks are controlled here; real CAS is covered by
+    -- candidate-adoption.luau.
+    local Review = modules.review
+    local originalPlanLoad, originalPlanAdopt, originalReviewAdopt, originalPlanApply =
+        R.loadPlan, R.adoptCandidate, Review.adoptCandidate, R.applyPlan
+    local importedState = def.init(cx, {payloadJson}, nil)
+    event(importedState, {ev="action", act="requirement", value="req-1"})
+    local iu = importedState.ui
+    iu.writable, iu.dirty, iu.token = true, false, "host-import-token"
+    importedState.snapshot, importedState.problem = tern.json.decode(tern.fs.read(
+        importedState.payload.location.runtime .. "snapshot.json")), nil
+    importedState.text, importedState.pending, importedState.receipt = "", nil, nil
+    local importCommands, observations, adoptions, linkWrites = {}, {}, {}, {}
+    local revisionDrift = 0
+    R.loadPlan = function(paths, req)
+        local value, problem = originalPlanLoad(paths, req)
+        if not value then return nil, problem end
+        value = table.clone(value)
+        value.revision += revisionDrift
+        return value
+    end
+    Live.command = function(_, command, cb) table.insert(importCommands, command); cb(true, nil) end
+    R.putChanges = function(paths, req, token, changes, expected, cb)
+        table.insert(observations, {paths=paths, req=req, changes=changes, expected=expected})
+        local saved = table.clone(iu.trace.results)
+        saved.changes, saved.revision = changes, expected + 1
+        cb(saved, nil)
+    end
+    Review.adoptCandidate = function(paths, req, token, candidate, sha256, expected, cb)
+        table.insert(adoptions, {kind="review", paths=paths, req=req, candidate=candidate, sha256=sha256, expected=expected})
+        cb(iu.review.data, nil)
+    end
+    R.adoptCandidate = function(paths, req, token, candidate, sha256, expected, cb)
+        table.insert(adoptions, {kind="plan", paths=paths, req=req, candidate=candidate, sha256=sha256, expected=expected})
+        cb(iu.trace.plan, nil)
+    end
+    local importReq = iu.byId["req-1"]
+    local artifactHash = string.rep("d", 64)
+    local function candidate(kind)
+        local value = {schemaVersion=1, kind=kind, id="external-" .. kind, projectId=importReq.projectId,
+            requirementId=importReq.requirementId, requirementRevision=importReq.revision,
+            requirementContentRevision=Store.contentRevision(importReq), codeSnapshotSha256=snapshot.fingerprint,
+            planRevision=iu.trace.plan.revision, complete=true}
+        if kind == "review" then
+            value.scope, value.findings = "完整工作区声明", {{id="external-finding", severity="blocking", description="不要从自然语言猜测身份"}}
+        else
+            value.steps = {{id="external-step", title="明确实现", criterionIds={"C1"}, filePaths={"src/login.ts"}}}
+        end
+        return value
+    end
+    local function respond(data, status)
+        local p = iu.trace.pending
+        check(p ~= nil, "候选每个来源阶段必须有独立 pending")
+        if not p then return end
+        tern.fs.write(importedState.payload.location.runtime .. "receipts/" .. p.requestId .. ".json",
+            tern.json.encode({schemaVersion=1, requestId=p.requestId, instanceId=p.instanceId, sessionId=p.sessionId,
+                status=status or "inspected", data=data, reason=status and "显式来源失败" or nil}))
+        action(importedState, "prefill")
+    end
+    local function start(kind, value)
+        local state = kind == "plan" and iu.trace or iu.review
+        state.fields[kind == "plan" and "planImportPath" or "reviewImportPath"].text = kind .. ".json"
+        action(importedState, kind == "plan" and "results-import-preview" or "review-import-preview")
+        return tern.json.encode(value or candidate(kind))
+    end
+    local function preview(kind)
+        local body = start(kind)
+        respond({file={path=kind .. ".json", body=body, sha256=artifactHash}})
+        respond({changes=snapshot})
+        return body
+    end
+    iu.handoff.importedFile = {path="wrong.json", body="unrelated draft", sha256=string.rep("e",64)}
+    local body = preview("review")
+    local frozen = iu.imports["req-1"].review
+    check(frozen.ready and frozen.body == body and frozen.path == "review.json", "完整预览必须冻结原候选文件，不读取通用 importedFile")
+    check(#observations == 0 and #adoptions == 0, "候选预览不得写代码观察、审查或计划")
+    local count = #importCommands
+    action(importedState, "review-import-adopt")
+    action(importedState, "review-import-adopt")
+    check(#importCommands == count + 1 and iu.trace.pending.operation == "file", "采用必须重读原文件，连点不得重复派发")
+    respond({file={path="review.json", body=body, sha256=artifactHash}})
+    check(iu.trace.pending and iu.trace.pending.operation == "changes", "采用读文件后必须再次读取当前代码快照")
+    respond({changes=snapshot})
+    check(#observations == 1 and #adoptions == 1 and adoptions[1].kind == "review"
+        and adoptions[1].req.requirementId == "req-1" and adoptions[1].sha256 == artifactHash,
+        "只有人工采用且两次检查匹配后才允许调用原需求 adoption API")
+    action(importedState, "review-import-adopt")
+    check(#adoptions == 1 and #importCommands == count + 2, "已采用的同一预览不得重复派发")
+    check(iu.handoff.importedFile.path == "wrong.json", "候选采用不得消费或覆盖其他交接草稿")
+    body = preview("review")
+    action(importedState, "review-import-adopt")
+    respond({file={path="review.json", body=body, sha256=string.rep("f",64)}})
+    check(#adoptions == 1 and not iu.trace.pending and not iu.imports["req-1"].review.ready,
+        "采用时原始文件摘要漂移必须拒绝且不能自动重试")
+    body = preview("review")
+    action(importedState, "review-import-adopt")
+    respond({file={path="review.json", body=body, sha256=artifactHash}})
+    respond({changes=changedSnapshot})
+    check(#adoptions == 1 and #observations == 1, "采用时全局代码快照漂移必须在任何域写入之前拒绝")
+    body = preview("review")
+    action(importedState, "review-import-adopt")
+    local pendingImport = iu.trace.pending
+    event(importedState, {ev="action", act="requirement", value="req-2"})
+    check(iu.review.fields.reviewImportPath.text == "" and iu.imports["req-1"] == nil, "切换需求必须清除冻结预览且隔离路径草稿")
+    respond({file={path="review.json", body=body, sha256=artifactHash}})
+    check(#adoptions == 1 and not iu.trace.pending and iu.selected == "req-2", "异步回执不得转存或采用到新选择")
+    event(importedState, {ev="action", act="requirement", value="req-1"})
+    check(iu.review.fields.reviewImportPath.text == "review.json", "切回原需求必须恢复其路径草稿，但不能恢复待采用候选")
+    body = preview("review")
+    local oldOpen = importedState.payload.binding.openRequestId
+    importedState.payload.binding.openRequestId = "other-open"
+    count = #importCommands
+    action(importedState, "review-import-adopt")
+    check(#importCommands == count and #adoptions == 1, "openRequest 绑定漂移必须在派发前拒绝采用")
+    importedState.payload.binding.openRequestId = oldOpen
+    body = preview("review")
+    revisionDrift = 1
+    action(importedState, "review-import-adopt")
+    check(#adoptions == 1 and not iu.trace.pending, "磁盘计划修订漂移必须拒绝采用")
+    revisionDrift = 0
+    body = preview("review")
+    tern.fs.write(reqPath, tern.json.encode(changedReq))
+    action(importedState, "review-import-adopt")
+    check(#adoptions == 1 and not iu.trace.pending, "磁盘需求 CAS 漂移必须拒绝采用，即使内容未变化")
+    tern.fs.write(reqPath, originalJson)
+    body = preview("review")
+    local input = iu.review.fields.reviewImportPath
+    event(importedState, {ev="edit", id="main.workbench.reviewImportPath", len=utf8.len(input.text),
+        from=0, to=utf8.len(input.text), text="other.json", cursor=10})
+    check(iu.imports["req-1"].review == nil, "编辑候选路径必须立即作废冻结预览")
+    body = start("review")
+    respond({}, "rejected")
+    check(not iu.trace.pending and not iu.trace.busy and iu.review.error ~= nil, "来源失败必须清理 pending 并在审查页明确提示，不重试")
+    body = preview("plan")
+    action(importedState, "results-import-adopt")
+    respond({file={path="plan.json", body=body, sha256=artifactHash}})
+    respond({changes=snapshot})
+    check(#adoptions == 2 and adoptions[2].kind == "plan" and adoptions[2].candidate.steps[1].criterionIds[1] == "C1",
+        "计划候选必须经同一显式检查路径追加，并保留显式稳定链接")
+    body = preview("review")
+    local revivedImport = def.init(cx, {payloadJson}, def.save(importedState))
+    check(revivedImport.ui.trace.pending == nil and revivedImport.ui.imports["req-1"] == nil
+        and revivedImport.ui.review.fields.reviewImportPath.text == "review.json",
+        "重载只能恢复需求路径草稿，不能恢复候选、pending 或自动采用")
+    -- Native split action/value routes stable step/finding IDs, never titles.
+    local h = iu.handoff
+    h.importedFile, h.candidate, h.preview = nil, nil, nil
+    for _, field in h.fields do field.text, field.cursor = "", 0 end
+    local findingEvents = #iu.review.data.reviews[1].events
+    local workflowRequests = #(h.workflow and h.workflow.requests or {})
+    event(importedState, {ev="action", act="review-fix-draft", value="review-aaa|finding-1"})
+    check(h.activity == "implement" and h.fields.excerpt.text:find("review-aaa", 1, true) ~= nil
+        and h.fields.excerpt.text:find("finding-1", 1, true) ~= nil
+        and h.fields.excerpt.text:find(iu.review.data.reviews[1].codeSnapshotSha256, 1, true) ~= nil,
+        "修复草稿必须携带稳定审查/发现 ID 与原快照")
+    check(#iu.review.data.reviews[1].events == findingEvents and #(h.workflow and h.workflow.requests or {}) == workflowRequests
+        and h.pending == nil and h.pendingSend == nil, "修复草稿不得授权、发送、改变发现处置或验收")
+    local excerpt = h.fields.excerpt.text
+    event(importedState, {ev="action", act="review-fix-draft", value="review-aaa|finding-2"})
+    check(h.fields.excerpt.text == excerpt and iu.review.error ~= nil, "修复草稿不得覆盖已有交接摘录")
+    h.fields.excerpt.text, h.fields.proposal.text = "", "已有正式方案草稿"
+    event(importedState, {ev="action", act="review-fix-draft", value="review-aaa|finding-1"})
+    check(h.fields.excerpt.text == "" and h.fields.proposal.text == "已有正式方案草稿", "其他非空交接草稿也必须阻止修复草稿覆盖")
+    local stablePlan = table.clone(iu.trace.plan)
+    stablePlan.steps = {{id="stable-step", title="不是身份", status="pending", criterionIds={"C1"}, filePaths={"src/old.ts"}}}
+    iu.trace.plan = stablePlan
+    R.applyPlan = function(_, req, _, kind, args, expected, cb)
+        table.insert(linkWrites, {req=req, kind=kind, args=args, expected=expected})
+        cb(nil, nil, {code="revision_conflict"})
+    end
+    event(importedState, {ev="action", act="results-link-pick", value="stable-step"})
+    check(iu.trace.selectedStep == "stable-step" and iu.trace.fields.stepCriteria.text == "C1"
+        and iu.trace.fields.stepFiles.text == "src/old.ts", "链接编辑器必须选择稳定步骤 ID 并回填显式链接")
+    iu.trace.fields.stepFiles.text = "src/new.ts"
+    action(importedState, "results-plan-links")
+    check(#linkWrites == 1 and linkWrites[1].kind == "links" and linkWrites[1].args.stepId == "stable-step"
+        and linkWrites[1].args.filePaths[1] == "src/new.ts" and iu.trace.fields.stepFiles.text == "src/new.ts"
+        and not iu.trace.busy and iu.trace.error ~= nil, "显式链接保存冲突必须保留草稿并清理 busy")
+    iu.trace.fields.stepFiles.text = "../escape"
+    action(importedState, "results-plan-links")
+    check(#linkWrites == 1, "不安全的计划文件链接不得调用域写入")
+    R.loadPlan, R.adoptCandidate, Review.adoptCandidate, R.applyPlan =
+        originalPlanLoad, originalPlanAdopt, originalReviewAdopt, originalPlanApply
     Store.lifecycle, R.putChanges, R.addVerification = originalLifecycle, originalChanges, originalVerification
     Live.command, tern.process.run = originalCommand, originalRun
     return {checks = checks, failures = failures}
