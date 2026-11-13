@@ -30,14 +30,15 @@ local function read(file)
     return value
 end
 local function empty(req)
-    return {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId, revision=0,
+    return {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId, revision=0,
         reviews=tern.json.array(), acceptances=tern.json.array(), reopenings=tern.json.array()}
 end
 local reviewKeys = {id=true, source=true, scope=true, codeSnapshotSha256=true, requirementRevision=true,
+    requirementContentRevision=true,
     createdAt=true, findings=true, events=true}
 local findingKeys = {id=true, severity=true, description=true, createdAt=true}
 local eventKeys = {id=true, findingId=true, action=true, reason=true, at=true}
-local acceptanceKeys = {id=true, decision=true, requirementRevision=true, codeSnapshotSha256=true,
+local acceptanceKeys = {id=true, decision=true, requirementRevision=true, requirementContentRevision=true, codeSnapshotSha256=true,
     verificationIds=true, reviewIds=true, comment=true, createdAt=true}
 local reopeningKeys = {id=true, acceptanceId=true, reason=true, at=true}
 local function validFinding(finding)
@@ -45,10 +46,16 @@ local function validFinding(finding)
         and severities[finding.severity] and text(finding.description, 4000, false)
         and integer(finding.createdAt, 0) and allowed(finding, findingKeys)
 end
-local function validReview(review)
+local function validIdentity(item, schemaVersion)
+    return item.requirementContentRevision == nil or (schemaVersion == 2
+        and integer(item.requirementContentRevision, 1) and item.requirementContentRevision <= 9007199254740991
+        and item.requirementContentRevision <= item.requirementRevision)
+end
+local function validReview(review, schemaVersion)
     if type(review) ~= "table" or not Store.token(review.id) or not review.id:match("^review%-[%w]+$")
         or not sources[review.source] or not text(review.scope, 2000, false) or not hash(review.codeSnapshotSha256)
         or not integer(review.requirementRevision, 1) or not integer(review.createdAt, 0)
+        or not validIdentity(review, schemaVersion)
         or type(review.findings) ~= "table" or #review.findings > MAX_FINDINGS
         or type(review.events) ~= "table" or #review.events > MAX_EVENTS
         or not allowed(review, reviewKeys) then return false end
@@ -64,10 +71,11 @@ local function validReview(review)
     end
     return true
 end
-local function validAcceptance(item)
+local function validAcceptance(item, schemaVersion)
     if type(item) ~= "table" or not Store.token(item.id) or not item.id:match("^acceptance%-[%w]+$")
         or (item.decision ~= "accepted" and item.decision ~= "rejected")
         or not integer(item.requirementRevision, 1) or not hash(item.codeSnapshotSha256)
+        or not validIdentity(item, schemaVersion)
         or type(item.verificationIds) ~= "table" or #item.verificationIds > 50
         or type(item.reviewIds) ~= "table" or #item.reviewIds > 50
         or not text(item.comment, 4000, item.decision == "accepted")
@@ -85,7 +93,7 @@ local function validReopening(item, acceptances)
         and integer(item.at, 0) and allowed(item, reopeningKeys)
 end
 function M.validate(data, req)
-    if type(data) ~= "table" or data.schemaVersion ~= 1 or data.projectId ~= req.projectId
+    if type(data) ~= "table" or (data.schemaVersion ~= 1 and data.schemaVersion ~= 2) or data.projectId ~= req.projectId
         or data.requirementId ~= req.requirementId or not integer(data.revision, 0)
         or type(data.reviews) ~= "table" or #data.reviews > MAX_REVIEWS
         or type(data.acceptances) ~= "table" or #data.acceptances > MAX_DECISIONS
@@ -94,12 +102,12 @@ function M.validate(data, req)
             reviews=true, acceptances=true, reopenings=true}) then return nil, "corrupt_reviews" end
     local ids = {}
     for _, review in data.reviews do
-        if not validReview(review) or ids[review.id] then return nil, "corrupt_reviews" end
+        if not validReview(review, data.schemaVersion) or ids[review.id] then return nil, "corrupt_reviews" end
         ids[review.id] = true
     end
     local acceptances = {}
     for _, item in data.acceptances do
-        if not validAcceptance(item) or acceptances[item.id] then return nil, "corrupt_reviews" end
+        if not validAcceptance(item, data.schemaVersion) or acceptances[item.id] then return nil, "corrupt_reviews" end
         acceptances[item.id] = true
         for _, id in item.reviewIds do if not ids[id] then return nil, "corrupt_reviews" end end
     end
@@ -141,7 +149,8 @@ function M.createReview(paths, req, token, args, expected, cb)
     if #data.reviews >= MAX_REVIEWS then fail("review_limit"); return end
     local now = os.time() * 1000
     local review = {id=Store.newId("review", now), source=args.source, scope=args.scope,
-        codeSnapshotSha256=args.codeSnapshotSha256, requirementRevision=req.revision, createdAt=now,
+        codeSnapshotSha256=args.codeSnapshotSha256, requirementRevision=req.revision,
+        requirementContentRevision=Store.contentRevision(req), createdAt=now,
         findings=tern.json.array(), events=tern.json.array()}
     for _, item in args.findings do
         if type(item) ~= "table" or not severities[item.severity] or not text(item.description, 4000, false) then
@@ -150,7 +159,7 @@ function M.createReview(paths, req, token, args, expected, cb)
         table.insert(review.findings, {id=Store.newId("finding", now), severity=item.severity,
             description=item.description, createdAt=now})
     end
-    local nextData = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextData = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=data.revision + 1, reviews=copy(data.reviews, MAX_REVIEWS),
         acceptances=copy(data.acceptances, MAX_DECISIONS), reopenings=copy(data.reopenings, MAX_DECISIONS)}
     table.insert(nextData.reviews, review)
@@ -165,7 +174,7 @@ function M.disposeFinding(paths, req, token, args, expected, cb)
     local data, problem = M.load(paths, req)
     if not data then cb(nil, problem); return end
     if data.revision ~= expected then fail("revision_conflict"); return end
-    local nextData = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextData = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=data.revision + 1, reviews=copy(data.reviews, MAX_REVIEWS),
         acceptances=copy(data.acceptances, MAX_DECISIONS), reopenings=copy(data.reopenings, MAX_DECISIONS)}
     local matched
@@ -207,11 +216,11 @@ function M.recordAcceptance(paths, req, token, args, expected, cb)
     if #data.acceptances >= MAX_DECISIONS then fail("acceptance_limit"); return end
     local now = os.time() * 1000
     local item = {id=Store.newId("acceptance", now), decision=args.decision,
-        requirementRevision=req.revision, codeSnapshotSha256=args.codeSnapshotSha256,
+        requirementRevision=req.revision, requirementContentRevision=Store.contentRevision(req), codeSnapshotSha256=args.codeSnapshotSha256,
         verificationIds=tern.json.array(), reviewIds=tern.json.array(), comment=args.comment, createdAt=now}
     for _, id in args.verificationIds do table.insert(item.verificationIds, id) end
     for _, id in args.reviewIds do table.insert(item.reviewIds, id) end
-    local nextData = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextData = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=data.revision + 1, reviews=copy(data.reviews, MAX_REVIEWS),
         acceptances=copy(data.acceptances, MAX_DECISIONS), reopenings=copy(data.reopenings, MAX_DECISIONS)}
     table.insert(nextData.acceptances, item)
@@ -232,7 +241,7 @@ function M.recordReopen(paths, req, token, args, expected, cb)
     for _, acceptance in data.acceptances do if acceptance.id == args.acceptanceId and acceptance.decision == "accepted" then found = true end end
     if not found then fail("missing_acceptance"); return end
     local now = os.time() * 1000
-    local nextData = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextData = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=data.revision + 1, reviews=copy(data.reviews, MAX_REVIEWS),
         acceptances=copy(data.acceptances, MAX_DECISIONS), reopenings=copy(data.reopenings, MAX_DECISIONS)}
     table.insert(nextData.reopenings, {id=Store.newId("reopening", now), acceptanceId=args.acceptanceId,

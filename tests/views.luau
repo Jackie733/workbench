@@ -95,7 +95,7 @@ return function(tern, repo)
                         changes = {head = "abc123", fingerprint = SHA, files = {}, commits = {}, diff = "",
                             capturedAt = 1700000000000, filesTruncated = false, commitsTruncated = false, diffTruncated = false},
                         verifications = {}}},
-                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "auditQuery", "activityQuery", "findingDraft"}),
+                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "lifecycleReason", "auditQuery", "activityQuery", "findingDraft"}),
                     source = "native_review", finding = "", action = "resolved", panel = "", draftSeverity = "major",
                     safe = true, busy = false, data = reviewsData(), error = nil, notice = nil},
                 audit = {busy = false, events = {}, eventsTruncated = false, markdown = "# 审计", exportPath = nil, error = nil, notice = nil},
@@ -116,11 +116,13 @@ return function(tern, repo)
         ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-batch-add"] = true, ["results-batch-start"] = true, ["results-batch-stop"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
+    simpleActions["lifecycle-confirm"], simpleActions["lifecycle-dismiss"] = true, true
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
         resourceKind = true, layout = true, priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
         compareVersion = true, privacyMode = true}
     local fieldKeys = {reviewScope = true, reviewFindings = true, reviewReason = true, reviewComment = true,
         reviewReject = true, reviewReopen = true, auditQuery = true, activityQuery = true, findingDraft = true,
+        lifecycleReason = true,
         verifyCommand = true, verifyCriteria = true, newStep = true, blockReason = true,
         materials = true, search = true, diff = true}
     local function validAction(act)
@@ -130,6 +132,8 @@ return function(tern, repo)
         if name then return changeNames[name] or name:match("^status%-%d+$") ~= nil end
         if act:match("^wb%-open%-[%w%-_]+$") then return true end
         if act:match("^requirement=.+$") then return true end
+        if act:match("^lifecycle%-open=") then return act:match("=(%w+)$") == "block" or act:match("=(%w+)$") == "unblock"
+            or act:match("=(%w+)$") == "cancel" or act:match("=(%w+)$") == "reopen" end
         if act:match("^results%-use%-candidate=%d+$") then return true end
         if act:match("^results%-batch%-remove=%d+$") then return true end
         if act:match("^resources%-remove=[%w_%-]+$") then return true end
@@ -381,7 +385,9 @@ return function(tern, repo)
     delivery.ui.trace.candidatesReady = true
     delivery.ui.trace.fields.verifyCommand.text = "npm run test"
     delivery.ui.trace.fields.verifyCriteria.text = "C1, C2"
-    delivery.ui.trace.runPreview = {command = "npm run test", criteriaText = "C1, C2", criterionIds = {"C1", "C2"}}
+    delivery.ui.trace.runPreview = {command = "npm run test", criteriaText = "C1, C2", criterionIds = {"C1", "C2"},
+        requirementId="req-1", requirementRevision=3, fingerprint=SHA, root=delivery.payload.binding.projectRoot,
+        instanceId=delivery.payload.binding.instanceId, sessionId=delivery.payload.binding.sessionId}
     local deliveryView = ui.build(delivery)
     check(findByKey(deliveryView, "coverageCard") ~= nil, "交付页应显示验收条件覆盖")
     check(findByKey(deliveryView, "candidatesCard") ~= nil, "交付页应显示只读命令候选")
@@ -425,5 +431,56 @@ return function(tern, repo)
     diffState.ui.handoff.workflow = diffWorkflow("not-json")
     check(findByKey(ui.build(diffState), "approvalDiff").p.tone == "warning", "无法比较时必须明示而不是当作无变化")
 
+    local Context = require("../lib/context")
+    local Audit = require("../lib/audit")
+    local lifecycle = copy(baseState())
+    lifecycle.ui.tab = "requirement"
+    local req = lifecycle.ui.byId["req-1"]
+    check(Context.identity(req):find("未标记内容身份", 1, true) ~= nil, "旧需求不得显示推断出的内容身份")
+    req.schemaVersion, req.contentRevision, req.revision = 2, 3, 8
+    req.lifecycleEvents = {{id="life-1", action="block", from="awaiting_acceptance", to="blocked",
+        reason="等待接口团队", at=1700000006000}}
+    req.stage, req.blockedFrom, req.blockedReason = "blocked", "awaiting_acceptance", "等待接口团队"
+    local lifecycleView = ui.build(lifecycle)
+    check(findByKey(lifecycleView, "lifecycle-open=unblock") ~= nil, "已阻塞需求应有显式解除阻塞入口")
+    check(findByKey(lifecycleView, "lifecycle-open=cancel") ~= nil, "已阻塞需求仍可明确取消")
+    check(findByKey(lifecycleView, "lifecycle-open=block") == nil, "已阻塞需求不得再次阻塞")
+    check(findByKey(lifecycleView, "lifecycleHistory") ~= nil, "需求页必须保留生命周期历史")
+    check(Context.identity(req):find("实体修订 8 · 内容修订 3", 1, true) ~= nil, "阶段变更后必须分别显示实体与内容修订")
+    local events = Audit.timeline(req, nil, nil, nil, nil)
+    local seen = false
+    for _, item in events do if item.kind == "生命周期" and item.summary:find("等待接口团队", 1, true) then seen = true end end
+    check(seen, "时间线必须包含完整生命周期原因")
+    check(Audit.markdown(req, nil, nil, nil, nil):find("等待接口团队", 1, true) ~= nil, "Markdown 导出必须包含生命周期历史")
+    lifecycle.ui.review.lifecycleAction, lifecycle.ui.review.lifecycleRequirement = "unblock", req.requirementId
+    local confirmation = ui.build(lifecycle)
+    check(findByKey(confirmation, "lifecycleReason") ~= nil and findByKey(confirmation, "lifecycle-confirm").p.disabled ~= false,
+        "确认变更必须先输入原因")
+    lifecycle.ui.review.fields.lifecycleReason.text = "接口已经恢复"
+    check(findByKey(ui.build(lifecycle), "lifecycle-confirm").p.disabled == false, "原因完整且空闲时才允许确认")
+    for _, mutate in {
+        function(s) s.ui.dirty = true end,
+        function(s) s.ui.trace.busy = true end,
+        function(s) s.ui.trace.pending = {} end,
+        function(s) s.ui.trace.batch = {state="running"} end,
+        function(s) s.ui.review.busy = true end,
+        function(s) s.ui.handoff.pending = {} end,
+        function(s) s.ui.handoff.pendingSend = {} end,
+        function(s) s.pending = {} end,
+        function(s) s.snapshot.state = "working" end,
+        function(s) s.ui.handoff.workflow = {requests={{status="delivery_unknown"}}} end,
+    } do
+        local busy = copy(lifecycle)
+        mutate(busy)
+        check(findByKey(ui.build(busy), "lifecycle-confirm").p.disabled ~= false, "忙碌、脏表单或未决请求时必须禁用生命周期确认")
+    end
+    for _, stage in {"done", "cancelled"} do
+        local closed = copy(lifecycle)
+        closed.ui.byId["req-1"].stage = stage
+        closed.ui.review.lifecycleAction = nil
+        local view = ui.build(closed)
+        check(findByKey(view, "lifecycle-open=reopen") ~= nil and findByKey(view, "lifecycle-open=cancel") == nil,
+            "终态需求只能明确重新打开")
+    end
     return {checks = checks, failures = failures}
 end

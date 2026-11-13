@@ -193,11 +193,67 @@ return function()
         "not_approved", "没有批准记录")
     local direct = {latestVersion = 0, designs = {}, approval = {id = "approval-2", mode = "direct",
         requirementRevision = 3, requirementContent = "content-v3", latestVersion = 0, designVersion = 0,
-        designSha256 = "", baseline = {head = "abc", fingerprint = SHA_A, dirty = false}, approvedAt = 1700000000000}}
+        designSha256 = "", reason = "明确的小范围修复", baseline = {head = "abc", fingerprint = SHA_A, dirty = false}, approvedAt = 1700000000000}}
     check(Validity.approval(direct, r, "content-v3").valid, "快捷实施授权不伪造方案")
     local brokenDesign = {latestVersion = 1, designs = {{version = 1, sha256 = SHA_B,
         requirementSha256 = SHA_B, requirementRevision = 3, createdAt = 0}}, approval = wf.approval}
     equal(Validity.approval(brokenDesign, r, "content-v3").reason, "design_changed", "方案指纹变化使批准失效")
+    local wrongLatest = copy(wf)
+    wrongLatest.latestVersion, wrongLatest.approval.latestVersion = 2, 2
+    equal(Validity.approval(wrongLatest, r, "content-v3").reason, "design_changed",
+        "不能把旧方案伪装成最新版本的授权")
+    local noDirectReason = copy(direct)
+    noDirectReason.approval.reason = ""
+    equal(Validity.approval(noDirectReason, r, "content-v3").reason, "invalid_authorization",
+        "直接授权缺少依据时与源端一致拒绝")
+
+    -- R4b: CAS-only transitions preserve new authorization/evidence; legacy
+    -- records never acquire identity merely because their container upgraded.
+    local identityReq = requirement({schemaVersion = 2, revision = 8, contentRevision = 3})
+    local identityVerification = verification({requirementContentRevision = 3})
+    local identityResults = results({schemaVersion = 2, verifications = {identityVerification}})
+    equal(Validity.verification(identityResults, identityReq, identityVerification), "passed",
+        "阶段写入不失效新证据")
+    check(Validity.acceptance(identityReq, identityResults, reviews()).ok,
+        "覆盖和验收使用内容身份而非实体修订")
+    equal(#Validity.currentVerificationIds(identityResults, identityReq, SHA_A, true), 1,
+        "人工验收仍选用同一内容上的证据")
+    equal(Validity.verification(identityResults, identityReq, verification()), "stale",
+        "混合容器内的旧证据仍绑定实体修订")
+    local identityWf = copy(wf)
+    identityWf.schemaVersion = 2
+    identityWf.approval.requirementContentRevision = 3
+    identityWf.designs[1].requirementContentRevision = 3
+    check(Validity.approval(identityWf, identityReq, "content-v3").valid,
+        "阶段写入不撤销新批准及方案")
+    equal(Validity.approval(wf, identityReq, "content-v3").reason, "requirement_changed",
+        "旧批准在新实体上不复活")
+    local legacyDesign = copy(identityWf)
+    legacyDesign.designs[1].requirementContentRevision = nil
+    equal(Validity.approval(legacyDesign, identityReq, "content-v3").reason, "design_changed",
+        "新批准不升级旧方案的有效期")
+    for _, contentRevision in {9, 10} do
+        local edited = requirement({schemaVersion = 2, revision = contentRevision, contentRevision = contentRevision})
+        equal(Validity.verification(identityResults, edited, identityVerification), "stale",
+            "内容变化及改回旧文本均不复活证据")
+        equal(Validity.approval(identityWf, edited, "content-v3").reason, "requirement_changed",
+            "内容改回相同文本也不能复活批准")
+        check(not Validity.acceptance(edited, identityResults, reviews()).ok, "内容身份变化后验收缺少覆盖")
+    end
+    local revokedIdentity = copy(identityWf)
+    revokedIdentity.approval.revokedAt = 1700000005000
+    equal(Validity.approval(revokedIdentity, identityReq, "content-v3").reason, "revoked",
+        "内容未变也不复活已撤销授权")
+    local legacyReqNewRecord = verification({requirementContentRevision = 3})
+    check(Validity.matchesRequirement(legacyReqNewRecord, r), "新记录可绑定尚未写入升级的旧需求")
+    check(not Validity.matchesRequirement(verification({requirementContentRevision = "3"}), identityReq),
+        "无效身份不回退到实体修订")
+    check(not Validity.matchesRequirement(verification({requirementContentRevision = 0}), identityReq),
+        "零身份被拒绝")
+    equal(Validity.verification(movedCode, identityReq, identityVerification), "stale",
+        "内容身份不绕过全局代码失效")
+    equal(identityReq.revision, 8, "评估不修改实体修订")
+    equal(identityReq.contentRevision, 3, "评估不修改内容身份")
 
     -- Approval snapshot comparison: decoded canonical content, field by field.
     local function snapshot(title)

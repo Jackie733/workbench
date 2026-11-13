@@ -16,13 +16,14 @@ M.maxGoal = 16000
 M.maxScope = 16000
 M.maxCriteria = 32
 M.maxLabels = 16
+M.maxLifecycleEvents = 200
 
 local projectKeys = {schemaVersion = true, projectId = true, root = true, name = true, revision = true,
     nextNumber = true, createdAt = true}
 local requirementKeys = {schemaVersion = true, requirementId = true, projectId = true, number = true,
     revision = true, title = true, type = true, priority = true, stage = true, goal = true, scope = true,
     acceptanceCriteria = true, labels = true, createdAt = true, updatedAt = true, blockedFrom = true,
-    blockedReason = true, extensions = true}
+    blockedReason = true, extensions = true, contentRevision = true, lifecycleEvents = true}
 
 local function integer(value, min)
     return type(value) == "number" and value % 1 == 0 and value >= min
@@ -60,6 +61,61 @@ local function criterion(value, id)
     if type(value) ~= "table" then return nil end
     if not text(value.id, 32, true) or not text(value.description, 1000, true) or type(value.required) ~= "boolean" then return nil end
     return {id = value.id, description = value.description, required = value.required}
+end
+
+local function array(value, maximum)
+    if type(value) ~= "table" or (maximum and #value > maximum) then return false end
+    local count = 0
+    for key in value do
+        if not integer(key, 1) or key > #value then return false end
+        count += 1
+    end
+    return count == #value
+end
+local function lifecycleTarget(stage, action, blockedFrom)
+    local terminal = stage == "done" or stage == "cancelled"
+    if action == "block" and not terminal and stage ~= "blocked" then return "blocked" end
+    if action == "unblock" and stage == "blocked" and M.stages[blockedFrom]
+        and blockedFrom ~= "blocked" and blockedFrom ~= "done" and blockedFrom ~= "cancelled" then return blockedFrom end
+    if action == "cancel" and not terminal then return "cancelled" end
+    if action == "reopen" and terminal then return "clarifying" end
+    return nil
+end
+local eventKeys = {id=true,action=true,from=true,to=true,reason=true,at=true,previousBlockedFrom=true,previousBlockedReason=true}
+local function validEvents(events)
+    if not array(events, M.maxLifecycleEvents) then return false end
+    local ids = {}
+    for _, event in events do
+        if type(event) ~= "table" or not keys(event, eventKeys) or not M.token(event.id) or ids[event.id]
+            or not M.stages[event.from] or not M.stages[event.to] or not text(event.reason, 2000, true)
+            or not integer(event.at, 0) or lifecycleTarget(event.from, event.action, event.to) ~= event.to then return false end
+        if (event.previousBlockedFrom ~= nil and (event.from ~= "blocked" or not M.stages[event.previousBlockedFrom]))
+            or (event.previousBlockedReason ~= nil and (event.from ~= "blocked" or not text(event.previousBlockedReason, 2000, false)))
+            or (event.action == "unblock" and event.previousBlockedFrom ~= nil and event.previousBlockedFrom ~= event.to) then return false end
+        ids[event.id] = true
+    end
+    return true
+end
+function M.contentRevision(requirement)
+    return requirement.contentRevision or requirement.revision
+end
+local function sameContent(a, b)
+    for _, field in {"title", "type", "priority", "goal", "scope"} do
+        if a[field] ~= b[field] then return false end
+    end
+    if #a.acceptanceCriteria ~= #b.acceptanceCriteria or #a.labels ~= #b.labels then return false end
+    for index, item in a.acceptanceCriteria do
+        local other = b.acceptanceCriteria[index]
+        if item.id ~= other.id or item.description ~= other.description or item.required ~= other.required then return false end
+    end
+    for index, label in a.labels do if b.labels[index] ~= label then return false end end
+    return true
+end
+local function upgradeRequirement(value, current)
+    value.schemaVersion = 2
+    value.contentRevision = current and (sameContent(value, current) and M.contentRevision(current) or value.revision) or 1
+    value.lifecycleEvents = value.lifecycleEvents or tern.json.array()
+    return value
 end
 
 function M.token(value)
@@ -102,9 +158,13 @@ function M.newProject(fields)
 end
 
 function M.validateRequirement(value)
-    if type(value) ~= "table" or value.schemaVersion ~= M.schemaVersion then return nil, "需求 schema 不匹配" end
+    if type(value) ~= "table" or (value.schemaVersion ~= 1 and value.schemaVersion ~= 2) then return nil, "需求 schema 不匹配" end
     local ok, problem = keys(value, requirementKeys)
     if not ok then return nil, problem end
+    if value.schemaVersion == 1 then
+        if value.contentRevision ~= nil or value.lifecycleEvents ~= nil then return nil, "旧版需求含身份或生命周期字段" end
+    elseif not integer(value.contentRevision, 1) or not integer(value.revision, 1) or value.contentRevision > value.revision
+        or not validEvents(value.lifecycleEvents) then return nil, "需求内容版本或生命周期历史无效" end
     if not M.token(value.requirementId) or not M.token(value.projectId)
         or type(value.number) ~= "string" or not value.number:match("^REQ%-%d%d%d%d+$") then
         return nil, "需求身份或编号无效"
@@ -170,8 +230,9 @@ function M.newRequirement(project, fields)
     end
     local labels = tern.json.array()
     for _, label in fields.labels or {} do table.insert(labels, label) end
-    local value = {schemaVersion = M.schemaVersion, requirementId = fields.id, projectId = project.projectId,
-        number = M.displayNumber(project.nextNumber), revision = 1, title = fields.title, type = fields.type,
+    local value = {schemaVersion = 2, requirementId = fields.id, projectId = project.projectId,
+        number = M.displayNumber(project.nextNumber), revision = 1, contentRevision = 1, lifecycleEvents = tern.json.array(),
+        title = fields.title, type = fields.type,
         priority = fields.priority or "normal", stage = "backlog", goal = fields.goal,
         scope = fields.scope or "", acceptanceCriteria = criteria, labels = labels,
         createdAt = fields.now, updatedAt = fields.now}
@@ -345,8 +406,8 @@ if ([IO.File]::Exists($target)) {
   if ($expect -eq 0) { exit 3 }
   try { $cur=[IO.File]::ReadAllText($target) | ConvertFrom-Json } catch { exit 4 }
   if ($cur -isnot [System.Management.Automation.PSCustomObject] -or
-    $cur.schemaVersion -ne 1 -or ($cur.revision -isnot [int] -and $cur.revision -isnot [long]) -or
-    [long]$cur.revision -lt 1) { exit 4 }
+    ($cur.schemaVersion -ne 1 -and -not ($env:OMPWB_SCHEMA2 -eq '1' -and $cur.schemaVersion -eq 2)) -or
+    ($cur.revision -isnot [int] -and $cur.revision -isnot [long]) -or [long]$cur.revision -lt 1) { exit 4 }
   if ([long]$cur.revision -ne $expect) { exit 3 }
 } elseif ($expect -ne 0) { exit 3 }
 if (-not [IO.File]::Exists($temp)) { exit 5 }
@@ -424,6 +485,41 @@ function M.put(paths, file, value, expectedRevision, token, cb)
         if cb then cb(false, "invalid_revision"); return end
         error("无效预期版本")
     end
+    if file ~= paths.project then
+        local current, problem = readJson(file)
+        if current then
+            if not M.validateRequirement(current) then
+                if cb then cb(false, "corrupt_requirement"); return end
+                error("损坏的需求记录")
+            end
+            if current.revision ~= expectedRevision then
+                if cb then cb(false, "revision_conflict"); return end
+                error("需求版本冲突")
+            end
+            local priorEvents = current.lifecycleEvents or {}
+            if #(value.lifecycleEvents or {}) < #priorEvents then
+                if cb then cb(false, "invalid_lifecycle_history"); return end
+                error("生命周期历史不可删除")
+            end
+            for index, event in priorEvents do
+                local nextEvent = value.lifecycleEvents[index]
+                for key, item in event do
+                    if nextEvent[key] ~= item then
+                        if cb then cb(false, "invalid_lifecycle_history"); return end
+                        error("生命周期历史不可修改")
+                    end
+                end
+            end
+        elseif problem ~= "missing" then
+            if cb then cb(false, "corrupt_requirement"); return end
+            error("损坏的需求记录")
+        end
+        if value.revision ~= expectedRevision + 1 then
+            if cb then cb(false, "invalid_revision"); return end
+            error("无效需求版本")
+        end
+        upgradeRequirement(value, current)
+    end
     local encoded, payload = pcall(tern.json.encode, value)
     if not encoded then if cb then cb(false, "encode_failed"); return end; error(payload) end
     if #payload > M.maxJson then if cb then cb(false, "record_too_large"); return end; error("记录超过大小上限") end
@@ -432,7 +528,7 @@ function M.put(paths, file, value, expectedRevision, token, cb)
     if not wrote then if cb then cb(false, "temp_write_failed:" .. tostring(writeError)); return end; return nil, writeError end
     local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
         OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
-        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
+        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision), OMPWB_SCHEMA2 = file ~= paths.project and "1" or "0"}
     if not cb then return M.runProcess(env, nil) end
     local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
         if status == 0 then cb(true, nil, cx)
@@ -455,23 +551,107 @@ local function casPublish(paths, file, value, expectedRevision, token, cb)
     if not wrote then cb(false, "temp_write_failed:" .. tostring(writeError)); return end
     local env = {OMPWB_TARGET = file, OMPWB_TEMP = temp, OMPWB_LOCK = paths.lock,
         OMPWB_GATE = paths.lock .. ".gate", OMPWB_LOCK_TEMP = paths.lock .. ".tmp-" .. M.newId("l", tern.now()),
-        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision)}
+        OMPWB_TOKEN = token, OMPWB_EXPECT = tostring(expectedRevision),
+        OMPWB_SCHEMA2 = (file:match("\\workflow%.json$") or file:match("\\results%.json$")
+            or file:match("\\reviews%.json$") or file:match("\\evidence\\")) and "1" or "0"}
     local spawned, errorValue = pcall(M.runProcess, env, function(status, stderr, timedOut, cx)
         if status == 0 then cb(true, nil, cx)
         else cb(false, timedOut and "timeout" or reasons[status] or ("write_failed:" .. tostring(stderr or ""):sub(1, 300)), cx) end
     end)
     if not spawned then cb(false, "process_failed:" .. tostring(errorValue)); pcall(tern.fs.remove, temp) end
 end
+local function hash(value)
+    return type(value) == "string" and #value == 64 and value:match("^[0-9a-f]+$") ~= nil
+end
+local function identity(record, schema)
+    return record.requirementContentRevision == nil or (schema == 2 and integer(record.requirementContentRevision, 1)
+        and integer(record.requirementRevision, 1) and record.requirementContentRevision <= record.requirementRevision)
+end
+local workflowKeys = {schemaVersion=true,projectId=true,requirementId=true,revision=true,latestVersion=true,
+    designs=true,comments=true,approvals=true,approval=true,requests=true}
+local designKeys = {version=true,sha256=true,requirementSha256=true,requirementRevision=true,requirementContentRevision=true,createdAt=true}
+local approvalKeys = {id=true,mode=true,requirementRevision=true,requirementContentRevision=true,requirementSha256=true,
+    requirementContent=true,designVersion=true,designSha256=true,latestVersion=true,baseline=true,approvedAt=true,
+    reason=true,revokedAt=true,revocationReason=true}
+local requestKeys = {requestId=true,activity=true,sessionId=true,instanceId=true,payloadSha256=true,status=true,
+    requirementRevision=true,requirementContentRevision=true,authorizedRequirementRevision=true,requirementSha256=true,
+    currentRequirementRevision=true,createdAt=true,reason=true,receivedAt=true,resolution=true}
+local function equalRecord(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for key, value in a do if not equalRecord(value, b[key]) then return false end end
+    for key in b do if a[key] == nil then return false end end
+    return true
+end
+-- Shared by Workflow.load and lifecycle: never repair or discard unknown history.
+function M.validateWorkflow(w, req)
+    local function fail() return nil, "corrupt_workflow" end
+    if type(w) ~= "table" or (w.schemaVersion ~= 1 and w.schemaVersion ~= 2) or not keys(w, workflowKeys)
+        or w.projectId ~= req.projectId or w.requirementId ~= req.requirementId
+        or not integer(w.revision, 1) or not integer(w.latestVersion, 0)
+        or not array(w.designs) or #w.designs ~= w.latestVersion or not array(w.comments)
+        or not array(w.approvals) or not array(w.requests) then return fail() end
+    for index, d in w.designs do
+        if type(d) ~= "table" or not keys(d, designKeys) or d.version ~= index or not hash(d.sha256)
+            or not hash(d.requirementSha256) or not integer(d.requirementRevision, 1)
+            or not integer(d.createdAt, 0) or not identity(d, w.schemaVersion) then return fail() end
+    end
+    for _, c in w.comments do
+        if type(c) ~= "table" or not keys(c, {designVersion=true,text=true,createdAt=true})
+            or not integer(c.designVersion, 1) or c.designVersion > w.latestVersion
+            or not text(c.text, 4000, true) or not integer(c.createdAt, 0) then return fail() end
+    end
+    local approvalIds = {}
+    for _, a in w.approvals do
+        if type(a) ~= "table" or not keys(a, approvalKeys) or not M.token(a.id) or approvalIds[a.id]
+            or (a.mode ~= "design" and a.mode ~= "direct") or not integer(a.requirementRevision, 1)
+            or not identity(a, w.schemaVersion) or not hash(a.requirementSha256)
+            or type(a.requirementContent) ~= "string" or not integer(a.latestVersion, 0)
+            or not integer(a.designVersion, 0) or not integer(a.approvedAt, 0) or type(a.baseline) ~= "table" then return fail() end
+        local b = a.baseline
+        if not keys(b, {head=true,fingerprint=true,dirty=true,files=true,filesTruncated=true}) or type(b.head) ~= "string" or #b.head > 128
+            or type(b.fingerprint) ~= "string" or #b.fingerprint ~= 64 or not b.fingerprint:match("^[0-9a-fA-F]+$")
+            or type(b.dirty) ~= "boolean" or (a.reason ~= nil and not text(a.reason, 2000, true))
+            or (a.mode == "direct" and not text(a.reason, 2000, true))
+            or (a.mode == "design" and (not hash(a.designSha256) or a.designVersion < 1))
+            or (a.revokedAt ~= nil and (not integer(a.revokedAt, 0) or not text(a.revocationReason, 2000, true)))
+            or (a.revocationReason ~= nil and a.revokedAt == nil) then return fail() end
+        if (b.filesTruncated ~= nil and type(b.filesTruncated) ~= "boolean") or (b.files ~= nil and not array(b.files)) then return fail() end
+        for _, file in b.files or {} do
+            if type(file) ~= "table" or not keys(file, {path=true,status=true,sha256=true}) or not text(file.path, 2048, true)
+                or not text(file.status, 32, true) or (file.sha256 ~= nil and not hash(file.sha256)) then return fail() end
+        end
+        approvalIds[a.id] = a
+    end
+    if w.approval ~= nil and (type(w.approval) ~= "table" or not approvalIds[w.approval.id]
+        or not equalRecord(w.approval, approvalIds[w.approval.id])) then return fail() end
+    local requestIds = {}
+    for _, r in w.requests do
+        if type(r) ~= "table" or not keys(r, requestKeys) or not M.token(r.requestId) or requestIds[r.requestId]
+            or (r.activity ~= "clarify" and r.activity ~= "design" and r.activity ~= "implement")
+            or not M.token(r.sessionId) or not M.token(r.instanceId) or not hash(r.requirementSha256)
+            or not hash(r.payloadSha256) or not integer(r.requirementRevision, 1) or not identity(r, w.schemaVersion)
+            or not integer(r.authorizedRequirementRevision, 1) or not integer(r.currentRequirementRevision, 1)
+            or not integer(r.createdAt, 0)
+            or (r.status ~= "pending" and r.status ~= "submitted" and r.status ~= "rejected" and r.status ~= "delivery_unknown")
+            or (r.reason ~= nil and not text(r.reason, 1000, false))
+            or (r.receivedAt ~= nil and not integer(r.receivedAt, 0))
+            or (r.status ~= "pending" and (not text(r.reason or "", 1000, false) or not integer(r.receivedAt, 0))) then return fail() end
+        if r.resolution ~= nil then
+            local resolution = r.resolution
+            if type(resolution) ~= "table" or not keys(resolution, {kind=true,note=true,at=true})
+                or resolution.kind ~= "user_acknowledged" or not text(resolution.note, 2000, true)
+                or not integer(resolution.at, 0) or r.status == "pending" then return fail() end
+        end
+        requestIds[r.requestId] = true
+    end
+    return w
+end
 function M.putRecord(paths, file, value, expectedRevision, token, cb)
     local prefix = paths.requirements .. "\\"
     local id = type(file) == "string" and file:sub(1,#prefix)==prefix and file:sub(#prefix + 1):match("^([%w_%-]+)\\workflow%.json$")
-    local allowed={schemaVersion=true,projectId=true,requirementId=true,revision=true,latestVersion=true,designs=true,
-        comments=true,approvals=true,approval=true,requests=true}
-    local valid=type(value)=="table" and value.requirementId==id and M.token(value.projectId)
-        and value.schemaVersion==1 and integer(value.revision,1) and integer(value.latestVersion,0)
-        and type(value.designs)=="table" and #value.designs==value.latestVersion
-        and type(value.comments)=="table" and type(value.approvals)=="table" and type(value.requests)=="table"
-    if valid then for key in value do if not allowed[key] then valid=false;break end end end
+    local valid = type(value) == "table" and value.requirementId == id and M.token(value.projectId)
+        and M.validateWorkflow(value, value) ~= nil
     if not M.token(token) or not id or not valid or not integer(expectedRevision,0) or value.revision~=expectedRevision+1 then
         cb(false,"invalid_path_or_record");return
     end
@@ -479,6 +659,22 @@ function M.putRecord(paths, file, value, expectedRevision, token, cb)
 end
 -- Plan, result and immutable verification records share the same requirement scope
 -- and gate. Evidence is create-only; mutable summaries require the exact prior revision.
+local scopedKeys = {
+    plan = {schemaVersion=true,projectId=true,requirementId=true,revision=true,designVersion=true,steps=true,changeReason=true,updatedAt=true},
+    resources = {schemaVersion=true,projectId=true,requirementId=true,revision=true,resources=true,updatedAt=true},
+    results = {schemaVersion=true,projectId=true,requirementId=true,revision=true,baseline=true,changes=true,verifications=true},
+    reviews = {schemaVersion=true,projectId=true,requirementId=true,revision=true,reviews=true,acceptances=true,reopenings=true},
+    evidence = {schemaVersion=true,projectId=true,requirementId=true,revision=true,id=true,command=true,cwd=true,criterionIds=true,
+        requirementRevision=true,requirementContentRevision=true,codeSnapshotSha256=true,startedAt=true,endedAt=true,exitCode=true,
+        timedOut=true,result=true,stdout=true,stderr=true,stdoutBytes=true,stderrBytes=true,stdoutTruncated=true,stderrTruncated=true},
+}
+local function identityTree(value, schema)
+    if not identity(value, schema) then return false end
+    for _, item in value do
+        if type(item) == "table" and not identityTree(item, schema) then return false end
+    end
+    return true
+end
 function M.putScoped(paths, file, value, expectedRevision, token, cb)
     local prefix = paths.requirements .. "\\"
     local relative = type(file) == "string" and file:sub(1, #prefix) == prefix and file:sub(#prefix + 1)
@@ -486,8 +682,12 @@ function M.putScoped(paths, file, value, expectedRevision, token, cb)
         or relative:match("^([%w_%-]+)\\reviews%.json$") or relative:match("^([%w_%-]+)\\resources%.json$"))
     local evidenceId = relative and relative:match("^([%w_%-]+)\\evidence\\verification%-[%w_%-]+%.json$")
     local requirementId = id or evidenceId
+    local kind = evidenceId and "evidence" or (relative and relative:match("\\([%a]+)%.json$"))
     local valid = type(value) == "table" and requirementId and value.requirementId == requirementId
-        and M.token(value.projectId) and value.schemaVersion == 1 and integer(value.revision, 1)
+        and M.token(value.projectId) and integer(value.revision, 1) and scopedKeys[kind] and keys(value, scopedKeys[kind])
+        and (value.schemaVersion == 1 or (value.schemaVersion == 2 and kind ~= "plan" and kind ~= "resources"))
+        and identityTree(value, value.schemaVersion)
+        and (not evidenceId or value.schemaVersion == 1 or integer(value.requirementContentRevision, 1))
     if valid and evidenceId then valid = expectedRevision == 0 and value.revision == 1
     elseif valid then valid = integer(expectedRevision, 0) and value.revision == expectedRevision + 1 end
     if not M.token(token) or not requirementId or not valid then cb(false, "invalid_path_or_record"); return end
@@ -499,12 +699,22 @@ function M.putImmutableRecord(paths, file, value, token, cb)
     local id, version = file:sub(#prefix + 1):match("^([%w_%-]+)\\designs\\v(%d+)%.json$")
     if not M.token(token) or not id or type(value)~="table" or not integer(value.version,1)
         or tonumber(version) ~= value.version or value.requirementId ~= id or not M.token(value.projectId)
-        or value.schemaVersion ~= 1 or type(value.body) ~= "string" or #value.body>16384
+        or (value.schemaVersion ~= 1 and value.schemaVersion ~= 2) or not identity(value, value.schemaVersion)
+        or (value.schemaVersion == 2 and not integer(value.requirementContentRevision, 1))
+        or not integer(value.requirementRevision, 1) or not integer(value.createdAt, 0)
+        or not text(value.body, 16384, true)
         or type(value.sha256)~="string" or #value.sha256~=64 or not value.sha256:match("^[0-9a-f]+$")
         or type(value.requirementSha256)~="string" or #value.requirementSha256~=64
         or not value.requirementSha256:match("^[0-9a-f]+$") then
         cb(false,"invalid_path_or_record"); return
     end
+    if not keys(value, {schemaVersion=true,projectId=true,requirementId=true,version=true,requirementRevision=true,
+        requirementContentRevision=true,requirementSha256=true,body=true,sha256=true,source=true,createdAt=true})
+        or type(value.source) ~= "table" or not keys(value.source, {kind=true,path=true,entryId=true,sessionId=true,requestId=true})
+        or (value.source.kind ~= "manual" and value.source.kind ~= "file" and value.source.kind ~= "assistant") then
+        cb(false, "invalid_path_or_record"); return
+    end
+    for _, item in value.source do if not text(item, 1024, false) then cb(false, "invalid_path_or_record"); return end end
     local encoded, payload = pcall(tern.json.encode, value)
     if not encoded then cb(false, "encode_failed"); return end
     if #payload > M.maxJson then cb(false, "record_too_large"); return end
@@ -662,6 +872,10 @@ function M.update(paths, requirement, expectedRevision, token, cb)
     if type(requirement) ~= "table" or not M.token(requirement.requirementId) then
         cb(nil, {code = "invalid_requirement_id"}); return
     end
+    if not keys(requirement, requirementKeys) or (requirement.schemaVersion ~= nil
+        and requirement.schemaVersion ~= 1 and requirement.schemaVersion ~= 2) then
+        cb(nil, {code = "invalid_requirement"}); return
+    end
     if not integer(expectedRevision, 1) then cb(nil, {code = "invalid_revision"}); return end
     local path = join(join(paths.requirements, requirement.requirementId), "requirement.json")
     local current, problem = readJson(path)
@@ -705,7 +919,6 @@ local reviewTransitions = {
     awaiting_acceptance = {implementing=true,verifying=true},
     implementing = {verifying=true,awaiting_acceptance=true},
     done = {awaiting_acceptance=true,implementing=true,verifying=true},
-    clarifying = {done=true},
 }
 -- Human review/acceptance transitions. Kept separate from workflow actions so
 -- a terminal requirement cannot silently adopt or approve new designs.
@@ -720,6 +933,55 @@ function M.advanceStage(paths, requirement, stage, expectedRevision, token, cb)
     nextReq.stage=stage;nextReq.revision=current.revision+1;nextReq.updatedAt=os.time()*1000
     M.put(paths,file,nextReq,current.revision,token,function(ok,reason,cx)
         if ok then cb(nextReq,nil,cx) else cb(nil,{code=reason},cx) end
+    end)
+end
+-- Explicit one-file lifecycle changes never rewrite workflow/results/review history.
+function M.lifecycle(paths, requirement, action, reason, expectedRevision, token, cb)
+    local function fail(code, detail) cb(nil, {code=code,detail=detail}) end
+    if not M.token(token) then fail("invalid_token"); return end
+    if type(requirement) ~= "table" or not M.token(requirement.requirementId) then fail("invalid_requirement_id"); return end
+    if not integer(expectedRevision, 1) then fail("invalid_revision"); return end
+    if not text(reason, 2000, true) then fail("invalid_lifecycle_reason"); return end
+    local project, projectProblem = M.readProject(paths)
+    if not project then fail("corrupt_project", projectProblem); return end
+    local rows, failures = M.readRequirements(paths)
+    if #failures > 0 then fail("corrupt_requirements", table.concat(failures, "; ")); return end
+    local current
+    for _, row in rows do if row.requirementId == requirement.requirementId then current = row; break end end
+    if not current then fail("missing_requirement"); return end
+    if current.revision ~= expectedRevision or current.projectId ~= requirement.projectId then fail("revision_conflict"); return end
+    local target = lifecycleTarget(current.stage, action, current.blockedFrom)
+    if not target then fail("invalid_stage_transition"); return end
+    local events = current.lifecycleEvents or {}
+    if #events >= M.maxLifecycleEvents then fail("lifecycle_history_full"); return end
+    local directory = join(paths.requirements, current.requirementId)
+    local workflow, workflowProblem = readJson(join(directory, "workflow.json"))
+    if workflow then
+        local valid, detail = M.validateWorkflow(workflow, current)
+        if not valid then fail("corrupt_workflow", detail); return end
+        for _, request in workflow.requests do
+            if (request.status == "pending" or request.status == "delivery_unknown")
+                and (not request.resolution or request.resolution.kind ~= "user_acknowledged") then
+                fail("unresolved_request", request.requestId); return
+            end
+        end
+    elseif workflowProblem ~= "missing" then fail("corrupt_workflow", workflowProblem); return end
+    local nextReq = {}
+    for key, value in current do nextReq[key] = value end
+    nextReq.lifecycleEvents = tern.json.array()
+    for _, event in events do table.insert(nextReq.lifecycleEvents, event) end
+    local at = os.time() * 1000
+    local event = {id=M.newId("lifecycle", tern.now()),action=action,from=current.stage,to=target,reason=reason,at=at}
+    if current.stage == "blocked" then
+        event.previousBlockedFrom, event.previousBlockedReason = current.blockedFrom, current.blockedReason
+    end
+    table.insert(nextReq.lifecycleEvents, event)
+    nextReq.stage, nextReq.revision, nextReq.updatedAt = target, current.revision + 1, at
+    if action == "block" then nextReq.blockedFrom, nextReq.blockedReason = current.stage, reason
+    else nextReq.blockedFrom, nextReq.blockedReason = nil, nil end
+    upgradeRequirement(nextReq, current)
+    M.put(paths, join(directory, "requirement.json"), nextReq, expectedRevision, token, function(saved, problem, cx)
+        if saved then cb(nextReq, nil, cx) else cb(nil, {code=problem}, cx) end
     end)
 end
 return M

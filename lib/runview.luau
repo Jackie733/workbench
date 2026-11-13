@@ -3,6 +3,7 @@ local ui = tern.ui
 local Results = require("./results")
 local Validity = require("./validity")
 local Batch = require("./batch")
+local Context = require("./context")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -60,7 +61,7 @@ function M.build(s)
     local nodes = {
         ui.card(r.number .. " · " .. r.title, {
             note("① 计划 → ② 代码变化 → ③ 验证证据。退出码不等于验收；验收在“审查与验收”页由你明确触发。"),
-            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)
+            note(Context.identity(r) .. " · 阶段 " .. tostring(r.stage)
                 .. " · 观察不能证明代码一定由本需求产生。"),
         }, {key = "traceTarget", tone = "muted"}),
     }
@@ -191,7 +192,7 @@ function M.build(s)
     if #coverageRows == 0 then table.insert(coverageRows, note("此需求尚无验收条件。")) end
     table.insert(nodes, ui.card("验收条件覆盖 · 必需 " .. tostring(coverage.requiredCovered) .. " / " .. tostring(coverage.required),
         {(function()
-            local content = {note("必需与信息性分开计数；必需条件未覆盖不能通过验收。需求修订或代码快照变化会使通过证据失效。")}
+            local content = {note("必需与信息性分开计数；需求内容或代码快照变化会使已标记通过证据失效；旧证据仍按实体修订核对。")}
             if not snapshot then table.insert(content, ui.text({ui.span("尚未读取当前代码快照；覆盖状态未知，不显示为通过。", "warning")})) end
             for _, row in coverageRows do table.insert(content, row) end
             table.insert(content, note("改变必需/信息性属于需求编辑，会按内容摘要使相关批准失效；历史通过不构成当前证据。"))
@@ -226,13 +227,17 @@ function M.build(s)
     local preview = t.runPreview
     local matches = preview ~= nil and preview.command == trimmedCommand
         and preview.criteriaText == t.fields.verifyCriteria.text
+        and preview.requirementId == r.requirementId and preview.requirementRevision == r.revision
+        and preview.fingerprint == (t.results and t.results.changes and t.results.changes.fingerprint)
+        and preview.root == s.payload.binding.projectRoot and preview.instanceId == s.payload.binding.instanceId
+        and preview.sessionId == s.payload.binding.sessionId
     if preview then
         table.insert(nodes, ui.card("验证预览 · 尚未执行", {
             ui.text({ui.span("命令：", "strong"), ui.span(preview.command)}),
-            note("目录：" .. s.payload.binding.projectRoot .. " · 超时 180 秒"),
+            note("目录：" .. tostring(preview.root) .. " · 实体修订 " .. tostring(preview.requirementRevision) .. " · 超时 180 秒"),
             note("执行环境：wsl.exe -d " .. tostring(s.payload.location.distro or "（未知发行版）") .. " · bash -lc · 当前用户"),
             note("关联条件：" .. (#preview.criterionIds > 0 and table.concat(preview.criterionIds, ", ") or "未关联")),
-            note("确认运行前会先读取代码快照；验证后代码变化会使结果失效。修改命令或条件后必须重新预览。"),
+            note("确认前读取新快照；需求、绑定或代码快照漂移会拒绝执行。命令或条件变化也必须重新预览。"),
         }, {key = "verifyPreview", tone = matches and "muted" or "warning"}))
     end
     table.insert(nodes, row("verifyActions", {
@@ -245,7 +250,7 @@ function M.build(s)
                 or (not trimmedCommand:match("%S") and "先填写验证命令")
                 or (not t.results and "先读取代码变化，取得快照")
                 or (not preview and "先预览确切命令")
-                or (not matches and "命令或条件在预览后已变化，请重新预览") or false),
+                or (not matches and "预览上下文已变化，请重新预览") or false),
     }))
 
     local batchEntries = t.batchEntries or {}
@@ -294,6 +299,7 @@ function M.build(s)
             local state, reason = Results.effectiveState(t.results, r, verification)
             local preview = verification.stdoutPreview ~= "" and verification.stdoutPreview or verification.stderrPreview
             table.insert(cards, ui.card(tostring(verification.id) .. " · " .. tostring(verification.command), {
+                note(Context.identity(verification)),
                 note("退出码 " .. tostring(verification.exitCode) .. (verification.timedOut and " · 超时" or "")
                     .. " · " .. tostring(verification.startedAt) .. "–" .. tostring(verification.endedAt)
                     .. " · 快照 " .. verification.codeSnapshotSha256:sub(1, 16)

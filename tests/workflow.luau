@@ -58,6 +58,15 @@ return function(tern, repo, tempRoot, waitOne)
         while not called do step() end
         return value,errorValue
     end
+    local function stage(target)
+        local changed,problem,called
+        Store.workflowStage(paths,req,target,req.revision,"workflow-owner",function(updated,err)
+            changed,problem,called=updated,err,true
+        end)
+        while not called do step() end
+        if changed then req=changed end
+        return changed,problem
+    end
     -- Invoke the returned function once per native call, preserving state between phases.
     return function()
     if aborted or phase>=7 then return result() end
@@ -84,6 +93,7 @@ return function(tern, repo, tempRoot, waitOne)
     if not adopted then aborted=true;return result() end
     local design=assert(Workflow.readDesign(paths,req,1))
     check(req.stage=="awaiting_approval" and design.requirementRevision==req.revision,"正式版本绑定采用之后的真实需求修订")
+    check(design.schemaVersion==2 and design.requirementContentRevision==Store.contentRevision(req),"正式方案保存独立内容身份")
     check(design.sha256=="02ad138027b3e3f79b21f7b594d58fda551a6b28df844ef807af148f20b0c71d","中文完整内容的 SHA-256 与独立 oracle 一致")
     immutable=tern.fs.read(paths.requirements.."\\workflow-req\\designs\\v1.json",262144)
     local _,stale=apply("comment",{designVersion=1,text="旧 CAS"},0)
@@ -92,8 +102,22 @@ return function(tern, repo, tempRoot, waitOne)
     check(unauthorized and unauthorized.code=="approval_invalid","未批准的实施被后端拒绝")
     local _,implicit=apply("approve",{designVersion=1,baseline=baseline})
     check(implicit and implicit.code=="explicit_confirmation_required","没有显式批准操作不能建立授权")
+    local identity=Store.contentRevision(req)
+    check(stage("designing")~=nil and Store.contentRevision(req)==identity,"批准前阶段变化保留方案内容身份")
     local approved=apply("approve",{designVersion=1,baseline=baseline,clicked=true})
     check(approved and Workflow.approvalState(approved,req).valid,"批准绑定当前需求及正式方案")
+    check(approved and approved.schemaVersion==2 and approved.approval.requirementContentRevision==identity,"新批准与工作流使用 schema2 内容身份")
+    check(stage("awaiting_approval")~=nil and Workflow.approvalState(approved,req).valid,"批准后仅阶段变化不会撤销授权")
+    local legacy={};for key,value in approved.approval do legacy[key]=value end;legacy.requirementContentRevision=nil
+    local legacyWorkflow={};for key,value in approved do legacyWorkflow[key]=value end;legacyWorkflow.approval=legacy
+    check(not Workflow.approvalState(legacyWorkflow,req).valid,"容器升级不能重新绑定旧批准到内容身份")
+    local reverted={};for key,value in req do reverted[key]=value end
+    reverted.revision=req.revision+2;reverted.contentRevision=reverted.revision
+    check(not Workflow.approvalState(approved,reverted).valid,"A 到 B 再回 A 的相同内容不能恢复旧批准")
+    local unknown={};for key,value in approved do unknown[key]=value end;unknown.unknown=true
+    check(Store.validateWorkflow(unknown,req)==nil,"工作流 schema2 拒绝未知字段")
+    unknown.unknown=nil;unknown.schemaVersion=1
+    check(Store.validateWorkflow(unknown,req)==nil,"schema1 工作流拒绝内容身份标记")
     elseif phase==3 then
     apply("comment",{designVersion=1,text="仅对第一版的批注"})
     local second=apply("adopt",{body="修订方案\n完整内容",source={kind="manual"}})

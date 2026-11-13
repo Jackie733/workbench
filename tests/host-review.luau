@@ -4,7 +4,7 @@
 -- checks the new draft/panel actions, their guards, and reload persistence.
 -- Storage-writing actions are intentionally out of scope here; they keep their
 -- existing code paths and are covered by the native storage tests.
-return function(tern, def, cx, payloadJson)
+return function(tern, def, cx, payloadJson, modules)
     local checks, failures = 0, {}
     local function check(ok, message)
         checks += 1
@@ -44,10 +44,13 @@ return function(tern, def, cx, payloadJson)
     check(s.ui.selected == "req-1" and s.ui.tab == "requirement", "看板卡片点击应打开需求工作区")
     -- Drafts belong to their requirement: switching must not carry text across.
     s.ui.handoff.fields.paths.text = "src/login.ts"
+    v.fields.lifecycleReason.text = "等待外部接口确认"
     event(s, {ev = "select", id = "main.workbench.requirements", item = "req-2"})
     check(s.ui.selected == "req-2" and s.ui.handoff.fields.paths.text == "", "切换需求不得带入另一项需求的资料草稿")
+    check(v.fields.lifecycleReason.text == "", "生命周期原因不得泄漏到另一需求")
     event(s, {ev = "select", id = "main.workbench.requirements", item = "req-1"})
     check(s.ui.handoff.fields.paths.text == "src/login.ts", "切回需求应恢复其草稿")
+    check(v.fields.lifecycleReason.text == "等待外部接口确认", "切回需求应恢复生命周期原因草稿")
     check(s.ui.handoff.drafts["req-2"] ~= nil, "切换时应保存原需求草稿")
     -- The preparation panel only toggles; opening it creates no request.
     local requestsBefore = #(s.ui.handoff.workflow and s.ui.handoff.workflow.requests or {})
@@ -152,6 +155,7 @@ return function(tern, def, cx, payloadJson)
     check(revived.ui.review.draftSeverity == "blocking", "重载应恢复草稿严重度")
     check(revived.ui.review.fields.reviewFindings.text == "blocking|过期后没有入口\n", "重载应恢复发现草稿")
 
+    check(revived.ui.review.fields.lifecycleReason.text == "等待外部接口确认", "重载应恢复本需求生命周期原因草稿")
     -- Readiness is derived at render time from the same gate inputs, and it is
     -- read-only: missing snapshots stay unknown, matching evidence becomes ready.
     local context = require("../lib/context")
@@ -207,10 +211,33 @@ return function(tern, def, cx, payloadJson)
     check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("变化", 1, true) ~= nil,
         "预览后命令变化必须要求重新预览")
     s.ui.trace.error = nil
+    local previewReq = s.ui.byId[s.ui.selected]
+    local oldRevision = previewReq.revision
+    s.ui.trace.fields.verifyCommand.text = "npm run test"
+    previewReq.revision += 1
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("变化", 1, true) ~= nil,
+        "仅实体修订变化也必须拒绝旧验证预览")
+    previewReq.revision = oldRevision
+    local oldFingerprint = s.ui.trace.results.changes.fingerprint
+    s.ui.trace.results.changes.fingerprint = string.rep("f", 64)
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("变化", 1, true) ~= nil,
+        "代码快照漂移必须拒绝旧验证预览")
+    s.ui.trace.results.changes.fingerprint = oldFingerprint
+    local oldSession = s.payload.binding.sessionId
+    s.payload.binding.sessionId = "other-session"
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("变化", 1, true) ~= nil,
+        "会话绑定漂移必须拒绝旧验证预览")
+    s.payload.binding.sessionId = oldSession
     s.ui.trace.fields.verifyCommand.text = "npm run test"
     action(s, "results-run-verification")
     check(s.ui.trace.verifyRequest ~= nil and s.ui.trace.verifyRequest.command == "npm run test",
         "匹配的预览应允许进入快照步骤")
+    check(s.ui.trace.verifyRequest.requirement ~= requirement
+        and s.ui.trace.verifyRequest.contentRevision == modules.store.contentRevision(requirement),
+        "验证必须冻结原需求与内容身份，而不是保留可变当前选择")
     check(s.ui.trace.pending == nil and s.ui.trace.error ~= nil
         and s.ui.trace.error:find("写入状态待核对", 1, true) ~= nil,
         "运行前应先尝试读取代码快照（测试环境拒绝真实进程写入）")
@@ -223,7 +250,7 @@ return function(tern, def, cx, payloadJson)
         if item.command == "npm run test" then candidateIndex = index end
     end
     check(candidateIndex ~= nil, "候选应可按位置选择")
-    event(s, {ev = "action", act = "results-use-candidate=" .. tostring(candidateIndex)})
+    event(s, {ev = "action", act = "results-use-candidate", value = tostring(candidateIndex)})
     check(s.ui.trace.fields.verifyCommand.text == "npm run test", "选择候选只应填入草稿")
     check(s.ui.trace.runPreview == nil, "选择候选后仍需重新预览")
 
@@ -285,5 +312,137 @@ return function(tern, def, cx, payloadJson)
         check(found, "渲染结果应包含添加发现按钮")
     end
 
+    -- Boundary-level async regressions: the real host and readers run against
+    -- controlled storage/process callbacks; Store's own tests cover atomic writes.
+    local Store, R, Live = modules.store, modules.results, modules.live
+    local originalLifecycle, originalChanges, originalVerification = Store.lifecycle, R.putChanges, R.addVerification
+    local originalCommand, originalRun = Live.command, tern.process.run
+    local isolated = def.init(cx, {payloadJson}, nil)
+    event(isolated, {ev="select", id="main.workbench.requirements", item="req-1"})
+    local u = isolated.ui
+    u.writable, u.dirty, u.token = true, false, "host-test-token"
+    local binding = isolated.payload.binding
+    local now = Live.epoch()
+    tern.kv.set("live:source:" .. isolated.payload.window .. ":" .. binding.instanceId,
+        {instanceId=binding.instanceId, sessionId=binding.sessionId, sourcePane=isolated.payload.source,
+            panel=isolated.panel, valid=true, updatedAt=now})
+    tern.fs.write(isolated.payload.location.runtime .. "snapshot.json", tern.json.encode({
+        schemaVersion=1, instanceId=binding.instanceId, sessionId=binding.sessionId, sourceMarker=binding.sourceMarker,
+        projectRoot=binding.projectRoot, sequence=1, updatedAt=now, pid=1, cwd=binding.cwd, state="idle", recentEvents={}}))
+    local calls = {}
+    Store.lifecycle = function(paths, req, kind, reason, revision, token, cb)
+        table.insert(calls, {paths=paths, req=req, kind=kind, reason=reason, revision=revision, token=token})
+        cb(nil, {code="revision_conflict"})
+    end
+    local target = u.byId["req-1"]
+    local originalStage = target.stage
+    for _, item in {{stage="awaiting_acceptance", action="block"}, {stage="blocked", action="unblock"},
+        {stage="blocked", action="cancel"}, {stage="cancelled", action="reopen"}, {stage="done", action="reopen"}} do
+        target.stage = item.stage
+        event(isolated, {ev="action", act="lifecycle-open", value=item.action})
+        check(u.review.lifecycleAction == item.action, "分裂的生命周期按钮应打开对应确认面板")
+        local before = #calls
+        u.review.fields.lifecycleReason.text = ""
+        action(isolated, "lifecycle-confirm")
+        check(#calls == before, "空原因不得调用 Store.lifecycle")
+        u.review.fields.lifecycleReason.text = "保留历史并记录人工原因"
+        action(isolated, "lifecycle-confirm")
+        check(#calls == before + 1 and calls[#calls].kind == item.action
+            and calls[#calls].reason == "保留历史并记录人工原因"
+            and calls[#calls].revision == target.revision and calls[#calls].req == target,
+            "确认应以完整原因及精确 CAS 调用共享生命周期 API")
+        check(u.lifecycleError ~= nil and u.review.fields.lifecycleReason.text == "保留历史并记录人工原因",
+            "冲突必须要求核对并保留原因，不能清空草稿")
+    end
+    target.stage = "done"
+    action(isolated, "review-toggle=reopen")
+    local beforeReopen = #calls
+    action(isolated, "review-reopen")
+    check(#calls == beforeReopen + 1 and calls[#calls].kind == "reopen",
+        "既有验收重开入口也必须调用 Store.lifecycle，而非 advanceStage")
+    u.dirty = true
+    local beforeDirty = #calls
+    action(isolated, "lifecycle-confirm")
+    check(#calls == beforeDirty and u.lifecycleError ~= nil, "脏需求表单时宿主必须拒绝生命周期写入")
+    u.dirty = false
+    target.stage = originalStage
+    action(isolated, "lifecycle-dismiss")
+    Store.lifecycle = originalLifecycle
+
+    local snapshot = {head="abc123", fingerprint=string.rep("a", 64), files={}, commits={}, diff="", dirty=false,
+        capturedAt=now, filesTruncated=false, commitsTruncated=false, diffTruncated=false, diffSha256=string.rep("b", 64)}
+    local commands, launches, recorded = {}, {}, {}
+    Live.command = function(_, command, cb) table.insert(commands, command); cb(true, nil) end
+    R.putChanges = function(paths, req, token, changes, expected, cb)
+        local saved = table.clone(u.trace.results)
+        saved.revision, saved.changes = expected + 1, changes
+        cb(saved, nil)
+    end
+    R.addVerification = function(paths, req, token, verification, evidence, expected, cb)
+        table.insert(recorded, {paths=paths, req=req, token=token, verification=verification, evidence=evidence, expected=expected})
+        local saved = {revision=expected + 1, verifications={verification}, changes=snapshot}
+        cb(saved, nil)
+    end
+    tern.process.run = function(argv, _, cb)
+        check(argv[1] == "wsl.exe", "异步验证回归不得运行真实进程")
+        table.insert(launches, {argv=argv, finish=cb})
+    end
+    local function prepare()
+        event(isolated, {ev="select", id="main.workbench.requirements", item="req-1"})
+        u.trace.results = {schemaVersion=2, projectId=target.projectId, requirementId="req-1", revision=0,
+            changes=snapshot, verifications={}}
+        u.trace.busy, u.trace.pending, u.trace.batch = false, nil, nil
+        u.trace.fields.verifyCommand.text, u.trace.fields.verifyCriteria.text = "printf verified", "C1"
+        action(isolated, "results-preview-verification")
+        action(isolated, "results-run-verification")
+        return u.trace.pending
+    end
+    local function receipt(pending, changes)
+        tern.fs.write(isolated.payload.location.runtime .. "receipts/" .. pending.requestId .. ".json",
+            tern.json.encode({schemaVersion=1, requestId=pending.requestId, instanceId=pending.instanceId,
+                sessionId=pending.sessionId, status="inspected", data={changes=changes}}))
+        action(isolated, "prefill") -- refreshes receipts; blank materials never publish a command
+    end
+    local pending = prepare()
+    receipt(pending, snapshot)
+    check(#launches == 1, "匹配的冻结上下文在新快照一致时才可启动验证")
+    local frozenRevision = target.revision
+    local originalPaths, originalRoot = u.paths, binding.projectRoot
+    event(isolated, {ev="select", id="main.workbench.requirements", item="req-2"})
+    local selectedResults = u.trace.results
+    binding.projectRoot = "/tmp/other-project"
+    target.revision = frozenRevision + 10
+    launches[1].finish({stdout="partial output", stderr="deadline", status=0, timed_out=true})
+    local saved = recorded[1]
+    check(saved ~= nil and saved.req.requirementId == "req-1" and saved.paths == originalPaths
+        and saved.req.revision == frozenRevision and saved.verification.requirementRevision == frozenRevision
+        and saved.verification.requirementContentRevision == frozenRevision
+        and saved.verification.cwd == originalRoot and saved.expected == 1,
+        "完成时必须保存到执行前的原需求、原项目、原结果修订和原内容身份")
+    check(saved.verification.result == "unknown" and saved.verification.exitCode == nil
+        and saved.verification.timedOut == true, "超时结果必须为 unknown 字符串且无退出码，不能写入布尔 true")
+    check(u.trace.results == selectedResults and u.selected == "req-2" and #commands == 1,
+        "切换选择后不得把证据或后续代码观察绑定到新需求")
+    binding.projectRoot, target.revision = originalRoot, frozenRevision
+    pending = prepare()
+    event(isolated, {ev="select", id="main.workbench.requirements", item="req-2"})
+    receipt(pending, snapshot)
+    check(#launches == 1 and #recorded == 1, "快照返回前切换需求必须拒绝执行")
+    pending = prepare()
+    local changedSnapshot = table.clone(snapshot)
+    changedSnapshot.fingerprint = string.rep("c", 64)
+    receipt(pending, changedSnapshot)
+    check(#launches == 1 and #recorded == 1, "读取到的代码快照相对预览漂移时必须拒绝执行")
+    local reqPath = u.paths.requirements .. "\\req-1\\requirement.json"
+    local originalJson = tern.fs.read(reqPath)
+    pending = prepare()
+    local changedReq = tern.json.decode(originalJson)
+    changedReq.revision += 1
+    tern.fs.write(reqPath, tern.json.encode(changedReq))
+    receipt(pending, snapshot)
+    check(#launches == 1 and #recorded == 1, "磁盘需求发生仅实体修订漂移时也必须拒绝执行")
+    tern.fs.write(reqPath, originalJson)
+    Store.lifecycle, R.putChanges, R.addVerification = originalLifecycle, originalChanges, originalVerification
+    Live.command, tern.process.run = originalCommand, originalRun
     return {checks = checks, failures = failures}
 end

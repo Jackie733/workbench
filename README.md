@@ -17,7 +17,7 @@
 - [阶段 5 审查、人工验收、审计与导出](docs/PHASE_5.md)
 - [阶段 6 迁移决定与旧入口清理](docs/PHASE_6.md)
 - [阶段 0 领域、存储、迁移与恢复契约](docs/DOMAIN_CONTRACT.md)
-- [重设计提案](docs/REDESIGN_PROPOSAL.md)、[证据登记](docs/REDESIGN_RESEARCH.md)、[执行计划](docs/REDESIGN_IMPLEMENTATION_PLAN.md)、[R0](docs/REDESIGN_R0.md)、[R1](docs/REDESIGN_R1.md)、[R2](docs/REDESIGN_R2.md)、[R3a](docs/REDESIGN_R3A.md)、[R3b](docs/REDESIGN_R3B.md)、[R4a](docs/REDESIGN_R4A.md)、[R4b 设计](docs/REDESIGN_R4B_DESIGN.md) 与 [能力探针结果](docs/REDESIGN_PROBES.md)
+- [重设计提案](docs/REDESIGN_PROPOSAL.md)、[证据登记](docs/REDESIGN_RESEARCH.md)、[执行计划](docs/REDESIGN_IMPLEMENTATION_PLAN.md)、[R0](docs/REDESIGN_R0.md)、[R1](docs/REDESIGN_R1.md)、[R2](docs/REDESIGN_R2.md)、[R3a](docs/REDESIGN_R3A.md)、[R3b](docs/REDESIGN_R3B.md)、[R4a](docs/REDESIGN_R4A.md)、[R4b 契约与实施记录](docs/REDESIGN_R4B_DESIGN.md) 与 [能力探针结果](docs/REDESIGN_PROBES.md)
 - [旧版 2.0.0 历史说明](docs/LEGACY_WORKBENCH_2_0.md)：仅作历史参考，相关代码已删除；旧数据不迁移。
 
 ## 在当前 omp 使用
@@ -27,6 +27,8 @@
 下次启动开发／调试会话可使用 `omp --model openai-codex/gpt-6-luna`；不改变全局默认模型。其他机器可显式加载 `omp --extension /absolute/path/to/workbench/omp/index.ts`。不要同时配置两个相同扩展入口；无需安装 skill、Provider 或新后台服务。
 
 当前插件版本 3.7.1。阶段 2 已通过 55 项真实存储、13 项同时写入和 9 项中断恢复检查；阶段 3 的协议与批准门禁通过自动测试，并在真实 Tern／Luna 会话完成预览、预填、发送、批注、版本差异、基线失效与未知投递对账；阶段 4 在隔离 Git 项目中真实执行失败／通过验证并确认失效与归属边界；阶段 5 真实完成原生 `/review` 预填、阻断审查、发现处置、人工接受、审计检索、导出与重新打开，确认导出不夹带验证输出或聊天。阶段 6 不迁移旧数据，只做旧入口清理；未完成发布验收，不以旧证据替代。3.7.0 的审查页试点通过 988 项视图契约与 33 项真实宿主交互自动检查（`lune run tests/run-views.luau`、`lune run tests/run-host.luau`），并修复芯片动作值丢失回归；新界面的真实桌面渲染验收尚未另行执行，不以自动检查替代。
+
+未发布的 R4b 已加入明确的阻塞／解除／取消／重开，以及独立内容修订：阶段变化不失效新授权和验证证据，内容改动仍会失效。更新时须同时更新宿主和 omp 扩展；部分实体新写 schema 2，旧记录只读兼容、不补造身份。写入后不保证旧二进制可写或降级，请勿手改 schema 数字。自动回归及隔离原生 PowerShell 工作流已通过，重设计的真实窗口／IME 验收仍未完成。
 
 
 ## 运行边界

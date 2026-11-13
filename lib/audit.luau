@@ -1,5 +1,6 @@
 --!strict
 -- Read-only audit timeline and deliberately narrow Markdown export.
+local Context = require("./context")
 local M = {}
 local MAX_EVENTS = 500
 local function push(events, at, kind, summary, ref)
@@ -9,12 +10,16 @@ end
 function M.timeline(req, workflow, plan, results, reviews)
     local events = {}
     push(events, req.createdAt, "需求", "创建 " .. tostring(req.number) .. " · " .. tostring(req.title), req.requirementId)
-    push(events, req.updatedAt, "需求", "当前修订 " .. tostring(req.revision) .. " · 阶段 " .. tostring(req.stage), req.requirementId)
+    push(events, req.updatedAt, "需求", Context.identity(req) .. " · 阶段 " .. tostring(req.stage), req.requirementId)
+    for _, event in req.lifecycleEvents or {} do
+        push(events, event.at, "生命周期", tostring(event.action) .. " · " .. tostring(event.from) .. " → " .. tostring(event.to)
+            .. " · " .. event.reason, event.id)
+    end
     for _, design in workflow and workflow.designs or {} do
-        push(events, design.createdAt, "方案", "采用正式方案 v" .. tostring(design.version) .. " · " .. tostring(design.sha256):sub(1, 16), "v" .. tostring(design.version))
+        push(events, design.createdAt, "方案", "采用正式方案 v" .. tostring(design.version) .. " · " .. Context.identity(design) .. " · " .. tostring(design.sha256):sub(1, 16), "v" .. tostring(design.version))
     end
     for _, approval in workflow and workflow.approvals or {} do
-        push(events, approval.approvedAt, "批准", tostring(approval.mode) .. " · 需求修订 " .. tostring(approval.requirementRevision)
+        push(events, approval.approvedAt, "批准", tostring(approval.mode) .. " · " .. Context.identity(approval)
             .. " · 方案 v" .. tostring(approval.designVersion), tostring(approval.id))
         if approval.revokedAt then push(events, approval.revokedAt, "批准撤销", tostring(approval.revocationReason or "未记录原因"), tostring(approval.id)) end
     end
@@ -37,19 +42,19 @@ function M.timeline(req, workflow, plan, results, reviews)
             .. tostring(results.changes.fingerprint):sub(1, 16), "changes") end
         for _, verification in results.verifications do
             push(events, verification.startedAt, "验证", tostring(verification.command) .. " · 退出码 " .. tostring(verification.exitCode)
-                .. " · " .. tostring(verification.result), tostring(verification.id))
+                .. " · " .. tostring(verification.result) .. " · " .. Context.identity(verification), tostring(verification.id))
         end
     end
     for _, review in reviews and reviews.reviews or {} do
         push(events, review.createdAt, "审查", tostring(review.source) .. " · " .. tostring(review.scope)
-            .. " · " .. tostring(#review.findings) .. " 项发现", tostring(review.id))
+            .. " · " .. tostring(#review.findings) .. " 项发现 · " .. Context.identity(review), tostring(review.id))
         for _, event in review.events do
             push(events, event.at, "发现处置", tostring(event.action) .. " · " .. tostring(event.findingId) .. " · " .. tostring(event.reason), tostring(event.findingId))
         end
     end
     for _, acceptance in reviews and reviews.acceptances or {} do
-        push(events, acceptance.createdAt, "人工验收", tostring(acceptance.decision) .. " · 需求修订 "
-            .. tostring(acceptance.requirementRevision) .. (acceptance.comment ~= "" and (" · " .. acceptance.comment) or ""), tostring(acceptance.id))
+        push(events, acceptance.createdAt, "人工验收", tostring(acceptance.decision) .. " · " .. Context.identity(acceptance)
+            .. (acceptance.comment ~= "" and (" · " .. acceptance.comment) or ""), tostring(acceptance.id))
     end
     for _, reopening in reviews and reviews.reopenings or {} do
         push(events, reopening.at, "重新打开", tostring(reopening.reason), tostring(reopening.acceptanceId))
@@ -78,9 +83,14 @@ function M.markdown(req, workflow, plan, results, reviews)
     line(out, "# " .. tostring(req.number) .. " · " .. tostring(req.title))
     blank(out)
     line(out, "- 需求标识：" .. tostring(req.requirementId))
-    line(out, "- 当前修订：" .. tostring(req.revision))
+    line(out, "- 当前身份：" .. Context.identity(req))
     line(out, "- 当前阶段：" .. tostring(req.stage))
     line(out, "- 类型／优先级：" .. tostring(req.type) .. " / " .. tostring(req.priority))
+    blank(out)
+    line(out, "## 生命周期历史"); blank(out)
+    for _, event in req.lifecycleEvents or {} do
+        line(out, "- " .. tostring(event.at) .. " · " .. event.id .. " · " .. event.action .. " · " .. event.from .. " → " .. event.to .. " · " .. event.reason)
+    end
     blank(out)
     line(out, "## 目标与范围"); blank(out); line(out, tostring(req.goal)); blank(out)
     line(out, "### 范围"); blank(out); line(out, tostring(req.scope)); blank(out)
@@ -92,11 +102,11 @@ function M.markdown(req, workflow, plan, results, reviews)
     line(out, "## 采用的方案与批准"); blank(out)
     for _, design in workflow and workflow.designs or {} do
         line(out, "- v" .. tostring(design.version) .. " · SHA-256 " .. tostring(design.sha256)
-            .. " · 需求修订 " .. tostring(design.requirementRevision) .. " · " .. tostring(design.createdAt))
+            .. " · " .. Context.identity(design) .. " · " .. tostring(design.createdAt))
     end
     if workflow and workflow.approval then
         local a = workflow.approval
-        line(out, "- 批准 " .. tostring(a.id) .. " · " .. tostring(a.mode) .. " · 需求修订 " .. tostring(a.requirementRevision)
+        line(out, "- 批准 " .. tostring(a.id) .. " · " .. tostring(a.mode) .. " · " .. Context.identity(a)
             .. " · 方案 v" .. tostring(a.designVersion) .. " · 基线 " .. tostring(a.baseline and a.baseline.head or ""))
         if a.revokedAt then line(out, "- 已撤销 " .. tostring(a.revokedAt) .. " · " .. tostring(a.revocationReason or "")) end
     else line(out, "- 无批准记录") end
@@ -123,14 +133,14 @@ function M.markdown(req, workflow, plan, results, reviews)
     for _, v in results and results.verifications or {} do
         line(out, "- " .. tostring(v.id) .. " · `" .. tostring(v.command) .. "` · 退出码 " .. tostring(v.exitCode)
             .. " · " .. tostring(v.result) .. " · 快照 " .. tostring(v.codeSnapshotSha256)
-            .. " · 验收条件 " .. table.concat(v.criterionIds, ", "))
+            .. " · " .. Context.identity(v) .. " · 验收条件 " .. table.concat(v.criterionIds, ", "))
     end
     blank(out)
     line(out, "## 审查"); blank(out)
     for _, review in reviews and reviews.reviews or {} do
         line(out, "### " .. tostring(review.id) .. " · " .. tostring(review.source))
         line(out, "- 范围：" .. tostring(review.scope))
-        line(out, "- 代码快照：" .. tostring(review.codeSnapshotSha256) .. " · 需求修订 " .. tostring(review.requirementRevision))
+        line(out, "- 代码快照：" .. tostring(review.codeSnapshotSha256) .. " · " .. Context.identity(review))
         for _, finding in review.findings do
             local state, reason = "open", nil
             for _, event in review.events do if event.findingId == finding.id then state, reason = event.action, event.reason end end
@@ -142,8 +152,8 @@ function M.markdown(req, workflow, plan, results, reviews)
     end
     line(out, "## 人工验收"); blank(out)
     for _, acceptance in reviews and reviews.acceptances or {} do
-        line(out, "- " .. tostring(acceptance.createdAt) .. " · " .. tostring(acceptance.decision) .. " · 需求修订 "
-            .. tostring(acceptance.requirementRevision) .. " · 快照 " .. tostring(acceptance.codeSnapshotSha256)
+        line(out, "- " .. tostring(acceptance.createdAt) .. " · " .. tostring(acceptance.decision) .. " · "
+            .. Context.identity(acceptance) .. " · 快照 " .. tostring(acceptance.codeSnapshotSha256)
             .. (acceptance.comment ~= "" and (" · " .. acceptance.comment) or ""))
     end
     for _, reopening in reviews and reviews.reopenings or {} do

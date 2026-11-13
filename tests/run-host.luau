@@ -89,7 +89,7 @@ local SHA = string.rep("ab12", 16)
 local store = "\\\\wsl.localhost\\Ubuntu\\tmp\\demo-project\\.omp\\workbench"
 local function put(path, value) files[path] = serde.encode("json", value) end
 put(store .. "\\project.json", {schemaVersion = 1, projectId = "project-1", root = "/tmp/demo-project",
-    name = "demo", revision = 1, nextNumber = 2, createdAt = 1700000000000})
+    name = "demo", revision = 1, nextNumber = 4, createdAt = 1700000000000})
 put(store .. "\\requirements\\req-1\\requirement.json", {schemaVersion = 1, requirementId = "req-1",
     projectId = "project-1", number = "REQ-0001", revision = 3, title = "登录过期时提供重新登录入口",
     type = "bug", priority = "high", stage = "awaiting_acceptance",
@@ -161,7 +161,9 @@ local payload = {
 }
 
 local test = require("./host-review")
-local result = test(stub, holder.def, cx, serde.encode("json", payload))
+local result = test(stub, holder.def, cx, serde.encode("json", payload),
+    {store=loadModule(repo .. "/lib/store.luau"), results=loadModule(repo .. "/lib/results.luau"),
+        live=loadModule(repo .. "/lib/live.luau")})
 for _, failure in result.failures do print("FAIL " .. failure) end
 print(string.format("%d checks, %d failures", result.checks, #result.failures))
 if #result.failures > 0 then error("host review contract violated") end

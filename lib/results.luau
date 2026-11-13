@@ -128,11 +128,12 @@ local changeKeys = {capturedAt=true, head=true, fingerprint=true, dirty=true, fi
     diff=true, diffSha256=true, diffTruncated=true, commits=true, commitsTruncated=true}
 local commitKeys = {hash=true, at=true, author=true, subject=true}
 local verificationKeys = {id=true, command=true, cwd=true, criterionIds=true, requirementRevision=true,
+    requirementContentRevision=true,
     codeSnapshotSha256=true, startedAt=true, endedAt=true, exitCode=true, timedOut=true, result=true,
     stdoutPreview=true, stderrPreview=true, stdoutBytes=true, stderrBytes=true, stdoutTruncated=true,
     stderrTruncated=true, evidencePath=true}
 local evidenceKeys = {schemaVersion=true, projectId=true, requirementId=true, revision=true, id=true, command=true,
-    cwd=true, criterionIds=true, requirementRevision=true, codeSnapshotSha256=true, startedAt=true, endedAt=true,
+    cwd=true, criterionIds=true, requirementRevision=true, requirementContentRevision=true, codeSnapshotSha256=true, startedAt=true, endedAt=true,
     exitCode=true, timedOut=true, result=true, stdout=true, stderr=true, stdoutBytes=true, stderrBytes=true,
     stdoutTruncated=true, stderrTruncated=true}
 
@@ -165,10 +166,13 @@ local function validateChanges(c)
     end
     return true
 end
-local function validateVerification(v, req)
+local function validateVerification(v, schemaVersion)
     if type(v) ~= "table" or not Store.token(v.id) or not v.id:match("^verification%-[%w]+$")
         or not text(v.command, 4000, false) or not text(v.cwd, 2048, false) or v.cwd:sub(1, 1) ~= "/"
         or type(v.criterionIds) ~= "table" or #v.criterionIds > 32 or not integer(v.requirementRevision, 1)
+        or (v.requirementContentRevision ~= nil and (schemaVersion ~= 2
+            or not integer(v.requirementContentRevision, 1) or v.requirementContentRevision > 9007199254740991
+            or v.requirementContentRevision > v.requirementRevision))
         or not hash(v.codeSnapshotSha256) or not integer(v.startedAt, 0) or not integer(v.endedAt, 0)
         or (v.exitCode ~= nil and not integer(v.exitCode, -1)) or type(v.timedOut) ~= "boolean"
         or (v.result ~= "passed" and v.result ~= "failed" and v.result ~= "unknown")
@@ -181,14 +185,11 @@ local function validateVerification(v, req)
     for _, id in v.criterionIds do
         if not Store.token(id) or seen[id] then return false end
         seen[id] = true
-        local found = false
-        for _, criterion in req.acceptanceCriteria or {} do if criterion.id == id then found = true; break end end
-        if not found then return false end
     end
     return true
 end
 function M.validateResults(results, req)
-    if type(results) ~= "table" or results.schemaVersion ~= 1 or results.projectId ~= req.projectId
+    if type(results) ~= "table" or (results.schemaVersion ~= 1 and results.schemaVersion ~= 2) or results.projectId ~= req.projectId
         or results.requirementId ~= req.requirementId or not integer(results.revision, 0)
         or type(results.verifications) ~= "table" or #results.verifications > MAX_VERIFICATIONS
         or not allowed(results, resultKeys) then return nil, "corrupt_results" end
@@ -196,14 +197,14 @@ function M.validateResults(results, req)
     if results.changes ~= nil and not validateChanges(results.changes) then return nil, "corrupt_results" end
     local ids = {}
     for _, v in results.verifications do
-        if not validateVerification(v, req) or ids[v.id] then return nil, "corrupt_results" end
+        if not validateVerification(v, results.schemaVersion) or ids[v.id] then return nil, "corrupt_results" end
         ids[v.id] = true
     end
     return results
 end
 function M.loadResults(paths, req)
     local results, err = read(M.resultsPath(paths, req))
-    if err == "missing" then return {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    if err == "missing" then return {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=0, baseline=nil, changes=nil, verifications=tern.json.array()}, nil end
     if not results then return nil, {code=err} end
     local valid, problem = M.validateResults(results, req)
@@ -226,7 +227,7 @@ function M.recordBaseline(paths, req, token, baseline, requestId, cb)
     local current, problem = M.loadResults(paths, req)
     if not current then cb(nil, nil, problem); return end
     if current.baseline and current.baseline.requestId == requestId then cb(current, nil); return end
-    local nextResults = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextResults = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=current.revision + 1, baseline={requestId=requestId, head=baseline.head or "",
             fingerprint=baseline.fingerprint, dirty=baseline.dirty == true, capturedAt=os.time() * 1000,
             files=baseline.files or tern.json.array(), filesTruncated=baseline.filesTruncated == true},
@@ -239,7 +240,7 @@ function M.putChanges(paths, req, token, changes, expected, cb)
     local current, problem = M.loadResults(paths, req)
     if not current then cb(nil, nil, problem); return end
     if current.revision ~= expected then cb(nil, nil, {code="revision_conflict"}); return end
-    local nextResults = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+    local nextResults = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
         revision=current.revision + 1, baseline=current.baseline, changes=changes,
         verifications=copyVerifications(current.verifications)}
     local valid, why = M.validateResults(nextResults, req)
@@ -250,11 +251,13 @@ function M.addVerification(paths, req, token, verification, evidence, expected, 
     local current, problem = M.loadResults(paths, req)
     if not current then cb(nil, nil, problem); return end
     if current.revision ~= expected then cb(nil, nil, {code="revision_conflict"}); return end
-    if not validateVerification(verification, req) then cb(nil, nil, {code="invalid_verification"}); return end
+    if not validateVerification(verification, 2) or verification.requirementContentRevision == nil
+        or not Validity.matchesRequirement(verification, req) then cb(nil, nil, {code="invalid_verification"}); return end
     for _, item in current.verifications do if item.id == verification.id then cb(nil, nil, {code="verification_exists"}); return end end
-    local record = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId, revision=1,
+    local record = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId, revision=1,
         id=verification.id, command=verification.command, cwd=verification.cwd,
         criterionIds=verification.criterionIds, requirementRevision=verification.requirementRevision,
+        requirementContentRevision=verification.requirementContentRevision,
         codeSnapshotSha256=verification.codeSnapshotSha256, startedAt=verification.startedAt, endedAt=verification.endedAt,
         exitCode=verification.exitCode, timedOut=verification.timedOut, result=verification.result,
         stdout=evidence.stdout, stderr=evidence.stderr, stdoutBytes=evidence.stdoutBytes, stderrBytes=evidence.stderrBytes,
@@ -262,7 +265,7 @@ function M.addVerification(paths, req, token, verification, evidence, expected, 
     if not allowed(record, evidenceKeys) then cb(nil, nil, {code="invalid_verification"}); return end
     Store.putScoped(paths, M.evidencePath(paths, req, verification.id), record, 0, token, function(saved, reason, cx)
         if not saved then cb(nil, nil, {code=reason}, cx); return end
-        local nextResults = {schemaVersion=1, projectId=req.projectId, requirementId=req.requirementId,
+        local nextResults = {schemaVersion=2, projectId=req.projectId, requirementId=req.requirementId,
             revision=current.revision + 1, baseline=current.baseline, changes=current.changes,
             verifications=copyVerifications(current.verifications)}
         table.insert(nextResults.verifications, verification)

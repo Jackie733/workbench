@@ -13,6 +13,7 @@ local approvalMessages = {
     requirement_changed = "需求修订或内容摘要已改变；必须重新授权。",
     newer_design = "已有更新的正式方案；必须批准最新版本。",
     design_changed = "批准的正式方案校验不再匹配；必须重新授权。",
+    invalid_authorization = "授权记录的方式或直接实施依据无效；必须重新授权。",
 }
 
 -- Last disposition event wins; "reopened" returns the finding to open.
@@ -31,9 +32,17 @@ local function reason(code, message, refs)
     return {code = code, message = message, refs = refs or {}}
 end
 
--- Approval validity for the current requirement revision and canonical content.
--- `content` must be the exact serialization `Workflow.requirementContent` returned;
--- a missing serialization is not "valid": callers must pass it.
+-- New records pin the last content-changing CAS revision. Legacy records keep
+-- their original exact-revision rule; upgrading a container never rebinds them.
+function M.matchesRequirement(record, requirement)
+    local pinned = record.requirementContentRevision
+    if pinned == nil then return record.requirementRevision == requirement.revision end
+    local current = requirement.contentRevision or requirement.revision
+    return type(pinned) == "number" and pinned % 1 == 0 and pinned >= 1
+        and pinned <= 9007199254740991 and pinned == current
+end
+
+-- Canonical content is checked independently of the monotonic content identity.
 function M.approval(workflow, requirement, content)
     local function invalid(code)
         return {valid = false, reason = code, message = approvalMessages[code]}
@@ -41,26 +50,31 @@ function M.approval(workflow, requirement, content)
     local a = workflow and workflow.approval
     if type(a) ~= "table" then return invalid("not_approved") end
     if a.revokedAt then return invalid("revoked") end
-    if content == nil or a.requirementRevision ~= requirement.revision or a.requirementContent ~= content then
+    if content == nil or not M.matchesRequirement(a, requirement) or a.requirementContent ~= content then
         return invalid("requirement_changed")
     end
     if a.latestVersion ~= workflow.latestVersion then return invalid("newer_design") end
+    if a.mode ~= "design" and a.mode ~= "direct" then return invalid("invalid_authorization") end
     if a.mode == "design" then
+        if a.designVersion ~= workflow.latestVersion then return invalid("design_changed") end
         local d = workflow.designs and workflow.designs[a.designVersion]
         if not d or d.sha256 ~= a.designSha256 or d.requirementSha256 ~= a.requirementSha256
-            or d.requirementRevision ~= requirement.revision then return invalid("design_changed") end
+            or d.version ~= a.designVersion or not M.matchesRequirement(d, requirement) then return invalid("design_changed") end
     end
+    if a.mode == "direct" and (a.designVersion ~= 0 or a.designSha256 ~= ""
+        or type(a.reason) ~= "string" or not a.reason:match("%S")
+        or type(requirement.scope) ~= "string" or not requirement.scope:match("%S")
+        or #(requirement.acceptanceCriteria or {}) == 0) then return invalid("invalid_authorization") end
     return {valid = true, reason = "current", message = approvalMessages.current,
         approvalId = a.id, mode = a.mode, designVersion = a.designVersion}
 end
 
--- A recorded result is only current when the requirement revision and the
--- observed code snapshot both still match. Without a snapshot observation a
--- recorded pass cannot be confirmed (unknown, never green); a recorded failure
--- stays a failure, because losing it would hide evidence.
+-- Content identity and observed code snapshot must both match. Legacy evidence
+-- remains bound to its exact entity revision. Missing observation never turns a
+-- pass green and never hides a recorded failure.
 function M.verification(results, requirement, verification)
-    if verification.requirementRevision ~= requirement.revision then
-        return "stale", "需求修订已变化", "requirement_changed"
+    if not M.matchesRequirement(verification, requirement) then
+        return "stale", "需求内容或旧记录绑定的修订已变化", "requirement_changed"
     end
     local snapshot = results and results.changes and results.changes.fingerprint
     if not snapshot then
@@ -83,6 +97,7 @@ function M.evidence(results, requirement, snapshot)
         table.insert(items, {id = verification.id, state = state, reason = why, code = code,
             command = verification.command, criterionIds = verification.criterionIds,
             requirementRevision = verification.requirementRevision,
+            requirementContentRevision = verification.requirementContentRevision,
             codeSnapshotSha256 = verification.codeSnapshotSha256})
     end
     return {items = items, counts = counts, total = #items, snapshot = snapshot}
@@ -96,7 +111,7 @@ function M.criteria(requirement, results, snapshot)
     for _, criterion in requirement.acceptanceCriteria or {} do
         local evidenceIds = {}
         for _, verification in results and results.verifications or {} do
-            if verification.result == "passed" and verification.requirementRevision == requirement.revision
+            if verification.result == "passed" and M.matchesRequirement(verification, requirement)
                 and snapshot ~= nil and verification.codeSnapshotSha256 == snapshot then
                 for _, id in verification.criterionIds or {} do
                     if id == criterion.id then table.insert(evidenceIds, verification.id); break end
@@ -168,12 +183,12 @@ function M.acceptance(requirement, results, reviewsData)
         criteria = coverage, findings = findings}
 end
 
--- Verification IDs applicable to the current snapshot. Rows are only selected
--- when revision and snapshot still match, so a later edit cannot be relabelled.
+-- Select only evidence with matching content identity (legacy: exact revision)
+-- and snapshot. No historical evidence is rebound to the current requirement.
 function M.currentVerificationIds(results, requirement, snapshot, passedOnly)
     local ids = {}
     for _, verification in results and results.verifications or {} do
-        if snapshot ~= nil and verification.requirementRevision == requirement.revision
+        if snapshot ~= nil and M.matchesRequirement(verification, requirement)
             and verification.codeSnapshotSha256 == snapshot
             and (not passedOnly or verification.result == "passed") then
             table.insert(ids, verification.id)

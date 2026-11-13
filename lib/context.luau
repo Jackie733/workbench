@@ -5,6 +5,28 @@ local ui = tern.ui
 local Validity = require("./validity")
 local Workflow = require("./workflow")
 local M = {}
+function M.identity(record)
+    local content = record.requirementContentRevision or record.contentRevision
+    return "实体修订 " .. tostring(record.requirementRevision or record.revision)
+        .. (content and (" · 内容修订 " .. tostring(content)) or " · 旧记录：未标记内容身份（按实体修订核对）")
+end
+function M.lifecycleGuard(s)
+    local u = s.ui
+    local h, t, v = u.handoff, u.trace, u.review
+    if not u.writable or u.storageUnsafe or u.loading then return "需要可编辑且已刷新的完整项目记录" end
+    if u.busy or u.saving or u.dirty then return "先保存或放弃需求编辑草稿，并等待当前操作完成" end
+    if not v or not v.safe or v.busy or u.lifecycleBusy then return "审查记录未就绪或操作正在进行" end
+    if not h or not h.safe or h.workflowBusy or h.pending or h.pendingSend then return "交接操作或业务请求尚待核对" end
+    if not t or not t.safe or t.busy or t.pending or (t.batch and t.batch.state == "running") then return "验证、代码检查或批量操作尚未结束" end
+    if s.pending or s.problem or not s.snapshot or s.snapshot.state ~= "idle" then return "来源未就绪、omp 正忙或有桥接请求待核对" end
+    for _, request in h.workflow and h.workflow.requests or {} do
+        if (request.status == "pending" or request.status == "delivery_unknown")
+            and (not request.resolution or request.resolution.kind ~= "user_acknowledged") then
+            return "存在未完成人工对账的业务请求"
+        end
+    end
+    return false
+end
 
 M.stages = {
     {"backlog", "待整理"}, {"clarifying", "澄清中"}, {"designing", "设计中"},
@@ -122,7 +144,7 @@ function M.bar(s, opts)
     local metaRow = {
         ui.badge(M.stageNames[r.stage] or r.stage, stageTone),
         ui.text({ui.span((M.types[r.type] or r.type) .. " · 优先级 " .. (M.priorities[r.priority] or r.priority)
-            .. " · 修订 " .. tostring(r.revision), "muted")}),
+            .. " · " .. M.identity(r), "muted")}),
     }
     local readiness = M.readiness(r, u)
     local nextStep = (readiness and readiness.next) or M.nextActions[r.stage]
@@ -149,6 +171,31 @@ function M.bar(s, opts)
     if r.stage == "blocked" and r.blockedReason then
         table.insert(children, ui.text({ui.span("阻塞：" .. r.blockedReason, "warning")}))
     end
+    local v = u.review
+    local guard = M.lifecycleGuard(s)
+    local actions = {}
+    local allowed = (r.stage == "done" or r.stage == "cancelled")
+        and {"reopen"} or (r.stage == "blocked" and {"unblock", "cancel"} or {"block", "cancel"})
+    local names = {block = "阻塞", unblock = "解除阻塞", cancel = "取消需求", reopen = "重新打开"}
+    for _, action in allowed do
+        table.insert(actions, ui.button(names[action] .. "…", {key = "lifecycle-open=" .. action, size = "sm",
+            disabled = guard, actions = {click = "lifecycle-open=" .. action}}))
+    end
+    table.insert(children, ui.node("row", {key = "lifecycleActions", gap = "xs", wrap = true}, actions))
+    if v and v.lifecycleAction and v.lifecycleRequirement == r.requirementId then
+        local f = v.fields.lifecycleReason or {text = ""}
+        table.insert(children, ui.node("card", {key = "lifecycleConfirm", head = names[v.lifecycleAction] .. " · 明确确认", tone = "warning"}, {
+            ui.text("仅改变需求生命周期；不会终止外部进程，也不会撤回已发送请求。历史与旧验收保留。"),
+            ui.node("editor", {key = "lifecycleReason", text = f.text, cursor = units(f.text, f.cursor or utf8.len(f.text)),
+                anchor = f.anchor and units(f.text, f.anchor) or nil, maxLines = 3, readonly = guard ~= false,
+                placeholder = "必填原因，最多 2000 UTF-8 字节", aria = "生命周期变更原因", variant = "field"}),
+            ui.button("确认" .. names[v.lifecycleAction], {key = "lifecycle-confirm", size = "sm", variant = "danger",
+                disabled = guard or (not f.text:match("%S") and "先填写原因") or false, actions = {click = "lifecycle-confirm"}}),
+            ui.button("返回，不变更", {key = "lifecycle-dismiss", size = "sm", actions = {click = "lifecycle-dismiss"}}),
+        }))
+    end
+    if u.lifecycleError then table.insert(children, ui.text({ui.span(u.lifecycleError, "error")})) end
+    if u.lifecycleNotice then table.insert(children, ui.text({ui.span(u.lifecycleNotice, "muted")})) end
     table.insert(children, M.switcher(u))
     return ui.node("card", {key = "contextBar", role = "workbench.context", tone = stageTone,
         head = {ui.span((r.number or "") .. "  ", "muted"), ui.span(r.title, "strong")}}, children)

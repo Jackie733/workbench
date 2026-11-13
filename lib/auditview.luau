@@ -1,6 +1,7 @@
 --!strict
 local ui = tern.ui
 local Audit = require("./audit")
+local Context = require("./context")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -32,7 +33,7 @@ function M.build(s)
     local nodes = {
         ui.card("审计 · " .. r.number .. " · " .. r.title, {
             note("按时间倒序汇总需求、方案、批准、计划、代码观察、验证、审查与人工验收记录；用于核对，不是防篡改日志。"),
-            note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage)),
+            note(Context.identity(r) .. " · 阶段 " .. tostring(r.stage)),
             note("本地文件仍可被用户修改；这不是防篡改日志，也不能证明操作者身份。"),
         }, {key = "auditTarget", tone = "muted"}),
     }

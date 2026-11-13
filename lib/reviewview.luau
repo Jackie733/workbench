@@ -2,6 +2,7 @@
 local ui = tern.ui
 local Review = require("./review")
 local Validity = require("./validity")
+local Context = require("./context")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -259,7 +260,7 @@ local function findingsCard(v, writable)
                     .. (reviewOpen > 0 and (" · " .. tostring(reviewOpen) .. " 未处置") or ""),
                 collapsible = true, collapsed = index ~= #items, tone = reviewOpen > 0 and "warning" or "muted"}, {
                 findingsTable(v, review, writable),
-                note("快照 " .. review.codeSnapshotSha256:sub(1, 12) .. " · 需求修订 " .. tostring(review.requirementRevision)),
+                note("快照 " .. review.codeSnapshotSha256:sub(1, 12) .. " · " .. Context.identity(review)),
             }))
         end
         if #items > 10 then table.insert(children, note("仅显示最近 10 次审查；共 " .. tostring(#items) .. " 次。")) end
@@ -290,8 +291,9 @@ local function acceptanceCard(s, v, r, writable, snapshot)
     end
     if latest then
         table.insert(evidenceChildren, row("latestDecision", {
-            ui.badge(decisionNames[latest.decision] or latest.decision, latest.decision == "accepted" and "success" or "warning"),
-            ui.text({ui.span(shortTime(latest.createdAt) .. (latest.comment ~= "" and (" · " .. latest.comment:sub(1, 80)) or ""), "muted")}),
+            ui.badge("历史决定：" .. (decisionNames[latest.decision] or latest.decision), "muted"),
+            ui.text({ui.span(shortTime(latest.createdAt) .. " · " .. Context.identity(latest)
+                .. (latest.comment ~= "" and (" · " .. latest.comment:sub(1, 80)) or ""), "muted")}),
         }, {gap = "xs"}))
     end
     table.insert(evidenceChildren, note("验收只能由你触发；退出码 0 或模型声称完成都不构成验收。"))
@@ -325,12 +327,13 @@ local function acceptanceCard(s, v, r, writable, snapshot)
     end
     if v.panel == "reopen" then
         table.insert(decideChildren, ui.node("col", {key = "reopenPanel", role = "workbench.disposition", gap = "sm"}, {
-            field("reviewReopen", "重新打开原因", v.fields.reviewReopen.text, v.fields.reviewReopen.cursor,
-                v.fields.reviewReopen.anchor, 2, not writable, "保留已完成历史；重新打开后回到澄清中"),
+            field("lifecycleReason", "重新打开原因", (s.ui.review.fields.lifecycleReason or {}).text,
+                (s.ui.review.fields.lifecycleReason or {}).cursor, (s.ui.review.fields.lifecycleReason or {}).anchor,
+                2, Context.lifecycleGuard(s) ~= false, "保留已完成历史；重新打开后回到澄清中，不会终止外部进程"),
             row("reopenActions", {
                 button("确认重新打开", "review-reopen", "default",
-                    (not writable and "只读或记录未就绪") or (r.stage ~= "done" and "只有已完成需求可以重新打开")
-                    or (not v.fields.reviewReopen.text:match("%S") and "先填写重新打开原因") or false),
+                    Context.lifecycleGuard(s) or (r.stage ~= "done" and "只有已完成需求可以重新打开")
+                    or (not ((v.fields.lifecycleReason or {}).text or ""):match("%S") and "先填写重新打开原因") or false),
                 button("取消", "review-cancel", "quiet"),
             }),
         }))
@@ -360,7 +363,7 @@ local function historyCard(v)
         local item = acceptances[index]
         table.insert(rows, row("acceptance-" .. tostring(index), {
             ui.badge(decisionNames[item.decision] or item.decision, item.decision == "accepted" and "success" or "warning"),
-            ui.text({ui.span(shortTime(item.createdAt) .. " · 修订 " .. tostring(item.requirementRevision)
+            ui.text({ui.span(shortTime(item.createdAt) .. " · 历史决定 · " .. Context.identity(item)
                 .. " · 快照 " .. item.codeSnapshotSha256:sub(1, 12)
                 .. (item.comment ~= "" and (" · " .. item.comment:sub(1, 100)) or ""), "muted")}),
         }, {gap = "xs"}))

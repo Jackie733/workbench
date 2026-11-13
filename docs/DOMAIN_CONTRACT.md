@@ -4,13 +4,13 @@
 
 ## 1. 身份与版本
 
-所有正式记录包含 `schemaVersion: 1`。未知版本必须拒绝修改，保留原始文件，不按空数据初始化。UTF-8 JSON 中时间为 Unix 毫秒整数，ID 为不含路径分隔符的稳定字符串。
+初始正式记录为 `schemaVersion: 1`。R4b 起，需求／工作流／正式方案／结果摘要／验证证据／审查的新写入使用 schema 2，读取兼容 1/2；project、plan、resources、锁与 IPC 保持 1。精确字段与升级边界见 [R4b 契约](REDESIGN_R4B_DESIGN.md)。未知版本拒绝修改，保留原始文件，不按空数据初始化。UTF-8 JSON 中时间为 Unix 毫秒整数，ID 为不含路径分隔符的稳定字符串。
 
 - 项目使用随机稳定 `projectId`，规范 Git 根目录为属性；移动目录不能重新分配需求身份。
 - 需求使用随机稳定 `requirementId`，`REQ-0008` 是项目内唯一展示编号，不当作跨项目身份。
 - 每次明确交接分配唯一 `requestId`，同一请求禁止重复消费。
 - omp `sessionId`、进程 `instanceId`、Tern window/pane 分开保存，pane 不能替代 session；会话切换使旧绑定失效。
-- `revision` 为业务实体单调递增版本；并发保存须携带预期版本，冲突拒绝覆盖。
+- `revision` 为实体 CAS 单调递增版本；并发保存携带预期版本，冲突拒绝覆盖。需求 v2 的 `contentRevision` 保存最近内容变化对应的 CAS 修订，阶段转换保持该值。新批准／方案／请求／验证／审查／验收另存 `requirementContentRevision`；旧条目不补造身份，仍按实体修订判断。内容改回旧文本也不复活旧记录。
 - `eventId` 唯一；来源 `sequence` 只在该来源内有序，不能比较不同进程的序号。
 
 ## 2. 实体 schema
@@ -50,8 +50,9 @@
 - verifying → implementing：记录验证失败或用户要求修复。
 - awaiting_acceptance → implementing：人工驳回，记录原因。
 - 任意未完成阶段 → blocked：保存 blockedFrom 和原因；解除后返回原阶段。涉及需求／方案变化时先失效 Approval。
-- 任意未完成阶段 → cancelled：用户明确操作。正在运行时先请求中断；取消需求不声称后台工具已终止。
+- 任意未完成阶段 → cancelled：用户明确操作并填写原因。R4b 不实现进程中断：有活动操作或待核对请求时拒绝转换；取消需求不声称后台工具已终止。
 - done/cancelled → clarifying：用户明确重新打开，保留历史 Acceptance，不把它作为新版本已验收。
+- R4b 的阻塞／解除／取消／重开与原因、来源／目标阶段、时间同存于需求 `lifecycleEvents`，单文件 CAS，最多 200 条，到限拒绝；不删除验收或证据历史。
 
 Run.state：draft、pending、accepted、running、waiting_user、ended、failed、cancel_requested、cancelled、delivery_unknown。业务 stage、Run.state 和 transport connected/stale/disconnected 是三组状态，禁止互相覆盖。
 
@@ -59,7 +60,7 @@ Run.state：draft、pending、accepted、running、waiting_user、ended、failed
 
 ## 4. 批准与验收不变量
 
-1. Approval 引用具体需求修订、方案正文指纹和实施前基线。方案、范围、验收条件变更使其失效。
+1. 新 Approval 引用需求内容身份、规范内容串、方案正文指纹和实施前基线；旧批准继续精确绑定实体修订。方案、范围、验收条件等内容变化使其失效；阶段变化不失效新记录。预览／发送仍绑定精确实体修订，不放宽漂移门禁。
 2. 开始实施前重新读取并核对；既有未提交变更保留，基线变化必须展示并重新确认。
 3. 开始后的预期代码改动不自动撤销本次授权。外部改动混入时标 mixed，不能宣称精确作者归属。
 4. Verification 引用实际代码快照；相关代码／验收条件变化使其 stale，历史记录不删除。

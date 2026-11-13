@@ -452,7 +452,7 @@ local function refreshHandoff(s)
     if h.workflowError then h.error = h.workflowError end
 end
 local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
-local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200, activityQuery=200, findingDraft=4000}
+local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, lifecycleReason=2000, auditQuery=200, activityQuery=200, findingDraft=4000}
 local function traceSnapshot(t)
     if not t then return nil end
     local fields = {}
@@ -483,7 +483,8 @@ local function reviewSnapshot(v)
             fields[name] = {text = field.text:sub(1, limit), cursor = field.cursor, anchor = field.anchor}
         end
     end
-    return {fields=fields, source=v.source, finding=v.finding, action=v.action, panel=v.panel, draftSeverity=v.draftSeverity}
+    return {fields=fields, source=v.source, finding=v.finding, action=v.action, panel=v.panel, draftSeverity=v.draftSeverity,
+        reasonDrafts=v.reasonDrafts, draftRequirement=v.draftRequirement}
 end
 local function makeReview(saved)
     local fields = {}
@@ -501,6 +502,8 @@ local function makeReview(saved)
         action=type(saved)=="table" and saved.action or "resolved",
         panel=(savedPanel == "reject" or savedPanel == "reopen" or savedPanel == "dispose") and savedPanel or "",
         draftSeverity=(savedSeverity == "blocking" or savedSeverity == "major" or savedSeverity == "minor" or savedSeverity == "note") and savedSeverity or "major",
+        reasonDrafts=type(saved)=="table" and type(saved.reasonDrafts)=="table" and saved.reasonDrafts or {},
+        draftRequirement=type(saved)=="table" and saved.draftRequirement or nil,
         safe=true, busy=false}
 end
 local function makeAudit(saved)
@@ -632,6 +635,15 @@ local function refreshReview(s)
     local u, v = s.ui, s.ui and s.ui.review
     if not u or not v then return end
     local requirement = u.selected and u.byId[u.selected]
+    local id = requirement and requirement.requirementId
+    if v.draftRequirement ~= id then
+        if v.draftRequirement then v.reasonDrafts[v.draftRequirement] = v.fields.lifecycleReason.text end
+        local text = id and v.reasonDrafts[id] or ""
+        if type(text) ~= "string" or #text > 2000 or not utf8.len(text) then text = "" end
+        v.fields.lifecycleReason = {text=text, cursor=utf8.len(text)}
+        v.draftRequirement, v.lifecycleAction, v.lifecycleRequirement = id, nil, nil
+        if v.panel == "reopen" then v.panel = "" end
+    end
     v.error = nil
     if not requirement then v.data = nil; return end
     local data, problem = Review.load(u.paths, requirement)
@@ -1227,7 +1239,8 @@ local function issueTraceCommand(s, cx, operation, extra, purpose)
     for key, value in extra or {} do command[key] = value end
     t.pending = {requestId = id, purpose = purpose, operation = operation, requirementId = requirement.requirementId,
         requirementRevision = requirement.revision, sessionId = s.payload.binding.sessionId,
-        instanceId = s.payload.binding.instanceId, createdAt = now, expiresAt = command.expiresAt}
+        instanceId = s.payload.binding.instanceId, projectRoot = s.payload.binding.projectRoot,
+        createdAt = now, expiresAt = command.expiresAt}
     t.error, t.busy, t.busyLabel = nil, true,
         purpose == "verify_snapshot" and "正在读取验证前代码快照…" or "正在读取当前代码变化…"
     saveUi(s)
@@ -1244,42 +1257,76 @@ local function issueTraceCommand(s, cx, operation, extra, purpose)
         end
     end)
 end
+local function verificationContext(s, request)
+    local req = selectedRequirement(s)
+    if not request or not req or req.requirementId ~= request.requirement.requirementId
+        or req.revision ~= request.requirement.revision or store.contentRevision(req) ~= request.contentRevision
+        or s.ui.paths ~= request.paths or s.payload.binding.projectRoot ~= request.root
+        or Workflow.requirementContent(req) ~= Workflow.requirementContent(request.requirement)
+        or s.payload.binding.instanceId ~= request.instanceId or s.payload.binding.sessionId ~= request.sessionId
+        or s.payload.location.distro ~= request.distro or s.payload.binding.openRequestId ~= request.openRequestId then return false end
+    local rows, failures = store.readRequirements(request.paths)
+    if #failures > 0 then return false end
+    for _, current in rows do
+        if current.requirementId == req.requirementId then
+            return current.projectId == request.requirement.projectId and current.revision == request.requirement.revision
+                and store.contentRevision(current) == request.contentRevision
+                and Workflow.requirementContent(current) == Workflow.requirementContent(request.requirement)
+        end
+    end
+    return false
+end
 local function beginTraceVerification(s, cx, command, criterionIds)
-    local t = s.ui.trace
+    local u, t, req = s.ui, s.ui.trace, selectedRequirement(s)
     if not t or not t.results then
         if t then traceError(s, "结果记录尚未读取；未执行命令") end
         cx:render()
         return
     end
-    t.verifyRequest = {command = command, criterionIds = criterionIds}
+    if not req or t.busy or t.pending or not u.writable or not t.safe then traceError(s, "当前操作未完成或记录不可写；未执行命令"); cx:render(); return end
+    local frozen = tern.json.decode(tern.json.encode(req))
+    t.verifyRequest = {command = command, criterionIds = table.clone(criterionIds), requirement = frozen,
+        contentRevision = store.contentRevision(frozen), paths = u.paths, token = u.token,
+        root = s.payload.binding.projectRoot, distro = s.payload.location.distro,
+        instanceId = s.payload.binding.instanceId, sessionId = s.payload.binding.sessionId,
+        openRequestId = s.payload.binding.openRequestId,
+        fingerprint = t.results.changes and t.results.changes.fingerprint}
     local baseline = t.results.baseline
     issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "verify_snapshot")
 end
 local function startTraceVerification(s, cx, snapshot)
-    local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
+    local u, t = s.ui, s.ui.trace
     local request = t.verifyRequest
-    if not request or not requirement then t.busy, t.busyLabel = false, nil; traceError(s, "验证请求上下文已丢失；未执行命令"); cx:render(); return end
+    if not verificationContext(s, request) or not snapshot or snapshot.fingerprint ~= request.fingerprint
+        or s.problem or not s.snapshot or s.snapshot.state ~= "idle" or not u.writable or u.dirty then
+        t.verifyRequest, t.busy, t.busyLabel = nil, false, nil
+        if t.batch and t.batch.state == "running" then Batch.advance(t.batch, {result = "unknown"}) end
+        traceError(s, "需求、绑定或代码快照已变化；请刷新并重新预览，未执行命令"); cx:render(); return
+    end
+    local requirement, resultsRevision = request.requirement, t.results.revision
     t.verifyRequest = nil
+    t.verifySnapshot = snapshot.fingerprint
     local startedAt = live.epoch()
     local id = store.newId("verification", startedAt)
-    local argv = {"wsl.exe", "-d", s.payload.location.distro, "--cd", s.payload.binding.projectRoot,
+    local argv = {"wsl.exe", "-d", request.distro, "--cd", request.root,
         "--", "bash", "-lc", request.command}
     local finished = false
     local function finish(result, startError)
-        if finished or not alive(s.cx) then return end
+        if finished then return end
         finished = true
         local endedAt = live.epoch()
         local stdout, stderr = result and result.stdout or "", result and result.stderr or startError or ""
         local timedOut = result and result.timed_out == true or false
         local status = result and type(result.status) == "number" and result.status or nil
-        local exitCode = timedOut and nil or status
-        local outcome = timedOut or exitCode == nil and "unknown" or (exitCode == 0 and "passed" or "failed")
+        local exitCode = if timedOut then nil else status
+        local outcome = (timedOut or exitCode == nil) and "unknown" or (exitCode == 0 and "passed" or "failed")
         local fullOut, outTruncated = clipBytes(stdout, 16384)
         local fullErr, errTruncated = clipBytes(stderr, 16384)
         local outPreview = clipBytes(stdout, 400)
         local errPreview = clipBytes(stderr, 400)
-        local verification = {id = id, command = request.command, cwd = s.payload.binding.projectRoot,
+        local verification = {id = id, command = request.command, cwd = request.root,
             criterionIds = request.criterionIds, requirementRevision = requirement.revision,
+            requirementContentRevision = request.contentRevision,
             codeSnapshotSha256 = snapshot.fingerprint, startedAt = startedAt, endedAt = endedAt,
             exitCode = exitCode, timedOut = timedOut, result = outcome,
             stdoutPreview = outPreview, stderrPreview = errPreview,
@@ -1288,22 +1335,26 @@ local function startTraceVerification(s, cx, snapshot)
             evidencePath = "evidence/" .. id .. ".json"}
         local evidence = {stdout = fullOut, stderr = fullErr, stdoutBytes = #stdout, stderrBytes = #stderr,
             stdoutTruncated = outTruncated, stderrTruncated = errTruncated}
-        Results.addVerification(u.paths, requirement, u.token, verification, evidence, t.results.revision,
+        Results.addVerification(request.paths, requirement, request.token, verification, evidence, resultsRevision,
             function(saved, reason, freshCx)
                 local ctx = freshCx or cx
                 if not alive(ctx) then return end
                 t.busy, t.busyLabel = false, nil
+                local sameTarget = s.ui == u and u.selected == requirement.requirementId
+                    and u.paths == request.paths and s.payload.binding.projectRoot == request.root
+                    and s.payload.binding.instanceId == request.instanceId and s.payload.binding.sessionId == request.sessionId
                 if saved then
-                    t.results = saved
-                    t.notice = "验证已保存：" .. outcome .. " · 退出码 " .. tostring(exitCode) .. "；这不是人工验收。"
+                    if sameTarget then t.results = saved end
+                    t.notice = "验证已保存到原需求 " .. requirement.number .. "：" .. outcome .. " · 退出码 " .. tostring(exitCode) .. "；这不是人工验收。"
                 else
                     t.error = "验证证据未能保存：" .. storageMessage(reason or "请核对结果记录")
                 end
                 saveUi(s)
                 ctx:render()
-                if saved then
+                if saved and sameTarget then
                     issueTraceCommand(s, ctx, "changes", {since = saved.baseline and saved.baseline.head or ""}, "after_verify")
                 end
+                if not sameTarget and t.batch and t.batch.state == "running" then Batch.advance(t.batch, {result = "unknown"}) end
             end)
     end
     t.busy, t.busyLabel = true, "验证命令运行中（最长 180 秒）；退出码与输出将写入证据"
@@ -1317,10 +1368,18 @@ local batchReasons = {not_passed = "首个命令未通过或结果未知", code_
     source_error = "来源请求失败"}
 local function acceptTraceChanges(s, cx, changes, purpose)
     local u, t, requirement = s.ui, s.ui.trace, selectedRequirement(s)
+    local payload = s.payload
     local function finish(saved, failure, freshCx)
         local ctx = freshCx or cx
         if not alive(ctx) then return end
         t.busy, t.busyLabel = false, nil
+        if s.ui ~= u or u.selected ~= requirement.requirementId or s.payload ~= payload
+            or not selectedRequirement(s) or selectedRequirement(s).revision ~= requirement.revision then
+            if t.batch and t.batch.state == "running" then Batch.advance(t.batch, {result = "unknown"}) end
+            t.verifyRequest = nil
+            traceError(s, "选择、需求或绑定在快照保存期间已变化；结果仍属于原需求，未执行下一条命令。")
+            saveUi(s); ctx:render(); return
+        end
         if saved then
             t.results = saved
             if purpose == "after_verify" then
@@ -1369,6 +1428,15 @@ local function acceptTraceChanges(s, cx, changes, purpose)
     end
 end
 local function handleTraceInspected(s, cx, pending, receipt)
+    local t, req = s.ui.trace, selectedRequirement(s)
+    if not req or pending.requirementId ~= req.requirementId or pending.requirementRevision ~= req.revision
+        or pending.instanceId ~= s.payload.binding.instanceId or pending.sessionId ~= s.payload.binding.sessionId
+        or pending.projectRoot ~= s.payload.binding.projectRoot
+        or (pending.purpose == "verify_snapshot" and not verificationContext(s, t.verifyRequest)) then
+        t.pending, t.busy, t.busyLabel, t.verifyRequest = nil, false, nil, nil
+        if t.batch and t.batch.state == "running" then Batch.advance(t.batch, {result = "unknown"}) end
+        traceError(s, "需求或绑定在快照检查期间已变化；未执行命令，未转存到当前选择"); saveUi(s); cx:render(); return
+    end
     local data = receipt.data
     local changes = type(data) == "table" and data.changes
     if type(changes) ~= "table" or not Results.validateChanges(changes) then
@@ -1461,7 +1529,11 @@ local function traceAction(s, act, cx)
         local criteria, failure = parseCriteria(t.fields.verifyCriteria.text, selectedRequirement(s))
         if not criteria then traceError(s, failure); cx:render(); return end
         if not t.results then traceError(s, "结果记录尚未读取"); cx:render(); return end
-        t.runPreview = {command = command, criteriaText = t.fields.verifyCriteria.text, criterionIds = criteria}
+        local req = selectedRequirement(s)
+        t.runPreview = {command = command, criteriaText = t.fields.verifyCriteria.text, criterionIds = criteria,
+            requirementId = req.requirementId, requirementRevision = req.revision,
+            fingerprint = t.results.changes and t.results.changes.fingerprint, root = s.payload.binding.projectRoot,
+            instanceId = s.payload.binding.instanceId, sessionId = s.payload.binding.sessionId}
         t.notice = "已生成验证预览；只有点击“确认并运行验证”才会执行。"
         saveUi(s); cx:render()
     elseif type(act) == "string" and act:match("^results%-use%-candidate=") then
@@ -1486,6 +1558,13 @@ local function traceAction(s, act, cx)
         if not t.runPreview then traceError(s, "请先预览确切的命令、目录、超时与条件，再确认运行"); cx:render(); return end
         if t.runPreview.command ~= command or t.runPreview.criteriaText ~= t.fields.verifyCriteria.text then
             traceError(s, "命令或条件在预览后已变化；请重新预览后再运行"); cx:render(); return
+        end
+        local req, preview = selectedRequirement(s), t.runPreview
+        if not req or preview.requirementId ~= req.requirementId or preview.requirementRevision ~= req.revision
+            or preview.fingerprint ~= (t.results.changes and t.results.changes.fingerprint)
+            or preview.root ~= s.payload.binding.projectRoot or preview.instanceId ~= s.payload.binding.instanceId
+            or preview.sessionId ~= s.payload.binding.sessionId then
+            traceError(s, "需求、绑定或代码快照在预览后已变化；请重新预览"); cx:render(); return
         end
         t.runPreview = nil
         beginTraceVerification(s, cx, command, criteria)
@@ -1698,6 +1777,48 @@ local function refreshProject(s)
     if u.tab == "history" then refreshAudit(s) end
     refreshScan(s)
 end
+local function lifecycleAction(s, act, cx)
+    local u, v, req = s.ui, s.ui.review, selectedRequirement(s)
+    if not req then return end
+    u.lifecycleError, u.lifecycleNotice = nil, nil
+    if act == "lifecycle-dismiss" then v.lifecycleAction, v.lifecycleRequirement = nil, nil; saveUi(s); cx:render(); return end
+    refresh(s)
+    local guard = context.lifecycleGuard(s)
+    if guard then u.lifecycleError = guard .. "；生命周期操作不会终止外部进程。"; cx:render(); return end
+    local action = act:match("^lifecycle%-open=(%w+)$")
+    if action then
+        local terminal = req.stage == "done" or req.stage == "cancelled"
+        if not ((action == "reopen" and terminal) or (action == "unblock" and req.stage == "blocked")
+            or (action == "block" and not terminal and req.stage ~= "blocked") or (action == "cancel" and not terminal)) then
+            u.lifecycleError = "当前阶段不允许此操作；请刷新后核对。"; cx:render(); return
+        end
+        v.lifecycleAction, v.lifecycleRequirement, v.lifecycleRevision = action, req.requirementId, req.revision
+        saveUi(s); cx:render(); return
+    end
+    if act ~= "lifecycle-confirm" or not v.lifecycleAction or v.lifecycleRequirement ~= req.requirementId
+        or v.lifecycleRevision ~= req.revision then
+        u.lifecycleError = "需求或修订已变化；请刷新并重新选择生命周期操作。"; cx:render(); return
+    end
+    local reason = v.fields.lifecycleReason.text
+    if not reason:match("%S") or #reason > 2000 or not utf8.len(reason) or reason:find("[%z\1-\8\11\12\14-\31\127]") then
+        u.lifecycleError = "请填写有效的变更原因（最多 2000 UTF-8 字节）。"; cx:render(); return
+    end
+    u.lifecycleBusy = true
+    saveUi(s); cx:render()
+    store.lifecycle(u.paths, req, v.lifecycleAction, reason, req.revision, u.token, function(updated, problem, freshCx)
+        local ctx = freshCx or cx
+        u.lifecycleBusy = false
+        if not alive(ctx) then return end
+        if updated then
+            v.lifecycleAction, v.lifecycleRequirement, v.panel = nil, nil, ""
+            refreshProject(s)
+            u.lifecycleNotice = "生命周期已更新；原因与旧验收历史已保留。未终止任何外部进程。"
+        else
+            u.lifecycleError = storageMessage(problem) .. "；未自动重试，请刷新后核对。"
+        end
+        saveUi(s); ctx:render()
+    end)
+end
 local function parseFindings(text)
     local findings = tern.json.array()
     for raw in (text .. "\n"):gmatch("(.-)\n") do
@@ -1757,11 +1878,17 @@ local function reviewAction(s, act, cx)
     end
     if act == "review-cancel" then
         v.panel = ""
+        v.lifecycleAction, v.lifecycleRequirement = nil, nil
         saveUi(s); cx:render()
         return
     end
     if type(act) == "string" and act:match("^review%-toggle=") then
         local name = act:match("^review%-toggle=(%w+)$")
+        if name == "reopen" then
+            lifecycleAction(s, "lifecycle-open=reopen", cx)
+            if v.lifecycleAction == "reopen" then v.panel = "reopen" end
+            return
+        end
         if name == "reject" or name == "reopen" or name == "dispose" then
             v.panel = if v.panel == name then "" else name
             saveUi(s); cx:render()
@@ -1928,27 +2055,7 @@ local function reviewAction(s, act, cx)
             else store.advanceStage(u.paths, requirement, "implementing", requirement.revision, u.token, finishStage) end
         end)
     elseif act == "review-reopen" then
-        local reason = trim(v.fields.reviewReopen.text)
-        if reason == "" then reviewFail(s, cx, "请填写重新打开原因"); return end
-        local latest = Review.latestAcceptance(v.data)
-        if not latest or latest.decision ~= "accepted" then reviewFail(s, cx, "没有可重新打开的人工接受记录"); return end
-        v.busy = true
-        saveUi(s); cx:render()
-        Review.recordReopen(u.paths, requirement, u.token, {acceptanceId=latest.id, reason=reason}, v.data.revision,
-            function(saved, problem, freshCx)
-                local ctx = freshCx or cx
-                if not alive(ctx) then return end
-                if not saved then reviewFail(s, ctx, "重新打开未能保存：" .. storageMessage(problem or "请核对 reviews.json")); return end
-                v.data = saved
-                store.advanceStage(u.paths, requirement, "clarifying", requirement.revision, u.token, function(updated, stageReason, stageCx)
-                    local final = stageCx or ctx
-                    if not alive(final) then return end
-                    v.busy = false
-                    if updated then refreshProject(s); reviewNotice(s, "需求已重新打开；旧验收历史保留。")
-                    else s.ui.review.error = "重新打开已记录，但阶段更新失败：" .. storageMessage(stageReason or "请核对需求记录") end
-                    saveUi(s); final:render()
-                end)
-            end)
+        lifecycleAction(s, "lifecycle-confirm", cx)
     else
         reviewFail(s, cx, "未知审查操作")
     end
@@ -2310,6 +2417,7 @@ local function traceEditorLocked(s)
 end
 local reviewReadOnlyFields = {auditQuery = true, activityQuery = true}
 local function reviewEditorLocked(s, name)
+    if name == "lifecycleReason" then return context.lifecycleGuard(s) ~= false end
     -- Audit and activity search only filter already-loaded events; they must stay
     -- usable in read-only projects and while review records are unavailable.
     if name and reviewReadOnlyFields[name] then return false end
@@ -2633,7 +2741,8 @@ tern.block.define("live", {
             local act = ev.act
             if type(act) == "string" and not act:find("=", 1, true)
                 and (type(ev.value) == "string" or type(ev.value) == "number")
-                and (act == "requirement" or act:match("^change:") or act:match("^review%-")) then
+                and (act == "requirement" or act:match("^change:") or act:match("^review%-")
+                    or act:match("^lifecycle%-") or act:match("^results%-") or act:match("^resources%-")) then
                 act = act .. "=" .. tostring(ev.value)
             end
             -- Luau `and` truncates to one value; match separately so the value survives.
@@ -2663,6 +2772,7 @@ tern.block.define("live", {
             elseif act == "open-handoff" or (type(act) == "string" and act:match("^handoff%-")) then handoffAction(s, act, cx)
             elseif type(act) == "string" and act:match("^results%-") then traceAction(s, act, cx)
             elseif type(act) == "string" and act:match("^review%-") then reviewAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^lifecycle%-") then lifecycleAction(s, act, cx)
             elseif type(act) == "string" and act:match("^audit%-") then auditAction(s, act, cx)
             elseif type(act) == "string" and act:match("^activity%-") then activityAction(s, act, cx)
             elseif type(act) == "string" and act:match("^resources%-") then resourcesAction(s, act, cx)

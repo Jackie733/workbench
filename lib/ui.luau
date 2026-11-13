@@ -78,7 +78,7 @@ local function form(s)
     local locked = not s.writable and "只读模式：先在页首取得编辑权" or (s.saving == true and "正在保存，暂不能修改" or false)
     local nodes = {ui.text({ui.span(s.mode == "new" and "新建需求" or "编辑需求", "title")}),
         note(s.mode == "new" and "先写清目标与验收条件；创建后按“资料 → 方案 → 批准 → 实施 → 验收”推进。"
-            or "保存会生成新的修订；正在进行的批准和证据会按内容摘要失效。")}
+            or "保存增加实体修订；内容变化增加内容身份并使批准与证据失效，单纯生命周期转换保留内容身份。")}
     table.insert(nodes, fieldEditor(s, "title", "标题 · 必填", "一句话描述要解决的问题", false))
     table.insert(nodes, choices("type", "类型", s.type, {
         {value = "feature", label = "功能"}, {value = "bug", label = "缺陷"}, {value = "chore", label = "维护"}}, locked))
@@ -144,6 +144,15 @@ local function detail(s, r)
         button("编辑需求", "edit-requirement", "default", editingReason),
         button("用作资料草稿", "prefill-selected", "default"),
     }))
+    if #(r.lifecycleEvents or {}) > 0 then
+        local events = {}
+        for index = #r.lifecycleEvents, 1, -1 do
+            local event = r.lifecycleEvents[index]
+            table.insert(events, ui.text(tostring(event.at) .. " · " .. event.action .. " · " .. event.from .. " → " .. event.to .. " · " .. event.reason))
+        end
+        table.insert(children, ui.node("section", {key = "lifecycleHistory", head = "生命周期历史 · " .. tostring(#events),
+            collapsible = true, collapsed = true}, events))
+    end
     return ui.node("col", {key = "detail", role = "workbench.detail", gap = "sm"}, children)
 end
 local function listView(s)

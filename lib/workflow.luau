@@ -32,87 +32,18 @@ local function read(path)
     if not decoded or type(value) ~= "table" then return nil, "corrupt_workflow" end
     return value
 end
+local function identityValid(record, schema)
+    local identity=record.requirementContentRevision
+    return identity==nil or (schema==2 and type(identity)=="number" and identity>=1 and identity%1==0
+        and type(record.requirementRevision)=="number" and identity<=record.requirementRevision)
+end
 local function validate(w, req)
-    if type(w) ~= "table" or w.schemaVersion ~= 1 or w.projectId ~= req.projectId or w.requirementId ~= req.requirementId
-        or type(w.revision) ~= "number" or w.revision < 1 or w.revision % 1 ~= 0
-        or type(w.latestVersion) ~= "number" or w.latestVersion < 0 or w.latestVersion % 1 ~= 0
-        or type(w.designs) ~= "table" or type(w.comments) ~= "table" or type(w.approvals) ~= "table" or type(w.requests) ~= "table" then
-        return nil, "corrupt_workflow"
-    end
-    local allowed={schemaVersion=true,projectId=true,requirementId=true,revision=true,latestVersion=true,designs=true,
-        comments=true,approvals=true,approval=true,requests=true}
-    for key in w do if not allowed[key] then return nil,"corrupt_workflow" end end
-    for _, field in {"designs", "comments", "approvals", "requests"} do
-        local prev = 0
-        for k in w[field] do if type(k) ~= "number" or k % 1 ~= 0 or k < 1 or k > #w[field] then return nil, "corrupt_workflow" end; prev += 1 end
-        if prev ~= #w[field] then return nil, "corrupt_workflow" end
-    end
-    if w.latestVersion ~= #w.designs then return nil, "corrupt_workflow" end
-    for i, d in w.designs do
-        if type(d)~="table" or d.version~=i or type(d.sha256)~="string" or #d.sha256~=64
-            or not d.sha256:match("^[0-9a-f]+$") or type(d.requirementSha256)~="string"
-            or #d.requirementSha256~=64 or not d.requirementSha256:match("^[0-9a-f]+$")
-            or type(d.requirementRevision)~="number" or d.requirementRevision%1~=0 or type(d.createdAt)~="number" then return nil,"corrupt_workflow" end
-        for key in d do
-            if key~="version" and key~="sha256" and key~="requirementSha256" and key~="requirementRevision" and key~="createdAt" then return nil,"corrupt_workflow" end
-        end
-    end
-    for _, c in w.comments do
-        if type(c)~="table" or type(c.designVersion)~="number" or c.designVersion<1 or c.designVersion>w.latestVersion
-            or not validText(c.text,4000,false) or type(c.createdAt)~="number" then return nil,"corrupt_workflow" end
-        for key in c do if key~="designVersion" and key~="text" and key~="createdAt" then return nil,"corrupt_workflow" end end
-    end
-    local approvalIds={}
-    for _, a in w.approvals do
-        if type(a)~="table" or not Store.token(a.id) or approvalIds[a.id] or (a.mode~="design" and a.mode~="direct")
-            or type(a.requirementRevision)~="number" or type(a.requirementSha256)~="string" or #a.requirementSha256~=64
-            or not a.requirementSha256:match("^[0-9a-f]+$") or type(a.requirementContent)~="string"
-            or type(a.latestVersion)~="number" or type(a.designVersion)~="number" or type(a.baseline)~="table"
-            or type(a.approvedAt)~="number" then return nil,"corrupt_workflow" end
-        if (a.mode=="direct" and not validText(a.reason,2000,false))
-            or type(a.baseline.head)~="string" or type(a.baseline.fingerprint)~="string"
-            or #a.baseline.fingerprint~=64 or not a.baseline.fingerprint:match("^[0-9a-fA-F]+$")
-            or type(a.baseline.dirty)~="boolean" then return nil,"corrupt_workflow" end
-        for key in a do
-            if key~="id" and key~="mode" and key~="requirementRevision" and key~="requirementSha256"
-                and key~="requirementContent" and key~="designVersion" and key~="designSha256" and key~="latestVersion"
-                and key~="baseline" and key~="approvedAt" and key~="reason" and key~="revokedAt"
-                and key~="revocationReason" then return nil,"corrupt_workflow" end
-        end
-        approvalIds[a.id]=true
-    end
-    if w.approval~=nil and (type(w.approval)~="table" or not approvalIds[w.approval.id]) then return nil,"corrupt_workflow" end
-    local requestIds={}
-    for _, r in w.requests do
-        if type(r)~="table" or not Store.token(r.requestId) or requestIds[r.requestId]
-            or (r.activity~="clarify" and r.activity~="design" and r.activity~="implement")
-            or not Store.token(r.sessionId) or not Store.token(r.instanceId)
-            or type(r.requirementSha256)~="string" or #r.requirementSha256~=64 or not r.requirementSha256:match("^[0-9a-f]+$")
-            or type(r.payloadSha256)~="string" or #r.payloadSha256~=64 or not r.payloadSha256:match("^[0-9a-f]+$")
-            or type(r.requirementRevision)~="number"
-            or (r.status~="pending" and r.status~="submitted" and r.status~="rejected" and r.status~="delivery_unknown") then return nil,"corrupt_workflow" end
-        if type(r.authorizedRequirementRevision)~="number" or type(r.currentRequirementRevision)~="number"
-            or type(r.createdAt)~="number" then return nil,"corrupt_workflow" end
-        if r.status~="pending" and (not validText(r.reason or "",1000,true) or type(r.receivedAt)~="number") then return nil,"corrupt_workflow" end
-        if r.resolution~=nil then
-            local resolution=r.resolution
-            if type(resolution)~="table" or resolution.kind~="user_acknowledged" or not validText(resolution.note,2000,false)
-                or type(resolution.at)~="number" or r.status=="pending" then return nil,"corrupt_workflow" end
-            for key in resolution do if key~="kind" and key~="note" and key~="at" then return nil,"corrupt_workflow" end end
-        end
-        for key in r do
-            if key~="requestId" and key~="activity" and key~="sessionId" and key~="instanceId" and key~="payloadSha256"
-                and key~="status" and key~="requirementRevision" and key~="authorizedRequirementRevision"
-                and key~="requirementSha256" and key~="currentRequirementRevision" and key~="createdAt" and key~="reason" and key~="receivedAt" and key~="resolution" then return nil,"corrupt_workflow" end
-        end
-        requestIds[r.requestId]=true
-    end
-    return w
+    return Store.validateWorkflow(w, req)
 end
 function M.load(paths, requirement)
     local p = workflowPath(paths, requirement)
     local w, err = read(p)
-    if err == "missing" then return {schemaVersion=1, projectId=requirement.projectId, requirementId=requirement.requirementId,
+    if err == "missing" then return {schemaVersion=2, projectId=requirement.projectId, requirementId=requirement.requirementId,
         revision=0, latestVersion=0, designs=tern.json.array(), comments=tern.json.array(), approvals=tern.json.array(), requests=tern.json.array()}, nil end
     if not w then return nil, {code=err} end
     local valid, problem = validate(w, requirement)
@@ -171,6 +102,7 @@ local function revokeCurrent(w, at, reason)
     w.approval=revoked
 end
 local function persist(paths, req, token, w, oldRev, cb)
+    w.schemaVersion=2
     w.revision=oldRev+1
     local f=workflowPath(paths,req)
     Store.putRecord(paths,f,w,oldRev,token,function(saved,reason,cx)
@@ -183,13 +115,20 @@ function M.readDesign(paths, requirement, version)
     local d,problem=read(join(join(paths.requirements,requirement.requirementId),"designs\\v"..version..".json"))
     if not d then return nil,{code=problem} end
     local metadata=w.designs[version]
-    if d.schemaVersion~=1 or d.projectId~=requirement.projectId or d.requirementId~=requirement.requirementId or d.version~=version
-        or not validText(d.body,MAX_BODY,false) or d.sha256~=metadata.sha256
-        or d.requirementSha256~=metadata.requirementSha256 then return nil,{code="corrupt_design"} end
+    if (d.schemaVersion~=1 and d.schemaVersion~=2) or d.projectId~=requirement.projectId or d.requirementId~=requirement.requirementId or d.version~=version
+        or not validText(d.body,MAX_BODY,false) or type(d.createdAt)~="number" or d.createdAt<0 or d.createdAt%1~=0 or d.sha256~=metadata.sha256
+        or d.requirementSha256~=metadata.requirementSha256 or d.requirementRevision~=metadata.requirementRevision
+        or not identityValid(d,d.schemaVersion) or (d.schemaVersion==2 and d.requirementContentRevision==nil)
+        or d.requirementContentRevision~=metadata.requirementContentRevision then return nil,{code="corrupt_design"} end
     for key in d do
         if key~="schemaVersion" and key~="projectId" and key~="requirementId" and key~="version"
-            and key~="requirementRevision" and key~="requirementSha256" and key~="body" and key~="sha256"
+            and key~="requirementRevision" and key~="requirementContentRevision" and key~="requirementSha256" and key~="body" and key~="sha256"
             and key~="source" and key~="createdAt" then return nil,{code="corrupt_design"} end
+    end
+    if type(d.source)~="table" or (d.source.kind~="manual" and d.source.kind~="file" and d.source.kind~="assistant") then return nil,{code="corrupt_design"} end
+    for key,value in d.source do
+        if (key~="kind" and key~="path" and key~="entryId" and key~="sessionId" and key~="requestId")
+            or not validText(value,1024,true) then return nil,{code="corrupt_design"} end
     end
     return d
 end
@@ -232,11 +171,13 @@ function M.apply(paths, requirement, token, action, args, expected, cb)
                 if not reqHash then fail(reqWhy);return end
                 local created=os.time()*1000
                 local adoptedRevision=fresh.revision+(fresh.stage~="awaiting_approval" and 1 or 0)
-                local record={schemaVersion=1,projectId=fresh.projectId,requirementId=fresh.requirementId,version=v,
-                    requirementRevision=adoptedRevision,requirementSha256=reqHash,body=args.body,sha256=hash,source=args.source,createdAt=created}
+                local record={schemaVersion=2,projectId=fresh.projectId,requirementId=fresh.requirementId,version=v,
+                    requirementRevision=adoptedRevision,requirementContentRevision=Store.contentRevision(fresh),
+                    requirementSha256=reqHash,body=args.body,sha256=hash,source=args.source,createdAt=created}
                 local function finish(saved,reason,cx)
                     if not saved then cb(nil,nil,{code=reason},cx);return end
-                    table.insert(nextW.designs,{version=v,sha256=hash,requirementSha256=reqHash,requirementRevision=record.requirementRevision,createdAt=record.createdAt})
+                    table.insert(nextW.designs,{version=v,sha256=hash,requirementSha256=reqHash,requirementRevision=record.requirementRevision,
+                        requirementContentRevision=record.requirementContentRevision,createdAt=record.createdAt})
                     nextW.latestVersion=v
                     revokeCurrent(nextW,created,"newer_design")
                     if fresh.stage~="awaiting_approval" then nextReq={};for k,x in fresh do nextReq[k]=x end;nextReq.stage="awaiting_approval";nextReq.revision=fresh.revision+1;nextReq.updatedAt=created end
@@ -244,8 +185,11 @@ function M.apply(paths, requirement, token, action, args, expected, cb)
                 end
                 if tern.fs.exists(dp) then
                     local prior=read(dp)
-                    if not prior or prior.body~=record.body or prior.sha256~=record.sha256
-                        or prior.requirementSha256~=record.requirementSha256
+                    if not prior or prior.schemaVersion~=record.schemaVersion or prior.projectId~=record.projectId
+                        or prior.requirementId~=record.requirementId or prior.version~=record.version
+                        or prior.body~=record.body or prior.sha256~=record.sha256
+                        or prior.requirementSha256~=record.requirementSha256 or prior.requirementContentRevision~=record.requirementContentRevision
+                        or prior.requirementRevision~=record.requirementRevision
                         or tern.json.encode(prior.source)~=tern.json.encode(record.source) then fail("immutable_design_conflict");return end
                     record.createdAt=prior.createdAt;record.requirementRevision=prior.requirementRevision
                     finish(true)
@@ -262,11 +206,11 @@ function M.apply(paths, requirement, token, action, args, expected, cb)
         if mode=="design" and (args.designVersion~=w.latestVersion or w.latestVersion<1) then fail("design_not_current");return end
         if mode=="direct" and (not validText(fresh.scope,MAX_BODY,false) or #fresh.acceptanceCriteria<1 or not validText(args.reason,2000,false)) then fail("direct_basis_required");return end
         local d=mode=="design" and w.designs[w.latestVersion] or nil
-        if d and d.requirementRevision~=fresh.revision then fail("design_not_current");return end
+        if d and not Validity.matchesRequirement(d,fresh) then fail("design_not_current");return end
         local function makeDecision(reqHash)
             if not reqHash or (d and d.requirementSha256~=reqHash) then fail("requirement_content_changed");return end
             local decision={id=Store.newId("approval",os.time()*1000),mode=mode,requirementRevision=fresh.revision,
-                requirementSha256=reqHash,requirementContent=M.requirementContent(fresh),
+                requirementContentRevision=Store.contentRevision(fresh),requirementSha256=reqHash,requirementContent=M.requirementContent(fresh),
                 designVersion=mode=="design" and w.latestVersion or 0,designSha256=d and d.sha256 or "",latestVersion=w.latestVersion,
                 baseline=args.baseline,approvedAt=os.time()*1000}
             if mode=="direct" then decision.reason=args.reason end
@@ -294,7 +238,8 @@ function M.apply(paths, requirement, token, action, args, expected, cb)
         sha256(M.requirementContent(fresh),function(hash,why)
             if not hash then fail(why);return end
             table.insert(nextW.requests,{requestId=args.requestId,activity=args.activity,sessionId=args.sessionId,instanceId=args.instanceId,
-                payloadSha256=args.payloadSha256,status="pending",requirementRevision=fresh.revision,requirementSha256=hash,
+                payloadSha256=args.payloadSha256,status="pending",requirementRevision=fresh.revision,
+                requirementContentRevision=Store.contentRevision(fresh),requirementSha256=hash,
                 authorizedRequirementRevision=fresh.revision,currentRequirementRevision=fresh.revision,createdAt=os.time()*1000})
             save()
         end);return

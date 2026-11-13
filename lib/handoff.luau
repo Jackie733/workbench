@@ -2,6 +2,7 @@
 local ui = tern.ui
 local diff = require("./diff")
 local Workflow = require("./workflow")
+local Context = require("./context")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -179,7 +180,7 @@ function M.preparePanel(s)
                 actions = {click = "handoff-prepare"}}),
         }),
         note("目标 " .. s.payload.binding.projectRoot .. " · 会话 " .. s.payload.binding.sessionId
-            .. " · 需求修订 " .. tostring(r.revision) .. "。打开面板不会发送，也不会覆盖 omp 已有草稿。"),
+            .. " · " .. Context.identity(r) .. "。打开面板不会发送，也不会覆盖 omp 已有草稿。"),
     }
     table.insert(nodes, editor("paths", "项目相对文件路径 · 每行一个", h.fields.paths.text,
         h.fields.paths.cursor, h.fields.paths.anchor, 4, not editable, "例如 src/app.ts；不接受绝对路径或 shell 片段"))
@@ -231,7 +232,7 @@ function M.preparePanel(s)
             note("目标 " .. s.payload.binding.projectRoot .. " · 会话 " .. s.payload.binding.sessionId
                 .. " · 需求 " .. tostring(preview.requirementId or r.requirementId)
                 .. " · " .. (activityNames[preview.activity] or preview.activity)
-                .. " · 需求修订 " .. tostring(preview.requirementRevision)
+                .. " · 预览实体修订 " .. tostring(preview.requirementRevision) .. "（任何修订漂移均须重新预览）"
                 .. " · 正式方案版本 " .. tostring(preview.designVersion or 0)),
             note("来源：" .. (#(preview.sources or {}) > 0 and table.concat((function()
                 local paths = {}; for _, source in preview.sources do table.insert(paths, source.path .. " · " .. source.sha256) end; return paths
@@ -261,7 +262,7 @@ function M.build(s)
     }
     local head = ui.card(r.number .. " · " .. r.title, {
         note(guides[h.tab == "approval" and "approval" or "design"]),
-        note("需求修订 " .. tostring(r.revision) .. " · 阶段 " .. tostring(r.stage) .. " · 项目 " .. s.payload.binding.projectRoot),
+        note(Context.identity(r) .. " · 阶段 " .. tostring(r.stage) .. " · 项目 " .. s.payload.binding.projectRoot),
         note("当前目标 omp 会话：" .. s.payload.binding.sessionId .. " · 实例 " .. s.payload.binding.instanceId),
     }, {key = "handoffTarget", tone = "muted"})
     local nodes = {head, tabs}
@@ -301,7 +302,7 @@ function M.build(s)
         if diffCard then table.insert(nodes, diffCard) end
         table.insert(nodes, ui.card("正式方案批准 · " .. state, {
             note(h.approvalReason or "批准绑定需求内容摘要、需求修订、最新方案版本与 Git 基线；源端执行时会再次核验。"),
-            wf and wf.approval and note("模式 " .. tostring(wf.approval.mode) .. " · 需求修订 " .. tostring(wf.approval.requirementRevision)
+            wf and wf.approval and note("模式 " .. tostring(wf.approval.mode) .. " · " .. Context.identity(wf.approval)
                 .. " · 方案版本 " .. tostring(wf.approval.designVersion) .. " · 批准 " .. tostring(wf.approval.approvedAt)
                 .. (wf.approval.reason and (" · 直接授权理由：" .. wf.approval.reason) or "")
                 .. (wf.approval.revocationReason and (" · 撤销理由：" .. wf.approval.revocationReason) or "")
@@ -339,7 +340,7 @@ function M.build(s)
             table.insert(nodes, ui.node("section", {key = "approvalHistory", head = "授权与撤销历史", collapsible = true, collapsed = true}, (function()
                 local history = {}
                 for index, approval in h.workflow.approvals or {} do
-                    table.insert(history, ui.text("#" .. tostring(index) .. " · " .. tostring(approval.mode) .. " · 需求修订 " .. tostring(approval.requirementRevision)
+                    table.insert(history, ui.text("#" .. tostring(index) .. " · " .. tostring(approval.mode) .. " · " .. Context.identity(approval)
                         .. " · 方案 v" .. tostring(approval.designVersion) .. " · " .. tostring(approval.approvedAt)
                         .. (approval.reason and (" · 理由 " .. approval.reason) or "")
                         .. (approval.revokedAt and (" · 已撤销 " .. tostring(approval.revokedAt)
@@ -390,7 +391,7 @@ function M.build(s)
             table.insert(nodes, choices("compareVersion", "真实逐行差异", tostring(h.compareVersion or 0), diffOptions, false))
             if h.selectedDesign then
                 table.insert(nodes, ui.card("正式方案 v" .. tostring(h.selectedDesign.version) .. " · SHA-256 " .. tostring(h.selectedDesign.sha256), {
-                    note("需求修订 " .. tostring(h.selectedDesign.requirementRevision) .. " · 来源 " .. tostring(h.selectedDesign.source and h.selectedDesign.source.kind or "unknown")
+                    note(Context.identity(h.selectedDesign) .. " · 来源 " .. tostring(h.selectedDesign.source and h.selectedDesign.source.kind or "unknown")
                         .. (h.selectedDesign.source and h.selectedDesign.source.path and (" · " .. h.selectedDesign.source.path) or "")),
                     ui.node("scroll", {key = "selectedDesignBody", max = {h = "20lines"}}, {ui.text(h.selectedDesign.body)}),
                     h.compareDesign and ui.node("scroll", {key = "versionDiff", max = {h = "20lines"}}, {ui.text("逐行差异（空格=相同，-=删除，+=新增）\n" .. diff.render(h.compareDesign.body, h.selectedDesign.body))}) or note("选择一个比较版本以查看真实逐行差异。"),

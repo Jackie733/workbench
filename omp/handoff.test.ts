@@ -11,13 +11,14 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, {recursive:true,force:true}); });
 const now = 1800000000000;
 const identity = {schemaVersion:1 as const,requestId:"inspect-one",instanceId:"source-one",sessionId:"session-one",createdAt:now,expiresAt:now+30000};
-function fixture() {
+function fixture(schemaVersion = 1) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "workbench-handoff-")); roots.push(root);
 	execFileSync("git",["init","-q",root]);
 	const folder = path.join(root,".omp/workbench/requirements/req-one"); fs.mkdirSync(folder,{recursive:true});
-	const requirement = {schemaVersion:1,projectId:"project-one",requirementId:"req-one",number:"REQ-0001",revision:1,
+	const requirement = {schemaVersion,projectId:"project-one",requirementId:"req-one",number:"REQ-0001",revision:1,
 		title:"中文需求 🧭",type:"feature",priority:"normal",stage:"backlog",goal:"完整交接",scope:"只修改选定项目",
-		acceptanceCriteria:[{id:"C1",description:"全部选中内容完整可见",required:true}],labels:[],createdAt:now,updatedAt:now};
+		acceptanceCriteria:[{id:"C1",description:"全部选中内容完整可见",required:true}],labels:[],createdAt:now,updatedAt:now,
+		...(schemaVersion === 2 ? {contentRevision:1,lifecycleEvents:[] as Record<string,unknown>[]} : {})};
 	fs.writeFileSync(path.join(root,".omp/workbench/project.json"),JSON.stringify({schemaVersion:1,projectId:"project-one",root,name:"test",revision:1,nextNumber:2,createdAt:now}));
 	const reqFile=path.join(folder,"requirement.json"); fs.writeFileSync(reqFile,JSON.stringify(requirement));
 	const service=new Handoff();
@@ -26,12 +27,16 @@ function fixture() {
 		const body="正式方案\n按验收条件实现，不扩大范围。";
 		const requirementSha256=createHash("sha256").update(requirementContent(requirement)).digest("hex");
 		const sha256=createHash("sha256").update(body).digest("hex");
-		fs.mkdirSync(path.join(folder,"designs"));
-		fs.writeFileSync(path.join(folder,"designs/v1.json"),JSON.stringify({schemaVersion:1,projectId:"project-one",requirementId:"req-one",version:1,requirementRevision:1,requirementSha256,body,sha256,source:{kind:"manual"},createdAt:now}));
-		const value={schemaVersion:1,projectId:"project-one",requirementId:"req-one",revision:1,latestVersion:1,
-			designs:[{version:1,sha256,requirementRevision:1}],requests:[] as Record<string,unknown>[],
-			approval:{id:"approval-one",mode,requirementRevision:1,requirementSha256,latestVersion:1,
-				designVersion:mode==="design"?1:0,designSha256:mode==="design"?sha256:"",baseline:gitBaseline(root),reason:"明确授权按范围直接实施",approvedAt:now}};
+		const marker = schemaVersion === 2 ? {requirementContentRevision:requirement.contentRevision} : {};
+		fs.mkdirSync(path.join(folder,"designs"),{recursive:true});
+		fs.writeFileSync(path.join(folder,"designs/v1.json"),JSON.stringify({schemaVersion,projectId:"project-one",requirementId:"req-one",version:1,
+			requirementRevision:requirement.revision,...marker,requirementSha256,body,sha256,source:{kind:"manual"},createdAt:now}));
+		const decision={id:"approval-one",mode,requirementRevision:requirement.revision,...marker,requirementSha256,
+			requirementContent:requirementContent(requirement),latestVersion:1,
+			designVersion:mode==="design"?1:0,designSha256:mode==="design"?sha256:"",baseline:gitBaseline(root),reason:"明确授权按范围直接实施",approvedAt:now};
+		const value={schemaVersion,projectId:"project-one",requirementId:"req-one",revision:1,latestVersion:1,
+			designs:[{version:1,sha256,requirementSha256,requirementRevision:requirement.revision,...marker,createdAt:now}],
+			comments:[],approvals:[decision],requests:[] as Record<string,unknown>[],approval:decision};
 		fs.writeFileSync(path.join(folder,"workflow.json"),JSON.stringify(value)); return value;
 	};
 	return {root,folder,reqFile,requirement,service,inspect,approval};
@@ -158,8 +163,9 @@ describe("approval is enforced at source, not merely button visibility",()=>{
 		expect(()=>f.service.resolve(p.previewToken,f.root,"session-one","source-one","send-one",false,now+1)).toThrow("design_changed");
 		fs.writeFileSync(file,JSON.stringify(version));
 		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,latestVersion:2}));
-		expect(()=>f.inspect({activity:"implement"})).toThrow("approval_required_or_stale");
-		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,approval:{...w.approval,revokedAt:now+1}}));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("invalid_workflow");
+		const revoked={...w.approval,revokedAt:now+1,revocationReason:"人工撤销"};
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,approval:revoked,approvals:[revoked]}));
 		expect(()=>f.inspect({activity:"implement"})).toThrow("approval_required_or_stale");
 		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify(w));
 		fs.writeFileSync(path.join(f.root,"external.txt"),"external edit");
@@ -168,16 +174,101 @@ describe("approval is enforced at source, not merely button visibility",()=>{
 	test("direct authorization still needs real scope, criteria and explicit reason",()=>{
 		const f=fixture();const w=f.approval("direct");
 		expect(f.inspect({activity:"implement"}).text).toContain("快捷实施授权");
-		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,approval:{...w.approval,reason:""}}));
-		expect(()=>f.inspect({activity:"implement"})).toThrow("invalid_direct_authorization");
+		const invalid={...w.approval,reason:""};
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,approval:invalid,approvals:[invalid]}));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("invalid_workflow");
 	});
 	test("send requires an exact persisted intent, not a token borrowed for another source",()=>{
 		const f=fixture();const w=f.approval();const p=f.inspect({activity:"implement"});
 		expect(()=>f.service.resolve(p.previewToken,f.root,"session-one","source-one","send-one",true,now+1)).toThrow("request_intent_mismatch");
-		w.requests.push({requestId:"send-one",activity:"implement",sessionId:"session-one",instanceId:"source-one",payloadSha256:p.sha256,requirementRevision:1,requirementSha256:createHash("sha256").update(requirementContent(f.requirement)).digest("hex"),status:"pending"});
+		w.requests.push({requestId:"send-one",activity:"implement",sessionId:"session-one",instanceId:"source-one",payloadSha256:p.sha256,
+			requirementRevision:1,authorizedRequirementRevision:1,currentRequirementRevision:1,createdAt:now,
+			requirementSha256:createHash("sha256").update(requirementContent(f.requirement)).digest("hex"),status:"pending"});
 		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify(w));
 		expect(f.service.resolve(p.previewToken,f.root,"session-one","source-one","send-one",true,now+1).sha256).toBe(p.sha256);
 		expect(()=>f.service.resolve(p.previewToken,f.root,"session-one","other-source","send-one",true,now+1)).toThrow("request_intent_mismatch");
+	});
+	test("marked design and approval survive stage-only CAS changes but reviewed previews do not",()=>{
+		const f=fixture(2);const w=f.approval();const preview=f.inspect({activity:"implement"});
+		f.requirement.revision=2;f.requirement.stage="implementing";fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+		expect(f.inspect({activity:"implement"}).text).toContain("正式方案");
+		expect(()=>f.service.resolve(preview.previewToken,f.root,"session-one","source-one","send-one",false,now+1)).toThrow("requirement_changed");
+		const next=f.inspect({activity:"implement"});
+		w.requests.push({requestId:"send-one",activity:"implement",sessionId:"session-one",instanceId:"source-one",payloadSha256:next.sha256,
+			requirementRevision:1,requirementContentRevision:1,authorizedRequirementRevision:1,currentRequirementRevision:1,createdAt:now,
+			requirementSha256:createHash("sha256").update(requirementContent(f.requirement)).digest("hex"),status:"pending"});
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify(w));
+		expect(()=>f.service.resolve(next.previewToken,f.root,"session-one","source-one","send-one",true,now+1)).toThrow("request_intent_mismatch");
+		Object.assign(w.requests[0]!,{requirementRevision:2,authorizedRequirementRevision:2,currentRequirementRevision:2});
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify(w));
+		expect(f.service.resolve(next.previewToken,f.root,"session-one","source-one","send-one",true,now+1).sha256).toBe(next.sha256);
+		Object.assign(w.requests[0]!,{requirementContentRevision:2});
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify(w));
+		expect(()=>f.service.resolve(next.previewToken,f.root,"session-one","source-one","send-one",true,now+1)).toThrow("request_intent_mismatch");
+	});
+	test("upgrading legacy containers never rebinds an unmarked approval or design",()=>{
+		const f=fixture();const w=f.approval();
+		Object.assign(f.requirement,{schemaVersion:2,contentRevision:1,lifecycleEvents:[],revision:2,stage:"implementing"});
+		fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,schemaVersion:2}));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("approval_required_or_stale");
+		const marked={...w.approval,requirementContentRevision:1};
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,schemaVersion:2,approval:marked,approvals:[marked]}));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("design_changed");
+	});
+	test("A to B to A canonical content never resurrects marked authorization",()=>{
+		const f=fixture(2);f.approval();const scope=f.requirement.scope;
+		Object.assign(f.requirement,{revision:2,contentRevision:2,scope:"B scope"});fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("approval_required_or_stale");
+		Object.assign(f.requirement,{revision:3,contentRevision:3,scope});fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+		expect(()=>f.inspect({activity:"implement"})).toThrow("approval_required_or_stale");
+	});
+	test("lifecycle events preserve optional legacy blocked metadata without fabricating missing fields",()=>{
+		const f=fixture(2);
+		const event={id:"lifecycle-one",action:"unblock",from:"blocked",to:"designing",reason:"恢复工作",at:now,
+			previousBlockedFrom:"designing",previousBlockedReason:"旧阻塞原因"};
+		for (const preserved of [event,{...event,previousBlockedFrom:undefined},{...event,previousBlockedReason:undefined},
+			{...event,previousBlockedReason:""},{...event,previousBlockedFrom:undefined,previousBlockedReason:undefined}]) {
+			Object.assign(f.requirement,{stage:"designing",revision:2,lifecycleEvents:[preserved]});
+			fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+			expect(f.inspect().text).toContain("完整交接");
+		}
+		for (const invalid of [{...event,previousBlockedFrom:"implementing"},{...event,previousBlockedFrom:"unknown"},
+			{...event,previousBlockedReason:42},{...event,previousBlockedReason:"x".repeat(2001)},
+			{...event,action:"block",from:"designing",to:"blocked"}]) {
+			Object.assign(f.requirement,{lifecycleEvents:[invalid]});fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+			expect(()=>f.inspect()).toThrow("invalid_requirement");
+		}
+	});
+	test("schema and identity combinations reject unknown versions and unknown fields per entity",()=>{
+		const f=fixture(2);const w=f.approval();const workflowFile=path.join(f.folder,"workflow.json");
+		for (const invalid of [{...f.requirement,schemaVersion:3},{...f.requirement,schemaVersion:1},{...f.requirement,contentRevision:undefined},
+			{...f.requirement,contentRevision:2},{...f.requirement,unknown:true}]) {
+			fs.writeFileSync(f.reqFile,JSON.stringify(invalid));expect(()=>f.inspect({activity:"implement"})).toThrow();
+		}
+		fs.writeFileSync(f.reqFile,JSON.stringify(f.requirement));
+		for (const invalid of [{...w,schemaVersion:3},{...w,schemaVersion:1},{...w,unknown:true},
+			{...w,designs:[{...w.designs[0],unknown:true}]},{...w,approval:{...w.approval,unknown:true}}]) {
+			fs.writeFileSync(workflowFile,JSON.stringify(invalid));expect(()=>f.inspect({activity:"implement"})).toThrow();
+		}
+		fs.writeFileSync(workflowFile,JSON.stringify(w));
+		const designFile=path.join(f.folder,"designs/v1.json"),design=JSON.parse(fs.readFileSync(designFile,"utf8"));
+		for (const invalid of [{...design,schemaVersion:3},{...design,schemaVersion:1},{...design,requirementContentRevision:undefined},{...design,unknown:true}]) {
+			fs.writeFileSync(designFile,JSON.stringify(invalid));expect(()=>f.inspect({activity:"implement"})).toThrow();
+		}
+		const projectFile=path.join(f.root,".omp/workbench/project.json"),project=JSON.parse(fs.readFileSync(projectFile,"utf8"));
+		fs.writeFileSync(projectFile,JSON.stringify({...project,schemaVersion:2}));
+		expect(()=>f.inspect()).toThrow("invalid_project_record");
+	});
+	test("preview pins approval and exact design source even when ids, identity and CAS stay unchanged",()=>{
+		const f=fixture(2);const w=f.approval();const p=f.inspect({activity:"implement"});
+		const designFile=path.join(f.folder,"designs/v1.json"),design=JSON.parse(fs.readFileSync(designFile,"utf8"));
+		fs.writeFileSync(designFile,JSON.stringify({...design,source:{kind:"file",path:"changed-origin"}}));
+		expect(()=>f.service.resolve(p.previewToken,f.root,"session-one","source-one","send-one",false,now+1)).toThrow("approval_changed");
+		fs.writeFileSync(designFile,JSON.stringify(design));
+		const decision={...w.approval,approvedAt:now+1};
+		fs.writeFileSync(path.join(f.folder,"workflow.json"),JSON.stringify({...w,approval:decision,approvals:[decision]}));
+		expect(()=>f.service.resolve(p.previewToken,f.root,"session-one","source-one","send-one",false,now+1)).toThrow("approval_changed");
 	});
 	test("inspection, unknown operations and text injection retain strict protocol boundaries",()=>{
 		const valid={...identity,kind:"inspect",operation:"preview",requirementId:"req-one",activity:"design",includeRequirement:true,paths:[],excerpt:"选择的内容"};
