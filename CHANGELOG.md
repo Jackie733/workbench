@@ -23,6 +23,7 @@
 - Requirement／workflow／正式方案／results／验证 evidence／reviews 读 1/2、新写 2；project／plan／resources／锁／IPC 保持 1。正常写入时升级，不批量改写，不允许手改版本号降级。
 - 修复验证异步归属与超时：启动前冻结需求、项目、会话、代码快照与内容身份；漂移拒绝执行，完成后写回原需求；超时保存字符串 `unknown` 和空退出码，不再误写布尔值。
 - R4b 回归及隔离 Tern 原生 PowerShell 工作流通过；重设计真实窗口、IME、完整升级恢复验收仍未完成。详见 [R4b 实施记录](docs/REDESIGN_R4B_DESIGN.md#9-实施与验证记录)。
+- 新增原生生命周期验收 `tests/native-lifecycle.luau`：真实 Tern／PowerShell 下 20 项通过，覆盖混合版本、四种转换、CAS 后回调丢失与重复操作拒绝、未知版本字节保留及旧读取器拒绝 v2；不冒称断电恢复或真实 IME 验收。
 - 测试：新增 `tests/validity.luau`／`tests/run-validity.luau`（53 项）；视图 1051 项、宿主交互 55 项、Bun 28 项通过。详见 [R0 记录](docs/REDESIGN_R0.md) 与 [R1 记录](docs/REDESIGN_R1.md)。
 
 ## 3.7.1 — 2026-11-12
