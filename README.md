@@ -4,21 +4,18 @@
 
 仓库：[Jackie733/workbench](https://github.com/Jackie733/workbench)。本机源码：`/home/jackie/code/workbench`。
 
-## 当前范围
+## 当前状态与文档
 
-阶段 0＋1 实时桥接、阶段 1.5 收尾、阶段 2 项目存储与原生需求界面、阶段 3 资料交接／正式方案／批准、阶段 4 实施计划／代码结果／验证证据，以及阶段 5 审查／人工验收／审计／导出已实现：完整资料预览、批准失效、稳定计划、真实 Git 差异、可失效验证证据、追加式审查与发现处置、人工接受／驳回／重新打开，以及按需求审计时间线和安全 Markdown 导出。阶段 6 **明确不迁移**旧 KV 任务与旧方案：快速迭代期保留旧数据原样，不读取、不删除；已清理旧角色启动与旧入口代码。[阶段 6 决定](docs/PHASE_6.md)说明未做的发布验收，不将其冒称已完成。
+现有实现包含需求存储、资料交接、方案批准、实施计划、Git 差异、验证证据、审查、人工验收和审计。Agent-first 重构已完成 AF-01 契约盘点，AF-02 隔离能力探针和 AF-03 读模型修正正在进行；新界面与 Agent 业务工具尚未完成，局部测试不代表完整发布验收通过。
 
-- [完整产品设计与分阶段计划](DESIGN_AND_IMPLEMENTATION_PLAN.md)
-- [阶段 0＋1 实际协议、激活方式与验证记录](docs/PHASE_0_1.md)
-- [阶段 1.5 收尾与阶段 2 存储层协议](docs/PHASE_2_STORAGE.md)
-- [阶段 2 原生界面、操作方式与真实桌面验证](docs/PHASE_2_UI.md)
-- [阶段 3 资料交接、正式方案与批准](docs/PHASE_3.md)
-- [阶段 4 实施计划、代码结果与验证证据](docs/PHASE_4.md)
-- [阶段 5 审查、人工验收、审计与导出](docs/PHASE_5.md)
-- [阶段 6 迁移决定与旧入口清理](docs/PHASE_6.md)
-- [阶段 0 领域、存储、迁移与恢复契约](docs/DOMAIN_CONTRACT.md)
-- [重设计提案](docs/REDESIGN_PROPOSAL.md)、[证据登记](docs/REDESIGN_RESEARCH.md)、[执行计划](docs/REDESIGN_IMPLEMENTATION_PLAN.md)、[R0](docs/REDESIGN_R0.md)、[R1](docs/REDESIGN_R1.md)、[R2](docs/REDESIGN_R2.md)、[R3a](docs/REDESIGN_R3A.md)、[R3b](docs/REDESIGN_R3B.md)、[R4a](docs/REDESIGN_R4A.md)、[R4b 契约](docs/REDESIGN_R4B_DESIGN.md)、[R5 完成记录](docs/REDESIGN_R5.md)、[桌面与 IME 验收](docs/REDESIGN_DESKTOP.md)、[R2 桌面交接记录](docs/REDESIGN_R2.md#6-真实桌面记录2026-11-13) 与 [能力探针结果](docs/REDESIGN_PROBES.md)
-- [旧版 2.0.0 历史说明](docs/LEGACY_WORKBENCH_2_0.md)：仅作历史参考，相关代码已删除；旧数据不迁移。
+| 文档 | 用途 |
+| --- | --- |
+| [设计文档](docs/DESIGN.md) | 当前产品、信息架构、交互、UI/色彩与 Agent 工具设计 |
+| [任务清单](docs/TASKS.md) | 唯一实施进度入口；AF-01–AF-16 的依赖、交付物和验收标准 |
+| [领域约束](docs/DOMAIN_CONTRACT.md) | 身份、授权、证据、状态、存储与版本兼容边界 |
+| [历史归档](docs/archive/README.md) | 旧方案、阶段记录与真实验证限制，仅供追溯 |
+
+旧文档已退出当前实施入口，不删除历史证据，也不据此清除尚未完成的验收事项。开始开发先读设计与领域约束，再按任务清单的实际状态和依赖继续；AF-02/03 未验收前不跳入新 UI 重构。
 
 ## 在当前 omp 使用
 
@@ -26,9 +23,9 @@
 
 下次启动开发／调试会话可使用 `omp --model openai-codex/gpt-6-luna`；不改变全局默认模型。其他机器可显式加载 `omp --extension /absolute/path/to/workbench/omp/index.ts`。不要同时配置两个相同扩展入口；无需安装 skill、Provider 或新后台服务。
 
-当前插件版本 3.7.1。阶段 2 已通过 55 项真实存储、13 项同时写入和 9 项中断恢复检查；阶段 3 的协议与批准门禁通过自动测试，并在真实 Tern／Luna 会话完成预览、预填、发送、批注、版本差异、基线失效与未知投递对账；阶段 4 在隔离 Git 项目中真实执行失败／通过验证并确认失效与归属边界；阶段 5 真实完成原生 `/review` 预填、阻断审查、发现处置、人工接受、审计检索、导出与重新打开，确认导出不夹带验证输出或聊天。阶段 6 不迁移旧数据，只做旧入口清理；未完成发布验收，不以旧证据替代。3.7.0 的审查页试点通过 988 项视图契约与 33 项真实宿主交互自动检查（`lune run tests/run-views.luau`、`lune run tests/run-host.luau`），并修复芯片动作值丢失回归；新界面的真实桌面渲染验收尚未另行执行，不以自动检查替代。
+当前插件版本 3.7.1。历史实现与验证详见归档；当前仍需关注真实收发时序、活动运行中的生命周期、批处理停止/重载、完整升级恢复，以及原生焦点、撤销与辅助技术支持。新任务清单承接这些边界，不将归档等同于关闭问题。
 
-未发布的 R4b 已加入明确的阻塞／解除／取消／重开，以及独立内容修订：阶段变化不失效新授权和验证证据，内容改动仍会失效。更新时须同时更新宿主和 omp 扩展；部分实体新写 schema 2，旧记录只读兼容、不补造身份。写入后不保证旧二进制可写或降级，请勿手改 schema 数字。自动回归及隔离原生 PowerShell 工作流已通过，重设计的真实窗口／IME 验收仍未完成。
+更新时须同步宿主和 omp 扩展。已记录版本包含需求等实体 schema 2、plan schema 2、reviews schema 3；精确矩阵见领域约束，旧条目不补造身份。新写入后不保证旧二进制可写或降级，请勿手改 schema 数字。旧 KV 与旧任务/方案仍不迁移、不读取、不删除。
 
 
 ## 运行边界

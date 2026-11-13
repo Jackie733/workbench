@@ -25,16 +25,16 @@ Use symbol names as the stable lookup; line numbers can drift during implementat
 
 | ID | File / symbol | Observation | Required action |
 | --- | --- | --- | --- |
-| L1 | [workflow](../lib/workflow.luau), `requirementContent`, approval creation and `approvalState` | Canonical requirement body is already persisted with approval; validity checks revision and content | Withdraw original E2; implement comparison with malformed/missing-history fallback |
-| L2 | [results](../lib/results.luau), `effectiveState`; [review](../lib/review.luau), `acceptanceGate` | Evidence and acceptance independently compare revision/global snapshot | Share evaluation without weakening conservative rules |
-| L3 | [store](../lib/store.luau), `criterion`; [review](../lib/review.luau), `acceptanceGate` | Required versus informational criteria already exist | UI improvement, not a new domain classification |
-| L4 | [handoff](../omp/handoff.ts), `HandoffService.resolve` | Preview sources, expiry, requirement and intent are checked again | Preserve these checks through navigation and unified presentation |
-| L5 | [runtime](../omp/runtime.ts), `Activity`, command validation; [workflow](../lib/workflow.luau), request validation | Only clarify/design/implement are accepted | New review/analyze intent crosses both bridge and durable boundaries |
-| L6 | [store](../lib/store.luau), validators and scoped writes; [results](../lib/results.luau), key allowlists | Strict schemas, including script-side validation, reject unrecognized structures | Inventory all readers, writers and recovery paths before extension |
-| L7 | [workflow](../lib/workflow.luau), receipt stage update | Stage changes may increment requirement revision | Derived readiness must be read-only; content identity is a separate later change |
+| L1 | [workflow](../../../../lib/workflow.luau), `requirementContent`, approval creation and `approvalState` | Canonical requirement body is already persisted with approval; validity checks revision and content | Withdraw original E2; implement comparison with malformed/missing-history fallback |
+| L2 | [results](../../../../lib/results.luau), `effectiveState`; [review](../../../../lib/review.luau), `acceptanceGate` | Evidence and acceptance independently compare revision/global snapshot | Share evaluation without weakening conservative rules |
+| L3 | [store](../../../../lib/store.luau), `criterion`; [review](../../../../lib/review.luau), `acceptanceGate` | Required versus informational criteria already exist | UI improvement, not a new domain classification |
+| L4 | [handoff](../../../../omp/handoff.ts), `HandoffService.resolve` | Preview sources, expiry, requirement and intent are checked again | Preserve these checks through navigation and unified presentation |
+| L5 | [runtime](../../../../omp/runtime.ts), `Activity`, command validation; [workflow](../../../../lib/workflow.luau), request validation | Only clarify/design/implement are accepted | New review/analyze intent crosses both bridge and durable boundaries |
+| L6 | [store](../../../../lib/store.luau), validators and scoped writes; [results](../../../../lib/results.luau), key allowlists | Strict schemas, including script-side validation, reject unrecognized structures | Inventory all readers, writers and recovery paths before extension |
+| L7 | [workflow](../../../../lib/workflow.luau), receipt stage update | Stage changes may increment requirement revision | Derived readiness must be read-only; content identity is a separate later change |
 | L8 | [phase 6 decision](PHASE_6.md) | Exempts old KV and old tasks/design.md from migration | Does not exempt current requirements from compatibility obligations |
 | L9 | [native UI record](PHASE_2_UI.md) | Documents narrow-pane constraints, preserved drafts, and historical IME validation | Re-test the new shell; old screenshots are not evidence for the redesign |
-| L10 | [results](../lib/results.luau), `stepKeys`, `verificationKeys` | Steps have evidence IDs; no explicit criterion/file association fields; evidence count is bounded | Plan links and batch limits need explicit schema/capacity consideration |
+| L10 | [results](../../../../lib/results.luau), `stepKeys`, `verificationKeys` | Steps have evidence IDs; no explicit criterion/file association fields; evidence count is bounded | Plan links and batch limits need explicit schema/capacity consideration |
 
 The initial proposal incorrectly classified approval content snapshots as absent. The earlier review did not catch that field; this deeper source inspection corrects both. The current gate's optional-criterion behavior also predates this redesign.
 

@@ -1,126 +1,108 @@
-# 阶段 0：领域、持久化与恢复契约
+# 当前领域约束与版本基线
 
-日期：2026-11-12。状态：领域与后续完整流程的目标契约。阶段 0＋1、阶段 2、阶段 3、阶段 4 与阶段 5 已实施；阶段 6 **不迁移旧数据**，旧 KV 与方案保留原样，不读取、不删除、不覆盖。实际字段、存储保证与界面边界以对应阶段记录为准。
+本文是新设计必须遵守的约束，不是完整 JSON Schema，也不是新能力已实现的声明。产品目标见 [DESIGN](DESIGN.md)，实施与验证进度只记在 [TASKS](TASKS.md)。早期包含目标字段、未实施事务与废弃迁移计划的原契约已[归档](archive/2026-11-13/docs/DOMAIN_CONTRACT.md)。
 
-## 1. 身份与版本
+## 1. 基线来源与适用范围
 
-初始正式记录为 `schemaVersion: 1`。R4b 起，需求／工作流／正式方案／结果摘要／验证证据／审查的新写入使用 schema 2，读取兼容 1/2；project、plan、resources、锁与 IPC 保持 1。精确字段与升级边界见 [R4b 契约](REDESIGN_R4B_DESIGN.md)。未知版本拒绝修改，保留原始文件，不按空数据初始化。UTF-8 JSON 中时间为 Unix 毫秒整数，ID 为不含路径分隔符的稳定字符串。
+下表由 AF-01 对当前读写器静态核对（2026-11-13）；版本矩阵本身不是运行通过记录。本次隔离回归与能力探针结果见 TASKS；未迁移业务数据或执行原生故障恢复场景。
 
-- 项目使用随机稳定 `projectId`，规范 Git 根目录为属性；移动目录不能重新分配需求身份。
-- 需求使用随机稳定 `requirementId`，`REQ-0008` 是项目内唯一展示编号，不当作跨项目身份。
-- 每次明确交接分配唯一 `requestId`，同一请求禁止重复消费。
-- omp `sessionId`、进程 `instanceId`、Tern window/pane 分开保存，pane 不能替代 session；会话切换使旧绑定失效。
-- `revision` 为实体 CAS 单调递增版本；并发保存携带预期版本，冲突拒绝覆盖。需求 v2 的 `contentRevision` 保存最近内容变化对应的 CAS 修订，阶段转换保持该值。新批准／方案／请求／验证／审查／验收另存 `requirementContentRevision`；旧条目不补造身份，仍按实体修订判断。内容改回旧文本也不复活旧记录。
-- `eventId` 唯一；来源 `sequence` 只在该来源内有序，不能比较不同进程的序号。
+| 实体 | 当前 Luau 读取版本 | 当前正常新写版本 | 当前依据 |
+| --- | --- | --- | --- |
+| project | 1 | 1 | `Store.validateProject/newProject` |
+| requirement | 1/2 | 2 | `Store.validateRequirement/put/upgradeRequirement` |
+| workflow、正式方案 | 1/2 | 2 | `Store.validateWorkflow`、`Workflow.load/persist/readDesign/apply` |
+| results、验证 evidence | 1/2 | 2 | `Results.validateResults/addVerification`、`Store.putScoped` |
+| plan | 1/2 | 2 | `Results.validatePlan/planAction/adoptCandidate` |
+| reviews | 1/2/3 | 3 | `Review.validate/createReview/recordAcceptance/adoptCandidate` |
+| resources、项目锁 | 1 | 1 | `Resources.validate`、`Store.atomicScript/lockValue` |
+| IPC command/receipt/open ack；外部 plan/review 候选 | 1 | 1 | `omp/runtime.ts`、`Candidates.validate`；候选不是正式实体 |
 
-## 2. 实体 schema
+plan v2 才允许步骤的 criterionIds/filePaths 与容器 candidateImports；reviews v3 才允许 candidateImports。旧记录的内容身份缺失保持缺失，升级容器不重绑旧批准、验证或验收。新 Agent 工具信封尚无已完成协议版本。
 
-下表字段均为必需，明确标为可空的字段使用 null；可扩展元数据仅置于独立 `extensions` 对象，不能悄悄忽略未知必需字段。
+### 1.1 两端与内嵌读写器边界
 
-| 实体 | 字段与类型 |
-| --- | --- |
-| Project | projectId:string, root:string, name:string, revision:integer, createdAt:time |
-| Requirement | requirementId:string, projectId:string, number:string, revision:integer, title:string, type:feature/bug/chore, priority:low/normal/high/urgent, stage:下述枚举, goal:string, scope:string, acceptanceCriteria:Criterion[], labels:string[], createdAt:time, updatedAt:time, blockedFrom:stage/null, blockedReason:string/null |
-| Criterion | id:string, description:string, required:boolean |
-| DesignVersion | requirementId:string, version:integer, requirementRevision:integer, sourceRequestId:string/null, relativePath:string, sha256:string, status:proposed/approved/superseded, createdAt:time |
-| Approval | id:string, requirementId:string, requirementRevision:integer, designVersion:integer/null, designSha256:string/null, baselineId:string, mode:design/direct, actor:user, approvedAt:time, invalidatedAt:time/null, reason:string/null |
-| Plan | requirementId:string, revision:integer, designVersion:integer/null, steps:Step[], changeReason:string, updatedAt:time |
-| Step | id:string, title:string, status:pending/active/done/blocked/skipped, evidenceIds:string[], reason:string/null |
-| Run | requestId:string, requirementId:string, requirementRevision:integer, instanceId:string, sessionId:string, kind:clarify/design/implement/verify/review, state:下述枚举, model:string/null, startedAt:time/null, endedAt:time/null, approvalId:string/null, baselineId:string/null |
-| Baseline | id:string, requirementId:string, head:string, capturedAt:time, trackedDiffPath:string, untrackedFiles:string[], dirty:boolean, sha256:string |
-| Change | id:string, requestId:string, baselineId:string, capturedAt:time, commits:string[], files:string[], diffPath:string, sha256:string, attribution:observed_since_baseline/mixed/confirmed_by_user |
-| Verification | id:string, requestId:string, criterionIds:string[], codeSnapshotSha256:string, requirementRevision:integer, argv:string[], cwd:string, startedAt:time, endedAt:time/null, exitCode:integer/null, outputPath:string/null, result:running/passed/failed/unknown/stale, redacted:boolean |
-| Review | id:string, requirementId:string, requestId:string/null, codeSnapshotSha256:string, source:string, findings:Finding[], createdAt:time |
-| Finding | id:string, severity:blocking/major/minor/note, description:string, resolution:open/fixed/waived, evidenceIds:string[], reason:string/null |
-| Acceptance | id:string, requirementId:string, requirementRevision:integer, codeSnapshotSha256:string, verificationIds:string[], reviewIds:string[], decision:accepted/rejected, actor:user, comment:string, createdAt:time |
-| AuditEvent | eventId:string, projectId:string, sequence:integer, time:time, actor:user/omp/workbench, type:string, entityIds:string[], requestId:string/null, payload:object |
+- `omp/handoff.ts` 只读取 project v1、requirement/workflow/design v1/2，并严格核对授权所需字段；不读写 plan/reviews/results，因此不是全库兼容读写器。
+- `Store.atomicScript` 在发布前读取现存目标，仅检查对象、schema 与 revision/CAS：默认 v1；调用方设置 OMPWB_SCHEMA2 时，requirement/workflow/plan/results/reviews 与 verification evidence 路径接受 v2；OMPWB_SCHEMA3 仅让 reviews 接受 v3。正式方案只创建，不走现存方案覆盖。此 PowerShell 层**不**执行完整领域字段验证，不能等同 Luau 验证器。
+- Luau 领域验证器使用字段白名单，未知字段/未知版本拒绝；requirement.extensions 是显式允许的扩展对象，不能据此声称递归拒绝所有未知键。IPC command 有字段白名单，但 `matchingOpenAck` 仅验证所需身份/时间/面板字段，并未拒绝所有额外字段；不得把业务实体的严格规则泛化到全部 IPC。
 
-文本草稿独立保存，不能覆盖正式 DesignVersion。附件记录相对路径、指纹和授权范围；项目外附件只读且显式确认。输出体积受限，截断保存须标明，不得冒充完整证据。
+## 2. 身份与写入
 
-## 3. 状态与转换
+- projectId、requirementId 是稳定身份；展示编号、路径、当前选择和窗口焦点都不能替代身份。
+- requestId、omp sessionId、进程 instanceId 与 Tern window/pane 分开绑定；来源不唯一、切换会话或来源失效时拒绝发送。
+- revision 是实体 CAS 修订，每次写入递增。预期版本不符则保留草稿并报告冲突，不采用最后写入覆盖。
+- contentRevision 是最近一次内容变动的单调身份，与实体修订分离；标题、类型、优先级、目标、范围、验收条件和标签属于当前保守内容集合。
+- 内容 A→B→A 仍产生新身份，不能复活旧批准。旧条目不回填虚构内容身份或来源，按原保守规则判断。
+- 预览与发送继续绑定精确实体修订、源内容、目标与有效期；不得因引入内容身份而放松预览漂移检查。
 
-`stage` 枚举：backlog、clarifying、designing、awaiting_approval、implementing、verifying、awaiting_acceptance、done、blocked、cancelled。
+## 3. 状态与归属
 
-正常路径：backlog → clarifying → designing → awaiting_approval → implementing → verifying → awaiting_acceptance → done。
+四种事实必须分离：持久生命周期、请求运行状态、连接新鲜度、只读派生 readiness。
 
-例外：
+持久阶段：backlog、clarifying、designing、awaiting_approval、implementing、verifying、awaiting_acceptance、done、blocked、cancelled。新看板分组仅作投影，不重命名持久枚举，不拖拽改变阶段。
 
-- awaiting_approval → designing：用户要求改方案。
-- backlog/clarifying → implementing：必须保存 direct Approval、验收条件和起始 Baseline。
-- verifying → implementing：记录验证失败或用户要求修复。
-- awaiting_acceptance → implementing：人工驳回，记录原因。
-- 任意未完成阶段 → blocked：保存 blockedFrom 和原因；解除后返回原阶段。涉及需求／方案变化时先失效 Approval。
-- 任意未完成阶段 → cancelled：用户明确操作并填写原因。R4b 不实现进程中断：有活动操作或待核对请求时拒绝转换；取消需求不声称后台工具已终止。
-- done/cancelled → clarifying：用户明确重新打开，保留历史 Acceptance，不把它作为新版本已验收。
-- R4b 的阻塞／解除／取消／重开与原因、来源／目标阶段、时间同存于需求 `lifecycleEvents`，单文件 CAS，最多 200 条，到限拒绝；不删除验收或证据历史。
+- 查看、搜索、切换标签、展开内容和重算 readiness 不写业务状态、不启动模型。
+- 被动 idle、工具成功、模型完成声明不自动推进生命周期或人工验收。
+- 明确命令可按既有契约记录相应转换，必须保留原请求归属；查看 B 不能把 A 的运行与证据改归 B。
+- 单个工作台工作流只认领一个活动请求，不引入隐藏队列、并行调度或自动 steer。
+- 观测 todo 的归属未知时保持未知；不能靠当前选中需求、文件重叠或自然语言猜测身份。
 
-Run.state：draft、pending、accepted、running、waiting_user、ended、failed、cancel_requested、cancelled、delivery_unknown。业务 stage、Run.state 和 transport connected/stale/disconnected 是三组状态，禁止互相覆盖。
+AF-03 已开始将 lifecycle、request、connection 与 readiness 分开呈现：待核对请求不等于执行中，断连不宣称新鲜就绪。有效批准的“查看实施准备”只是导航，切换活动会失效旧预览；真正发送仍走既有源端/领域门禁。现存导航补记历史基线的例外仍未清除，不能将纯读计算推广为所有导航均零业务写入。
 
-`ended` 只表示一次运行停止；只有明确采用的产物才构成设计交付。后台工作未结束不能发布终态。仅工具调用不报错不能构成 Verification.passed。
+## 4. 授权、证据与验收
 
-## 4. 批准与验收不变量
+- 批准绑定需求内容、具体方案与实施前基线；确认时重新读取并校验。批准与开始实施分开。
+- 新内容、方案或相关基线变化按现有规则失效授权；生命周期变化不错误失效新格式内容授权。
+- 实施后的预期代码变化不能反向假装用户批准了新的需求范围。外部混合编辑不宣称精确作者归属。
+- 验证结果来自真实执行器，绑定需求内容与代码快照，保留准确命令、目录、退出码和必要输出；模型不能写入通过结论。
+- 当前生产策略仍按全局代码快照判断证据有效性；条件到文件的关联仅为计划意图，不构成选择性复用依据。
+- 未执行、失败、过期、未知和通过不得混为一谈；没有验收条件不得把绿色 0/0 当作覆盖成功。
+- 必需条件缺少有效证据或仍有阻断发现时拒绝验收。修改条件属性是需求编辑，不是免除失败检查的隐式捷径。
+- 发现的明确处置/豁免须保留理由与历史；零发现的新审查不抹去旧阻断。最终验收只能由人触发，Agent 不得代答。
+- 直接实施仍需要范围、验收条件、理由与明确授权，不按任务类型自动豁免。
 
-1. 新 Approval 引用需求内容身份、规范内容串、方案正文指纹和实施前基线；旧批准继续精确绑定实体修订。方案、范围、验收条件等内容变化使其失效；阶段变化不失效新记录。预览／发送仍绑定精确实体修订，不放宽漂移门禁。
-2. 开始实施前重新读取并核对；既有未提交变更保留，基线变化必须展示并重新确认。
-3. 开始后的预期代码改动不自动撤销本次授权。外部改动混入时标 mixed，不能宣称精确作者归属。
-4. Verification 引用实际代码快照；相关代码／验收条件变化使其 stale，历史记录不删除。
-5. 无可靠退出码、命令来源或快照的结果为 unknown，不使用模型自然语言代替证据。
-6. 已完成只能由用户 Acceptance.accepted 触发；必需验收条件缺证据或阻断发现未关闭时拒绝验收，除非用户明确记录豁免。
-7. 切换看板需求不改变运行请求；单会话只认领一个活动工作台请求，手工插入活动标为共享上下文。
+## 5. 生命周期、停止与恢复
 
-## 5. 持久化、单写者与中断恢复
+阻塞/解除/取消/重开保留原因和历史；有活动或待核对操作时遵守现有转换门禁。取消需求不表示进程终止，停止调度不等于杀死当前命令，停止请求只有收到可信确认才能显示已停止。
 
-正式数据位于 `.omp/workbench/`；实时 IPC 和心跳位于当前用户私有临时目录，不进入 Git。阶段 1 不初始化需求数据库或写入虚构任务。
+未知投递先核对，不默认重发；关闭面板不关闭 omp；重载不恢复执行、不自动消费旧预览、不复活旧批准。新工具幂等协议必须包含同键异载荷拒绝、重复结果核对和持久化恢复边界，不宣称网络“恰好一次”。
 
-采用单项目写入协调者和版本前置条件，不采用最后写入覆盖。后续持久化实现使用下列文件事务：
+## 6. 存储与兼容
 
-阶段 2 当前采用 gate 内单文件 CAS、完整 staging 目录发布、稳定 ID 重试与允许编号空洞的本地协议，已验证回调中断后的列表完整性；尚不包含下述审计实体／事件的跨文件事务。详见 [实际存储协议](PHASE_2_STORAGE.md)。以下事务记录为后续完整审计切换的目标，不将阶段 2 的单实体保证冒称整个流程已完成。
+正式资料仍在项目 `.omp/workbench/`，IPC 留在用户私有临时目录。当前基线采用项目锁、单文件 CAS、同目录临时发布与创建 staging；不把早期设计中的跨文件事务日志当作已经存在的实现。
 
-1. 获取项目锁，锁包含本机实例、PID、随机 owner token；已有锁不可直接删除。PID 存活且身份无法核对时拒绝写入。跨窗口接管须显式确认。
-2. 将本次完整实体更新与审计事件写入 `transactions/<txId>.pending.json`，包含原修订、目标修订和各文件指纹，原子 rename 完成准备。
-3. 各实体写入同目录临时文件后原子 rename；事件追加需按 eventId 去重。
-4. 全部落盘后将事务标为 committed，再释放锁。不得把所有平台上的 rename 都宣称为断电持久保证；实际实现需按平台 flush 能力标明边界。
-5. 启动发现 pending 时先只读核对：文件符合目标则补齐审计，符合原修订则重放，出现不符则进入冲突恢复，不覆盖用户数据。
-6. 恢复只处理本地持久化，不重发模型请求、不恢复旧批准、不自动执行命令。
+- 未知版本、损坏数据、非法字段保留原始数据并拒绝不安全写入，不能按空库重建。
+- 当前业务历史必须保留，包括混合版本实体、方案、批准、采用清单、证据与验收。
+- 正常写入时按已有协议升级；纯 UI 改造不升级 schema，不批量改写数据。
+- 新字段与新协议先定义读写矩阵、上限、旧端拒绝、发布顺序与部分失败恢复；跨文件修改不能未经设计宣称原子。
+- 回滚新数据需要一致目录备份与匹配读写器，不允许只改 schema 数字或单文件恢复。
+- 旧 KV 与 `.omp/workbench/tasks` 继续不迁移、不读取、不删除；这不允许丢弃当前 requirements 数据。
 
-应用界面中的审计只追加；更正追加事件。本地文件仍可被用户修改，不能声称防篡改或提供操作者真实性证明。
+### 6.1 已核对的发布顺序与恢复边界
 
-## 6. 旧数据迁移规范
+- 项目锁 token 与 `.gate` 独占句柄保护单次发布；锁过期阈值为 15 秒，接管仍需显式 takeover。PowerShell 使用同目录临时文件和 MoveFileEx（创建不覆盖、更新替换）；这是单文件 CAS，不是跨实体事务，也不阻止绕过协议的外部编辑。
+- 创建需求：先在 `.pending-*` staging 写 requirement，再 CAS 增加 project 的 nextNumber/revision，最后发布需求目录。超时/进程结果不确定时保留 staging；没有启动时扫描 staging 自动完成事务的恢复器。分配后发布失败可能留下编号空洞。相同需求 ID、相同内容可由 `Store.create` 重读返回既有需求，不同内容报冲突。
+- 采用正式方案：先写不可变 designs/vN.json，再按需写 requirement 阶段，最后写 workflow 元数据。相同孤立方案正文/身份/source 可复用，异内容报 immutable_design_conflict；这不是任意中断点均自动恢复的保证。
+- 验证：先创建不可变 evidence/verification-*.json，再 CAS 发布 results 摘要。第二步失败或首步成功后回调丢失可留下未索引证据；`addVerification` 没有扫描/合并孤立 evidence 的恢复器，同 ID 重试可能遇到创建冲突，已索引同 ID 返回 verification_exists。不能把运行命令或结果写入自动重试包装成“恰好一次”。
+- plan/review 外部候选的采用清单与正式条目在各自单文件中同时 CAS 发布；同 ID 同指纹返回既有容器，同 ID 异指纹拒绝。此幂等性不延伸到所有工作流动作或执行命令。
+- 单文件写入成功后回调丢失，磁盘是事实来源：重读可观察已提交 revision，旧预期修订重试应冲突；它不意味着丢失的业务回调或跨文件后续步骤会自动补做。`tests/native-lifecycle.luau` 有真实 FS/PowerShell、仅丢回调的分阶段场景；本次只检查其源码，未执行。
+- `omp/runtime.ts` 的 IPC JSON 用独占临时文件、fsync、rename 与目录同步发布，不是业务实体 CAS。每个 Runtime 创建新 instanceId 私有目录；receipt 存在性可供调用端判重，但 Runtime 本身没有载荷摘要幂等账本或跨实例执行恢复。旧死进程目录可被清理，IPC 不是永久业务审计。
 
-> 2026-11-12 决定：当前快速迭代期**不实施**本节迁移。旧 `tasks:*` KV 与旧 `design.md` 保留原样，不读取、不删除、不覆盖；无迁移映射、备份或兼容读取。以下内容仅作为历史设计记录，不代表已实现。
+### 6.2 证据结构与未消除差异
 
-来源：`tern.kv` 的 `tasks:<project.key>` schema 2，以及 `.omp/workbench/tasks/<task-id>/design.md`。旧 Canvas schema 1 元数据仅作为已知历史输入。
+- results 保存 baseline、changes（fingerprint、文件/提交/diff 及截断标志）、verifications 摘要；完整输出另在不可变 evidence 文件。摘要包含准确 command/cwd、条件 ID、需求修订/可选内容身份、代码快照、起止时间、可选退出码、超时、passed/failed/unknown、输出预览/字节数/截断标志及 evidencePath。完整文件保存 stdout/stderr，但仍受大小/截断限制，不应称为无损无限日志。
+- reviews 保留审查来源、范围、快照、需求身份、findings、处置 events，以及 acceptances/reopenings；外部候选采用额外保留 source/internal ID 映射与指纹，不升级为认证原生来源。审查零发现不清除旧阻断。
+- `Validity` 是纯只读表计算：新记录按内容身份，旧记录按精确 revision；当前快照缺失时历史 passed 显示 unknown，历史 failed 不被隐藏。条件/文件关联不启用选择性快照复用。
+- **当前实现差异：** `Validity.acceptance` 在存在快照、无必需条件、无未处置阻断发现时可返回 ok；它没有“零验收条件必须拒绝”的独立理由。`Review.recordAcceptance` 仅校验和保存记录，不自行调用 acceptanceGate 或证明人工点击；最终门禁与人工触发仍须由可信调用链强制执行。后续不得把这些底层函数当作独立安全写接口，本段不是放宽 §4 的产品约束。
+- 可执行基线源码包括 `tests/run-content-identity.luau`（混合版本与未知字段/版本）、`tests/native-lifecycle.luau`（回调丢失/旧端拒绝）、`tests/native-candidate-adoption.luau`（plan1→2、reviews1/2→3、采用映射与重放）。源码里的断言是待运行场景，不是本次验收证据。
 
-迁移必须在阶段 6 显式执行；阶段 1 保留来源，不提前转换或丢弃数据。
+## 7. 外部候选与安全边界
 
-| 旧字段／阶段 | 目标 |
-| --- | --- |
-| id | 保存 legacyTaskId；生成稳定 requirementId，维护单独映射防止重复迁移 |
-| title / goal | 标题／目标原样保留，验收条件缺失标待补充 |
-| draft | backlog |
-| designing | blocked，blockedFrom=designing，原因“历史运行待核对” |
-| design_ready | awaiting_approval；方案内容需读取验证，旧批准一律无效 |
-| executing | blocked，blockedFrom=implementing，原因“历史运行待核对” |
-| attention | blocked，原因保留旧 message/error，不猜原阶段 |
-| review | awaiting_acceptance，但证据不足，需人工核实，不能自动完成 |
-| done | 历史完成标记保留；导入为 awaiting_acceptance，不能虚构人工验收 |
-| bindings.design/execute | 仅保留历史引用；不绑定新会话、不启动角色 |
-| designPath / head / designHead | 历史产物／基线引用，不伪装新快照 |
+外部 JSON 候选保留严格范围声明、完整性与大小限制、项目内路径校验、冻结预览及采用前重读。同 ID 同指纹重放返回既有结果，同 ID 异指纹冲突；不将声明的来源当作认证的原生审查。
 
-迁移前导出原始 KV 和方案副本；按项目和 legacyTaskId 建映射，重复执行不得增加副本。损坏或未知数据独立报告，不以空对象替换。只有完整验收后才切换写入源，备份保留。
+新工具与 UI 共用领域命令，不允许模型提供人工批准身份、伪造证据或通过任意路径绕过存储器。可信权限来自宿主/运行时，不能由工具载荷自我授予。
 
-## 7. 完整业务样例与证据链
+工作台不是操作系统权限沙箱；本地审计不是防篡改日志。资料与导出应有界、脱敏，不自动复制完整聊天、环境变量或凭据。不改默认模型/Provider，不自动提交、推送、合并或发布。
 
-示例需求 `REQ-0008`：会话过期后显示重新登录入口。
+## 8. 变更本契约
 
-1. Requirement revision 1，验收条件 C1“过期时显示入口”、C2“有效会话不受影响”。
-2. 设计请求 R1 产生 DesignVersion 1，引用需求修订和方案指纹。
-3. 用户 Approval A1 绑定 revision 1、方案 v1 和 Baseline B1；开始实施请求 R2。
-4. Plan 的 S1“定位”、S2“修复”、S3“验证”拥有稳定 ID。新增 S4 必须记录变更原因，而不是伪造固定进度。
-5. Change CH1 记录 B1 之后实际观察的 diff，原有改动或混合编辑明确标识。
-6. Verification V1/V2 记录真实命令、退出码、C1/C2 和代码快照 K1；未执行不得填 passed。
-7. Review RV1 发现 F1，处理后生成新快照 K2，则 K1 上的验证保留为 stale，补充新验证。
-8. 用户 Acceptance AC1 引用 revision 1、K2 和有效证据才将需求置 done。
-9. 所有转移以 AuditEvent 引用相关实体；读到完整证据链才能声称业务闭环完成。
-
-该样例用于后续 schema／行为验收，不在阶段 1 写成真实业务数据，也不构成已经运行测试的声明。
+若实现确需改变此处约束，先在 DESIGN 与 TASKS 记录具体语义、兼容影响与验证要求；不得用 UI 简化作为放松授权的理由。完整字段定义以同步维护的真实验证器为实现依据；发现差异先解释，不以文档覆盖事实。

@@ -1,5 +1,7 @@
 # Workbench redesign: information architecture and delivery efficiency
 
+> 历史归档：本文不再定义下一轮范围；当前依据见 [设计](../../../DESIGN.md) 与 [任务](../../../TASKS.md)。下文授权与阶段状态只描述历史。
+
 - Updated: 2026-11-13. Baseline: plugin 3.7.1, commit `39afcdf`.
 - Status: revised proposal; documentation work is authorized. Recommendations below are not approval to implement scope extensions.
 - Authority: [the charter](../DESIGN_AND_IMPLEMENTATION_PLAN.md) remains the confirmed product contract. This proposal supersedes the initial 2026-11-12 redesign recommendations, not existing implementation records.

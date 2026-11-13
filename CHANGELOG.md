@@ -1,5 +1,18 @@
 # 变更记录
 
+## 未发布 — AF-01/02 基线与能力探针
+
+- 完成 AF-01 能力/动作迁移盘点、两端版本矩阵与恢复边界核对，固定 11 类合成内存夹具；所有进度和证据记于 [TASKS](docs/TASKS.md)。
+- AF-02 使用独立配置/socket 的 Windows 真窗口探测 Markdown、select、overlay、滚动、禁用原因、a11y、深色与中文组合输入重绘，并完成一次隔离真实工具分发；组合撤销分组、完整 Tab/modal 焦点仍未完成，不宣称整体能力验收。
+- AF-03 读模型开始分离生命周期、请求与连接事实；有效批准改为“查看实施准备”，打开 implement 草稿会失效旧活动预览，不自动发送。未知投递建议核对原请求；断连不显示新鲜就绪。
+- 新增 `tests/af-fixtures.luau`、`tests/run-context.luau`、隔离 native/SDK 探针。实际检查：context 17、host 179、views 1480 项通过；基线 validity 86、内容身份 27 项及 Bun 34 项通过。生产 context 在合成夹具的真实原生窗口中完成局部视觉观察；新 UI、业务工具与发布验收未完成。
+
+## 未发布 — Agent-first 文档重整
+
+- 将 23 份旧方案、阶段与验证记录归档到 `docs/archive/2026-11-13/`，保留历史引用与未完成边界。
+- 将 Agent-first 方案提升为 [当前设计](docs/DESIGN.md)，新增 [AF-01–AF-16 任务清单](docs/TASKS.md)，重整 [领域约束](docs/DOMAIN_CONTRACT.md)，修正 plan v2 / reviews v3 的版本基线说明。
+- README 收敛为设计、任务、领域约束和历史索引四个入口；本次仅修改文档，未实施新 UI、工具协议或数据升级。
+
 ## 未发布 — 重设计 R0-R5
 
 - 新增 `lib/validity.luau`：批准、证据有效性、验收条件覆盖、发现状态与验收门禁的唯一只读评估；批准原因文案随之集中。
@@ -22,13 +35,13 @@
 - 需求页新增明确的阻塞／解除／取消／重开操作：必填原因、确认、活动操作及待核对请求门禁；历史与阶段同文件 CAS 保存，到限拒绝，不宣称终止进程。按需求保存原因草稿，历史／导出展示转换及内容修订。
 - Requirement／workflow／正式方案／results／验证 evidence／reviews 读 1/2、新写 2；project／plan／resources／锁／IPC 保持 1。正常写入时升级，不批量改写，不允许手改版本号降级。
 - 修复验证异步归属与超时：启动前冻结需求、项目、会话、代码快照与内容身份；漂移拒绝执行，完成后写回原需求；超时保存字符串 `unknown` 和空退出码，不再误写布尔值。
-- R4b 回归及隔离 Tern 原生 PowerShell 工作流通过；重设计真实窗口、IME、完整升级恢复验收仍未完成。详见 [R4b 实施记录](docs/REDESIGN_R4B_DESIGN.md#9-实施与验证记录)。
+- R4b 回归及隔离 Tern 原生 PowerShell 工作流通过；重设计真实窗口、IME、完整升级恢复验收仍未完成。详见 [R4b 实施记录](docs/archive/2026-11-13/docs/REDESIGN_R4B_DESIGN.md#9-实施与验证记录)。
 - R5：新增严格的项目内 JSON 审查／计划候选：完整范围声明、稳定来源 ID、精确需求／计划／代码快照身份；解析、预览与采用分离，预览不写领域，采用追加审查或待办步骤并保留来源映射。同一候选重放幂等，同 ID 不同指纹冲突。计划步骤可维护显式条件／文件关联；从发现准备修复只生成不覆盖的实施交接草稿。可选增量审查未启用，完整零发现不能清除历史阻断。
 - 计划新写 schema 2、reviews 新写 schema 3；旧容器与条目只读兼容，采用清单与人工历史保留，未知版本或字段拒绝。修复采用路径对受保护 JSON 数组的深拷贝兼容问题。
 - 完成 R2 关键桌面路径：跨需求中文草稿隔离与恢复、omp 已有草稿时预填被拒（draft_conflict）、批准差异与漂移后 design_not_current、持久未知投递审计；成功发送与乱序回执桌面场景仍开放。
 - 完成 R5 真实桌面验收：隔离 Tern 会话中预览不写记录、明确采用只追加一次，零发现完整审查不清除历史阻断；340/476/784 CSS px 面板下主内容可用；中文 IME 组合与提交、多行输入和取消保留修订通过。工作台 surface 仍无原生无障碍节点，其它阶段桌面场景保持开放。
 - 新增原生生命周期验收 `tests/native-lifecycle.luau`：真实 Tern／PowerShell 下 20 项通过，覆盖混合版本、四种转换、CAS 后回调丢失与重复操作拒绝、未知版本字节保留及旧读取器拒绝 v2；不冒称断电恢复或真实 IME 验收。
-- 测试：新增 `tests/validity.luau`／`tests/run-validity.luau`（53 项）；视图 1051 项、宿主交互 55 项、Bun 28 项通过。详见 [R0 记录](docs/REDESIGN_R0.md) 与 [R1 记录](docs/REDESIGN_R1.md)。
+- 测试：新增 `tests/validity.luau`／`tests/run-validity.luau`（53 项）；视图 1051 项、宿主交互 55 项、Bun 28 项通过。详见 [R0 记录](docs/archive/2026-11-13/docs/REDESIGN_R0.md) 与 [R1 记录](docs/archive/2026-11-13/docs/REDESIGN_R1.md)。
 
 ## 3.7.1 — 2026-11-12
 

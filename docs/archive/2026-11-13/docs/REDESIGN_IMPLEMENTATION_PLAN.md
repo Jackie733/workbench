@@ -1,5 +1,7 @@
 # Redesign implementation and validation plan
 
+> 历史归档：R0–R6 不是当前任务编号。当前执行清单见 [TASKS](../../../TASKS.md)；历史未验收事项不得因归档视为完成。
+
 Date: 2026-11-13. Status: R0-R2 and R3a implemented with automated regressions ([R0](REDESIGN_R0.md), [R1](REDESIGN_R1.md), [R2](REDESIGN_R2.md), [R3a](REDESIGN_R3A.md)); P2-P4 probed ([results](REDESIGN_PROBES.md)). R3b and R4a implemented under documented boundaries ([R3b](REDESIGN_R3B.md), [R4a](REDESIGN_R4A.md)); R4b implemented with domain/host/source regressions and an isolated native PowerShell workflow ([contract and results](REDESIGN_R4B_DESIGN.md)). R5 implemented with strict external JSON candidates, human adoption, native persistence and desktop/IME acceptance ([record](REDESIGN_R5.md), [desktop](REDESIGN_DESKTOP.md)); R6 remains proposed. Other stage desktop scenarios and full upgrade/recovery acceptance remain open; automated/native storage results do not complete those exits.
 
 Read with [the proposal](REDESIGN_PROPOSAL.md), [research register](REDESIGN_RESEARCH.md), and [confirmed charter](../DESIGN_AND_IMPLEMENTATION_PLAN.md). E1/E4 boundaries are recorded in their completion notes; the user authorized subsequent implementation and delegated architectural decisions. R4b's E8 boundary is recorded in [its contract](REDESIGN_R4B_DESIGN.md). Existing phase 6 release acceptance remains open.

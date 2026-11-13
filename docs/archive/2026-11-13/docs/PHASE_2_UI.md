@@ -59,4 +59,4 @@ Tern 会因链接插件目录的文件变化热重载；把截图写进该目录
 
 ## 本机视觉证据
 
-以下截图保存在忽略目录，不随源码提交：[宽面板列表／详情](../target/shots/tern/live/phase2-final-wide.png)、[窄面板看板](../target/shots/tern/live/phase2-final-board.png)。截图中的数据来自隔离验证项目；左侧最早一次打开失败记录是修复首帧确认前的历史提示，随后已核对新的 request／session 回执一致。
+以下截图保存在忽略目录，不随源码提交：[宽面板列表／详情](../../../../target/shots/tern/live/phase2-final-wide.png)、[窄面板看板](../../../../target/shots/tern/live/phase2-final-board.png)。截图中的数据来自隔离验证项目；左侧最早一次打开失败记录是修复首帧确认前的历史提示，随后已核对新的 request／session 回执一致。
