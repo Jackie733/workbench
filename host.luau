@@ -2832,6 +2832,15 @@ local function applyChange(s, cx, name, value)
     end
 end
 local function openPage(s, tab, sub)
+    if tab == "implementation" then
+        local requirement = selectedRequirement(s)
+        local next = requirement and context.readiness(requirement, s.ui, s)
+        if not next or not next.next or next.next.activity ~= "implement" then return end
+        local h = s.ui.handoff
+        if h.pending or h.pendingSend then return end
+        if h.activity ~= "implement" then h.activity = "implement"; invalidatePreview(h) end
+        tab, sub = "design", "materials"
+    end
     if context.workspaceTab[tab] then
         if not s.ui.selected or not s.ui.byId[s.ui.selected] then tab = "requirements" end
         s.ui.tab, s.ui.detailMode = tab, tab ~= "requirements"

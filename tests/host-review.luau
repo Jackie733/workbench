@@ -628,5 +628,29 @@ return function(tern, def, cx, payloadJson, modules)
         originalPlanLoad, originalPlanAdopt, originalReviewAdopt, originalPlanApply
     Store.lifecycle, R.putChanges, R.addVerification = originalLifecycle, originalChanges, originalVerification
     Live.command, tern.process.run = originalCommand, originalRun
+    -- A current authorization opens implementation preparation only. It must
+    -- not submit a request or retain a preview for the previous activity.
+    local prepared = def.init(cx, {payloadJson}, nil)
+    event(prepared, {ev="select", id="main.workbench.requirements", item="req-1"})
+    prepared.problem, prepared.snapshot = nil, {state="idle"}
+    local pu, ph = prepared.ui, prepared.ui.handoff
+    local pr = pu.byId["req-1"]
+    pr.stage = "awaiting_approval"
+    local W = require("../lib/workflow")
+    ph.workflow = {requirementId=pr.requirementId, latestVersion=0, requests={},
+        approval={mode="direct", requirementRevision=pr.revision,
+            requirementContent=W.requirementContent(pr), latestVersion=0,
+            designVersion=0, designSha256="", reason="人工明确授权"}}
+    ph.pending, ph.pendingSend, ph.activity = nil, nil, "design"
+    ph.preview = {previewToken="previous-design-token", requirementId=pr.requirementId,
+        requirementRevision=pr.revision}
+    local beforeWrites = tern.json.encode(tern.fs.read(pu.paths.requirements.."\\req-1\\requirement.json"))
+    action(prepared, context.openAction(context.readiness(pr, pu, prepared).next))
+    check(pu.tab=="design" and ph.panel and ph.activity=="implement",
+        "有效批准应进入实施资料准备，不再进入批准页")
+    check(ph.preview.previewToken==nil and ph.previewStale and not ph.pending and not ph.pendingSend,
+        "切换活动必须失效旧预览且不自动投递")
+    check(beforeWrites==tern.json.encode(tern.fs.read(pu.paths.requirements.."\\req-1\\requirement.json")),
+        "打开实施准备不能修改需求版本")
     return {checks = checks, failures = failures}
 end

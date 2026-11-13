@@ -81,7 +81,8 @@ M.workspaceTab = {}
 for _, tab in M.workspaceTabs do M.workspaceTab[tab.id] = true end
 M.destination = {}
 for _, tab in M.destinations do M.destination[tab.id] = true end
-function M.openAction(target: {tab: string, sub: string?})
+function M.openAction(target: {tab: string, sub: string?, activity: string?})
+    if target.activity == "implement" then return "wb-open-implementation" end
     return "wb-open-" .. target.tab .. (target.sub and ("-" .. target.sub) or "")
 end
 
@@ -146,7 +147,7 @@ function M.bar(s, opts)
         ui.text({ui.span((M.types[r.type] or r.type) .. " · 优先级 " .. (M.priorities[r.priority] or r.priority)
             .. " · " .. M.identity(r), "muted")}),
     }
-    local readiness = M.readiness(r, u)
+    local readiness = M.readiness(r, u, s)
     local nextStep = (readiness and readiness.next) or M.nextActions[r.stage]
     local current = opts and opts.current
     local onPage = current and nextStep and nextStep.tab == current.tab
@@ -204,21 +205,59 @@ end
 -- Read-only readiness for one requirement, derived at render time from the same
 -- validity evaluation the Delivery list and the acceptance action use. It never
 -- writes a stage or revision; unknown facts stay unknown instead of green.
-function M.readiness(r, u)
+function M.readiness(r, u, source)
     if not r then return nil end
     local trace = u and u.trace
     local review = u and u.review
     local h = u and u.handoff
+    -- Only consume records explicitly belonging to this requirement. The
+    -- selected page and the session's current tool are not ownership proofs.
+    local workflow = h and h.workflow
+    if workflow and workflow.requirementId ~= r.requirementId then workflow = nil end
+    local connection = {state = "unknown"}
+    if source then
+        local snapshot = source.snapshot
+        connection = {state = snapshot and snapshot.state == "disconnected" and "disconnected"
+                or ((source.problem or not snapshot) and "stale" or "connected"),
+            runState = snapshot and snapshot.state, observedAt = snapshot and snapshot.updatedAt,
+            reason = source.problem}
+    end
+    local request = {state = "none"}
+    for _, item in workflow and workflow.requests or {} do
+        if not item.resolution and (item.status == "pending" or item.status == "delivery_unknown")
+            and (not request.createdAt or (item.createdAt or 0) >= request.createdAt) then
+            request = {state = item.status, id = item.requestId, requirementId = r.requirementId,
+                createdAt = item.createdAt or 0}
+        end
+    end
+    local function result(state, label, tone, reasons, next)
+        if state ~= "done" and state ~= "cancelled" then
+            if request.state ~= "none" then
+                state, label, tone = "waiting", "请求结果待核对", "warning"
+                reasons = {"先核对原请求结果；不会自动重发。"}
+                next = {tab = "design", sub = "materials", label = "查看请求结果"}
+            elseif source and connection.state ~= "connected" then
+                state, label, tone = "unknown", "来源连接不可用", "warning"
+                reasons = {connection.reason or "缺少新鲜来源；保留最后已知事实。"}
+                next = {tab = "session", label = "查看连接"}
+            end
+        end
+        if next then
+            next = table.clone(next)
+            next.kind, next.target = "navigate", r.requirementId
+        end
+        return {state = state, label = label, tone = tone, reasons = reasons, next = next,
+            lifecycle = r.stage, request = request, connection = connection}
+    end
     if (trace and trace.safe == false) or (review and review.safe == false) or (h and h.safe == false) then
-        return {state = "unknown", label = "记录无法读取", tone = "error",
-            reasons = {"当前需求的部分记录无法安全读取；未推断任何通过状态。"},
-            next = {tab = "requirement", label = "检查记录"}}
+        return result("unknown", "记录无法读取", "error",
+            {"当前需求的部分记录无法安全读取；未推断任何通过状态。"},
+            {tab = "requirement", label = "检查记录"})
     end
-    local gate = Validity.acceptance(r, trace and trace.results, review and review.data)
-    local approval = nil
-    if h and h.workflow then
-        approval = Validity.approval(h.workflow, r, Workflow.requirementContent(r))
-    end
+    local evaluation = Validity.evaluate({requirement = r,
+        results = trace and trace.results, reviews = review and review.data,
+        workflow = workflow, content = workflow and Workflow.requirementContent(r)})
+    local gate, approval = evaluation.acceptance, evaluation.approval
     local reasons = {}
     local function addReasons(items)
         for index, item in items do
@@ -239,6 +278,7 @@ function M.readiness(r, u)
         next = M.nextActions.awaiting_approval
         if approval and approval.valid then
             state, label, tone = "ready", "授权有效，等待明确开始实施", "success"
+            next = {tab = "design", sub = "materials", activity = "implement", label = "查看实施准备"}
         else
             state, label, tone = "waiting", "待批准", "pending"
             if approval then table.insert(reasons, approval.message) end
@@ -278,7 +318,7 @@ function M.readiness(r, u)
     else
         state, label, tone, next = "waiting", "待准备交接", "muted", M.nextActions[r.stage]
     end
-    return {state = state, label = label, tone = tone, reasons = reasons, next = next}
+    return result(state, label, tone, reasons, next)
 end
 
 return M

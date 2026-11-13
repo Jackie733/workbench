@@ -1,0 +1,12 @@
+schema = 1
+id = "af-capability-probe"
+name = "AF isolated capability probe"
+version = "0.0.1"
+host = "host.luau"
+window = "window.luau"
+styles = ["styles.css"]
+
+[[blocks]]
+id = "probe"
+title = "AF capability probe"
+palette = false
