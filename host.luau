@@ -10,6 +10,7 @@ local auditview = require("./lib/auditview")
 local Audit = require("./lib/audit")
 local context = require("./lib/context")
 local Batch = require("./lib/batch")
+local Resources = require("./lib/resources")
 local runview = require("./lib/runview")
 local ui = require("./lib/ui")
 local function invalidatePreview(h)
@@ -206,7 +207,7 @@ local function projectKey(s)
     return "workbench:project:" .. s.payload.location.distro .. ":" .. s.payload.binding.projectRoot
 end
 local storageMessage
-local handoffLimits={paths=8192,excerpt=8192,proposal=16384,importPath=2048,comment=4000,directReason=2000,revokeReason=2000,ackReason=2000}
+local handoffLimits={paths=8192,excerpt=8192,proposal=16384,importPath=2048,resourcePath=2048,comment=4000,directReason=2000,revokeReason=2000,ackReason=2000}
 local function snapshotFields(fields)
     local snapshot = {}
     for name, field in fields or {} do
@@ -240,7 +241,7 @@ local function handoffSnapshot(h)
         preview = preview, previewStale = preview ~= nil, baseline = h.baseline, baselineCheckedAt = h.baselineCheckedAt,
         candidate = h.candidate, importedFile = h.importedFile, proposalSource = h.proposalSource,
         pending = h.pending, pendingSend = h.pendingSend, sourceReceipt = h.sourceReceipt,
-        selectedVersion = h.selectedVersion, compareVersion = h.compareVersion, panel = h.panel == true,
+        selectedVersion = h.selectedVersion, compareVersion = h.compareVersion, panel = h.panel == true, resourceKind = h.resourceKind,
         draftRequirement = h.draftRequirement, draftOrder = h.draftOrder, drafts = snapshotDrafts(h)}
 end
 local function handoffFields(saved)
@@ -295,6 +296,7 @@ local function makeHandoff(saved)
         proposalSource = saved.proposalSource, pending = pending, pendingSend = pendingSend,
         sourceReceipt = saved.sourceReceipt, selectedVersion = saved.selectedVersion,
         compareVersion = tonumber(saved.compareVersion) or 0, panel = saved.panel == true,
+        resourceKind = (saved.resourceKind == "verify" and "verify") or "context",
         drafts = drafts, draftOrder = draftOrder,
         draftRequirement = live.token(saved.draftRequirement) and saved.draftRequirement or nil,
         safe = true, workflowBusy = false}
@@ -340,6 +342,30 @@ local function loadDraft(h, requirementId)
     h.activity = draft.activity or "design"
     h.proposalSource = draft.proposalSource
     h.importedFile, h.candidate = draft.importedFile, draft.candidate
+end
+local function refreshResources(s)
+    local u = s.ui
+    if not u then return end
+    u.resources = u.resources or {safe = true}
+    local state = u.resources
+    state.data, state.error, state.status, state.safe = nil, nil, {}, true
+    local requirement = u.selected and u.byId[u.selected]
+    if not requirement or not u.paths then return end
+    local data, problem = Resources.load(u.paths, requirement)
+    if not data then
+        state.safe = false
+        state.error = "资源绑定记录损坏：" .. storageMessage(problem or "请核对 resources.json")
+        return
+    end
+    state.data = data
+    local root = store.unc(s.payload.location, s.payload.binding.projectRoot)
+    for _, entry in data.resources do
+        local ok, text = false, nil
+        if root then ok, text = pcall(tern.fs.read, root .. "\\" .. entry.path:gsub("/", "\\"), 16385) end
+        if not ok then state.status[entry.id] = "unreadable"
+        elseif type(text) == "string" and #text >= 16385 then state.status[entry.id] = "large"
+        else state.status[entry.id] = "ok" end
+    end
 end
 local function refreshHandoff(s)
     local u, h = s.ui, s.ui and s.ui.handoff
@@ -884,9 +910,21 @@ local function inspect(s, cx, operation, extra)
     issueSourceCommand(s, cx, "inspect", fields, "inspect")
 end
 local function startPreview(s, cx)
-    local h = s.ui.handoff
+    local u, h = s.ui, s.ui.handoff
     local paths, failure = cleanRelativePaths(h.fields.paths.text)
     if not paths then handoffError(h, failure); cx:render(); return end
+    local seen = {}
+    for _, path in paths do seen[path] = true end
+    local bound = u.resources and u.resources.data and u.resources.data.resources or {}
+    for _, entry in bound do
+        if not seen[entry.path] then
+            if #paths >= 16 then
+                handoffError(h, "资料与绑定资源合计最多 16 个文件；未生成预览"); cx:render(); return
+            end
+            table.insert(paths, entry.path)
+            seen[entry.path] = true
+        end
+    end
     if #h.fields.excerpt.text > 8192 then handoffError(h, "讨论摘录超过 8 KiB；不会截断"); cx:render(); return end
     inspect(s, cx, "preview", {activity = h.activity, includeRequirement = h.includeRequirement,
         paths = paths, excerpt = h.fields.excerpt.text})
@@ -1507,6 +1545,43 @@ local function traceAction(s, act, cx)
         applyTracePlan(s, cx, "generate", {})
     end
 end
+local function resourcesAction(s, act, cx)
+    local u, h = s.ui, s.ui and s.ui.handoff
+    local requirement = selectedRequirement(s)
+    if not u or not h or not requirement then return end
+    if not u.writable or not u.token then
+        handoffError(h, "需要项目编辑权限才能修改资源绑定"); cx:render(); return
+    end
+    if not h.safe then handoffError(h, "当前记录只读；不能修改资源绑定"); cx:render(); return end
+    local state = u.resources or {}
+    if not state.safe then handoffError(h, "资源绑定记录不可用；先核对 resources.json"); cx:render(); return end
+    local expected = state.data and state.data.revision or 0
+    local function done(nextData, _, problem)
+        if nextData then
+            refreshResources(s)
+            h.fields.resourcePath.text, h.fields.resourcePath.cursor, h.fields.resourcePath.anchor = "", 0, nil
+            invalidatePreview(h)
+            h.error, h.notice = nil, "资源绑定已更新；现有预览已失效，需要重新生成。"
+        else
+            handoffError(h, "资源绑定未能保存：" .. storageMessage(problem or "请核对 resources.json"))
+        end
+        saveUi(s)
+        cx:render()
+    end
+    if act == "resources-add" then
+        local path, failure = Resources.cleanPath(trim(h.fields.resourcePath.text))
+        if not path then
+            handoffError(h, failure == "invalid_path" and "资源路径必须是项目内相对路径" or "资源路径无效")
+            cx:render(); return
+        end
+        Resources.apply(u.paths, requirement, u.token, "add",
+            {path = path, kind = h.resourceKind or "context"}, expected, done)
+    elseif type(act) == "string" and act:match("^resources%-remove=") then
+        local id = act:match("=([%w_%-]+)$")
+        if not id then handoffError(h, "资源标识无效"); cx:render(); return end
+        Resources.apply(u.paths, requirement, u.token, "remove", {id = id}, expected, done)
+    end
+end
 local function handoffAction(s, act, cx)
     local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
     if act == "handoff-end-wait" then endHandoffWait(s,cx)
@@ -1617,6 +1692,7 @@ local function refreshProject(s)
     table.sort(u.requirements, requirementOrder(u))
     if u.selected and not u.byId[u.selected] then u.selected = nil end
     refreshHandoff(s)
+    refreshResources(s)
     refreshTrace(s)
     refreshReview(s)
     if u.tab == "history" then refreshAudit(s) end
@@ -2000,7 +2076,8 @@ local function loadWorkbench(s, cx)
         trace = makeTrace(type(saved) == "table" and saved.trace or nil),
         review = makeReview(type(saved) == "table" and saved.review or nil),
         audit = makeAudit(type(saved) == "table" and saved.audit or nil),
-        activity = makeActivity(type(saved) == "table" and saved.activity or nil)}
+        activity = makeActivity(type(saved) == "table" and saved.activity or nil),
+        resources = {safe = true}}
     s.ui = u
     -- Snapshots from before per-requirement drafts kept one unnamed draft; adopt
     -- it for the requirement that was selected when it was saved.
@@ -2309,6 +2386,8 @@ local function applyChange(s, cx, name, value)
         saveUi(s)
     elseif name == "layout" then
         if value == "list" or value == "board" then s.ui.layout = value; saveUi(s) end
+    elseif name == "resourceKind" then
+        if value == "context" or value == "verify" then s.ui.handoff.resourceKind = value; saveUi(s) end
     elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
     elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s)
     elseif name == "activity" then
@@ -2525,6 +2604,7 @@ tern.block.define("live", {
             elseif s.ui.byId[id] then
                 s.ui.selected, s.ui.tab, s.ui.detailMode = id, "requirement", true
                 refreshHandoff(s)
+                refreshResources(s)
                 refreshTrace(s)
                 refreshReview(s)
                 saveUi(s)
@@ -2575,6 +2655,7 @@ tern.block.define("live", {
                 else
                     s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirement", true
                     refreshHandoff(s)
+                    refreshResources(s)
                     refreshTrace(s)
                     refreshReview(s)
                     saveUi(s)
@@ -2584,6 +2665,7 @@ tern.block.define("live", {
             elseif type(act) == "string" and act:match("^review%-") then reviewAction(s, act, cx)
             elseif type(act) == "string" and act:match("^audit%-") then auditAction(s, act, cx)
             elseif type(act) == "string" and act:match("^activity%-") then activityAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^resources%-") then resourcesAction(s, act, cx)
             elseif act == "prefill" then prefill(s, cx)
             elseif act == "acknowledge-unknown" then
                 if s.pending and s.receipt and s.receipt.status == "delivery_unknown"

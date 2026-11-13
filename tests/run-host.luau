@@ -105,6 +105,16 @@ put(store .. "\\requirements\\req-2\\requirement.json", {schemaVersion = 1, requ
     type = "feature", priority = "normal", stage = "designing",
     goal = "续期到期前给出提示。", scope = "", acceptanceCriteria = {{id = "C1", description = "提示可见", required = true}},
     labels = {}, createdAt = 1700000001000, updatedAt = 1700000001000})
+put(store .. "\\requirements\\req-1\\resources.json", {schemaVersion = 1, projectId = "project-1",
+    requirementId = "req-1", revision = 1, resources = {{id = "resource-1", path = "AGENTS.md",
+        kind = "context", addedAt = 1}}, updatedAt = 1})
+files[projectUnc .. "\\AGENTS.md"] = "# Guidelines\nKeep evidence honest.\n"
+put(store .. "\\requirements\\req-3\\requirement.json", {schemaVersion = 1, requirementId = "req-3",
+    projectId = "project-1", number = "REQ-0003", revision = 1, title = "资源记录版本不兼容",
+    type = "chore", priority = "low", stage = "backlog", goal = "验证未知版本只读。", scope = "",
+    acceptanceCriteria = {}, labels = {}, createdAt = 1700000002000, updatedAt = 1700000002000})
+put(store .. "\\requirements\\req-3\\resources.json", {schemaVersion = 2, projectId = "project-1",
+    requirementId = "req-3", revision = 1, resources = {}, updatedAt = 2})
 put(store .. "\\requirements\\req-1\\reviews.json", {schemaVersion = 1, projectId = "project-1",
     requirementId = "req-1", revision = 2,
     reviews = {

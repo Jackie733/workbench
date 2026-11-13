@@ -483,7 +483,7 @@ function M.putScoped(paths, file, value, expectedRevision, token, cb)
     local prefix = paths.requirements .. "\\"
     local relative = type(file) == "string" and file:sub(1, #prefix) == prefix and file:sub(#prefix + 1)
     local id = relative and (relative:match("^([%w_%-]+)\\plan%.json$") or relative:match("^([%w_%-]+)\\results%.json$")
-        or relative:match("^([%w_%-]+)\\reviews%.json$"))
+        or relative:match("^([%w_%-]+)\\reviews%.json$") or relative:match("^([%w_%-]+)\\resources%.json$"))
     local evidenceId = relative and relative:match("^([%w_%-]+)\\evidence\\verification%-[%w_%-]+%.json$")
     local requirementId = id or evidenceId
     local valid = type(value) == "table" and requirementId and value.requirementId == requirementId

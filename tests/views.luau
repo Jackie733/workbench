@@ -77,12 +77,16 @@ return function(tern, repo)
                 type = "feature", priority = "normal", drafts = {},
                 error = nil, notice = nil, storageUnsafe = false, takeoverAvailable = false,
                 handoff = {tab = "design", panel = false, draftRequirement = "req-1", drafts = {}, draftOrder = {},
-                    fields = fields({"paths", "excerpt", "proposal", "importPath", "comment", "directReason", "revokeReason", "ackReason"}),
+                    fields = fields({"paths", "excerpt", "proposal", "importPath", "resourcePath", "comment", "directReason", "revokeReason", "ackReason"}), resourceKind = "context",
                     includeRequirement = true, activity = "design", preview = nil, previewStale = false,
                     baseline = nil, baselineCheckedAt = nil, candidate = nil, importedFile = nil,
                     pending = nil, pendingSend = nil, sourceReceipt = nil, selectedVersion = nil, compareVersion = 0,
                     safe = true, workflowBusy = false, workflow = nil, selectedDesign = nil, compareDesign = nil,
                     approvalValid = false, approvalReason = nil, error = nil, notice = nil},
+                resources = {safe = true, status = {["resource-1"] = "ok"},
+                    data = {schemaVersion = 1, projectId = "project-1", requirementId = "req-1", revision = 1,
+                        resources = {{id = "resource-1", path = "AGENTS.md", kind = "context", addedAt = 1}},
+                        updatedAt = 1}},
                 trace = {fields = fields({"verifyCommand", "verifyCriteria", "newStep", "blockReason"}),
                     safe = true, busy = false, error = nil, notice = nil, pending = nil,
                     plan = {revision = 1, steps = {{id = "S1", title = "实现入口", status = "active", updatedAt = 1700000000000}}},
@@ -108,12 +112,12 @@ return function(tern, repo)
         ["handoff-preview"] = true, ["handoff-baseline"] = true, ["handoff-prefill"] = true, ["handoff-send"] = true,
         ["handoff-candidate"] = true, ["handoff-import-file"] = true, ["handoff-import-file-content"] = true,
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
-        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true,
+        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true, ["resources-add"] = true,
         ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-batch-add"] = true, ["results-batch-start"] = true, ["results-batch-stop"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
-        layout = true, priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
+        resourceKind = true, layout = true, priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
         compareVersion = true, privacyMode = true}
     local fieldKeys = {reviewScope = true, reviewFindings = true, reviewReason = true, reviewComment = true,
         reviewReject = true, reviewReopen = true, auditQuery = true, activityQuery = true, findingDraft = true,
@@ -128,6 +132,7 @@ return function(tern, repo)
         if act:match("^requirement=.+$") then return true end
         if act:match("^results%-use%-candidate=%d+$") then return true end
         if act:match("^results%-batch%-remove=%d+$") then return true end
+        if act:match("^resources%-remove=[%w_%-]+$") then return true end
         if act:match("^review%-toggle=") then return act == "review-toggle=reject" or act == "review-toggle=reopen" or act == "review-toggle=dispose" end
         if act:match("^review%-inline=.+$") then return true end
         if act:match("^review%-remove%-finding=%d+$") then return true end
@@ -356,6 +361,8 @@ return function(tern, repo)
     prepared.ui.handoff.preview = {text = "工作台请求：设计\n需求：R-001", sha256 = SHA, requirementId = "req-1",
         requirementRevision = 3, activity = "design", sources = {}, designVersion = 0}
     local preparedView = ui.build(prepared)
+    check(findByKey(preparedView, "resourcesCard") ~= nil, "准备交接应列出绑定资源")
+    check(findByKey(preparedView, "resources-remove=resource-1") ~= nil, "绑定资源应可移除")
     check(findByKey(preparedView, "handoff-prefill") ~= nil, "准备交接应提供只预填动作")
     check(findByKey(preparedView, "handoff-send") ~= nil, "准备交接应提供明确发送动作")
     check(findByKey(preparedView, "handoff-send").p.disabled == false, "空闲会话中预览可发送")

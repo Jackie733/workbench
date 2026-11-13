@@ -15,7 +15,7 @@ return function(tern, def, cx, payloadJson)
 
     local s = def.init(cx, {payloadJson}, nil)
     check(s.ui ~= nil, "init 应建立界面状态")
-    check(#s.ui.requirements == 2, "应读取到两项需求")
+    check(#s.ui.requirements == 3, "应读取到三项需求")
     check(s.ui.writable == false, "打开先只读")
     check(s.ui.review ~= nil and s.ui.review.fields.findingDraft ~= nil, "findingDraft 字段应存在")
 
@@ -249,6 +249,20 @@ return function(tern, def, cx, payloadJson)
     check(s.ui.trace.batch.stopRequested == true, "停止只应请求结束调度")
     s.ui.trace.batch, s.ui.trace.batchEntries, s.ui.trace.verifyRequest = nil, nil, nil
     s.ui.trace.pending, s.ui.trace.busy, s.ui.trace.busyLabel = nil, false, nil
+
+    -- Resource bindings: loaded per requirement, unknown versions stay read-only,
+    -- and invalid paths are refused before any write.
+    check(s.ui.resources.safe == true and s.ui.resources.data ~= nil
+        and #s.ui.resources.data.resources == 1, "应读取到需求级资源绑定")
+    check(s.ui.resources.status["resource-1"] == "ok", "存在的绑定资源应可读取")
+    s.ui.handoff.fields.resourcePath.text = "../escape"
+    action(s, "resources-add")
+    check(s.ui.handoff.error ~= nil, "越界资源路径应被拒绝")
+    s.ui.handoff.error = nil
+    event(s, {ev = "select", id = "main.workbench.requirements", item = "req-3"})
+    check(s.ui.resources.safe == false and s.ui.resources.error ~= nil, "未知资源版本必须只读而不是重置")
+    event(s, {ev = "select", id = "main.workbench.requirements", item = "req-1"})
+    check(s.ui.resources.safe == true, "切回兼容需求应恢复可读")
 
     -- Activity export writes only its event index into the project export folder.
     s.ui.writable = true

@@ -189,6 +189,36 @@ function M.preparePanel(s)
         {{value = "clarify", label = "澄清"}, {value = "design", label = "设计"}, {value = "implement", label = "实施"}}, not editable))
     table.insert(nodes, editor("excerpt", "选中的讨论摘录", h.fields.excerpt.text,
         h.fields.excerpt.cursor, h.fields.excerpt.anchor, 6, not editable, "仅发送你明确选择的讨论片段；不会读取整个聊天记录"))
+    local resourceState = u.resources
+    local bound = resourceState and resourceState.data and resourceState.data.resources or {}
+    local resourceChildren = {}
+    if resourceState and resourceState.error then
+        table.insert(resourceChildren, ui.text({ui.span(resourceState.error, "error")}))
+    elseif #bound == 0 then
+        table.insert(resourceChildren, note("尚未绑定资源。绑定只记录项目内相对路径；文件变化会使预览失效。"))
+    else
+        for index, entry in bound do
+            local status = resourceState.status and resourceState.status[entry.id]
+            local statusText = status == "ok" and "可读取"
+                or (status == "large" and "超过 16 KiB；预览会拒绝" or "无法读取（缺失或不可读）")
+            table.insert(resourceChildren, row("resourceEntry-" .. tostring(index), {
+                ui.text({ui.span(entry.path, "code")}),
+                ui.badge(entry.kind == "verify" and "验证说明" or "上下文", entry.kind == "verify" and "info" or "muted"),
+                note(statusText),
+                button("移除", "resources-remove=" .. entry.id, "quiet", not editable or resourceState.safe == false),
+            }))
+        end
+    end
+    table.insert(resourceChildren, editor("resourcePath", "绑定资源路径 · 项目相对路径", h.fields.resourcePath.text,
+        h.fields.resourcePath.cursor, h.fields.resourcePath.anchor, 2, not editable, "例如 AGENTS.md 或 docs/checklist.md"))
+    table.insert(resourceChildren, choices("resourceKind", "绑定用途", h.resourceKind or "context",
+        {{value = "context", label = "上下文资料"}, {value = "verify", label = "验证说明"}}, not editable))
+    table.insert(resourceChildren, button("绑定此资源", "resources-add", "default",
+        not editable or not (h.fields.resourcePath.text or ""):match("%S")
+            or (resourceState ~= nil and resourceState.safe == false)))
+    table.insert(nodes, ui.card("绑定资源 · 仅本需求", {
+        ui.node("col", {key = "resourceBody", gap = "sm"}, resourceChildren),
+    }, {key = "resourcesCard", tone = (resourceState and resourceState.safe == false) and "warning" or "muted"}))
     table.insert(nodes, row("previewActions", {
         button(h.preview and "重新生成完整预览" or "生成完整资料预览", "handoff-preview",
             h.preview and "default" or "primary", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
