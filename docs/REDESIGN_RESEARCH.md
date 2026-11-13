@@ -40,7 +40,7 @@ The initial proposal incorrectly classified approval content snapshots as absent
 
 ## 3. Capability probes still required
 
-These are planned investigations, not completed experiments. Use the actual installed SDK and isolated projects; never send test prompts to the user's daily session implicitly.
+P2-P4 were run against the installed omp 18.20.0 without prompts; results and limits are recorded in [the probe register](REDESIGN_PROBES.md). P1 still needs the desktop and remains open. Use the actual installed SDK and isolated projects; never send test prompts to the user's daily session implicitly.
 
 | Probe | Question | Required record | Conservative fallback |
 | --- | --- | --- | --- |

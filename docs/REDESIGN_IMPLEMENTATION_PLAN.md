@@ -1,6 +1,6 @@
 # Redesign implementation and validation plan
 
-Date: 2026-11-13. Status: R0-R2 and R3a implemented with automated regressions ([R0](REDESIGN_R0.md), [R1](REDESIGN_R1.md), [R2](REDESIGN_R2.md), [R3a](REDESIGN_R3A.md)); R3b-R6 proposed, R3b blocked on the E4 decision. Real Tern desktop evidence for R1 (V04-V06, V12) and R2 (V07-V09) remains open, as do the host-side parts of R0's V02/V03.
+Date: 2026-11-13. Status: R0-R2 and R3a implemented with automated regressions ([R0](REDESIGN_R0.md), [R1](REDESIGN_R1.md), [R2](REDESIGN_R2.md), [R3a](REDESIGN_R3A.md)); P2-P4 probed ([results](REDESIGN_PROBES.md)). R3b-R6 proposed, blocked on E1/E4/E5/E6/E8/E9 decisions. Real Tern desktop evidence for R1 (V04-V06, V12) and R2 (V07-V09) remains open, as do the host-side parts of R0's V02/V03.
 
 Read with [the proposal](REDESIGN_PROPOSAL.md), [research register](REDESIGN_RESEARCH.md), and [confirmed charter](../DESIGN_AND_IMPLEMENTATION_PLAN.md). This plan is documentation, not approval of E1/E4/E5/E6/E8/E9. Existing phase 6 release acceptance remains open.
 
@@ -23,7 +23,7 @@ Keep changes within existing domain/view/host/bridge boundaries. Extract shared 
 | R3b: optional serial batch | Verification scheduler and per-command evidence; bounded total time and count; cancellation and reconciliation | E4 decision, P5, batch schema inventory if persistence is needed | V10-V11 pass; no parallel commands, auto-resume, retry, or final-snapshot relabeling |
 | R4a: persistent context | Resource manifest, optional conventions/verify configuration, retained handoff metadata | E1 and relevant E9 decision; upgrade/recovery design | V07/V13 pass; no duplicate instruction store by default; changed sources invalidate previews |
 | R4b: lifecycle | Explicit block/cancel/reopen and revision/content-identity separation across all consumers | E8 and transition/schema approval; R0; compatibility matrix | V02/V13/V14 pass; old invalid approvals never resurrect; derived readiness remains read-only |
-| R5: structured candidates | Review import, stable plan links, human adoption; optional incremental coverage records | P2/P3/P4 as applicable; E5/E6/E9 decisions; compatible readers | V08/V15-V16 pass; unsupported output degrades to manual flow |
+| R5: structured candidates | Review import, stable plan links, human adoption; optional incremental coverage records | P2-P4 probed: no structured review source in installed omp; plan is observation-only ([results](REDESIGN_PROBES.md)). E5/E6/E9 decisions and compatible readers still required | V08/V15-V16 pass; unsupported output degrades to manual flow |
 | R6: selective validity research | Advisory mappings and shadow comparison to full runs | Defined supported dependency model and experiment approval | V17 results documented; production still uses full invalidation; rollout requires separate review |
 
 R3a can proceed without R3b or R4a. R2 uses existing data and transport adapters; if true protocol unification needs new intents or durable fields, move that slice to the relevant approved extension. Full AI-generated analysis/retrospective features remain optional backlog work, not implicit R2 completion criteria.
