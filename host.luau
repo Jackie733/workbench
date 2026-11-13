@@ -486,11 +486,79 @@ local function makeActivity(saved)
         error=nil, notice=nil,
         exportPath=type(saved.exportPath)=="string" and saved.exportPath:sub(1,2048) or nil}
 end
+local MAX_CANDIDATES = 12
+local packageRunners = {npm = "npm run ", pnpm = "pnpm ", yarn = "yarn ", bun = "bun run "}
+local function candidateText(value)
+    return type(value) == "string" and #value > 0 and #value <= 4000 and not value:find("[%z\1-\8\11\12\14-\31\127]")
+        and utf8.len(value) ~= nil
+end
+-- Read-only discovery: only reads bounded manifest text; no command is executed
+-- and no script body is interpreted.
+local function discoverCandidates(s, t)
+    local function add(items, seen, source, command, note)
+        if #items >= MAX_CANDIDATES or not candidateText(command) or seen[command] then return end
+        seen[command] = true
+        table.insert(items, {id = "candidate-" .. tostring(#items + 1), command = command, source = source, note = note})
+    end
+    local items, seen = {}, {}
+    local root = store.unc(s.payload.location, s.payload.binding.projectRoot)
+    local function read(name, limit)
+        if not root then return nil end
+        local path = root .. "\\" .. name
+        local exists, present = pcall(tern.fs.exists, path)
+        if not exists or not present then return nil end
+        local ok, text = pcall(tern.fs.read, path, limit or 65536)
+        if not ok or type(text) ~= "string" or #text > (limit or 65536) or not utf8.len(text) then return nil end
+        return text
+    end
+    local package = read("package.json")
+    if package then
+        local decoded, manifest = pcall(tern.json.decode, package)
+        if decoded and type(manifest) == "table" and type(manifest.scripts) == "table" then
+            local manager = type(manifest.packageManager) == "string" and manifest.packageManager:match("^([%w]+)@") or nil
+            local runner = packageRunners[manager or ""] or packageRunners.npm
+            local names = {}
+            for name in manifest.scripts do
+                if type(name) == "string" and #name <= 64 and name:match("^[%w_.:%-]+$") then table.insert(names, name) end
+            end
+            table.sort(names)
+            for index, name in names do
+                if index > 8 then break end
+                add(items, seen, "package.json", runner .. name, "来自 package.json 的脚本名；脚本正文未被解析或执行")
+            end
+        end
+    end
+    local makefile = read("Makefile", 32768)
+    if makefile then
+        local count = 0
+        for line in (makefile .. "\n"):gmatch("(.-)\n") do
+            local target = line:match("^([%w_.-]+):")
+            if target and target ~= ".PHONY" and count < 6 then
+                add(items, seen, "Makefile", "make " .. target, "来自 Makefile 的目标名；未执行 make")
+                count += 1
+            end
+        end
+    end
+    for _, manifest in {{"Cargo.toml", "cargo test"}, {"go.mod", "go test ./..."}, {"mix.exs", "mix test"}} do
+        if read(manifest[1], 4096) then
+            add(items, seen, manifest[1], manifest[2], "来自项目清单的固定测试命令；未执行")
+        end
+    end
+    for index = #t.results.verifications, 1, -1 do
+        if #items >= MAX_CANDIDATES then break end
+        local verification = t.results.verifications[index]
+        if type(verification.command) == "string" then
+            add(items, seen, "历史证据", verification.command, "历史命令仅作草稿；其旧结果不构成当前证据")
+        end
+    end
+    return items, root ~= nil
+end
 local function refreshTrace(s)
     local u, t = s.ui, s.ui and s.ui.trace
     if not u or not t then return end
     local requirement = u.selected and u.byId[u.selected]
     t.error = nil
+    t.candidates, t.candidatesReady = nil, false
     if not requirement then t.plan, t.results = nil, nil; return end
     local plan, planError = Results.loadPlan(u.paths, requirement)
     local results, resultsError = Results.loadResults(u.paths, requirement)
@@ -504,6 +572,11 @@ local function refreshTrace(s)
         t.fields.verifyCriteria.text = table.concat(ids, ", ")
         t.fields.verifyCriteria.cursor = utf8.len(t.fields.verifyCriteria.text)
     end
+    if t.safe and t.results then
+        local ok, items, ready = pcall(discoverCandidates, s, t)
+        t.candidates, t.candidatesReady = ok and items or nil, ok and ready or false
+    end
+    t.runPreview = nil
 end
 local function refreshAudit(s)
     local u, a = s.ui, s.ui and s.ui.audit
@@ -1302,6 +1375,28 @@ local function traceAction(s, act, cx)
     if act == "results-refresh-changes" then
         local baseline = t.results and t.results.baseline
         issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "refresh")
+    elseif act == "results-preview-verification" then
+        local command = trim(t.fields.verifyCommand.text)
+        if command == "" then traceError(s, "请填写要执行的验证命令"); cx:render(); return end
+        if #command > 4000 or not utf8.len(command) or command:find("[%z\1-\8\11\12\14-\31\127]") then
+            traceError(s, "验证命令必须是有效 UTF-8，且不超过 4000 字节"); cx:render(); return
+        end
+        local criteria, failure = parseCriteria(t.fields.verifyCriteria.text, selectedRequirement(s))
+        if not criteria then traceError(s, failure); cx:render(); return end
+        if not t.results then traceError(s, "结果记录尚未读取"); cx:render(); return end
+        t.runPreview = {command = command, criteriaText = t.fields.verifyCriteria.text, criterionIds = criteria}
+        t.notice = "已生成验证预览；只有点击“确认并运行验证”才会执行。"
+        saveUi(s); cx:render()
+    elseif type(act) == "string" and act:match("^results%-use%-candidate=") then
+        local index = tonumber(act:match("=([%d]+)$"))
+        local item = index and t.candidates and t.candidates[index]
+        if not item or not candidateText(item.command) then
+            traceError(s, "命令候选已变化；请刷新后重试"); cx:render(); return
+        end
+        t.fields.verifyCommand.text, t.fields.verifyCommand.cursor, t.fields.verifyCommand.anchor = item.command, utf8.len(item.command), nil
+        t.runPreview = nil
+        t.notice = "已填入命令候选；这只是草稿，仍需预览并确认。"
+        saveUi(s); cx:render()
     elseif act == "results-run-verification" then
         local command = trim(t.fields.verifyCommand.text)
         if command == "" then traceError(s, "请填写要执行的验证命令"); cx:render(); return end
@@ -1311,6 +1406,11 @@ local function traceAction(s, act, cx)
         local criteria, failure = parseCriteria(t.fields.verifyCriteria.text, selectedRequirement(s))
         if not criteria then traceError(s, failure); cx:render(); return end
         if not t.results then traceError(s, "结果记录尚未读取"); cx:render(); return end
+        if not t.runPreview then traceError(s, "请先预览确切的命令、目录、超时与条件，再确认运行"); cx:render(); return end
+        if t.runPreview.command ~= command or t.runPreview.criteriaText ~= t.fields.verifyCriteria.text then
+            traceError(s, "命令或条件在预览后已变化；请重新预览后再运行"); cx:render(); return
+        end
+        t.runPreview = nil
         t.verifyRequest = {command = command, criterionIds = criteria}
         local baseline = t.results.baseline
         issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "verify_snapshot")

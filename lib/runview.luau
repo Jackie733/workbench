@@ -1,6 +1,7 @@
 --!strict
 local ui = tern.ui
 local Results = require("./results")
+local Validity = require("./validity")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -172,6 +173,46 @@ function M.build(s)
 
     table.insert(nodes, field("verifyCommand", "验证命令", t.fields.verifyCommand.text, t.fields.verifyCommand.cursor, t.fields.verifyCommand.anchor,
         2, not writable, "在项目根目录由当前用户执行；只在你明确点击后运行"))
+
+    local snapshot = t.results and t.results.changes and t.results.changes.fingerprint or nil
+    local coverage = Validity.criteria(r, t.results, snapshot)
+    local coverageRows = {}
+    for _, item in coverage.items do
+        local state, tone = "未覆盖", "muted"
+        if item.state == "covered" then state, tone = "当前快照有通过证据", "success"
+        elseif item.state == "missing" then state, tone = "缺少当前证据", "warning" end
+        table.insert(coverageRows, ui.text({
+            ui.span(item.id .. " · ", "strong"), ui.span(item.description),
+            ui.span(item.required and "（必需）" or "（信息性）", "muted"),
+            ui.span(" · " .. state, tone),
+        }))
+    end
+    if #coverageRows == 0 then table.insert(coverageRows, note("此需求尚无验收条件。")) end
+    table.insert(nodes, ui.card("验收条件覆盖 · 必需 " .. tostring(coverage.requiredCovered) .. " / " .. tostring(coverage.required),
+        {(function()
+            local content = {note("必需与信息性分开计数；必需条件未覆盖不能通过验收。需求修订或代码快照变化会使通过证据失效。")}
+            if not snapshot then table.insert(content, ui.text({ui.span("尚未读取当前代码快照；覆盖状态未知，不显示为通过。", "warning")})) end
+            for _, row in coverageRows do table.insert(content, row) end
+            table.insert(content, note("改变必需/信息性属于需求编辑，会按内容摘要使相关批准失效；历史通过不构成当前证据。"))
+            return ui.node("col", {key = "coverageBody", gap = "xs"}, content)
+        end)()}, {key = "coverageCard",
+        tone = (snapshot and coverage.required > 0 and coverage.requiredCovered == coverage.required) and "success" or "warning"}))
+
+    if t.candidates and #t.candidates > 0 then
+        local chips = {}
+        for index, item in t.candidates do
+            table.insert(chips, button(item.command:sub(1, 72) .. " · " .. item.source, "results-use-candidate=" .. tostring(index), "quiet", not writable))
+        end
+        table.insert(nodes, ui.card("命令候选 · 只读发现", {(function()
+            local content = {note("发现只读取项目清单与历史证据，不执行任何命令；填入选中的候选仍只是草稿，必须预览并确认。")}
+            table.insert(content, row("candidateChips", chips))
+            return ui.node("col", {key = "candidateBody", gap = "sm"}, content)
+        end)()}, {key = "candidatesCard", tone = "muted"}))
+    else
+        table.insert(nodes, note(t.candidatesReady == false and "命令候选不可用（项目根目录无法安全读取）；可以直接填写命令。"
+            or "未发现命令候选；可以直接填写命令。"))
+    end
+
     table.insert(nodes, field("verifyCriteria", "关联验收条件 · 逗号分隔 ID", t.fields.verifyCriteria.text,
         t.fields.verifyCriteria.cursor, t.fields.verifyCriteria.anchor, 2, not writable,
         (function()
@@ -179,11 +220,32 @@ function M.build(s)
             for _, criterion in r.acceptanceCriteria or {} do table.insert(values, criterion.id) end
             return #values > 0 and ("可用：" .. table.concat(values, ", ")) or "此需求尚无验收条件"
         end)()))
-    table.insert(nodes, note("命令通过 wsl.exe 在项目根目录交给 bash 执行；退出码与输出会保存为证据。退出码 0 不等于验收通过。"))
-    table.insert(nodes, button(t.busy and "正在记录…" or "先取代码快照，再运行验证", "results-run-verification", "primary",
-        (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
-            or (not t.fields.verifyCommand.text:match("%S") and "先填写验证命令")
-            or (not t.results and "先读取代码变化，取得快照") or false))
+    table.insert(nodes, note("命令通过 wsl.exe 在项目根目录交给 bash 执行，超时 180 秒；退出码与输出会保存为证据。退出码 0 不等于验收通过。"))
+    local trimmedCommand = t.fields.verifyCommand.text:gsub("^%s+", ""):gsub("%s+$", "")
+    local preview = t.runPreview
+    local matches = preview ~= nil and preview.command == trimmedCommand
+        and preview.criteriaText == t.fields.verifyCriteria.text
+    if preview then
+        table.insert(nodes, ui.card("验证预览 · 尚未执行", {
+            ui.text({ui.span("命令：", "strong"), ui.span(preview.command)}),
+            note("目录：" .. s.payload.binding.projectRoot .. " · 超时 180 秒"),
+            note("执行环境：wsl.exe -d " .. tostring(s.payload.location.distro or "（未知发行版）") .. " · bash -lc · 当前用户"),
+            note("关联条件：" .. (#preview.criterionIds > 0 and table.concat(preview.criterionIds, ", ") or "未关联")),
+            note("确认运行前会先读取代码快照；验证后代码变化会使结果失效。修改命令或条件后必须重新预览。"),
+        }, {key = "verifyPreview", tone = matches and "muted" or "warning"}))
+    end
+    table.insert(nodes, row("verifyActions", {
+        button("预览验证命令", "results-preview-verification", "default",
+            (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
+                or (not trimmedCommand:match("%S") and "先填写验证命令")
+                or (not t.results and "先读取代码变化，取得快照") or false),
+        button(t.busy and "正在记录…" or "确认并运行验证", "results-run-verification", "primary",
+            (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
+                or (not trimmedCommand:match("%S") and "先填写验证命令")
+                or (not t.results and "先读取代码变化，取得快照")
+                or (not preview and "先预览确切命令")
+                or (not matches and "命令或条件在预览后已变化，请重新预览") or false),
+    }))
 
     local verifications = t.results and t.results.verifications or {}
     if #verifications > 0 then

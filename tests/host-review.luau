@@ -183,6 +183,50 @@ return function(tern, def, cx, payloadJson)
     check(reading.state == "ready" and reading.label:find("验收", 1, true) ~= nil,
         "当前证据齐备且阻断已豁免后 readiness 应可验收")
 
+    -- Command discovery is read-only and offers drafts; running needs a preview
+    -- that still matches the current command and criteria.
+    local discovered = {}
+    for _, item in s.ui.trace.candidates or {} do discovered[item.command] = item.source end
+    check(discovered["npm run test"] == "package.json", "应从 package.json 只读发现测试脚本")
+    check(discovered["make test"] == "Makefile", "应从 Makefile 只读发现目标")
+    s.ui.writable = true
+    s.ui.trace.fields.verifyCommand.text = "npm run test"
+    s.ui.trace.fields.verifyCriteria.text = "C1"
+    s.ui.trace.runPreview = nil
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("预览", 1, true) ~= nil,
+        "未预览时不得运行验证")
+    s.ui.trace.error = nil
+    action(s, "results-preview-verification")
+    check(s.ui.trace.runPreview ~= nil and s.ui.trace.runPreview.command == "npm run test",
+        "预览应记录确切命令")
+    check(#s.ui.trace.runPreview.criterionIds == 1 and s.ui.trace.runPreview.criterionIds[1] == "C1",
+        "预览应记录关联条件")
+    s.ui.trace.fields.verifyCommand.text = "npm run build"
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest == nil and s.ui.trace.error:find("变化", 1, true) ~= nil,
+        "预览后命令变化必须要求重新预览")
+    s.ui.trace.error = nil
+    s.ui.trace.fields.verifyCommand.text = "npm run test"
+    action(s, "results-run-verification")
+    check(s.ui.trace.verifyRequest ~= nil and s.ui.trace.verifyRequest.command == "npm run test",
+        "匹配的预览应允许进入快照步骤")
+    check(s.ui.trace.pending == nil and s.ui.trace.error ~= nil
+        and s.ui.trace.error:find("写入状态待核对", 1, true) ~= nil,
+        "运行前应先尝试读取代码快照（测试环境拒绝真实进程写入）")
+    s.ui.trace.pending, s.ui.trace.busy, s.ui.trace.busyLabel = nil, false, nil
+    s.ui.trace.error = nil
+    s.ui.trace.verifyRequest = nil
+    s.ui.trace.fields.verifyCommand.text = ""
+    local candidateIndex
+    for index, item in s.ui.trace.candidates or {} do
+        if item.command == "npm run test" then candidateIndex = index end
+    end
+    check(candidateIndex ~= nil, "候选应可按位置选择")
+    event(s, {ev = "action", act = "results-use-candidate=" .. tostring(candidateIndex)})
+    check(s.ui.trace.fields.verifyCommand.text == "npm run test", "选择候选只应填入草稿")
+    check(s.ui.trace.runPreview == nil, "选择候选后仍需重新预览")
+
     -- Activity export writes only its event index into the project export folder.
     s.ui.writable = true
     check(#s.ui.activity.events > 0, "活动事件应可用于导出")

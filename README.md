@@ -17,7 +17,7 @@
 - [阶段 5 审查、人工验收、审计与导出](docs/PHASE_5.md)
 - [阶段 6 迁移决定与旧入口清理](docs/PHASE_6.md)
 - [阶段 0 领域、存储、迁移与恢复契约](docs/DOMAIN_CONTRACT.md)
-- [重设计提案](docs/REDESIGN_PROPOSAL.md)、[证据登记](docs/REDESIGN_RESEARCH.md)、[执行计划](docs/REDESIGN_IMPLEMENTATION_PLAN.md)、[R0](docs/REDESIGN_R0.md)、[R1](docs/REDESIGN_R1.md) 与 [R2 完成记录](docs/REDESIGN_R2.md)
+- [重设计提案](docs/REDESIGN_PROPOSAL.md)、[证据登记](docs/REDESIGN_RESEARCH.md)、[执行计划](docs/REDESIGN_IMPLEMENTATION_PLAN.md)、[R0](docs/REDESIGN_R0.md)、[R1](docs/REDESIGN_R1.md)、[R2](docs/REDESIGN_R2.md) 与 [R3a 完成记录](docs/REDESIGN_R3A.md)
 - [旧版 2.0.0 历史说明](docs/LEGACY_WORKBENCH_2_0.md)：仅作历史参考，相关代码已删除；旧数据不迁移。
 
 ## 在当前 omp 使用

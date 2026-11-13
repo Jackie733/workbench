@@ -109,7 +109,7 @@ return function(tern, repo)
         ["handoff-candidate"] = true, ["handoff-import-file"] = true, ["handoff-import-file-content"] = true,
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
         ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true,
-        ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
+        ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
@@ -126,6 +126,7 @@ return function(tern, repo)
         if name then return changeNames[name] or name:match("^status%-%d+$") ~= nil end
         if act:match("^wb%-open%-[%w%-_]+$") then return true end
         if act:match("^requirement=.+$") then return true end
+        if act:match("^results%-use%-candidate=%d+$") then return true end
         if act:match("^review%-toggle=") then return act == "review-toggle=reject" or act == "review-toggle=reopen" or act == "review-toggle=dispose" end
         if act:match("^review%-inline=.+$") then return true end
         if act:match("^review%-remove%-finding=%d+$") then return true end
@@ -363,6 +364,23 @@ return function(tern, repo)
     local closed = copy(prepared)
     closed.ui.handoff.panel = false
     check(findByKey(ui.build(closed), "handoff-prefill") == nil, "面板关闭时不应出现发送动作")
+
+    -- Delivery: coverage is split from informational criteria, candidates are
+    -- drafts only, and running requires a preview that still matches.
+    local delivery = copy(baseState())
+    delivery.ui.tab, delivery.ui.detailMode = "delivery", true
+    delivery.ui.trace.candidates = {{id = "candidate-1", command = "npm run test", source = "package.json", note = ""}}
+    delivery.ui.trace.candidatesReady = true
+    delivery.ui.trace.fields.verifyCommand.text = "npm run test"
+    delivery.ui.trace.fields.verifyCriteria.text = "C1, C2"
+    delivery.ui.trace.runPreview = {command = "npm run test", criteriaText = "C1, C2", criterionIds = {"C1", "C2"}}
+    local deliveryView = ui.build(delivery)
+    check(findByKey(deliveryView, "coverageCard") ~= nil, "交付页应显示验收条件覆盖")
+    check(findByKey(deliveryView, "candidatesCard") ~= nil, "交付页应显示只读命令候选")
+    check(findByKey(deliveryView, "verifyPreview") ~= nil, "预览后应显示确切命令")
+    check(findByKey(deliveryView, "results-run-verification").p.disabled == false, "匹配的预览应允许确认运行")
+    delivery.ui.trace.fields.verifyCommand.text = "npm run build"
+    check(findByKey(ui.build(delivery), "results-run-verification").p.disabled ~= false, "命令变化后必须重新预览")
 
     -- Approval diff: changed content is a warning, identical content is muted,
     -- and an unreadable snapshot is explicitly unavailable.

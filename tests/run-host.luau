@@ -97,6 +97,9 @@ put(store .. "\\requirements\\req-1\\requirement.json", {schemaVersion = 1, requ
     acceptanceCriteria = {{id = "C1", description = "过期后显示重新登录入口", required = true},
         {id = "C2", description = "重新登录后回到原页面", required = true}},
     labels = {"界面"}, createdAt = 1700000000000, updatedAt = 1700000000000})
+local projectUnc = "\\\\wsl.localhost\\Ubuntu\\tmp\\demo-project"
+put(projectUnc .. "\\package.json", {scripts = {test = "node test.js", build = "node build.js"}})
+files[projectUnc .. "\\Makefile"] = "test:\n\tnode test.js\n\nbuild:\n\tnode build.js\n"
 put(store .. "\\requirements\\req-2\\requirement.json", {schemaVersion = 1, requirementId = "req-2",
     projectId = "project-1", number = "REQ-0002", revision = 1, title = "补充会话续期入口",
     type = "feature", priority = "normal", stage = "designing",
@@ -142,7 +145,8 @@ local payload = {
     binding = {schemaVersion = 1, instanceId = "wb-inst-0001", sessionId = "session-1", openRequestId = "open-1",
         runtimeDir = "/tmp/omp-workbench-1000/wb-inst-0001", sourceMarker = "⚒ demo · wbinst00",
         projectRoot = "/tmp/demo-project", cwd = "/tmp/demo-project"},
-    location = {marker = "//wsl.localhost/Ubuntu/tmp/omp-workbench-1000/wb-inst-0001/open.omp-workbench.json"},
+    location = {marker = "//wsl.localhost/Ubuntu/tmp/omp-workbench-1000/wb-inst-0001/open.omp-workbench.json",
+        host = "wsl.localhost", distro = "Ubuntu"},
     source = 7, window = "win-1",
 }
 
