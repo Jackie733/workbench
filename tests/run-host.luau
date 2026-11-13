@@ -97,6 +97,11 @@ put(store .. "\\requirements\\req-1\\requirement.json", {schemaVersion = 1, requ
     acceptanceCriteria = {{id = "C1", description = "过期后显示重新登录入口", required = true},
         {id = "C2", description = "重新登录后回到原页面", required = true}},
     labels = {"界面"}, createdAt = 1700000000000, updatedAt = 1700000000000})
+put(store .. "\\requirements\\req-2\\requirement.json", {schemaVersion = 1, requirementId = "req-2",
+    projectId = "project-1", number = "REQ-0002", revision = 1, title = "补充会话续期入口",
+    type = "feature", priority = "normal", stage = "designing",
+    goal = "续期到期前给出提示。", scope = "", acceptanceCriteria = {{id = "C1", description = "提示可见", required = true}},
+    labels = {}, createdAt = 1700000001000, updatedAt = 1700000001000})
 put(store .. "\\requirements\\req-1\\reviews.json", {schemaVersion = 1, projectId = "project-1",
     requirementId = "req-1", revision = 2,
     reviews = {

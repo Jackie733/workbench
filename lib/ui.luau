@@ -417,8 +417,14 @@ function M.build(s)
     if u.notice then table.insert(nodes, ui.text({ui.span(u.notice, "warning")})) end
     if inWorkspace then
         table.insert(nodes, context.bar(s, {current = {tab = tab, sub = tab == "design" and u.handoff.tab or nil}}))
-        table.insert(nodes, ui.node("tabs", {key = "tabs", active = tab, items = tabItems(context.workspaceTabs)}))
         local r = u.selected and u.byId[u.selected]
+        if r then table.insert(nodes, row("workspaceActions", {
+            ui.button(u.handoff.panel and "收起准备交接" or "准备交接", {key = "handoff-prepare", variant = "default",
+                size = "sm", actions = {click = "handoff-prepare"}}),
+            note("次动作：打开面板不发送；目标 " .. tostring(r.number or "")),
+        })) end
+        if r and u.handoff.panel then table.insert(nodes, handoff.preparePanel(s)) end
+        table.insert(nodes, ui.node("tabs", {key = "tabs", active = tab, items = tabItems(context.workspaceTabs)}))
         if u.loading then table.insert(nodes, note("正在读取当前需求…"))
         elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
         elseif not r then table.insert(nodes, ui.node("empty", {key = "noSelection", variant = "inline",

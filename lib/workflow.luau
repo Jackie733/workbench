@@ -148,6 +148,20 @@ end
 function M.approvalState(w, req)
     return Validity.approval(w, req, M.requirementContent(req))
 end
+M.contentFields = Validity.contentFields
+-- Field-level comparison between an existing approval snapshot and the current
+-- requirement. Missing or unreadable snapshots are reported as unavailable.
+function M.approvalDiff(approval, requirement)
+    if type(approval) ~= "table" or type(approval.requirementContent) ~= "string" then
+        return {available = false, reason = "missing_snapshot", changes = {}}
+    end
+    local okBefore, before = pcall(tern.json.decode, approval.requirementContent)
+    local okAfter, after = pcall(function() return tern.json.decode(M.requirementContent(requirement)) end)
+    if not okBefore or not okAfter or type(before) ~= "table" or type(after) ~= "table" then
+        return {available = false, reason = "corrupt_snapshot", changes = {}}
+    end
+    return Validity.contentDiff(before, after)
+end
 local function copyArray(a) local b=tern.json.array(); for _,v in a do table.insert(b,v) end; return b end
 local function revokeCurrent(w, at, reason)
     if not w.approval or w.approval.revokedAt then return end

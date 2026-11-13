@@ -15,7 +15,7 @@ return function(tern, def, cx, payloadJson)
 
     local s = def.init(cx, {payloadJson}, nil)
     check(s.ui ~= nil, "init 应建立界面状态")
-    check(#s.ui.requirements == 1, "应读取到一项需求")
+    check(#s.ui.requirements == 2, "应读取到两项需求")
     check(s.ui.writable == false, "打开先只读")
     check(s.ui.review ~= nil and s.ui.review.fields.findingDraft ~= nil, "findingDraft 字段应存在")
 
@@ -42,6 +42,23 @@ return function(tern, def, cx, payloadJson)
     event(s, {ev = "action", act = "change:layout", value = "board"})
     event(s, {ev = "action", act = "requirement", value = "req-1"})
     check(s.ui.selected == "req-1" and s.ui.tab == "requirement", "看板卡片点击应打开需求工作区")
+    -- Drafts belong to their requirement: switching must not carry text across.
+    s.ui.handoff.fields.paths.text = "src/login.ts"
+    event(s, {ev = "select", id = "main.workbench.requirements", item = "req-2"})
+    check(s.ui.selected == "req-2" and s.ui.handoff.fields.paths.text == "", "切换需求不得带入另一项需求的资料草稿")
+    event(s, {ev = "select", id = "main.workbench.requirements", item = "req-1"})
+    check(s.ui.handoff.fields.paths.text == "src/login.ts", "切回需求应恢复其草稿")
+    check(s.ui.handoff.drafts["req-2"] ~= nil, "切换时应保存原需求草稿")
+    -- The preparation panel only toggles; opening it creates no request.
+    local requestsBefore = #(s.ui.handoff.workflow and s.ui.handoff.workflow.requests or {})
+    action(s, "handoff-prepare")
+    check(s.ui.handoff.panel == true, "准备交接应打开面板")
+    check(#(s.ui.handoff.workflow and s.ui.handoff.workflow.requests or {}) == requestsBefore
+        and s.ui.handoff.pendingSend == nil, "打开准备交接不得创建请求或发送")
+    action(s, "handoff-prepare")
+    check(s.ui.handoff.panel == false, "再次点击应收起面板")
+    action(s, "wb-open-design-materials")
+    check(s.ui.tab == "design" and s.ui.handoff.panel == true, "资料步骤应打开准备交接面板")
     action(s, "back-workspace")
     event(s, {ev = "select", id = "main.workbench.tabs", item = "activity"})
     check(s.ui.tab == "activity" and s.ui.detailMode == false, "活动是全局目的地")

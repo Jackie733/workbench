@@ -198,4 +198,40 @@ function M.evaluate(input)
 end
 
 M.approvalMessages = approvalMessages
+-- Field names and order of the canonical approval snapshot
+-- (`Workflow.requirementContent`): title, type, priority, goal, scope, criteria,
+-- labels. Comparing decoded snapshots keeps the reader independent of encoding.
+M.contentFields = {"title", "type", "priority", "goal", "scope", "criteria", "labels"}
+
+local function same(a, b)
+    if a == b then return true end
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    local countA, countB = 0, 0
+    for _ in a do countA += 1 end
+    for _ in b do countB += 1 end
+    if countA ~= countB then return false end
+    for key, value in a do
+        if not same(value, b[key]) then return false end
+    end
+    return true
+end
+
+-- Comparison against an existing approval snapshot. `nil` or malformed input is
+-- "unavailable", never "no changes".
+function M.contentDiff(before, after)
+    if type(before) ~= "table" or type(after) ~= "table" then
+        return {available = false, reason = "corrupt_snapshot", changes = {}}
+    end
+    local changes = {}
+    for index, name in M.contentFields do
+        local old, new = before[index], after[index]
+        if old == nil and new == nil then
+            -- Absent pairs are equal; a missing trailing field is not invented.
+        elseif not same(old, new) then
+            table.insert(changes, {field = name, before = old, after = new})
+        end
+    end
+    return {available = true, changes = changes, identical = #changes == 0}
+end
+
 return M

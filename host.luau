@@ -205,13 +205,30 @@ local function projectKey(s)
     return "workbench:project:" .. s.payload.location.distro .. ":" .. s.payload.binding.projectRoot
 end
 local storageMessage
-local function handoffSnapshot(h)
-    local fields = {}
-    for name, field in h.fields or {} do
+local handoffLimits={paths=8192,excerpt=8192,proposal=16384,importPath=2048,comment=4000,directReason=2000,revokeReason=2000,ackReason=2000}
+local function snapshotFields(fields)
+    local snapshot = {}
+    for name, field in fields or {} do
         if type(field) == "table" and type(field.text) == "string" then
-            fields[name] = {text = field.text, cursor = field.cursor, anchor = field.anchor}
+            snapshot[name] = {text = field.text, cursor = field.cursor, anchor = field.anchor}
         end
     end
+    return snapshot
+end
+local function snapshotDrafts(h)
+    local drafts = {}
+    for _, id in h.draftOrder or {} do
+        local draft = h.drafts and h.drafts[id]
+        if type(draft) == "table" then
+            drafts[id] = {fields = snapshotFields(draft.fields), includeRequirement = draft.includeRequirement,
+                activity = draft.activity, proposalSource = draft.proposalSource,
+                importedFile = draft.importedFile, candidate = draft.candidate}
+        end
+    end
+    return drafts
+end
+local function handoffSnapshot(h)
+    local fields = snapshotFields(h.fields)
     local preview
     if type(h.preview) == "table" then
         preview = {text = h.preview.text, sha256 = h.preview.sha256, requirementId = h.preview.requirementId,
@@ -222,9 +239,9 @@ local function handoffSnapshot(h)
         preview = preview, previewStale = preview ~= nil, baseline = h.baseline, baselineCheckedAt = h.baselineCheckedAt,
         candidate = h.candidate, importedFile = h.importedFile, proposalSource = h.proposalSource,
         pending = h.pending, pendingSend = h.pendingSend, sourceReceipt = h.sourceReceipt,
-        selectedVersion = h.selectedVersion, compareVersion = h.compareVersion}
+        selectedVersion = h.selectedVersion, compareVersion = h.compareVersion, panel = h.panel == true,
+        draftRequirement = h.draftRequirement, draftOrder = h.draftOrder, drafts = snapshotDrafts(h)}
 end
-local handoffLimits={paths=8192,excerpt=8192,proposal=16384,importPath=2048,comment=4000,directReason=2000,revokeReason=2000,ackReason=2000}
 local function handoffFields(saved)
     local fields = {}
     for name, limit in handoffLimits do
@@ -256,19 +273,84 @@ local function makeHandoff(saved)
         end
     end
     if pendingSend and pendingSend.state == "recording_intent" then pendingSend.state = "recovered_intent" end
-    return {tab = saved.tab or "materials", fields = handoffFields(saved.fields), includeRequirement = saved.includeRequirement ~= false,
+    local tab = (saved.tab == "approval" and "approval") or "design"
+    local drafts, draftOrder = {}, {}
+    if type(saved.drafts) == "table" then
+        for _, id in type(saved.draftOrder) == "table" and saved.draftOrder or {} do
+            local draft = saved.drafts[id]
+            if live.token(id) and type(draft) == "table" and #draftOrder < 4 then
+                table.insert(draftOrder, id)
+                drafts[id] = {fields = handoffFields(draft.fields),
+                    includeRequirement = draft.includeRequirement ~= false,
+                    activity = (draft.activity == "clarify" or draft.activity == "design" or draft.activity == "implement") and draft.activity or "design",
+                    proposalSource = draft.proposalSource, importedFile = draft.importedFile, candidate = draft.candidate}
+            end
+        end
+    end
+    return {tab = tab, fields = handoffFields(saved.fields), includeRequirement = saved.includeRequirement ~= false,
         activity = (saved.activity == "clarify" or saved.activity == "design" or saved.activity == "implement") and saved.activity or "design",
         preview = preview, previewStale = preview ~= nil or saved.previewStale == true, baseline = saved.baseline,
         baselineCheckedAt = saved.baselineCheckedAt, candidate = saved.candidate, importedFile = saved.importedFile,
         proposalSource = saved.proposalSource, pending = pending, pendingSend = pendingSend,
         sourceReceipt = saved.sourceReceipt, selectedVersion = saved.selectedVersion,
-        compareVersion = tonumber(saved.compareVersion) or 0,
+        compareVersion = tonumber(saved.compareVersion) or 0, panel = saved.panel == true,
+        drafts = drafts, draftOrder = draftOrder,
+        draftRequirement = live.token(saved.draftRequirement) and saved.draftRequirement or nil,
         safe = true, workflowBusy = false}
+end
+local handoffDraftFields = {"paths", "excerpt", "proposal", "importPath", "comment", "directReason", "revokeReason", "ackReason"}
+local function saveCurrentDraft(h)
+    local id = h.draftRequirement
+    if not id then return end
+    local fields = {}
+    for _, name in handoffDraftFields do
+        local field = h.fields[name]
+        fields[name] = {text = field and field.text or "", cursor = field and field.cursor or nil,
+            anchor = field and field.anchor or nil}
+    end
+    h.drafts[id] = {fields = fields, includeRequirement = h.includeRequirement, activity = h.activity,
+        proposalSource = h.proposalSource, importedFile = h.importedFile, candidate = h.candidate}
+    local order = {}
+    for _, existing in h.draftOrder or {} do
+        if existing ~= id then table.insert(order, existing) end
+    end
+    table.insert(order, id)
+    while #order > 4 do
+        local oldest = table.remove(order, 1)
+        h.drafts[oldest] = nil
+    end
+    h.draftOrder = order
+end
+local function loadDraft(h, requirementId)
+    h.draftRequirement = requirementId
+    h.importedFile, h.candidate = nil, nil
+    local draft = requirementId and h.drafts[requirementId] or nil
+    if not draft then
+        for _, name in handoffDraftFields do h.fields[name] = {text = "", cursor = 0, anchor = nil} end
+        h.includeRequirement, h.activity, h.proposalSource = true, "design", nil
+        return
+    end
+    for _, name in handoffDraftFields do
+        local field = draft.fields and draft.fields[name]
+        h.fields[name] = {text = field and field.text or "", cursor = field and field.cursor or nil,
+            anchor = field and field.anchor or nil}
+    end
+    h.includeRequirement = draft.includeRequirement ~= false
+    h.activity = draft.activity or "design"
+    h.proposalSource = draft.proposalSource
+    h.importedFile, h.candidate = draft.importedFile, draft.candidate
 end
 local function refreshHandoff(s)
     local u, h = s.ui, s.ui and s.ui.handoff
     if not u or not h then return end
     local requirement = u.selected and u.byId[u.selected]
+    -- Drafts belong to the requirement they were written for; switching the
+    -- selection must not carry text into another requirement's preview.
+    local target = requirement and requirement.requirementId or nil
+    if h.draftRequirement ~= target then
+        saveCurrentDraft(h)
+        loadDraft(h, target)
+    end
     h.workflow, h.selectedDesign, h.compareDesign = nil, nil, nil
     h.error, h.workflowError, h.safe = nil, nil, true
     if not requirement then h.approvalValid, h.approvalReason = false, "先选择一项需求"; return end
@@ -742,6 +824,9 @@ local function sendPreview(s, cx, prefillOnly)
     if s.problem then handoffError(h, s.problem); cx:render(); return end
     if not preview or h.previewStale or type(preview.previewToken) ~= "string" or preview.previewToken == "" then
         handoffError(h, "此预览令牌已失效；请显式重新生成完整预览"); cx:render(); return
+    end
+    if preview.requirementId ~= requirement.requirementId then
+        handoffError(h, "此预览属于另一项需求；已拒绝发送，请针对当前需求重新生成预览"); cx:render(); return
     end
     if h.pending or h.pendingSend then handoffError(h, "已有请求待核对；不会重复发送"); cx:render(); return end
     if not s.snapshot or s.snapshot.state ~= "idle" then handoffError(h, "目标 omp 当前非空闲；保留预览，不发送"); cx:render(); return end
@@ -1295,8 +1380,12 @@ local function handoffAction(s, act, cx)
         elseif not reason:match("%S") or type(requirement.scope) ~= "string" or not requirement.scope:match("%S")
             then handoffError(h, "直接实施必须明确填写授权理由，并在需求中提供范围"); cx:render()
         else applyWorkflow(s, cx, "authorize_direct", {baseline = h.baseline, reason = reason, clicked = true}) end
+    elseif act == "handoff-prepare" then
+        h.panel = not h.panel
+        refreshHandoff(s)
+        saveHandoffAndRender(s, cx)
     elseif act == "open-handoff" then
-        u.tab, h.tab = "handoff", h.tab or "materials"
+        u.tab, u.detailMode, h.tab, h.panel = "design", true, "design", true
         refreshHandoff(s)
         saveUi(s)
     end
@@ -1726,6 +1815,11 @@ local function loadWorkbench(s, cx)
         audit = makeAudit(type(saved) == "table" and saved.audit or nil),
         activity = makeActivity(type(saved) == "table" and saved.activity or nil)}
     s.ui = u
+    -- Snapshots from before per-requirement drafts kept one unnamed draft; adopt
+    -- it for the requirement that was selected when it was saved.
+    if u.handoff and not u.handoff.draftRequirement and u.selected and u.byId[u.selected] then
+        u.handoff.draftRequirement = u.selected
+    end
     for key, draft in u.drafts do
         if type(draft) == "table" then
             u.drafts[key] = {fields = draftFields(draft.fields), type = draft.type,
@@ -2051,7 +2145,11 @@ local function openPage(s, tab, sub)
         if not s.ui.selected or not s.ui.byId[s.ui.selected] then tab = "requirements" end
         s.ui.tab, s.ui.detailMode = tab, tab ~= "requirements"
         if tab == "design" then
-            if sub == "materials" or sub == "design" or sub == "approval" then s.ui.handoff.tab = sub end
+            if sub == "materials" then
+                s.ui.handoff.panel = true
+            elseif sub == "design" or sub == "approval" then
+                s.ui.handoff.tab, s.ui.handoff.panel = sub, false
+            end
             refreshHandoff(s)
         elseif tab == "delivery" then refreshTrace(s)
         elseif tab == "acceptance" then refreshReview(s)
@@ -2211,8 +2309,10 @@ tern.block.define("live", {
                 persistBuffer(s, target)
             end
         elseif ev.ev == "select" and ev.id:match("%.handoffTabs$") then
-            s.ui.handoff.tab = ev.item
-            saveUi(s)
+            if ev.item == "design" or ev.item == "approval" then
+                s.ui.handoff.tab = ev.item
+                saveUi(s)
+            end
         elseif ev.ev == "select" and ev.id:match("%.tabs$") then
             local item = tostring(ev.item)
             if context.workspaceTab[item] then

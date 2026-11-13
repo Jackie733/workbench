@@ -199,6 +199,34 @@ return function()
         requirementSha256 = SHA_B, requirementRevision = 3, createdAt = 0}}, approval = wf.approval}
     equal(Validity.approval(brokenDesign, r, "content-v3").reason, "design_changed", "方案指纹变化使批准失效")
 
+    -- Approval snapshot comparison: decoded canonical content, field by field.
+    local function snapshot(title)
+        return {title, r.type, r.priority, r.goal, r.scope,
+            {{"C1", "过期后显示重新登录入口", true}, {"C2", "重新登录后回到原页面", true},
+                {"C3", "日志记录过期事件", false}}, {"登录", "界面"}}
+    end
+    local unchanged = Validity.contentDiff(snapshot(r.title), snapshot(r.title))
+    check(unchanged.available and unchanged.identical, "相同内容应报告无变化")
+    local changed = Validity.contentDiff(snapshot("旧标题"), snapshot(r.title))
+    check(changed.available and not changed.identical, "内容变化应可比较")
+    equal(#changed.changes, 1, "只报告实际变化的字段")
+    equal(changed.changes[1].field, "title", "变化字段名")
+    equal(changed.changes[1].before, "旧标题", "保留批准时的旧值")
+    equal(changed.changes[1].after, r.title, "保留当前新值")
+    local criteriaChange = snapshot(r.title)
+    criteriaChange[6][2][3] = false
+    local deepChange = Validity.contentDiff(criteriaChange, snapshot(r.title))
+    equal(#deepChange.changes, 1, "嵌套验收条件变化应被检测")
+    equal(deepChange.changes[1].field, "criteria", "嵌套变化归到验收条件")
+    local labelsChange = snapshot(r.title)
+    labelsChange[7] = {"登录"}
+    equal(#Validity.contentDiff(labelsChange, snapshot(r.title)).changes, 1, "标签变化应被检测")
+    local missing = Validity.contentDiff(nil, snapshot(r.title))
+    check(not missing.available and missing.reason == "corrupt_snapshot", "缺失快照不得视为无变化")
+    local truncated = {r.title, r.type}
+    local partial = Validity.contentDiff(truncated, snapshot(r.title))
+    check(partial.available and #partial.changes > 0, "缺少尾部字段应报告变化，不补齐为相同")
+
     for _, item in failures do print("FAIL " .. item) end
     return {checks = checks, failures = failures}
 end

@@ -76,7 +76,8 @@ return function(tern, repo)
                 fields = fields({"title", "goal", "scope", "criteria", "labels"}),
                 type = "feature", priority = "normal", drafts = {},
                 error = nil, notice = nil, storageUnsafe = false, takeoverAvailable = false,
-                handoff = {tab = "materials", fields = fields({"paths", "excerpt", "proposal", "importPath", "comment", "directReason", "revokeReason", "ackReason"}),
+                handoff = {tab = "design", panel = false, draftRequirement = "req-1", drafts = {}, draftOrder = {},
+                    fields = fields({"paths", "excerpt", "proposal", "importPath", "comment", "directReason", "revokeReason", "ackReason"}),
                     includeRequirement = true, activity = "design", preview = nil, previewStale = false,
                     baseline = nil, baselineCheckedAt = nil, candidate = nil, importedFile = nil,
                     pending = nil, pendingSend = nil, sourceReceipt = nil, selectedVersion = nil, compareVersion = 0,
@@ -107,7 +108,7 @@ return function(tern, repo)
         ["handoff-preview"] = true, ["handoff-baseline"] = true, ["handoff-prefill"] = true, ["handoff-send"] = true,
         ["handoff-candidate"] = true, ["handoff-import-file"] = true, ["handoff-import-file-content"] = true,
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
-        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true,
+        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true,
         ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
@@ -304,7 +305,15 @@ return function(tern, repo)
         s.ui.error = "上次的工作台实例留下了过期写锁"; s.ui.takeoverAvailable = true
     end)
     page("空需求只读", function(s) s.ui.tab = "requirements"; s.ui.detailMode = false; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil; s.ui.writable = false end)
-    page("工作区-方案资料", function(s) s.ui.tab = "design"; s.ui.detailMode = true end)
+    page("工作区-方案", function(s) s.ui.tab = "design"; s.ui.detailMode = true end)
+    page("工作区-准备交接", function(s)
+        s.ui.tab = "design"; s.ui.detailMode = true; s.ui.handoff.panel = true
+    end)
+    page("工作区-准备交接预览", function(s)
+        s.ui.tab = "requirement"; s.ui.detailMode = true; s.ui.handoff.panel = true
+        s.ui.handoff.preview = {text = "工作台请求：设计\n需求：R-001", sha256 = SHA, requirementId = "req-1",
+            requirementRevision = 3, activity = "design", sources = {}, designVersion = 0}
+    end)
     page("工作区-方案", function(s)
         s.ui.tab = "design"
         local h = s.ui.handoff
@@ -316,6 +325,7 @@ return function(tern, repo)
     end)
     page("工作区-批准", function(s)
         s.ui.tab = "design"
+        s.ui.detailMode = true
         local h = s.ui.handoff
         h.tab = "approval"
         h.workflow = {designs = {}, latestVersion = 0, comments = {}, approvals = {},
@@ -336,6 +346,52 @@ return function(tern, repo)
         s.ui.activity.scanned = 2
     end)
     page("会话", function(s) s.ui.tab = "session"; s.ui.detailMode = false end)
+
+    -- Preparation panel: opening shows distinct Prefill and Send actions; closing
+    -- removes them; a busy session keeps the preview but disables sending.
+    local prepared = copy(baseState())
+    prepared.ui.tab, prepared.ui.detailMode, prepared.ui.handoff.panel = "design", true, true
+    prepared.ui.handoff.preview = {text = "工作台请求：设计\n需求：R-001", sha256 = SHA, requirementId = "req-1",
+        requirementRevision = 3, activity = "design", sources = {}, designVersion = 0}
+    local preparedView = ui.build(prepared)
+    check(findByKey(preparedView, "handoff-prefill") ~= nil, "准备交接应提供只预填动作")
+    check(findByKey(preparedView, "handoff-send") ~= nil, "准备交接应提供明确发送动作")
+    check(findByKey(preparedView, "handoff-send").p.disabled == false, "空闲会话中预览可发送")
+    local busy = copy(prepared)
+    busy.snapshot = {state = "working", recentEvents = {}}
+    check(findByKey(ui.build(busy), "handoff-send").p.disabled ~= false, "会话忙碌时不得发送")
+    local closed = copy(prepared)
+    closed.ui.handoff.panel = false
+    check(findByKey(ui.build(closed), "handoff-prefill") == nil, "面板关闭时不应出现发送动作")
+
+    -- Approval diff: changed content is a warning, identical content is muted,
+    -- and an unreadable snapshot is explicitly unavailable.
+    local diffState = copy(baseState())
+    diffState.ui.tab, diffState.ui.detailMode = "design", true
+    diffState.ui.handoff.tab = "approval"
+    local diffRequirement = diffState.ui.byId["req-1"]
+    local function snapshot(title)
+        return {title, diffRequirement.type, diffRequirement.priority, diffRequirement.goal, diffRequirement.scope,
+            {{"C1", "过期后显示重新登录入口", true}, {"C2", "重新登录后回到原页面", true}}, {"界面"}}
+    end
+    local function approval(content)
+        return {id = "approval-1", mode = "design", requirementRevision = 3, designVersion = 1,
+            designSha256 = SHA, latestVersion = 1, requirementSha256 = SHA, requirementContent = content,
+            baseline = {head = "abc", fingerprint = SHA, dirty = false}, approvedAt = 0}
+    end
+    local function diffWorkflow(content)
+        return {designs = {{version = 1, sha256 = SHA, requirementSha256 = SHA, requirementRevision = 3, createdAt = 0}},
+            latestVersion = 1, comments = {}, approvals = {}, approval = approval(content)}
+    end
+    diffState.ui.handoff.selectedDesign = {version = 1, sha256 = SHA, body = "方案", requirementRevision = 3}
+    diffState.ui.handoff.workflow = diffWorkflow(tern.json.encode(snapshot("旧标题")))
+    local changed = ui.build(diffState)
+    check(findByKey(changed, "approvalDiff") ~= nil, "批准页应显示与上次批准的差异")
+    check(findByKey(changed, "approvalDiff").p.tone == "warning", "内容变化时差异卡应为警告态")
+    diffState.ui.handoff.workflow = diffWorkflow(tern.json.encode(snapshot(diffRequirement.title)))
+    check(findByKey(ui.build(diffState), "approvalDiff").p.tone == "muted", "内容一致时差异卡不应警告")
+    diffState.ui.handoff.workflow = diffWorkflow("not-json")
+    check(findByKey(ui.build(diffState), "approvalDiff").p.tone == "warning", "无法比较时必须明示而不是当作无变化")
 
     return {checks = checks, failures = failures}
 end
