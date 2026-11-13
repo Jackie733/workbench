@@ -1,7 +1,7 @@
 --!strict
 local ui = tern.ui
 local Review = require("./review")
-local context = require("./context")
+local Validity = require("./validity")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -69,35 +69,12 @@ local function draftRows(text)
     return rows, invalid
 end
 local function findingCounts(data)
-    local total, open, openBlocking = 0, 0, 0
-    for _, review in data and data.reviews or {} do
-        for _, finding in review.findings or {} do
-            total += 1
-            if Review.findingState(review, finding.id) == "open" then
-                open += 1
-                if finding.severity == "blocking" then openBlocking += 1 end
-            end
-        end
-    end
-    return total, open, openBlocking
+    local findings = Validity.findings(data)
+    return findings.total, findings.open, findings.blockingOpen
 end
 local function criterionCoverage(r, results, snapshot)
-    local required, covered = 0, 0
-    for _, criterion in r.acceptanceCriteria or {} do
-        if criterion.required then
-            required += 1
-            local has = false
-            for _, verification in results and results.verifications or {} do
-                if snapshot and verification.result == "passed" and verification.requirementRevision == r.revision
-                    and verification.codeSnapshotSha256 == snapshot then
-                    for _, id in verification.criterionIds do if id == criterion.id then has = true; break end end
-                end
-                if has then break end
-            end
-            if has then covered += 1 end
-        end
-    end
-    return required, covered
+    local criteria = Validity.criteria(r, results, snapshot)
+    return criteria.required, criteria.requiredCovered
 end
 local function shortTime(value)
     local text = tostring(value or "")
@@ -401,7 +378,7 @@ end
 function M.build(s)
     local u, r = s.ui, s.ui.byId[s.ui.selected]
     local v = u.review
-    local nodes = {context.bar(s, {current = {tab = "review"}})}
+    local nodes = {}
     if not r then
         return ui.node("col", {key = "review", role = "workbench.review", gap = "sm"}, nodes)
     end

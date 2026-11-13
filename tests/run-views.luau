@@ -43,7 +43,19 @@ local uiStub = {
     overflow = function(n) return node("overflow", {hidden = n}) end,
     el = function(tag, props, children) return node("el", merge(props, {tag = tag}), children) end,
 }
-local ternStub = {ui = uiStub}
+local function encode(value)
+    local kind = type(value)
+    if kind == "table" then
+        local parts = {}
+        for index = 1, #value do parts[index] = encode(value[index]) end
+        return "[" .. table.concat(parts, ",") .. "]"
+    elseif kind == "string" then return string.format("%q", value)
+    elseif kind == "boolean" then return value and "true" or "false"
+    elseif kind == "number" then return tostring(value) end
+    return '""'
+end
+local ternStub = {ui = uiStub, json = {array = function() return {} end, encode = encode,
+    decode = function() return nil end}}
 tern = ternStub
 
 local test = require("./views")

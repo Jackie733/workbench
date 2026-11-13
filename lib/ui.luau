@@ -5,6 +5,7 @@ local handoff = require("./handoff")
 local runview = require("./runview")
 local reviewview = require("./reviewview")
 local auditview = require("./auditview")
+local Audit = require("./audit")
 local function units(text, position)
     local n, index = 0, 0
     for _, code in utf8.codes(text) do
@@ -117,35 +118,23 @@ local function form(s)
     if s.dirty then table.insert(nodes, note(s.saving and "正在保存…" or "草稿已保留在此项目；尚未写入需求文件。")) end
     return ui.node("col", {key = "form", role = "workbench.form", gap = "sm"}, nodes)
 end
-local stepOrder, steps, nextActions = context.stepOrder, context.steps, context.nextActions
 local openAction = context.openAction
-local function workflowSteps(r)
-    return ui.node("field", {key = "workflowSteps", label = "交付流程",
-        help = "点击步骤可切换页面；主按钮始终是当前建议动作。"}, {context.stepper(r)})
-end
 local function detail(s, r)
     if not r then return ui.node("empty", {key = "noSelection", variant = "inline", title = "选择一项需求", text = "从列表或看板选择需求以查看详情。"}) end
-    local nextStep = nextActions[r.stage] or {label = "继续处理", tab = "requirements"}
     local editingReason = not s.writable and "只读模式：先在页首取得编辑权"
         or (s.handoff.pendingSend ~= nil and "已有业务请求待核对；完成核对前不能修改需求" or false)
-    local children = {
-        row("detailTitle", {ui.text({ui.span(r.title, "title")}), ui.badge(stageNames[r.stage] or r.stage, tones[r.stage] or "muted")}),
-        note((r.number or "") .. " · " .. (types[r.type] or r.type) .. " · 优先级 " .. (priorities[r.priority] or r.priority)
-            .. " · 第 " .. tostring(math.min(stepOrder[r.stage] or 1, #steps)) .. " / " .. tostring(#steps) .. " 步"),
-        workflowSteps(r),
-        row("detailPrimary", {ui.button(nextStep.label, {key = "next-step", variant = "primary", size = "sm",
-            actions = {click = openAction(nextStep)}})}),
-    }
+    local children = {}
     if r.stage == "blocked" and r.blockedReason then
         table.insert(children, ui.card("当前被阻塞", {ui.text(r.blockedReason),
-            button("回到资料页补充澄清", openAction({tab = "handoff", sub = "materials"}), "default")}, {key = "blockedReason", tone = "warning"}))
+            button("去方案页补充澄清", openAction({tab = "design", sub = "materials"}), "default")}, {key = "blockedReason", tone = "warning"}))
     end
-    table.insert(children, ui.node("rule", {}))
     table.insert(children, ui.text({ui.span("目标", "strong")})); table.insert(children, ui.md(r.goal or ""))
     if r.scope and r.scope ~= "" then table.insert(children, ui.text({ui.span("范围", "strong")})); table.insert(children, ui.md(r.scope)) end
     if #(r.acceptanceCriteria or {}) > 0 then
         table.insert(children, ui.text({ui.span("验收条件", "strong")}))
-        for _, c in r.acceptanceCriteria do table.insert(children, ui.text("• " .. c.description)) end
+        for _, c in r.acceptanceCriteria do
+            table.insert(children, ui.text("• " .. c.description .. (c.required and "（必需）" or "（信息性）")))
+        end
     else
         table.insert(children, ui.text({ui.span("尚无验收条件；批准与验收会因缺少可验证结果而受阻。", "warning")}))
     end
@@ -154,24 +143,21 @@ local function detail(s, r)
     table.insert(children, row("detailActions", {
         button("编辑需求", "edit-requirement", "default", editingReason),
         button("用作资料草稿", "prefill-selected", "default"),
-        button("返回需求列表", "back-list", "quiet"),
     }))
     return ui.node("col", {key = "detail", role = "workbench.detail", gap = "sm"}, children)
 end
 local function listView(s)
     local visible = requirements(s)
-    if s.detailMode and s.selected and s.byId[s.selected] then return detail(s, s.byId[s.selected]) end
     local listChildren = {}
     for _, r in visible do table.insert(listChildren, rowItem(r)) end
     local items = ui.node("list", {key = "requirements", selected = s.selected, max = {lines = 12},
         empty = "没有匹配的需求；调整筛选或新建一项"}, listChildren)
     local stageOptions = {{value = "all", label = "全部阶段"}}
     for _, stage in stages do table.insert(stageOptions, {value = stage[1], label = stage[2]}) end
-    local listHead = {ui.text({ui.span("需求", "title"), ui.span(" · " .. tostring(#visible), "muted")})}
-    if s.writable then table.insert(listHead, button("新建需求", "new-requirement", "primary")) end
+    local listHead = {ui.text({ui.span("列表 · " .. tostring(#visible) .. " 项", "strong")})}
     local list = ui.node("col", {key = "listView", role = "workbench.list", gap = "sm"}, {
         row("listHead", listHead),
-        note("点击需求进入详情；详情页的主按钮是当前建议动作，流程条可随时切换页面。"),
+        note("点击需求进入工作区；工作区顶部的主按钮是当前建议动作。"),
         ui.node("input", {key = "search", text = s.query or "", cursor = units(s.query or "", s.queryCursor or utf8.len(s.query or "")),
             placeholder = "搜索标题、目标、标签", aria = "搜索需求", variant = "field", icon = "search"}),
         choices("priorityFilter", "按优先级筛选", s.priorityFilter or "all", {
@@ -184,7 +170,55 @@ local function listView(s)
     })
     return list
 end
-local function board(s)
+local function attentionSection(s)
+    local attention = s.attention
+    local items = attention and attention.items or {}
+    local children = {}
+    if not attention then
+        table.insert(children, note("正在读取各需求的门禁条件…"))
+    elseif #items == 0 then
+        table.insert(children, note("没有未解决的可执行条件。" .. (attention.errors > 0 and (" 有 " .. tostring(attention.errors) .. " 项记录无法读取，未计入。") or "")))
+    else
+        for _, item in items do
+            local meta = {}
+            for index, reason in item.reasons do
+                if index > 3 then break end
+                table.insert(meta, ui.text({ui.span("• " .. reason, "muted")}))
+            end
+            table.insert(children, ui.node("card", {key = "attention-" .. item.requirementId, head = item.number .. " · " .. item.title,
+                meta = #item.reasons > 3 and ("另有 " .. tostring(#item.reasons - 3) .. " 项") or nil,
+                tone = item.tone or "warning", actions = {click = "requirement=" .. item.requirementId}}, meta))
+        end
+        local sources = {"由当前项目记录派生；读取或处理不会改变门禁"}
+        if attention.errors > 0 then table.insert(sources, tostring(attention.errors) .. " 项记录无法读取，已单独列出") end
+        if attention.truncated then table.insert(sources, "需求过多，仅扫描前 " .. tostring(attention.scanned or 40) .. " 项") end
+        table.insert(children, note(table.concat(sources, " · ")))
+    end
+    return ui.node("section", {key = "attention", role = "workbench.attention",
+        head = "需要处理 · " .. tostring(attention and attention.actionable or #items), collapsible = true,
+        collapsed = #items == 0}, children)
+end
+local function layoutButton(s, value, label)
+    local selected = (s.layout or "list") == value
+    return ui.button(label, {key = "layout-" .. value, variant = selected and "primary" or "default", size = "sm",
+        on = selected, actions = {click = "change:layout=" .. value}})
+end
+local board
+local function requirementsDestination(s)
+    local head = {ui.node("row", {key = "requirementsTitle", gap = "sm", wrap = true}, {
+        ui.text({ui.span("需求", "title")}),
+        ui.node("row", {key = "layoutChoices", gap = "xs"}, {
+            layoutButton(s, "list", "列表"), layoutButton(s, "board", "看板")}),
+    })}
+    if s.writable then
+        table.insert(head, button("新建需求", "new-requirement", "primary"))
+    end
+    local nodes = {ui.node("row", {key = "requirementsHead", gap = "sm", wrap = true, align = "center"}, head),
+        attentionSection(s)}
+    if (s.layout or "list") == "board" then table.insert(nodes, board(s)) else table.insert(nodes, listView(s)) end
+    return ui.node("col", {key = "requirementsDestination", role = "workbench.requirements", gap = "sm"}, nodes)
+end
+board = function(s)
     local visible, cols, secondary = requirements(s), {}, {}
     local function card(r)
         return ui.node("card", {key = r.requirementId, head = r.title,
@@ -221,7 +255,64 @@ local function board(s)
     if #secondary > 0 then table.insert(content, ui.node("section", {key = "exceptions", head = "已阻塞 / 已取消 · " .. tostring(#secondary), collapsible = true, collapsed = true}, secondary)) end
     return ui.node("col", {key = "boardView", role = "workbench.board", gap = "sm"}, content)
 end
-local function runtime(s)
+local function activity(s)
+    local u = s.ui
+    local a = u.activity or {}
+    local queryField = u.review and u.review.fields and u.review.fields.activityQuery
+    local query = queryField and queryField.text or ""
+    local events = Audit.filter(a.events or {}, query)
+    local children = {
+        ui.node("row", {key = "activityHead", gap = "sm", wrap = true, align = "center"}, {
+            ui.text({ui.span("活动", "title")}),
+            note("跨需求的只追加事件索引；与某项需求的“历史”是同一事件流。"),
+        }),
+    }
+    if a.error then table.insert(children, ui.text({ui.span(a.error, "error")})) end
+    if a.notice then table.insert(children, ui.text({ui.span(a.notice, "warning")})) end
+    table.insert(children, ui.node("field", {key = "activityQueryField", label = "检索事件"}, {
+        ui.node("input", {key = "activityQuery", text = query, cursor = units(query, queryField and queryField.cursor or utf8.len(query)),
+            placeholder = "按需求编号、类型、摘要或引用检索", aria = "活动检索", variant = "field", icon = "search"}),
+    }))
+    table.insert(children, ui.node("row", {key = "activityActions", gap = "sm", wrap = true}, {
+        button("刷新", "activity-refresh", "default"),
+        button("写入活动导出", "activity-write", "primary", not u.writable or #events == 0 or a.busy),
+    }))
+    local rows = {}
+    for index, event in events do
+        if index > 120 then break end
+        table.insert(rows, ui.text(tostring(event.at) .. " · " .. tostring(event.requirement or "") .. " · "
+            .. tostring(event.kind) .. " · " .. tostring(event.summary) .. (event.ref ~= "" and (" · " .. event.ref) or "")))
+    end
+    if #rows == 0 then table.insert(rows, note(query == "" and "尚未读取到事件。" or "没有匹配的事件。")) end
+    if #events > 120 then table.insert(rows, note("仅显示前 120 条；共 " .. tostring(#events) .. " 条。")) end
+    table.insert(children, ui.node("scroll", {key = "activityEvents", max = {h = "28lines"}}, rows))
+    local caveats = {"导出只含事件索引（时间、需求、类型、摘要、引用），不含验证输出、聊天或凭据；不是防篡改日志。"}
+    if a.truncated then table.insert(caveats, "事件超过上限，已保留最新部分。") end
+    if a.exportPath then table.insert(caveats, "最近写入：" .. a.exportPath) end
+    table.insert(children, note(table.concat(caveats, " ")))
+    return ui.node("col", {key = "activity", role = "workbench.activity", gap = "sm"}, children)
+end
+local runtime
+local function session(s)
+    local u = s.ui
+    local diagnostics = {
+        note("项目路径：" .. s.payload.binding.projectRoot .. " · 来源 pane：" .. tostring(s.payload.source)
+            .. " · 会话：" .. s.payload.binding.sessionId .. " · 实例：" .. s.payload.binding.instanceId),
+    }
+    if s.receipt then table.insert(diagnostics, note("原始预填回执：" .. tostring(s.receipt.status) .. " · " .. tostring(s.receipt.reason or ""))) end
+    if s.snapshot then
+        for i = math.max(1, #s.snapshot.recentEvents - 11), #s.snapshot.recentEvents do
+            local ev = s.snapshot.recentEvents[i]
+            if ev then table.insert(diagnostics, ui.text(tostring(ev.type or "事件") .. " · " .. tostring(ev.summary or ""))) end
+        end
+    end
+    table.insert(diagnostics, note("运行快照与原始事件仅供排障；不会用于推断需求阶段或归属。"))
+    return ui.node("col", {key = "session", role = "workbench.session", gap = "sm"}, {
+        runtime(s),
+        ui.node("section", {key = "diagnostics", head = "绑定与原始事件", collapsible = true, collapsed = true}, diagnostics),
+    })
+end
+runtime = function(s)
     local data = s.snapshot
     local status = s.problem and "连接异常" or (data and ({idle="空闲",working="工作中",waiting_user="等待输入",disconnected="已断开"})[data.state] or "正在连接")
     local children = {row("runtimeStatus", {ui.text({ui.span("运行会话", "title")}), ui.badge(status, s.problem and "warning" or (data and data.state == "idle" and "success" or "muted"))})}
@@ -268,6 +359,11 @@ local function runtime(s)
     end
     return ui.node("col", {key = "runtime", role = "workbench.runtime", gap = "sm"}, children)
 end
+local function tabItems(list)
+    local items = {}
+    for _, tab in list do table.insert(items, {id = tab.id, label = tab.label}) end
+    return items
+end
 function M.build(s)
     local u = s.ui
     local data = s.snapshot
@@ -279,10 +375,13 @@ function M.build(s)
             u.storageUnsafe and "项目存储异常；先核对文件" or (u.busy and "正在处理上一步" or false)))
     end
     table.insert(headerActions, button("刷新", "reload", "default"))
-    local session = {ui.badge(status, statusTone), note(data and data.model and data.model:match("[^/]+$") or "模型未知")}
+    local sessionBadges = {ui.badge(status, statusTone), note(data and data.model and data.model:match("[^/]+$") or "模型未知")}
     if data and data.currentTool then
-        table.insert(session, note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")))
+        table.insert(sessionBadges, note("正在使用 " .. tostring(data.currentTool.toolName or data.currentTool.name or "工具")))
     end
+    local tab = u.tab
+    if not (context.destination[tab] or context.workspaceTab[tab]) then tab = "requirements" end
+    local inWorkspace = context.workspaceTab[tab] == true
     local nodes = {
         row("pageHeader", {ui.node("col", {gap = "xs"}, {
             ui.text({ui.span("Tern 工作台", "title")}),
@@ -290,9 +389,16 @@ function M.build(s)
         }), ui.badge(u.loading and "读取中" or (u.writable and "可编辑" or (u.project and "只读" or "未初始化")),
             u.loading and "pending" or (u.writable and "success" or "muted")),
         ui.node("row", {key = "headerActions", gap = "xs", wrap = true}, headerActions)}),
-        row("sessionSummary", session),
-        ui.node("tabs", {key = "tabs", active = u.tab or "requirements", items = {{id="requirements",label="需求"},{id="board",label="看板"},{id="handoff",label="资料与批准"},{id="results",label="实施与验证"},{id="review",label="审查与验收"},{id="audit",label="审计"},{id="runtime",label="运行"},{id="diagnostics",label="诊断"}}}),
+        row("sessionSummary", sessionBadges),
     }
+    if inWorkspace then
+        table.insert(nodes, row("workspaceBack", {
+            button("← 返回需求", "back-workspace", "quiet"),
+            note("工作区标签只切换本节内容；返回恢复列表/看板与筛选。"),
+        }))
+    else
+        table.insert(nodes, ui.node("tabs", {key = "tabs", active = tab, items = tabItems(context.destinations)}))
+    end
     if u.error then
         local actions = {}
         if u.takeoverAvailable then
@@ -309,7 +415,21 @@ function M.build(s)
         table.insert(nodes, ui.node("card", {key = "loadError", head = u.storageUnsafe and "项目存储异常" or "操作未完成", tone = "error"}, errorChildren))
     end
     if u.notice then table.insert(nodes, ui.text({ui.span(u.notice, "warning")})) end
-    if u.tab == "requirements" then
+    if inWorkspace then
+        table.insert(nodes, context.bar(s, {current = {tab = tab, sub = tab == "design" and u.handoff.tab or nil}}))
+        table.insert(nodes, ui.node("tabs", {key = "tabs", active = tab, items = tabItems(context.workspaceTabs)}))
+        local r = u.selected and u.byId[u.selected]
+        if u.loading then table.insert(nodes, note("正在读取当前需求…"))
+        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
+        elseif not r then table.insert(nodes, ui.node("empty", {key = "noSelection", variant = "inline",
+            title = "选择一项需求", text = "工作区绑定到一项需求；返回列表选择后继续。"}))
+        elseif tab == "requirement" then
+            table.insert(nodes, u.formMode and form(u) or detail(u, r))
+        elseif tab == "design" then table.insert(nodes, handoff.build(s))
+        elseif tab == "delivery" then table.insert(nodes, runview.build(s))
+        elseif tab == "acceptance" then table.insert(nodes, reviewview.build(s))
+        elseif tab == "history" then table.insert(nodes, auditview.build(s)) end
+    elseif tab == "requirements" then
         if u.loading then table.insert(nodes, note("正在只读读取项目需求…"))
         elseif u.formMode then table.insert(nodes, form(u))
         elseif not u.project then
@@ -327,44 +447,17 @@ function M.build(s)
             }))
         elseif #u.requirements == 0 then
             table.insert(nodes, ui.node("empty", {key = "empty", title = "还没有需求",
-                text = "创建第一项需求；之后按“资料 → 方案 → 批准 → 实施 → 审查验收”推进。"}, {
+                text = "创建第一项需求；之后按“资料 → 方案 → 批准 → 交付 → 验收”推进。"}, {
                 u.writable and button("创建第一项需求", "new-requirement", "primary")
                     or ui.button("启用编辑", {key = "empty-enable-edit", variant = "primary", size = "sm",
                         disabled = "只读模式：先取得编辑权才能创建需求", actions = {click = "enable-edit"}}),
             }))
-        else table.insert(nodes, listView(u)) end
-    elseif u.tab == "board" then
-        if u.loading then table.insert(nodes, note("正在只读读取项目需求…"))
-        elseif not u.project then table.insert(nodes, note("先初始化项目后，需求才会出现在看板。"))
-        else table.insert(nodes, board(u)) end
-    elseif u.tab == "handoff" then
-        if u.loading then table.insert(nodes, note("正在读取当前需求与不可变方案版本…"))
-        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
-        else table.insert(nodes, handoff.build(s)) end
-    elseif u.tab == "results" then
-        if u.loading then table.insert(nodes, note("正在读取计划、代码变化与验证证据…"))
-        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
-        else table.insert(nodes, runview.build(s)) end
-    elseif u.tab == "review" then
-        if u.loading then table.insert(nodes, note("正在读取审查与验收记录…"))
-        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
-        else table.insert(nodes, reviewview.build(s)) end
-    elseif u.tab == "audit" then
-        if u.loading then table.insert(nodes, note("正在读取审计时间线…"))
-        elseif not u.project then table.insert(nodes, note("先初始化项目存储并选择一项需求。"))
-        else table.insert(nodes, auditview.build(s)) end
-    elseif u.tab == "runtime" then
-        table.insert(nodes, runtime(s))
-    else
-        table.insert(nodes, note("运行快照与原始事件仅供排障；不会用于推断需求阶段。"))
-        table.insert(nodes, note("项目路径：" .. s.payload.binding.projectRoot .. " · 来源 pane：" .. tostring(s.payload.source) .. " · 会话：" .. s.payload.binding.sessionId))
-        if s.receipt then table.insert(nodes, note("原始预填回执：" .. tostring(s.receipt.status) .. " · " .. tostring(s.receipt.reason or ""))) end
-        if s.snapshot then
-            for i = math.max(1, #s.snapshot.recentEvents - 11), #s.snapshot.recentEvents do
-                local ev = s.snapshot.recentEvents[i]
-                if ev then table.insert(nodes, ui.text(tostring(ev.type or "事件") .. " · " .. tostring(ev.summary or ""))) end
-            end
-        end
+        else table.insert(nodes, requirementsDestination(u)) end
+    elseif tab == "activity" then
+        if u.loading then table.insert(nodes, note("正在读取各需求的事件…"))
+        else table.insert(nodes, activity(s)) end
+    elseif tab == "session" then
+        table.insert(nodes, session(s))
     end
     return ui.node("col", {key = "workbench", role = "workbench.live", gap = "sm"}, nodes)
 end

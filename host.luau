@@ -5,7 +5,10 @@ local store = require("./lib/store")
 local Workflow = require("./lib/workflow")
 local Results = require("./lib/results")
 local Review = require("./lib/review")
+local Validity = require("./lib/validity")
+local auditview = require("./lib/auditview")
 local Audit = require("./lib/audit")
+local context = require("./lib/context")
 local runview = require("./lib/runview")
 local ui = require("./lib/ui")
 local function invalidatePreview(h)
@@ -319,12 +322,7 @@ local function refreshHandoff(s)
     if h.pending and (h.pending.instanceId ~= s.payload.binding.instanceId
         or h.pending.sessionId ~= s.payload.binding.sessionId) then h.pending.staleBinding = true end
     local state = Workflow.approvalState(workflow, requirement)
-    local approvalReasons = {current = "当前授权有效；仍须生成并检查实施预览，再明确发送。",
-        not_approved = "尚无批准记录。", revoked = "当前授权已撤销。",
-        requirement_changed = "需求修订或内容摘要已改变；必须重新授权。",
-        newer_design = "已有更新的正式方案；必须批准最新版本。",
-        design_changed = "批准的正式方案校验不再匹配；必须重新授权。"}
-    h.approvalValid, h.approvalReason = state.valid, approvalReasons[state.reason] or tostring(state.reason)
+    h.approvalValid, h.approvalReason = state.valid, state.message or tostring(state.reason)
     local version, versionExists = tonumber(h.selectedVersion) or workflow.latestVersion, false
     for _, item in workflow.designs or {} do if item.version == version then versionExists = true; break end end
     if version > 0 and not versionExists then version = workflow.latestVersion; h.compareVersion = 0 end
@@ -345,7 +343,7 @@ local function refreshHandoff(s)
     if h.workflowError then h.error = h.workflowError end
 end
 local traceLimits = {verifyCommand = 4000, verifyCriteria = 200, newStep = 500, blockReason = 1000}
-local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200, findingDraft=4000}
+local reviewLimits = {reviewScope=2000, reviewFindings=8192, reviewReason=2000, reviewComment=4000, reviewReject=2000, reviewReopen=2000, auditQuery=200, activityQuery=200, findingDraft=4000}
 local function traceSnapshot(t)
     if not t then return nil end
     local fields = {}
@@ -399,6 +397,12 @@ end
 local function makeAudit(saved)
     return {busy=false, events=tern.json.array(), eventsTruncated=false,
         exportPath=type(saved)=="table" and type(saved.exportPath)=="string" and saved.exportPath:sub(1,2048) or nil}
+end
+local function makeActivity(saved)
+    saved = type(saved) == "table" and saved or {}
+    return {busy=false, events=tern.json.array(), truncated=false, errors=0, scanned=0,
+        error=nil, notice=nil,
+        exportPath=type(saved.exportPath)=="string" and saved.exportPath:sub(1,2048) or nil}
 end
 local function refreshTrace(s)
     local u, t = s.ui, s.ui and s.ui.trace
@@ -469,10 +473,12 @@ local function saveUi(s)
     if not s.ui then return end
     tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
         priorityFilter = s.ui.priorityFilter, stageFilter = s.ui.stageFilter, query = s.ui.query,
-        queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode,
+        queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode, layout = s.ui.layout,
         detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
         mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff),
-        trace = traceSnapshot(s.ui.trace), review = reviewSnapshot(s.ui.review), audit = {exportPath = s.ui.audit and s.ui.audit.exportPath or nil}})
+        trace = traceSnapshot(s.ui.trace), review = reviewSnapshot(s.ui.review),
+        audit = {exportPath = s.ui.audit and s.ui.audit.exportPath or nil},
+        activity = {exportPath = s.ui.activity and s.ui.activity.exportPath or nil}})
 end
 storageMessage = function(reason)
     local code = type(reason) == "table" and reason.code or reason
@@ -521,6 +527,99 @@ end
 local function selectedRequirement(s)
     local u = s.ui
     return u and u.selected and u.byId[u.selected] or nil
+end
+
+local MAX_SCAN, MAX_ACTIVITY_EVENTS = 40, 500
+local function readRequirementRecords(u, r)
+    local workflow, workflowError = Workflow.load(u.paths, r)
+    local plan, planError = Results.loadPlan(u.paths, r)
+    local results, resultsError = Results.loadResults(u.paths, r)
+    local reviews, reviewError = Review.load(u.paths, r)
+    if not workflow or not plan or not results or not reviews then
+        return nil, storageMessage(workflowError or planError or resultsError or reviewError or "未知错误")
+    end
+    return {workflow = workflow, plan = plan, results = results, reviews = reviews}
+end
+
+-- Cross-requirement projection over the same domain records the gates use.
+-- Conditions use stable reasons and deduplicate per requirement; a read failure
+-- is shown as an error item instead of being hidden.
+local function refreshScan(s)
+    local u = s.ui
+    if not u or not u.paths then return end
+    local attention = {items = {}, actionable = 0, errors = 0, scanned = 0, truncated = false}
+    local events = {}
+    local total = #u.requirements
+    local limit = math.min(total, MAX_SCAN)
+    attention.truncated = total > limit
+    for index = 1, limit do
+        local r = u.requirements[index]
+        attention.scanned += 1
+        local records, problem = readRequirementRecords(u, r)
+        local item = {requirementId = r.requirementId, number = r.number, title = r.title,
+            reasons = {}, rank = 99, tone = "warning"}
+        local function push(reason, rank)
+            if #item.reasons >= 6 then return end
+            table.insert(item.reasons, reason)
+            if rank < item.rank then item.rank = rank end
+        end
+        if not records then
+            attention.errors += 1
+            item.rank, item.tone = 1, "error"
+            table.insert(item.reasons, "记录无法完整读取：" .. tostring(problem))
+        else
+            for _, request in records.workflow.requests or {} do
+                if request.status == "delivery_unknown" and not request.resolution then
+                    push("投递结果待核对：" .. tostring(request.requestId), 1)
+                end
+            end
+            if r.stage == "blocked" then push("已阻塞：" .. (r.blockedReason or "未记录原因"), 2) end
+            local approval = Validity.approval(records.workflow, r, Workflow.requirementContent(r))
+            if (r.stage == "implementing" or r.stage == "verifying") and not approval.valid then
+                push("实施授权已失效：" .. tostring(approval.message), 3)
+            end
+            if r.stage == "awaiting_approval" and not approval.valid then push("方案待批准", 4) end
+            if r.stage == "implementing" or r.stage == "verifying" or r.stage == "awaiting_acceptance" then
+                local gate = Validity.acceptance(r, records.results, records.reviews)
+                if not gate.snapshot then
+                    push("缺少当前代码快照，验收不能通过", 4)
+                else
+                    if gate.findings.blockingOpen > 0 then
+                        push("有 " .. tostring(gate.findings.blockingOpen) .. " 项阻断发现未处置", 4)
+                    end
+                    local missing = gate.criteria.required - gate.criteria.requiredCovered
+                    if missing > 0 then push("必需验收条件缺少当前证据：" .. tostring(missing) .. " 项", 4) end
+                    if gate.ok and r.stage == "awaiting_acceptance" then push("证据齐备，待人工验收", 5) end
+                end
+            end
+            for _, event in Audit.timeline(r, records.workflow, records.plan, records.results, records.reviews) do
+                event.requirement, event.requirementId = r.number, r.requirementId
+                table.insert(events, event)
+            end
+        end
+        if #item.reasons > 0 then
+            item.tone = item.rank <= 2 and "error" or (item.rank == 5 and "success" or "warning")
+            table.insert(attention.items, item)
+        end
+    end
+    table.sort(attention.items, function(a, b)
+        if a.rank ~= b.rank then return a.rank < b.rank end
+        return tostring(a.number) < tostring(b.number)
+    end)
+    attention.actionable = #attention.items
+    table.sort(events, function(a, b)
+        if a.at == b.at then return tostring(a.kind) < tostring(b.kind) end
+        return a.at > b.at
+    end)
+    local truncatedEvents = #events > MAX_ACTIVITY_EVENTS
+    if truncatedEvents then
+        local limited = {}
+        for eventIndex = 1, MAX_ACTIVITY_EVENTS do table.insert(limited, events[eventIndex]) end
+        events = limited
+    end
+    u.attention = attention
+    u.activity.events, u.activity.truncated = events, attention.truncated or truncatedEvents
+    u.activity.errors, u.activity.scanned = attention.errors, attention.scanned
 end
 local function applyWorkflow(s, cx, action, args, completed)
     local u, h = s.ui, s.ui and s.ui.handoff
@@ -1202,6 +1301,18 @@ local function handoffAction(s, act, cx)
         saveUi(s)
     end
 end
+local priorityRank = {urgent = 1, high = 2, normal = 3, low = 4}
+local function requirementOrder(u)
+    return function(a, b)
+        if u.sort == "number" then return a.number < b.number end
+        if u.sort == "priority" then
+            if priorityRank[a.priority] ~= priorityRank[b.priority] then
+                return priorityRank[a.priority] < priorityRank[b.priority]
+            end
+        end
+        return a.updatedAt > b.updatedAt
+    end
+end
 local function refreshProject(s)
     local u = s.ui
     if not u or not u.paths then return end
@@ -1227,19 +1338,13 @@ local function refreshProject(s)
     if #failures > 0 then
         u.error, u.storageUnsafe, u.writable = "有 " .. tostring(#failures) .. " 项需求无法安全读取；当前只读，未覆盖任何文件。", true, false
     end
-    table.sort(u.requirements, function(a, b)
-        if u.sort == "number" then return a.number < b.number end
-        if u.sort == "priority" then
-            local rank = {urgent = 1, high = 2, normal = 3, low = 4}
-            if rank[a.priority] ~= rank[b.priority] then return rank[a.priority] < rank[b.priority] end
-        end
-        return a.updatedAt > b.updatedAt
-    end)
+    table.sort(u.requirements, requirementOrder(u))
     if u.selected and not u.byId[u.selected] then u.selected = nil end
     refreshHandoff(s)
     refreshTrace(s)
     refreshReview(s)
-    if u.tab == "audit" then refreshAudit(s) end
+    if u.tab == "history" then refreshAudit(s) end
+    refreshScan(s)
 end
 local function parseFindings(text)
     local findings = tern.json.array()
@@ -1261,11 +1366,8 @@ local function parseFindings(text)
 end
 local function currentVerificationIds(results, requirement, snapshot, passedOnly)
     local ids = tern.json.array()
-    for _, verification in results and results.verifications or {} do
-        if verification.requirementRevision == requirement.revision and verification.codeSnapshotSha256 == snapshot
-            and (not passedOnly or verification.result == "passed") then
-            table.insert(ids, verification.id)
-        end
+    for _, id in Validity.currentVerificationIds(results, requirement, snapshot, passedOnly) do
+        table.insert(ids, id)
     end
     return ids
 end
@@ -1524,6 +1626,40 @@ local function auditAction(s, act, cx)
     end
     saveUi(s); cx:render()
 end
+local function activityAction(s, act, cx)
+    local u, a = s.ui, s.ui and s.ui.activity
+    if not u or not a then return end
+    if act == "activity-refresh" then
+        refreshScan(s); saveUi(s); cx:render(); return
+    end
+    if act ~= "activity-write" then return end
+    if not u.writable then a.error = "需要项目编辑锁才能写入导出"; cx:render(); return end
+    local events = Audit.filter(a.events or {}, s.ui.review and s.ui.review.fields and s.ui.review.fields.activityQuery and s.ui.review.fields.activityQuery.text or "")
+    if #events == 0 then a.error = "没有可导出的事件"; cx:render(); return end
+    local lines = {"# 工作台活动导出", "",
+        "项目：" .. tostring(u.project and u.project.root or ""),
+        "范围：跨需求事件索引；不含验证输出、聊天、认证信息或凭据。", ""}
+    for _, event in events do
+        table.insert(lines, "- " .. tostring(event.at) .. " · " .. tostring(event.requirement or "")
+            .. " · " .. tostring(event.kind) .. " · " .. tostring(event.summary)
+            .. (event.ref ~= "" and (" · " .. event.ref) or ""))
+    end
+    local markdown = table.concat(lines, "\n")
+    if #markdown > 131072 then
+        a.error = "导出内容超过 128 KiB；未生成不完整的导出。"
+        cx:render(); return
+    end
+    local directory = u.paths.store .. "\\exports"
+    local file = directory .. "\\activity-" .. tostring(live.epoch()) .. ".md"
+    local made, mkdirError = pcall(tern.fs.mkdir, directory)
+    if not made then a.error = "导出目录创建失败：" .. tostring(mkdirError); cx:render(); return end
+    local wrote, writeError = pcall(tern.fs.write, file, markdown)
+    if wrote then
+        a.exportPath = file
+        a.notice = "活动事件索引已写入项目导出目录。"
+    else a.error = "导出写入失败：" .. tostring(writeError) end
+    saveUi(s); cx:render()
+end
 local function scheduleProjectRefresh(s, cx)
     local u = s.ui
     if not u or not u.paths then return end
@@ -1552,7 +1688,23 @@ local function loadWorkbench(s, cx)
     local location = live.path(s.payload.location.marker)
     local paths, failure = store.paths(location, binding.projectRoot)
     local saved = tern.kv.get(projectKey(s))
-    local u = {paths = paths, requirements = {}, byId = {}, tab = type(saved) == "table" and saved.tab or "requirements",
+    -- Old UI persisted flat tabs. Map them to the object-centered shell; unknown
+    -- values fall back to the requirements dataset instead of an unreachable page.
+    local savedTab = type(saved) == "table" and saved.tab or nil
+    local tabAliases = {board = "requirements", handoff = "design", results = "delivery",
+        review = "acceptance", audit = "history", runtime = "session", diagnostics = "session"}
+    local tab = tabAliases[savedTab] or savedTab
+    local detailMode = type(saved) == "table" and saved.detailMode == true or false
+    if savedTab == "requirements" and detailMode then tab = "requirement" end
+    if savedTab == "handoff" then detailMode = true end
+    if savedTab == "results" or savedTab == "review" or savedTab == "audit" then detailMode = true end
+    if savedTab == "runtime" or savedTab == "diagnostics" then detailMode = false end
+    if not (context.destination[tab] or context.workspaceTab[tab]) then tab, detailMode = "requirements", false end
+    if context.workspaceTab[tab] then detailMode = true end
+    local layout = "list"
+    if type(saved) == "table" and saved.layout == "board" then layout = "board"
+    elseif savedTab == "board" then layout = "board" end
+    local u = {paths = paths, requirements = {}, byId = {}, tab = tab,
         selected = type(saved) == "table" and saved.selected or nil,
         sort = type(saved) == "table" and saved.sort or "recent",
         priorityFilter = type(saved) == "table" and saved.priorityFilter or "all",
@@ -1560,7 +1712,8 @@ local function loadWorkbench(s, cx)
         query = type(saved) == "table" and saved.query or "",
         queryCursor = type(saved) == "table" and saved.queryCursor or nil,
         privacyMode = type(saved) == "table" and saved.privacyMode or "local",
-        detailMode = type(saved) == "table" and saved.detailMode or false,
+        layout = layout,
+        detailMode = detailMode,
         drafts = type(saved) == "table" and saved.drafts or {}, fields = {}, type = "feature",
         priority = "normal", writable = false, busy = false, token = s.token,
         formMode = type(saved) == "table" and saved.formMode == true or false,
@@ -1570,7 +1723,8 @@ local function loadWorkbench(s, cx)
         handoff = makeHandoff(type(saved) == "table" and saved.handoff or nil),
         trace = makeTrace(type(saved) == "table" and saved.trace or nil),
         review = makeReview(type(saved) == "table" and saved.review or nil),
-        audit = makeAudit(type(saved) == "table" and saved.audit or nil)}
+        audit = makeAudit(type(saved) == "table" and saved.audit or nil),
+        activity = makeActivity(type(saved) == "table" and saved.activity or nil)}
     s.ui = u
     for key, draft in u.drafts do
         if type(draft) == "table" then
@@ -1796,7 +1950,11 @@ local function traceEditorLocked(s)
     local t = s.ui.trace
     return not s.ui.writable or not t or not t.safe or t.busy
 end
-local function reviewEditorLocked(s)
+local reviewReadOnlyFields = {auditQuery = true, activityQuery = true}
+local function reviewEditorLocked(s, name)
+    -- Audit and activity search only filter already-loaded events; they must stay
+    -- usable in read-only projects and while review records are unavailable.
+    if name and reviewReadOnlyFields[name] then return false end
     local v = s.ui.review
     return not s.ui.writable or not v or not v.safe or v.busy
 end
@@ -1864,7 +2022,12 @@ local function applyChange(s, cx, name, value)
         end
     elseif name == "type" then s.ui.type = value; s.ui.dirty = true; persistForm(s)
     elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
-    elseif name == "sort" then s.ui.sort = value; refreshProject(s); saveUi(s)
+    elseif name == "sort" then
+        s.ui.sort = value
+        table.sort(s.ui.requirements, requirementOrder(s.ui))
+        saveUi(s)
+    elseif name == "layout" then
+        if value == "list" or value == "board" then s.ui.layout = value; saveUi(s) end
     elseif name == "priorityFilter" then s.ui.priorityFilter = value; saveUi(s)
     elseif name == "stageFilter" then s.ui.stageFilter = value; saveUi(s)
     elseif name == "activity" then
@@ -1884,15 +2047,19 @@ local function applyChange(s, cx, name, value)
     end
 end
 local function openPage(s, tab, sub)
-    if tab ~= "requirements" and tab ~= "board" and tab ~= "handoff" and tab ~= "results"
-        and tab ~= "review" and tab ~= "audit" and tab ~= "runtime" and tab ~= "diagnostics" then return end
-    s.ui.tab, s.ui.detailMode = tab, false
-    if tab == "handoff" then
-        if sub == "materials" or sub == "design" or sub == "approval" then s.ui.handoff.tab = sub end
-        refreshHandoff(s)
-    elseif tab == "results" then refreshTrace(s)
-    elseif tab == "review" then refreshReview(s)
-    elseif tab == "audit" then refreshReview(s); refreshAudit(s) end
+    if context.workspaceTab[tab] then
+        if not s.ui.selected or not s.ui.byId[s.ui.selected] then tab = "requirements" end
+        s.ui.tab, s.ui.detailMode = tab, tab ~= "requirements"
+        if tab == "design" then
+            if sub == "materials" or sub == "design" or sub == "approval" then s.ui.handoff.tab = sub end
+            refreshHandoff(s)
+        elseif tab == "delivery" then refreshTrace(s)
+        elseif tab == "acceptance" then refreshReview(s)
+        elseif tab == "history" then refreshReview(s); refreshAudit(s) end
+    elseif context.destination[tab] then
+        s.ui.tab, s.ui.detailMode = tab, false
+        if tab == "activity" then refreshScan(s) end
+    else return end
     saveUi(s)
 end
 tern.block.define("live", {
@@ -1966,7 +2133,7 @@ tern.block.define("live", {
         if not buffer then return false end
         if isHandoffField(s, target) and handoffEditorLocked(s, target) then return true end
         if isTraceField(s, target) and traceEditorLocked(s) then return true end
-        if isReviewField(s, target) and reviewEditorLocked(s) then return true end
+        if isReviewField(s, target) and reviewEditorLocked(s, target) then return true end
         if target ~= "materials" and target ~= "search" and s.ui.saving then return true end
         local length = utf8.len(buffer.text)
         local first, last = math.min(buffer.anchor or buffer.cursor, buffer.cursor), math.max(buffer.anchor or buffer.cursor, buffer.cursor)
@@ -2010,7 +2177,7 @@ tern.block.define("live", {
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if isTraceField(s, target) and traceEditorLocked(s) then return end
-            if isReviewField(s, target) and reviewEditorLocked(s) then return end
+            if isReviewField(s, target) and reviewEditorLocked(s, target) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             if buffer and ev.len == units(buffer.text, utf8.len(buffer.text)) then
@@ -2035,7 +2202,7 @@ tern.block.define("live", {
             local target = fieldName(ev.id)
             if isHandoffField(s, target) and handoffEditorLocked(s, target) then return end
             if isTraceField(s, target) and traceEditorLocked(s) then return end
-            if isReviewField(s, target) and reviewEditorLocked(s) then return end
+            if isReviewField(s, target) and reviewEditorLocked(s, target) then return end
             if target ~= "materials" and target ~= "search" and s.ui.saving then return end
             local buffer = target and bufferFor(s, target)
             local old = buffer and buffer.history and table.remove(buffer.history)
@@ -2047,11 +2214,21 @@ tern.block.define("live", {
             s.ui.handoff.tab = ev.item
             saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.tabs$") then
-            s.ui.tab, s.ui.detailMode = ev.item, false
-            if ev.item == "handoff" then refreshHandoff(s) end
-            if ev.item == "results" then refreshTrace(s) end
-            if ev.item == "review" then refreshReview(s) end
-            if ev.item == "audit" then refreshReview(s); refreshAudit(s) end
+            local item = tostring(ev.item)
+            if context.workspaceTab[item] then
+                if not s.ui.selected or not s.ui.byId[s.ui.selected] then
+                    s.ui.tab, s.ui.detailMode = "requirements", false
+                else
+                    s.ui.tab, s.ui.detailMode = item, true
+                    if item == "design" then refreshHandoff(s) end
+                    if item == "delivery" then refreshTrace(s) end
+                    if item == "acceptance" then refreshReview(s) end
+                    if item == "history" then refreshReview(s); refreshAudit(s) end
+                end
+            elseif context.destination[item] then
+                s.ui.tab, s.ui.detailMode = item, false
+                if item == "activity" then refreshScan(s) end
+            end
             saveUi(s)
         elseif ev.ev == "select" and ev.id:match("%.requirements$") then
             local id = tostring(ev.item):match("([^%.]+)$")
@@ -2059,11 +2236,10 @@ tern.block.define("live", {
             if (h.pending or h.pendingSend) and id ~= s.ui.selected then
                 handoffError(h, "已有请求待核对；先完成同一需求的回执核对，不能切换工作依据")
             elseif s.ui.byId[id] then
-                s.ui.selected, s.ui.detailMode = id, true
+                s.ui.selected, s.ui.tab, s.ui.detailMode = id, "requirement", true
                 refreshHandoff(s)
                 refreshTrace(s)
                 refreshReview(s)
-                if s.ui.tab == "audit" then refreshAudit(s) end
                 saveUi(s)
             end
         elseif ev.ev == "select" and type(ev.item) == "string" and ev.item:match("^review%-[%w_-]+|finding%-[%w_-]+$") then
@@ -2082,16 +2258,26 @@ tern.block.define("live", {
             if stepName then applyChange(s, cx, "status-" .. stepName, ev.value)
             elseif name then applyChange(s, cx, name, ev.value) end
         elseif ev.ev == "action" then
+            -- Tern splits a custom action name at its first `=` into act/value for
+            -- plain nodes (cards, text, table cells), while button nodes keep the
+            -- whole name. The workbench vocabulary is the joined form; restore it
+            -- only for the actions that use it, so other value-carrying events
+            -- (table bars and the like) are not rewritten.
             local act = ev.act
+            if type(act) == "string" and not act:find("=", 1, true)
+                and (type(ev.value) == "string" or type(ev.value) == "number")
+                and (act == "requirement" or act:match("^change:") or act:match("^review%-")) then
+                act = act .. "=" .. tostring(ev.value)
+            end
             -- Luau `and` truncates to one value; match separately so the value survives.
             local changeName, changeValue
             if type(act) == "string" then changeName, changeValue = act:match("^change:([%w%-_]+)=(.*)$") end
             if changeName then applyChange(s, cx, changeName, changeValue); return end
             local route = type(act) == "string" and act:match("^wb%-open%-([%w%-_]+)$")
             if route then
-                local sub = route:match("^handoff%-(%w+)$")
+                local sub = route:match("^design%-(%w+)$")
                 if sub and sub ~= "materials" and sub ~= "design" and sub ~= "approval" then sub = nil end
-                openPage(s, sub and "handoff" or route, sub)
+                openPage(s, sub and "design" or route, sub)
                 return
             end
             local req = type(act) == "string" and act:match("^requirement=(.+)$")
@@ -2100,14 +2286,17 @@ tern.block.define("live", {
                 if (h.pending or h.pendingSend) and req ~= s.ui.selected then
                     handoffError(h, "已有请求待核对；不能切换到另一项需求")
                 else
-                    s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirements", true
+                    s.ui.selected, s.ui.tab, s.ui.detailMode = req, "requirement", true
                     refreshHandoff(s)
+                    refreshTrace(s)
+                    refreshReview(s)
                     saveUi(s)
                 end
             elseif act == "open-handoff" or (type(act) == "string" and act:match("^handoff%-")) then handoffAction(s, act, cx)
             elseif type(act) == "string" and act:match("^results%-") then traceAction(s, act, cx)
             elseif type(act) == "string" and act:match("^review%-") then reviewAction(s, act, cx)
             elseif type(act) == "string" and act:match("^audit%-") then auditAction(s, act, cx)
+            elseif type(act) == "string" and act:match("^activity%-") then activityAction(s, act, cx)
             elseif act == "prefill" then prefill(s, cx)
             elseif act == "acknowledge-unknown" then
                 if s.pending and s.receipt and s.receipt.status == "delivery_unknown"
@@ -2131,7 +2320,7 @@ tern.block.define("live", {
             elseif act == "edit-requirement" and s.ui.writable and s.ui.selected then openForm(s, "edit", s.ui.byId[s.ui.selected])
             elseif act == "save-requirement" then saveRequirement(s, cx)
             elseif act == "back" then s.ui.formMode = false; s.ui.formError = nil; saveUi(s)
-            elseif act == "back-list" then s.ui.detailMode = false; saveUi(s)
+            elseif act == "back-workspace" then s.ui.tab, s.ui.detailMode = "requirements", false; saveUi(s)
             elseif act == "prefill-selected" and s.ui.selected then
                 local r = s.ui.byId[s.ui.selected]
                 if r then

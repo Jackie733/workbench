@@ -21,9 +21,35 @@ return function(tern, def, cx, payloadJson)
 
     event(s, {ev = "select", id = "main.workbench.requirements", item = "req-1"})
     check(s.ui.selected == "req-1", "应选择需求")
-    event(s, {ev = "select", id = "main.workbench.tabs", item = "review"})
+    check(s.ui.tab == "requirement" and s.ui.detailMode == true, "选择需求应进入工作区需求页")
+    check(s.ui.attention ~= nil and type(s.ui.attention.items) == "table", "打开后应派生需要处理投影")
+    check(s.ui.attention.actionable >= 1, "待验收需求缺少代码快照时应出现在需要处理")
+    check(#s.ui.activity.events > 0, "打开后应汇总跨需求事件")
+    event(s, {ev = "select", id = "main.workbench.tabs", item = "acceptance"})
+    check(s.ui.tab == "acceptance" and s.ui.detailMode == true, "工作区标签应切换到验收")
     local v = s.ui.review
     check(v.data ~= nil and #v.data.reviews == 2, "审查记录应加载")
+
+    action(s, "back-workspace")
+    check(s.ui.tab == "requirements" and s.ui.detailMode == false, "返回应回到需求数据集")
+    check(s.ui.selected == "req-1", "返回应保留选中项")
+    action(s, "change:layout=board")
+    check(s.ui.layout == "board", "布局切换应生效")
+    -- Plain nodes (board/attention cards) get act/value split by Tern; the host
+    -- must still route the joined vocabulary.
+    event(s, {ev = "action", act = "change:layout", value = "list"})
+    check(s.ui.layout == "list", "分裂的布局动作应生效")
+    event(s, {ev = "action", act = "change:layout", value = "board"})
+    event(s, {ev = "action", act = "requirement", value = "req-1"})
+    check(s.ui.selected == "req-1" and s.ui.tab == "requirement", "看板卡片点击应打开需求工作区")
+    action(s, "back-workspace")
+    event(s, {ev = "select", id = "main.workbench.tabs", item = "activity"})
+    check(s.ui.tab == "activity" and s.ui.detailMode == false, "活动是全局目的地")
+    event(s, {ev = "select", id = "main.workbench.tabs", item = "session"})
+    check(s.ui.tab == "session", "会话是全局目的地")
+    event(s, {ev = "select", id = "main.workbench.tabs", item = "definition"})
+    check(s.ui.tab == "session", "未知标签不应切换页面")
+    event(s, {ev = "select", id = "main.workbench.tabs", item = "acceptance"})
 
     action(s, "review-toggle=reject")
     check(v.panel == "reject", "toggle 应打开驳回面板")
@@ -102,9 +128,50 @@ return function(tern, def, cx, payloadJson)
     v.fields.reviewFindings.text = "blocking|过期后没有入口\n"
     local saved = def.save(s)
     local revived = def.init(cx, {payloadJson}, saved)
+    check(revived.ui.tab == "acceptance" and revived.ui.detailMode == true, "重载应恢复工作区标签")
+    check(revived.ui.layout == "board", "重载应恢复列表/看板布局")
+    check(revived.ui.selected == "req-1", "重载应恢复选中需求")
     check(revived.ui.review.panel == "dispose", "重载应恢复面板状态")
     check(revived.ui.review.draftSeverity == "blocking", "重载应恢复草稿严重度")
     check(revived.ui.review.fields.reviewFindings.text == "blocking|过期后没有入口\n", "重载应恢复发现草稿")
+
+    -- Readiness is derived at render time from the same gate inputs, and it is
+    -- read-only: missing snapshots stay unknown, matching evidence becomes ready.
+    local context = require("../lib/context")
+    local requirement = s.ui.byId["req-1"]
+    local snapshot = s.ui.review.data.reviews[1].codeSnapshotSha256
+    local revisionBefore = requirement.revision
+    local reading = context.readiness(requirement, s.ui)
+    check(reading ~= nil and reading.state == "unknown", "缺少代码快照时 readiness 不得显示可以验收")
+    check(requirement.revision == revisionBefore, "readiness 不改变需求修订")
+    s.ui.trace.results.changes = {head = "abc123", fingerprint = snapshot, files = {}, filesTruncated = false,
+        diff = "", diffSha256 = snapshot, diffTruncated = false, commits = {}, commitsTruncated = false,
+        capturedAt = 1700000000000, dirty = false}
+    s.ui.trace.results.verifications = {{id = "verification-1", command = "node test.js", cwd = "/tmp/demo-project",
+        criterionIds = {"C1", "C2"}, requirementRevision = requirement.revision, codeSnapshotSha256 = snapshot,
+        startedAt = 1700000000000, endedAt = 1700000001000, exitCode = 0, timedOut = false, result = "passed",
+        stdoutPreview = "ok", stderrPreview = "", stdoutBytes = 2, stderrBytes = 0, stdoutTruncated = false,
+        stderrTruncated = false, evidencePath = "evidence/verification-1.json"}}
+    reading = context.readiness(requirement, s.ui)
+    check(reading.state ~= "ready", "仍有未处置阻断发现时不得显示可以验收")
+    for _, review in s.ui.review.data.reviews do
+        for _, finding in review.findings do
+            if finding.severity == "blocking" then
+                table.insert(review.events, {id = "review-event-waive", findingId = finding.id,
+                    action = "waived", reason = "风险已接受", at = 1700000009000})
+            end
+        end
+    end
+    reading = context.readiness(requirement, s.ui)
+    check(reading.state == "ready" and reading.label:find("验收", 1, true) ~= nil,
+        "当前证据齐备且阻断已豁免后 readiness 应可验收")
+
+    -- Activity export writes only its event index into the project export folder.
+    s.ui.writable = true
+    check(#s.ui.activity.events > 0, "活动事件应可用于导出")
+    action(s, "activity-write")
+    check(s.ui.activity.exportPath ~= nil and s.ui.activity.exportPath:find("activity%-") ~= nil,
+        "活动导出应写入项目导出目录")
 
     local ui = require("../lib/ui")
     local ok, view = pcall(ui.build, revived)

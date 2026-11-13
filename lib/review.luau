@@ -1,6 +1,7 @@
 --!strict
 -- Append-only review records, finding dispositions and human acceptance decisions.
 local Store = require('./store')
+local Validity = require('./validity')
 local M = {}
 local MAX_REVIEWS, MAX_FINDINGS, MAX_EVENTS, MAX_DECISIONS = 50, 50, 200, 20
 local sources = {native_review = true, manual = true, external = true}
@@ -185,44 +186,14 @@ function M.disposeFinding(paths, req, token, args, expected, cb)
     save(paths, req, token, nextData, data.revision, cb)
 end
 function M.findingState(review, findingId)
-    local state, reason, at = "open", nil, nil
-    for _, event in review.events do
-        if event.findingId == findingId then state = event.action == "reopened" and "open" or event.action; reason, at = event.reason, event.at end
-    end
-    return state, reason, at
+    return Validity.findingState(review, findingId)
 end
 function M.latestAcceptance(data)
     local item = data and data.acceptances and data.acceptances[#data.acceptances]
     return item
 end
 function M.acceptanceGate(req, results, data)
-    local problems = {}
-    local snapshot = results and results.changes and results.changes.fingerprint
-    if not snapshot then table.insert(problems, "缺少当前代码快照；请先在结果页读取代码变化") end
-    for _, criterion in req.acceptanceCriteria or {} do
-        if criterion.required then
-            local covered = false
-            for _, verification in results and results.verifications or {} do
-                if snapshot and verification.result == "passed" and verification.requirementRevision == req.revision
-                    and verification.codeSnapshotSha256 == snapshot then
-                    for _, id in verification.criterionIds do if id == criterion.id then covered = true; break end end
-                end
-                if covered then break end
-            end
-            if not covered then table.insert(problems, "必需验收条件 " .. criterion.id .. " 缺少当前代码快照上的通过证据") end
-        end
-    end
-    for _, review in data and data.reviews or {} do
-        for _, finding in review.findings do
-            if finding.severity == "blocking" then
-                local state = M.findingState(review, finding.id)
-                if state == "open" then
-                    table.insert(problems, "阻断发现仍未解决或豁免：" .. finding.description:sub(1, 160))
-                end
-            end
-        end
-    end
-    return {ok=#problems == 0, problems=problems, snapshot=snapshot}
+    return Validity.acceptance(req, results, data)
 end
 function M.recordAcceptance(paths, req, token, args, expected, cb)
     local function fail(code) cb(nil, {code=code}) end

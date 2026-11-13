@@ -31,8 +31,11 @@ return function(tern, repo, tempRoot, waitOne)
     local Store=assert(loadstring("local tern=...\n"..tern.fs.read(repo.."\\lib\\store.luau",262144)))(tern)
     waitOne()
     local source=tern.fs.read(repo.."\\lib\\workflow.luau",262144)
+    local Validity=assert(loadstring(tern.fs.read(repo.."\\lib\\validity.luau",262144)))()
+    waitOne()
     local Workflow=assert(loadstring("local tern,require=...\n"..source))(tern,function(name)
-        assert(name=="./store","未知工作流依赖");return Store
+        if name=="./store" then return Store end
+        assert(name=="./validity","未知工作流依赖");return Validity
     end)
     waitOne()
     local Diff=assert(loadstring(tern.fs.read(repo.."\\lib\\diff.luau",262144)))()

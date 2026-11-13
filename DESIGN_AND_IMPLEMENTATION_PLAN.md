@@ -7,6 +7,19 @@
 - 现有项目：`/home/jackie/code/workbench`；远端仓库：`git@github.com:Jackie733/workbench.git`。
 - 工作名称：需求交付工作台。暂不更改插件 ID `multi-model-workbench`，避免提前改变安装与数据身份。
 
+## Redesign planning addendum (2026-11-13)
+
+The [revised redesign proposal](docs/REDESIGN_PROPOSAL.md), [research register](docs/REDESIGN_RESEARCH.md), and [implementation plan](docs/REDESIGN_IMPLEMENTATION_PLAN.md) define the proposed next iteration. This addendum records documentation work, not approval of new storage, protocol, lifecycle, batch-execution, or selective-validity extensions. Sections 1.2 and the historical phase records remain authoritative until a concrete scope decision changes them.
+
+The recommended sequence brings object-centered navigation, read-only readiness, existing approval-snapshot comparison, and command preparation forward. Selective evidence invalidation is deferred to a shadow experiment; current global invalidation remains the production baseline. The redesigned implementation phases are R0-R6 and are distinct from the historical phases 0-6 below.
+
+The phase 6 no-migration decision applies only to legacy KV and old tasks/design files. It does not authorize dropping current schema-1 requirements or evidence. Current-data extensions require a versioned reader/writer and recovery plan. No redesigned phase or real-project release acceptance is marked complete by this addendum.
+
+Scope decisions taken since this addendum:
+
+- 2026-11-13: the user explicitly approved replacing the four top-level destinations in §3.2 with the object-centered shell in [the proposal](docs/REDESIGN_PROPOSAL.md) §3 (需求 / 活动 / 会话 + requirement workspace tabs). UI copy stays Chinese for now; i18n is out of scope. The §3.2/§3.4 text below is the updated contract; the rest of the charter is unchanged.
+- R0 (shared validity evaluator) is being executed under this approval. No storage, protocol, lifecycle, batch, or selective-validity extension is thereby approved.
+
 ## 1. 产品定位与不可变约束
 
 ### 1.1 定位
@@ -67,31 +80,35 @@
 
 ### 3.2 顶层导航
 
-- **看板**：按需求阶段组织卡片，突出阻塞和需要用户处理的事项。
-- **需求**：可搜索、筛选、排序的需求列表及详情。
-- **运行**：当前绑定 omp 的实时活动、计划、工具、交付和待处理事项。
-- **审计**：跨需求事件检索，以及某个需求的完整证据链。
+2026-11-13 用户明确同意用本节替换原“看板／需求／运行／审计”四个顶层目的地（charter §10 的范围变更程序）。
 
-项目名、绑定会话、连接健康和当前请求应始终可见。实际模型未知时显示未知，不猜测、不擅自切换。
+- **需求**：唯一的需求数据集，筛选、排序、选中项共用；List／Board 是同一数据集的两种布局，不是两个目的地。
+- **活动**：跨需求事件检索与导出。
+- **会话**：被绑定 omp 的观测任务、工具、绑定细节与诊断；需求归属未知时明确标注未知，不猜测关联。
+
+“需要处理”是由领域记录派生的投影（未解决的可执行条件），不是第四个目的地，也不是未读通知中心。
+
+项目名、绑定会话、连接健康和当前请求归属应始终可见。实际模型未知时显示未知，不猜测、不擅自切换。文案暂用中文；i18n 不在本轮范围。
 
 ### 3.3 看板
 
-默认列：需求池、澄清中、设计中、待批准、实施中、验证中、待验收、已完成。已阻塞和已取消通过独立筛选展示，避免默认列过多。
+看板是“需求”目的地的 Board 布局：默认列按持久阶段分组，卡片显示编号、标题、优先级、阶段、当前运行状态、需要处理的事项和最近更新时间；readiness 只作为与列清晰区分的徽章。无法到达的空列不假装存在工作流，未知或旧阶段值保留在显式回退组。
 
-卡片显示编号、标题、优先级、阶段、当前运行状态、需要处理的事项和最近更新时间。方案版本、变更及验证摘要只在有真实数据时显示。
+已阻塞和已取消通过独立筛选展示，避免默认列过多。方案版本、变更及验证摘要只在有真实数据时显示。
 
 拖动只改变排序或执行允许的低风险状态调整。批准方案、开始实施、验收等有门禁的转换不能靠拖拽绕过。
 
-### 3.4 需求详情
+### 3.4 需求工作区
 
 | 页面 | 内容 |
 | --- | --- |
-| 概览 | 目标、范围、优先级、当前阶段、阻塞原因和下一步 |
-| 需求 | 背景、场景、验收条件、约束、附件和选定讨论摘录 |
-| 方案 | 正式方案版本、差异、风险、批注、批准和失效原因 |
-| 计划 | 实施步骤、状态、动态调整和阻塞项 |
-| 结果 | 基线、关联提交、真实 diff、验证证据和交付总结 |
-| 审计 | 审查发现、处理结论、验收决定和事件时间线 |
+| 需求 | 背景、场景、目标、范围、验收条件、约束、附件和选定讨论摘录 |
+| 方案 | 正式方案版本、差异、风险、批注、批准与失效原因；“准备交接”是次动作内联面板 |
+| 交付 | 实施步骤、基线、真实 diff、验证证据与命令准备 |
+| 验收 | 审查发现、处置结论、门禁证据与人工接受／驳回／重新打开 |
+| 历史 | 该需求的事件时间线与导出，与“活动”是同一事件流 |
+
+工作区顶部只保留只读 readiness 摘要（含缺失动作）与一个主操作；概览并入顶部摘要，不再单独成页。返回来源、滚动、筛选与布局的恢复规则见 [重设计提案](docs/REDESIGN_PROPOSAL.md) §3.1。
 
 每个页面只突出一个主操作。复杂操作放入上下文菜单，不新增一组全局 slash 命令。
 

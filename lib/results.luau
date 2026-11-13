@@ -1,6 +1,7 @@
 --!strict
 -- Requirement-scoped implementation plan, observed code results and verification evidence.
 local Store = require('./store')
+local Validity = require('./validity')
 local M = {}
 local MAX_STEPS, MAX_FILES, MAX_COMMITS, MAX_VERIFICATIONS = 40, 256, 50, 50
 local MAX_DIFF = 48 * 1024
@@ -272,8 +273,6 @@ function M.addVerification(paths, req, token, verification, evidence, expected, 
 end
 M.validateChanges = validateChanges
 function M.effectiveState(results, req, verification)
-    if verification.requirementRevision ~= req.revision then return "stale", "需求修订已变化" end
-    if results.changes and results.changes.fingerprint ~= verification.codeSnapshotSha256 then return "stale", "验证后代码已变化" end
-    return verification.result, nil
+    return Validity.verification(results, req, verification)
 end
 return M

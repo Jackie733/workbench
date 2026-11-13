@@ -68,11 +68,11 @@ return function(tern, repo)
                 sourceMarker = "⚒ demo · ab12cd34"}, source = 7, window = "win-1", location = {distro = "Ubuntu", marker = "m"}},
             snapshot = {state = "idle", model = "test/model", recentEvents = {}},
             problem = nil, error = nil, receipt = nil, pending = nil, text = "", cursor = 0,
-            ui = {tab = "review", selected = "req-1", writable = true, loading = false, busy = false,
+            ui = {tab = "acceptance", selected = "req-1", writable = true, loading = false, busy = false,
                 project = {projectId = "project-1", name = "demo", root = "/tmp/demo-project"},
                 requirements = {r1, r2}, byId = {["req-1"] = r1, ["req-2"] = r2},
                 query = "", queryCursor = 0, sort = "recent", priorityFilter = "all", stageFilter = "all",
-                privacyMode = "local", detailMode = false, formMode = false, mode = nil,
+                privacyMode = "local", layout = "list", detailMode = true, formMode = false, mode = nil,
                 fields = fields({"title", "goal", "scope", "criteria", "labels"}),
                 type = "feature", priority = "normal", drafts = {},
                 error = nil, notice = nil, storageUnsafe = false, takeoverAvailable = false,
@@ -90,17 +90,18 @@ return function(tern, repo)
                         changes = {head = "abc123", fingerprint = SHA, files = {}, commits = {}, diff = "",
                             capturedAt = 1700000000000, filesTruncated = false, commitsTruncated = false, diffTruncated = false},
                         verifications = {}}},
-                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "auditQuery", "findingDraft"}),
+                review = {fields = fields({"reviewScope", "reviewFindings", "reviewReason", "reviewComment", "reviewReject", "reviewReopen", "auditQuery", "activityQuery", "findingDraft"}),
                     source = "native_review", finding = "", action = "resolved", panel = "", draftSeverity = "major",
                     safe = true, busy = false, data = reviewsData(), error = nil, notice = nil},
-                audit = {busy = false, events = {}, eventsTruncated = false, markdown = "# 审计", exportPath = nil, error = nil, notice = nil}},
+                audit = {busy = false, events = {}, eventsTruncated = false, markdown = "# 审计", exportPath = nil, error = nil, notice = nil},
+                activity = {busy = false, events = {}, truncated = false, errors = 0, scanned = 2, exportPath = nil, error = nil, notice = nil}},
         }
     end
 
     -- Dispatch contract: everything the views emit must be handled by host.luau.
     local simpleActions = {prefill = true, reload = true, ["enable-edit"] = true, initialize = true, takeover = true,
         ["takeover-initialize"] = true, ["new-requirement"] = true, ["edit-requirement"] = true, ["save-requirement"] = true,
-        back = true, ["back-list"] = true, ["prefill-selected"] = true, rebase = true, ["acknowledge-unknown"] = true, ["open-handoff"] = true,
+        back = true, ["back-workspace"] = true, ["prefill-selected"] = true, rebase = true, ["acknowledge-unknown"] = true, ["open-handoff"] = true,
         ["review-open-native"] = true, ["review-create"] = true, ["review-dispose"] = true, ["review-accept"] = true,
         ["review-reject"] = true, ["review-reopen"] = true, ["review-cancel"] = true, ["review-add-finding"] = true,
         ["handoff-preview"] = true, ["handoff-baseline"] = true, ["handoff-prefill"] = true, ["handoff-send"] = true,
@@ -108,12 +109,13 @@ return function(tern, repo)
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
         ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true,
         ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
-        ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true}
+        ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
+        ["activity-refresh"] = true, ["activity-write"] = true}
     local changeNames = {rvSource = true, rvAction = true, draftSeverity = true, type = true, priority = true, sort = true,
-        priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
+        layout = true, priorityFilter = true, stageFilter = true, activity = true, includeRequirement = true, selectedVersion = true,
         compareVersion = true, privacyMode = true}
     local fieldKeys = {reviewScope = true, reviewFindings = true, reviewReason = true, reviewComment = true,
-        reviewReject = true, reviewReopen = true, auditQuery = true, findingDraft = true,
+        reviewReject = true, reviewReopen = true, auditQuery = true, activityQuery = true, findingDraft = true,
         verifyCommand = true, verifyCriteria = true, newStep = true, blockReason = true,
         materials = true, search = true, diff = true}
     local function validAction(act)
@@ -194,7 +196,6 @@ return function(tern, repo)
     end
 
     render("未选择需求", function(s) s.ui.selected = nil end, function(_, view)
-        check(findByKey(view, "contextSwitcher") ~= nil, "未选择需求时应提供切换器")
         check(findByKey(view, "acceptance") == nil, "未选择需求时不应渲染验收卡")
     end)
     render("只读", function(s) s.ui.writable = false end, function(_, view)
@@ -252,7 +253,6 @@ return function(tern, repo)
     end, function(_, view)
         check(findByKey(view, "reopenPanel") ~= nil, "应渲染重开面板")
         check(findByKey(view, "historyCard") ~= nil, "有验收历史时应渲染历史卡")
-        check(findByKey(view, "next-step") ~= nil, "已完成需求的上下文条应给出审计下一步")
     end)
     render("无效草稿行", function(s)
         s.ui.review.fields.reviewFindings = buffer("这行没有严重度\n")
@@ -285,19 +285,28 @@ return function(tern, repo)
         check(ok, label .. ": ui.build 失败 " .. tostring(ok and "" or view))
         if ok then validateTree(label, view) end
     end
-    page("需求列表", function(s) s.ui.tab = "requirements" end)
-    page("需求详情", function(s) s.ui.tab = "requirements"; s.ui.detailMode = true end)
-    page("需求表单", function(s) s.ui.tab = "requirements"; s.ui.formMode = true; s.ui.mode = "new"; s.ui.dirty = true end)
-    page("初始化", function(s) s.ui.tab = "requirements"; s.ui.project = nil; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil end)
+    page("需求列表", function(s) s.ui.tab = "requirements"; s.ui.detailMode = false end)
+    page("需求列表-看板", function(s) s.ui.tab = "requirements"; s.ui.layout = "board"; s.ui.detailMode = false end)
+    page("需要处理", function(s)
+        s.ui.tab = "requirements"; s.ui.detailMode = false
+        s.ui.attention = {items = {{requirementId = "req-1", number = "R-001", title = "需求一",
+            reasons = {"缺少当前代码快照", "有 1 项阻断发现未处置"}, rank = 4, tone = "warning"}},
+            actionable = 1, errors = 0, scanned = 2, truncated = false}
+    end)
+    page("工作区-需求", function(s) s.ui.tab = "requirement"; s.ui.detailMode = true end)
+    page("工作区-需求表单", function(s)
+        s.ui.tab = "requirement"; s.ui.detailMode = true; s.ui.formMode = true; s.ui.mode = "new"; s.ui.dirty = true
+    end)
+    page("工作区-未选择需求", function(s) s.ui.tab = "requirement"; s.ui.detailMode = true; s.ui.selected = nil end)
+    page("初始化", function(s) s.ui.tab = "requirements"; s.ui.detailMode = false; s.ui.project = nil; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil end)
     page("锁错误与初始化并存", function(s)
-        s.ui.tab = "requirements"; s.ui.project = nil; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil
+        s.ui.tab = "requirements"; s.ui.detailMode = false; s.ui.project = nil; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil
         s.ui.error = "上次的工作台实例留下了过期写锁"; s.ui.takeoverAvailable = true
     end)
-    page("空需求只读", function(s) s.ui.tab = "requirements"; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil; s.ui.writable = false end)
-    page("看板", function(s) s.ui.tab = "board" end)
-    page("资料", function(s) s.ui.tab = "handoff" end)
-    page("方案", function(s)
-        s.ui.tab = "handoff"
+    page("空需求只读", function(s) s.ui.tab = "requirements"; s.ui.detailMode = false; s.ui.requirements = {}; s.ui.byId = {}; s.ui.selected = nil; s.ui.writable = false end)
+    page("工作区-方案资料", function(s) s.ui.tab = "design"; s.ui.detailMode = true end)
+    page("工作区-方案", function(s)
+        s.ui.tab = "design"
         local h = s.ui.handoff
         h.tab = "design"
         h.workflow = {designs = {{version = 1, sha256 = SHA, body = "# 方案", requirementRevision = 3, source = {kind = "manual"}}},
@@ -305,8 +314,8 @@ return function(tern, repo)
         h.selectedDesign = h.workflow.designs[1]
         h.selectedVersion = 1
     end)
-    page("批准", function(s)
-        s.ui.tab = "handoff"
+    page("工作区-批准", function(s)
+        s.ui.tab = "design"
         local h = s.ui.handoff
         h.tab = "approval"
         h.workflow = {designs = {}, latestVersion = 0, comments = {}, approvals = {},
@@ -315,13 +324,18 @@ return function(tern, repo)
         h.baseline = {head = "abc123", fingerprint = "fp", dirty = false}
         h.baselineCheckedAt = 1700000000000
     end)
-    page("实施与验证", function(s) s.ui.tab = "results" end)
-    page("审计", function(s)
-        s.ui.tab = "audit"
-        s.ui.audit.events = {{at = 1700000000000, kind = "requirement_created", summary = "创建需求", ref = ""}}
+    page("工作区-交付", function(s) s.ui.tab = "delivery"; s.ui.detailMode = true end)
+    page("工作区-验收", function(s) s.ui.tab = "acceptance"; s.ui.detailMode = true end)
+    page("工作区-历史", function(s)
+        s.ui.tab = "history"; s.ui.detailMode = true
+        s.ui.audit.events = {{at = 1700000000000, kind = "需求", summary = "创建需求", ref = ""}}
     end)
-    page("运行", function(s) s.ui.tab = "runtime" end)
-    page("诊断", function(s) s.ui.tab = "diagnostics" end)
+    page("活动", function(s)
+        s.ui.tab = "activity"; s.ui.detailMode = false
+        s.ui.activity.events = {{at = 1700000000000, kind = "需求", summary = "创建需求", ref = "", requirement = "R-001"}}
+        s.ui.activity.scanned = 2
+    end)
+    page("会话", function(s) s.ui.tab = "session"; s.ui.detailMode = false end)
 
     return {checks = checks, failures = failures}
 end

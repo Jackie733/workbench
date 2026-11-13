@@ -1,6 +1,7 @@
 --!strict
 -- Durable, append-only requirement design history and explicit authorization.
 local Store = require('./store')
+local Validity = require('./validity')
 local M = {}
 local MAX_BODY = 16384
 local function join(a, b) return a .. "\\" .. b end
@@ -145,17 +146,7 @@ local function baselineValid(b)
         and #b.fingerprint==64 and b.fingerprint:match("^[0-9a-fA-F]+$")~=nil and type(b.dirty)=="boolean"
 end
 function M.approvalState(w, req)
-    local a=w.approval
-    if type(a)~="table" then return {valid=false,reason="not_approved"} end
-    if a.revokedAt then return {valid=false,reason="revoked"} end
-    if a.requirementRevision~=req.revision or a.requirementContent~=M.requirementContent(req) then return {valid=false,reason="requirement_changed"} end
-    if a.latestVersion~=w.latestVersion then return {valid=false,reason="newer_design"} end
-    if a.mode=="design" then
-        local d=w.designs[a.designVersion]
-        if not d or d.sha256~=a.designSha256 or d.requirementSha256~=a.requirementSha256
-            or d.requirementRevision~=req.revision then return {valid=false,reason="design_changed"} end
-    end
-    return {valid=true,reason="current"}
+    return Validity.approval(w, req, M.requirementContent(req))
 end
 local function copyArray(a) local b=tern.json.array(); for _,v in a do table.insert(b,v) end; return b end
 local function revokeCurrent(w, at, reason)
