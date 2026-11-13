@@ -616,6 +616,132 @@ return function(tern, def, cx, payloadJson, modules)
     event(importedState, {ev="action", act="results-link-pick", value="stable-step"})
     check(iu.trace.selectedStep == "stable-step" and iu.trace.fields.stepCriteria.text == "C1"
         and iu.trace.fields.stepFiles.text == "src/old.ts", "链接编辑器必须选择稳定步骤 ID 并回填显式链接")
+    -- AF-03: navigation/refresh must stay write-free, historical baseline reconciliation
+    -- must be explicit, and UI/host action gates must consume the same evaluation.
+    do
+        local Context = require("../lib/context")
+        local Workflow = require("../lib/workflow")
+        local HandoffView = require("../lib/handoff")
+        local ReviewView = require("../lib/reviewview")
+        local af = def.init(cx, {payloadJson}, nil)
+        af.ui.writable, af.ui.dirty, af.ui.token = true, false, "af03-token"
+        event(af, {ev="select", id="main.workbench.requirements", item="req-1"})
+        local au = af.ui
+        local afReq = au.byId["req-1"]
+        local wfPath, resPath = au.paths.requirements .. "\\" .. afReq.requirementId .. "\\workflow.json", R.resultsPath(au.paths, afReq)
+        local origWfJson = tern.fs.exists(wfPath) and tern.fs.read(wfPath) or nil
+        local origResJson = tern.fs.exists(resPath) and tern.fs.read(resPath) or nil
+        local origRecordBaseline = R.recordBaseline
+        local recordedCalls = {}
+        R.recordBaseline = function(paths, r, _, baseline, requestId, cb)
+            table.insert(recordedCalls, {reqId=r.requirementId, requestId=requestId})
+            local cur = R.loadResults(paths, r)
+            local nextRes = {schemaVersion=2, projectId=r.projectId, requirementId=r.requirementId,
+                revision=(cur and cur.revision or 0) + 1,
+                baseline={requestId=requestId, head=baseline.head or "abc", fingerprint=baseline.fingerprint,
+                    dirty=baseline.dirty == true, capturedAt=1700000000000, files={}, filesTruncated=false},
+                changes=nil, verifications=cur and cur.verifications or {}}
+            tern.fs.write(R.resultsPath(paths, r), tern.json.encode(nextRes))
+            cb(nextRes, nil)
+        end
+        local H1, H2 = string.rep("c", 64), string.rep("d", 64)
+        local contentRev = Store.contentRevision(afReq)
+        local designPath = au.paths.requirements .. "\\" .. afReq.requirementId .. "\\designs\\v1.json"
+        local origDesignJson = tern.fs.exists(designPath) and tern.fs.read(designPath) or nil
+        local designDoc = {schemaVersion=2, projectId=afReq.projectId, requirementId=afReq.requirementId, version=1,
+            requirementRevision=afReq.revision, requirementContentRevision=contentRev,
+            requirementSha256=H1, body="# 测试方案 v1", sha256=H1, source={kind="manual"}, createdAt=1700000000000}
+        tern.fs.write(designPath, tern.json.encode(designDoc))
+        local histId = "req-hist-impl"
+        local appDoc = {id="app-1", mode="design", requirementRevision=afReq.revision, requirementContentRevision=contentRev,
+            requirementContent=Workflow.requirementContent(afReq), requirementSha256=H1, designVersion=1, designSha256=H1,
+            latestVersion=1, baseline={head="abc123", fingerprint=H2, dirty=false}, approvedAt=1700000000000}
+        local reqDoc = {requestId=histId, activity="implement", status="submitted",
+            sessionId=af.payload.binding.sessionId, instanceId=af.payload.binding.instanceId, payloadSha256=H1,
+            requirementRevision=afReq.revision, requirementContentRevision=contentRev, requirementSha256=H1,
+            authorizedRequirementRevision=afReq.revision, currentRequirementRevision=afReq.revision,
+            createdAt=1700000001000, reason="submitted", receivedAt=1700000002000}
+        local wfFixture = {schemaVersion=2, projectId=afReq.projectId, requirementId=afReq.requirementId, revision=1,
+            latestVersion=1, designs={{version=1, sha256=H1, requirementSha256=H1, requirementRevision=afReq.revision,
+                requirementContentRevision=contentRev, createdAt=1700000000000}},
+            comments=tern.json.array(), approvals={appDoc}, requests={reqDoc}, approval=appDoc}
+        tern.fs.write(wfPath, tern.json.encode(wfFixture))
+        event(af, {ev="select", id="main.workbench.requirements", item="req-2"})
+        event(af, {ev="select", id="main.workbench.requirements", item="req-1"})
+        local resBefore = R.loadResults(au.paths, afReq)
+        local revBefore, reqRevBefore = resBefore.revision, afReq.revision
+        for _, nav in {"wb-open-design-approval", "wb-open-delivery", "wb-open-acceptance", "wb-open-design-materials"} do
+            action(af, nav)
+        end
+        event(af, {ev="select", id="main.workbench.requirements", item="req-2"})
+        event(af, {ev="select", id="main.workbench.requirements", item="req-1"})
+        local resAfterNav = R.loadResults(au.paths, afReq)
+        check(#recordedCalls == 0 and resAfterNav.revision == revBefore and resAfterNav.baseline == nil
+            and au.byId["req-1"].revision == reqRevBefore,
+            "AF-03: 导航、切页、切换需求与 refreshHandoff 不得静默写 results 或递增修订")
+
+        action(af, "wb-open-design-approval")
+        check(Context.pendingBaselineSync(au.byId["req-1"], au.handoff, au.trace) ~= nil,
+            "AF-03: 历史已提交实施缺少 baseline 时应派生显式补记提示")
+        local function findBtn(node, key)
+            if type(node) ~= "table" then return nil end
+            if node.k == "button" and node.p and node.p.key == key then return node end
+            for _, c in node.c or {} do local f = findBtn(c, key); if f then return f end end
+            return nil
+        end
+        check(findBtn(HandoffView.build(af), "handoff-reconcile-baseline") ~= nil, "AF-03: 批准页应提供显式补记基线按钮")
+        action(af, "handoff-reconcile-baseline")
+        local resAfterSync = R.loadResults(au.paths, afReq)
+        check(#recordedCalls == 1 and resAfterSync.revision == revBefore + 1
+            and resAfterSync.baseline and resAfterSync.baseline.requestId == histId,
+            "AF-03: 显式 handoff-reconcile-baseline 应只写入一次并递增 results 修订")
+        check(Context.pendingBaselineSync(au.byId["req-1"], au.handoff, au.trace) == nil,
+            "AF-03: 补记完成后 pendingBaselineSync 应清空")
+
+        au.handoff.pendingSend = nil
+        local curReq = au.byId["req-1"]
+        local savedCriteria = curReq.acceptanceCriteria
+        curReq.acceptanceCriteria = {}
+        au.handoff.baseline = {head="abc123", fingerprint=string.rep("d",64), dirty=false}
+        au.handoff.baselineCheckedAt = 1700000000000
+        au.handoff.fields.directReason.text = "测试原因"
+        local directGate = Context.evaluateAction("handoff-authorize-direct", af, curReq)
+        local directBtn = findBtn(HandoffView.build(af), "handoff-authorize-direct")
+        check(not directGate.allowed and directBtn and directBtn.p.disabled == directGate.reason,
+            "AF-03: 缺少验收条件时直接授权按钮禁用原因必须与 evaluateAction 一致")
+        au.handoff.error = nil
+        action(af, "handoff-authorize-direct")
+        check(au.handoff.error == Context.formatFailure(directGate)
+            and (Workflow.load(au.paths, curReq) :: any).revision == 1,
+            "AF-03: 缺少验收条件时宿主必须拒绝直接授权并返回同一门禁原因")
+        curReq.acceptanceCriteria = savedCriteria
+
+        au.handoff.selectedDesign = {version=0, sha256=string.rep("e",64)}
+        local approveGate = Context.evaluateAction("handoff-approve", af, curReq)
+        local approveBtn = findBtn(HandoffView.build(af), "handoff-approve")
+        check(not approveGate.allowed and approveBtn and approveBtn.p.disabled == approveGate.reason,
+            "AF-03: 非最新版本方案时批准按钮必须与 evaluateAction 同一原因禁用")
+        au.handoff.error = nil
+        action(af, "handoff-approve")
+        check(au.handoff.error == Context.formatFailure(approveGate)
+            and (Workflow.load(au.paths, curReq) :: any).revision == 1,
+            "AF-03: 宿主必须拒绝批准过期方案版本并给出同一原因")
+
+        action(af, "wb-open-acceptance")
+        local accGate = Context.evaluateAction("review-accept", af, curReq)
+        local accBtn = findBtn(ReviewView.build(af), "review-accept")
+        check(not accGate.allowed and accBtn and accBtn.p.disabled == accGate.reason,
+            "AF-03: 验收页按钮禁用原因必须与 evaluateAction 门禁原因完全一致")
+        au.review.error = nil
+        action(af, "review-accept")
+        check(au.review.error == Context.formatFailure(accGate),
+            "AF-03: 验收命令拒绝信息必须与视图门禁完全同源")
+
+        R.recordBaseline = origRecordBaseline
+        if origDesignJson then tern.fs.write(designPath, origDesignJson) end
+        if origWfJson then tern.fs.write(wfPath, origWfJson) end
+        if origResJson then tern.fs.write(resPath, origResJson) end
+    end
     iu.trace.fields.stepFiles.text = "src/new.ts"
     action(importedState, "results-plan-links")
     check(#linkWrites == 1 and linkWrites[1].kind == "links" and linkWrites[1].args.stepId == "stable-step"

@@ -283,13 +283,15 @@ end
 local function acceptanceCard(s, v, r, writable, snapshot)
     local data = v.data
     local trace = s.ui.trace
-    local gate = Review.acceptanceGate(r, trace and trace.results, data)
+    local acceptGate = Context.evaluateAction("review-accept", s, r)
+    local rejectGate = Context.evaluateAction("review-reject", s, r)
+    local reopenGate = Context.evaluateAction("review-reopen", s, r)
+    local gate = acceptGate.acceptance or Review.acceptanceGate(r, trace and trace.results, data)
     local latest = Review.latestAcceptance(data)
     local canDecide = r.stage == "implementing" or r.stage == "verifying" or r.stage == "awaiting_acceptance"
     local required, covered = criterionCoverage(r, trace and trace.results, snapshot)
     local _, open, openBlocking = findingCounts(data)
-    local gateReason = (not writable and "只读或记录未就绪") or (not canDecide and "当前阶段不能验收")
-        or (not gate.ok and "门禁未通过：先满足条件") or false
+    local gateReason = acceptGate.reason or false
     local evidenceChildren = {}
     if gate.ok then
         table.insert(evidenceChildren, ui.text({ui.span("门禁通过：必需条件有当前快照上的通过证据，且没有未处置的阻断发现。", "success")}))
@@ -327,9 +329,7 @@ local function acceptanceCard(s, v, r, writable, snapshot)
             field("reviewReject", "驳回原因", v.fields.reviewReject.text, v.fields.reviewReject.cursor,
                 v.fields.reviewReject.anchor, 2, not writable, "驳回会记录人工决定，并把需求退回实施中"),
             row("rejectActions", {
-                button("确认驳回", "review-reject", "danger",
-                    (not writable and "只读或记录未就绪") or (not canDecide and "当前阶段不能驳回")
-                    or (not snapshot and "先读取代码快照") or (not v.fields.reviewReject.text:match("%S") and "先填写驳回原因") or false),
+                button("确认驳回", "review-reject", "danger", rejectGate.reason or false),
                 button("取消", "review-cancel", "quiet"),
             }),
         }))
@@ -340,9 +340,7 @@ local function acceptanceCard(s, v, r, writable, snapshot)
                 (s.ui.review.fields.lifecycleReason or {}).cursor, (s.ui.review.fields.lifecycleReason or {}).anchor,
                 2, Context.lifecycleGuard(s) ~= false, "保留已完成历史；重新打开后回到澄清中，不会终止外部进程"),
             row("reopenActions", {
-                button("确认重新打开", "review-reopen", "default",
-                    Context.lifecycleGuard(s) or (r.stage ~= "done" and "只有已完成需求可以重新打开")
-                    or (not ((v.fields.lifecycleReason or {}).text or ""):match("%S") and "先填写重新打开原因") or false),
+                button("确认重新打开", "review-reopen", "default", reopenGate.reason or false),
                 button("取消", "review-cancel", "quiet"),
             }),
         }))

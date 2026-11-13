@@ -112,7 +112,7 @@ return function(tern, repo)
         ["handoff-preview"] = true, ["handoff-baseline"] = true, ["handoff-prefill"] = true, ["handoff-send"] = true,
         ["handoff-candidate"] = true, ["handoff-import-file"] = true, ["handoff-import-file-content"] = true,
         ["handoff-import-candidate"] = true, ["handoff-adopt"] = true, ["handoff-comment"] = true, ["handoff-approve"] = true,
-        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-prepare"] = true, ["resources-add"] = true,
+        ["handoff-revoke"] = true, ["handoff-authorize-direct"] = true, ["handoff-end-wait"] = true, ["handoff-reconcile-baseline"] = true, ["handoff-prepare"] = true, ["resources-add"] = true,
         ["results-refresh-changes"] = true, ["results-run-verification"] = true, ["results-preview-verification"] = true, ["results-batch-add"] = true, ["results-batch-start"] = true, ["results-batch-stop"] = true, ["results-plan-add"] = true, ["results-plan-generate"] = true,
         ["audit-refresh"] = true, ["audit-copy"] = true, ["audit-write"] = true,
         ["activity-refresh"] = true, ["activity-write"] = true}
@@ -523,5 +523,39 @@ return function(tern, repo)
         and markdown:find(SHA, 1, true) ~= nil and markdown:find("external-finding → finding-1", 1, true) ~= nil
         and markdown:find("src/login.ts", 1, true) ~= nil, "导出必须有导入摘要、稳定映射及显式链接")
     check(markdown:find("完整范围末尾", 1, true) == nil, "导出不得包含完整候选文件")
+
+    -- AF-03 view gate alignment: valid approval demotes re-approval from primary,
+    -- and historical submitted implement requests surface explicit baseline sync.
+    local approvedViewState = copy(baseState())
+    approvedViewState.ui.tab, approvedViewState.ui.detailMode = "design", true
+    approvedViewState.ui.handoff.tab = "approval"
+    approvedViewState.ui.handoff.baseline = {head = "abc", fingerprint = SHA, dirty = false}
+    approvedViewState.ui.handoff.baselineCheckedAt = 1700000000000
+    local approvedReq = approvedViewState.ui.byId["req-1"]
+    approvedReq.stage = "awaiting_approval"
+    local approvedContent = require("../lib/workflow").requirementContent(approvedReq)
+    local approvedWf = {schemaVersion = 2, projectId = approvedReq.projectId, requirementId = approvedReq.requirementId, revision = 2,
+        latestVersion = 1, designs = {{version = 1, sha256 = SHA, requirementSha256 = SHA, requirementRevision = 3,
+            requirementContentRevision = 3, createdAt = 1700000000000}},
+        comments = {}, approvals = {},
+        requests = {{requestId = "req-hist-impl", activity = "implement", status = "submitted", createdAt = 1700000001000}},
+        approval = {id = "app-1", mode = "design", requirementRevision = 3, requirementContentRevision = 3,
+            requirementContent = approvedContent, requirementSha256 = SHA, designVersion = 1, designSha256 = SHA,
+            latestVersion = 1, baseline = {head = "abc", fingerprint = SHA, dirty = false}, approvedAt = 1700000000000}}
+    approvedViewState.ui.handoff.workflow = approvedWf
+    approvedViewState.ui.handoff.selectedDesign = approvedWf.designs[1]
+    approvedViewState.ui.handoff.selectedVersion = 1
+    approvedViewState.ui.trace.results = {schemaVersion = 2, projectId = approvedReq.projectId,
+        requirementId = approvedReq.requirementId, revision = 0, verifications = {}}
+    local approvedTree = ui.build(approvedViewState)
+    validateTree("已批准且待补记基线视图", approvedTree)
+    local approveBtn = findByKey(approvedTree, "handoff-approve")
+    check(approveBtn ~= nil and approveBtn.p.variant ~= "primary", "已批准待执行时不得再把重新批准作为主按钮")
+    local syncBtn = findByKey(approvedTree, "handoff-reconcile-baseline")
+    check(syncBtn ~= nil and syncBtn.p.disabled == false, "缺少基线时应提供可点击的显式补记基线按钮")
+    local acceptBtn = findByKey(reviewview.build(baseState()), "review-accept")
+    check(acceptBtn ~= nil and acceptBtn.p.disabled == require("../lib/context").evaluateAction("review-accept", baseState()).reason,
+        "验收按钮禁用原因必须直接来自 Context.evaluateAction")
+
     return {checks = checks, failures = failures}
 end

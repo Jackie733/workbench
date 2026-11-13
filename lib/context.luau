@@ -10,16 +10,19 @@ function M.identity(record)
     return "实体修订 " .. tostring(record.requirementRevision or record.revision)
         .. (content and (" · 内容修订 " .. tostring(content)) or " · 旧记录：未标记内容身份（按实体修订核对）")
 end
-function M.lifecycleGuard(s)
+function M.lifecycleGuard(s, r)
     local u = s.ui
     local h, t, v = u.handoff, u.trace, u.review
+    local req = r or (u.selected and u.byId and u.byId[u.selected]) or nil
     if not u.writable or u.storageUnsafe or u.loading then return "需要可编辑且已刷新的完整项目记录" end
     if u.busy or u.saving or u.dirty then return "先保存或放弃需求编辑草稿，并等待当前操作完成" end
     if not v or not v.safe or v.busy or u.lifecycleBusy then return "审查记录未就绪或操作正在进行" end
     if not h or not h.safe or h.workflowBusy or h.pending or h.pendingSend then return "交接操作或业务请求尚待核对" end
     if not t or not t.safe or t.busy or t.pending or (t.batch and t.batch.state == "running") then return "验证、代码检查或批量操作尚未结束" end
     if s.pending or s.problem or not s.snapshot or s.snapshot.state ~= "idle" then return "来源未就绪、omp 正忙或有桥接请求待核对" end
-    for _, request in h.workflow and h.workflow.requests or {} do
+    local workflow = h.workflow
+    if workflow and workflow.requirementId and req and workflow.requirementId ~= req.requirementId then workflow = nil end
+    for _, request in workflow and workflow.requests or {} do
         if (request.status == "pending" or request.status == "delivery_unknown")
             and (not request.resolution or request.resolution.kind ~= "user_acknowledged") then
             return "存在未完成人工对账的业务请求"
@@ -202,6 +205,74 @@ function M.bar(s, opts)
         head = {ui.span((r.number or "") .. "  ", "muted"), ui.span(r.title, "strong")}}, children)
 end
 
+local function ownedRecord(record, requirementId)
+    if type(record) ~= "table" then return nil end
+    if record.requirementId ~= requirementId then return nil end
+    return record
+end
+
+-- Helper for legacy synthetic view fixtures that omit requirementId; rejects mismatched ids.
+local function compatibleRecord(record, requirementId)
+    if type(record) ~= "table" then return nil end
+    if record.requirementId and requirementId and record.requirementId ~= requirementId then return nil end
+    return record
+end
+
+local function trimmedField(container, name)
+    local f = container and container.fields and container.fields[name]
+    local text = type(f) == "table" and type(f.text) == "string" and f.text or ""
+    return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function currentVerifyMatches(t, req, s, results, cmd, criteriaText)
+    local preview = t and t.runPreview
+    if type(preview) ~= "table" or preview.command ~= cmd then return false end
+    if preview.requirementId and req and preview.requirementId ~= req.requirementId then return false end
+    if preview.requirementRevision and req and preview.requirementRevision ~= req.revision then return false end
+    local snapshot = results and results.changes and results.changes.fingerprint
+    if preview.fingerprint and snapshot and preview.fingerprint ~= snapshot then return false end
+    local binding = s and s.payload and s.payload.binding
+    if preview.sessionId and binding and binding.sessionId and preview.sessionId ~= binding.sessionId then return false end
+    local ids = {}
+    for token in criteriaText:gmatch("[^,%s]+") do table.insert(ids, token) end
+    local got = preview.criterionIds or {}
+    if #ids ~= #got then return false end
+    for i = 1, #ids do if ids[i] ~= got[i] then return false end end
+    return true
+end
+
+function M.pendingBaselineSync(r, h, trace)
+    if not r or not h or type(h.workflow) ~= "table" or r.stage == "done" or r.stage == "cancelled" then return nil end
+    local wf = ownedRecord(h.workflow, r.requirementId)
+    if not wf or type(wf.approval) ~= "table" or type(wf.approval.baseline) ~= "table" then return nil end
+    local latest = nil
+    for _, req in wf.requests or {} do
+        if not latest or (req.createdAt or 0) >= (latest.createdAt or 0) then latest = req end
+    end
+    if not latest or latest.status ~= "submitted" or latest.activity ~= "implement" then return nil end
+    if trace and trace.safe == false then return nil end
+    local results = ownedRecord(trace and trace.results, r.requirementId)
+    if not results then return nil end
+    if results.baseline and results.baseline.requestId == latest.requestId then return nil end
+    return {requestId = latest.requestId, baseline = wf.approval.baseline, clearsChanges = results.changes ~= nil}
+end
+
+function M.approvalState(r, h)
+    if not r or not h then return {valid = false, reason = "not_approved", message = "尚未批准"} end
+    local wf = h.workflow
+    if wf and wf.requirementId and wf.requirementId ~= r.requirementId then
+        return {valid = false, reason = "wrong_requirement", message = "交接记录属于另一项需求"}
+    end
+    if wf and wf.approval and (wf.requirementId == r.requirementId or wf.approval.baseline ~= nil) then
+        return Validity.approval(wf, r, Workflow.requirementContent(r))
+    end
+    if h.approvalValid ~= nil then
+        return {valid = h.approvalValid == true, reason = h.approvalValid and "valid" or "not_approved",
+            message = h.approvalReason or (h.approvalValid and "有效批准" or "尚未批准")}
+    end
+    return Validity.approval(wf, r, Workflow.requirementContent(r))
+end
+
 -- Read-only readiness for one requirement, derived at render time from the same
 -- validity evaluation the Delivery list and the acceptance action use. It never
 -- writes a stage or revision; unknown facts stay unknown instead of green.
@@ -212,8 +283,13 @@ function M.readiness(r, u, source)
     local h = u and u.handoff
     -- Only consume records explicitly belonging to this requirement. The
     -- selected page and the session's current tool are not ownership proofs.
-    local workflow = h and h.workflow
-    if workflow and workflow.requirementId ~= r.requirementId then workflow = nil end
+    local workflow = ownedRecord(h and h.workflow, r.requirementId)
+    local results = ownedRecord(trace and trace.results, r.requirementId)
+    local reviewsData = ownedRecord(review and review.data, r.requirementId)
+    local pendingSend = h and h.pendingSend
+    if pendingSend and pendingSend.requirementId and pendingSend.requirementId ~= r.requirementId then
+        pendingSend = nil
+    end
     local connection = {state = "unknown"}
     if source then
         local snapshot = source.snapshot
@@ -230,6 +306,16 @@ function M.readiness(r, u, source)
                 createdAt = item.createdAt or 0}
         end
     end
+    if request.state == "none" and pendingSend and pendingSend.requirementId == r.requirementId
+        and (pendingSend.state == "recording_intent" or pendingSend.state == "recovered_intent"
+            or pendingSend.state == "intent_unknown" or pendingSend.state == "intent_only"
+            or pendingSend.state == "dispatching" or pendingSend.state == "delivery_unknown") then
+        request = {state = pendingSend.state, id = pendingSend.requestId, requirementId = r.requirementId,
+            createdAt = pendingSend.createdAt or 0}
+    end
+    local evaluation = Validity.evaluate({requirement = r,
+        results = results, reviews = reviewsData,
+        workflow = workflow, content = workflow and Workflow.requirementContent(r)})
     local function result(state, label, tone, reasons, next)
         if state ~= "done" and state ~= "cancelled" then
             if request.state ~= "none" then
@@ -247,16 +333,13 @@ function M.readiness(r, u, source)
             next.kind, next.target = "navigate", r.requirementId
         end
         return {state = state, label = label, tone = tone, reasons = reasons, next = next,
-            lifecycle = r.stage, request = request, connection = connection}
+            lifecycle = r.stage, request = request, connection = connection, evaluation = evaluation}
     end
     if (trace and trace.safe == false) or (review and review.safe == false) or (h and h.safe == false) then
         return result("unknown", "记录无法读取", "error",
             {"当前需求的部分记录无法安全读取；未推断任何通过状态。"},
             {tab = "requirement", label = "检查记录"})
     end
-    local evaluation = Validity.evaluate({requirement = r,
-        results = trace and trace.results, reviews = review and review.data,
-        workflow = workflow, content = workflow and Workflow.requirementContent(r)})
     local gate, approval = evaluation.acceptance, evaluation.approval
     local reasons = {}
     local function addReasons(items)
@@ -319,6 +402,364 @@ function M.readiness(r, u, source)
         state, label, tone, next = "waiting", "待准备交接", "muted", M.nextActions[r.stage]
     end
     return result(state, label, tone, reasons, next)
+end
+
+M.actionKinds = {navigate = true, read = true, edit = true, decide = true, execute = true}
+
+type ActionSpec = {
+    kind: string, target: string, mutatesRevision: boolean, writesFiles: boolean,
+    requiresLock: boolean, requiresSource: boolean, idempotency: string, impact: string,
+}
+
+local function makeSpec(kind: string, target: string, mutatesRevision: boolean, writesFiles: boolean,
+    requiresLock: boolean, requiresSource: boolean, idempotency: string, impact: string): ActionSpec
+    return {kind = kind, target = target, mutatesRevision = mutatesRevision, writesFiles = writesFiles,
+        requiresLock = requiresLock, requiresSource = requiresSource, idempotency = idempotency, impact = impact}
+end
+
+local exactSpecs: {[string]: ActionSpec} = {
+    requirement = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "切换所选需求视图，不修改业务修订"),
+    back = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "返回工作区，不保存草稿修改"),
+    ["back-workspace"] = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "返回需求列表并保留筛选位置"),
+    ["new-requirement"] = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "打开新建需求表单，暂未写入实体"),
+    ["edit-requirement"] = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "打开需求编辑表单，暂未写入实体"),
+    ["handoff-prepare"] = makeSpec("navigate", "workflow", false, false, false, false, "ui_only", "打开交接准备面板，不生成意图或发送"),
+    ["open-handoff"] = makeSpec("navigate", "workflow", false, false, false, false, "ui_only", "展开交接准备面板，不修改业务状态"),
+    ["lifecycle-dismiss"] = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "取消生命周期确认弹层，不变更阶段"),
+    ["review-cancel"] = makeSpec("navigate", "reviews", false, false, false, false, "ui_only", "关闭当前处置或确认面板，不写入决定"),
+    reload = makeSpec("read", "project", false, false, false, false, "readonly", "重读项目存储与会话快照，不增加实体修订"),
+    ["audit-refresh"] = makeSpec("read", "project", false, false, false, false, "readonly", "重新扫描当前需求的审计事件，不写入文件"),
+    ["audit-copy"] = makeSpec("read", "export", false, false, false, false, "readonly", "复制审计摘要到剪贴板，不写入项目文件"),
+    ["activity-refresh"] = makeSpec("read", "project", false, false, false, false, "readonly", "重新扫描项目活动记录，不写入文件"),
+    ["handoff-preview"] = makeSpec("read", "workflow", false, false, true, true, "volatile_read", "请求来源生成只读交接预览，不增加修订也不发送"),
+    ["handoff-baseline"] = makeSpec("read", "workflow", false, false, true, true, "volatile_read", "请求来源只读检查 Git 基线，不写入修订"),
+    ["handoff-candidate"] = makeSpec("read", "workflow", false, false, true, true, "volatile_read", "从来源只读获取最新回复候选，不自动采用"),
+    ["handoff-import-file"] = makeSpec("read", "workflow", false, false, true, true, "volatile_read", "从来源只读检查项目文件预览，不修改正式方案"),
+    ["results-preview-verification"] = makeSpec("read", "results", false, false, true, false, "volatile_read", "绑定当前快照生成验证命令预览，不运行命令也不写入修订"),
+    ["results-import-preview"] = makeSpec("read", "results", false, false, true, true, "volatile_read", "只读检查外部计划候选 JSON，不写入计划修订"),
+    ["review-import-preview"] = makeSpec("read", "reviews", false, false, true, true, "volatile_read", "只读检查外部审查候选 JSON，不写入审查修订"),
+    ["prefill-selected"] = makeSpec("edit", "ui", false, false, false, false, "ui_only", "填充本地会话输入草稿，不投递也不写业务记录"),
+    ["handoff-import-file-content"] = makeSpec("edit", "workflow", false, false, true, false, "draft_only", "将文件预览填入方案草稿框，不自动采用为正式版本"),
+    ["handoff-import-candidate"] = makeSpec("edit", "workflow", false, false, true, false, "draft_only", "将回复候选填入方案草稿框，不自动采用为正式版本"),
+    ["results-batch-add"] = makeSpec("edit", "results", false, false, true, false, "draft_only", "将验证项加入本地批量队列草稿，尚未运行"),
+    ["review-add-finding"] = makeSpec("edit", "reviews", false, false, true, false, "draft_only", "添加本地审查发现草稿条目，尚未正式提交"),
+    rebase = makeSpec("edit", "requirement", false, false, true, false, "draft_only", "用当前持久化修订重设本地表单基线"),
+    ["enable-edit"] = makeSpec("edit", "project", false, true, false, false, "lock_acquire", "申请项目编辑锁；不授权实施或命令执行"),
+    ["save-requirement"] = makeSpec("edit", "requirement", true, true, true, false, "cas_revision", "保存需求并递增实体与内容修订（CAS 校验）"),
+    ["resources-add"] = makeSpec("edit", "resources", true, true, true, false, "cas_revision", "追加项目/需求绑定资源并使旧预览失效"),
+    ["handoff-comment"] = makeSpec("edit", "workflow", true, true, true, false, "cas_revision", "追加当前正式方案版本的批注并写入工作流"),
+    ["results-plan-add"] = makeSpec("edit", "results", true, true, true, false, "cas_revision", "向运行计划追加稳定步骤并递增计划修订"),
+    ["results-plan-generate"] = makeSpec("edit", "results", true, true, true, false, "cas_revision", "由当前需求结构化生成计划步骤并递增计划修订"),
+    ["results-plan-links"] = makeSpec("edit", "results", true, true, true, false, "cas_revision", "保存所选步骤的验收条件与文件关联并递增计划修订"),
+    initialize = makeSpec("decide", "project", false, true, false, false, "guard_lock", "初始化项目工作台目录与项目锁文件"),
+    takeover = makeSpec("decide", "project", false, true, false, false, "guard_lock", "明确接管已有编辑锁"),
+    ["takeover-initialize"] = makeSpec("decide", "project", false, true, false, false, "guard_lock", "接管过期锁并初始化项目存储"),
+    ["handoff-adopt"] = makeSpec("decide", "workflow", true, true, true, false, "cas_revision", "将草稿采用为不可变正式方案版本，可能推动阶段与工作流"),
+    ["handoff-approve"] = makeSpec("decide", "workflow", true, true, true, false, "cas_revision", "记录针对最新正式方案与 Git 基线的有效实施授权，不启动模型"),
+    ["handoff-authorize-direct"] = makeSpec("decide", "workflow", true, true, true, false, "cas_revision", "记录显式直接实施授权事实，不自动发送或执行"),
+    ["handoff-revoke"] = makeSpec("decide", "workflow", true, true, true, false, "cas_revision", "追加撤销授权记录并使既有实施批准失效"),
+    ["handoff-end-wait"] = makeSpec("decide", "workflow", true, true, true, false, "request_id", "仅在本地结束等待并记录对账状态，不终止外部进程"),
+    ["acknowledge-unknown"] = makeSpec("decide", "workflow", true, true, true, false, "request_id", "记录人工对未知投递结果的对账确认，不会重发原请求"),
+    ["results-import-adopt"] = makeSpec("decide", "results", true, true, true, false, "content_fingerprint", "按冻结身份与快照校验采用外部计划候选（同 ID 同指纹返回既有）"),
+    ["review-create"] = makeSpec("decide", "reviews", true, true, true, false, "cas_revision", "针对当前代码快照写入正式审查记录（递增审查修订）"),
+    ["review-dispose"] = makeSpec("decide", "reviews", true, true, true, false, "cas_revision", "追加审查发现的处置决定事件"),
+    ["review-accept"] = makeSpec("decide", "reviews", true, true, true, false, "cas_revision", "门禁通过后记录人工接受决定，并将需求阶段更新为已完成"),
+    ["review-reject"] = makeSpec("decide", "reviews", true, true, true, false, "cas_revision", "记录人工驳回决定并要求补充实施或验证"),
+    ["review-reopen"] = makeSpec("decide", "reviews", true, true, true, false, "cas_revision", "重新打开已完成需求，保留旧验收但不复活有效性"),
+    ["review-import-adopt"] = makeSpec("decide", "reviews", true, true, true, false, "content_fingerprint", "按冻结身份与快照校验采用外部审查候选"),
+    ["lifecycle-confirm"] = makeSpec("decide", "requirement", true, true, true, false, "cas_revision", "记录需求生命周期变更（阻塞/解阻/取消/重开），不终止外部进程"),
+    prefill = makeSpec("execute", "runtime", false, false, false, true, "request_id", "通过 IPC 将草稿写入绑定会话输入框，不按 Enter 推理"),
+    ["handoff-prefill"] = makeSpec("execute", "runtime", false, false, true, true, "request_id", "通过 IPC 将交接预览预填到绑定会话输入框，不触发推理"),
+    ["review-open-native"] = makeSpec("execute", "runtime", false, false, false, true, "request_id", "通过 IPC 预填 /review 命令到绑定会话，不自动发送"),
+    ["handoff-send"] = makeSpec("execute", "runtime", true, true, true, true, "request_id", "先持久化业务发送意图，再通过 IPC 投递并触发绑定会话推理"),
+    ["results-refresh-changes"] = makeSpec("execute", "results", true, true, true, true, "snapshot_command", "显式通过来源观测 Git 变更并写入 results 快照（递增结果修订）"),
+    ["handoff-reconcile-baseline"] = makeSpec("execute", "results", true, true, true, false, "request_id", "显式补记已提交实施的 Git 基线到 results（递增结果修订并清空旧变更缓存）"),
+    ["results-run-verification"] = makeSpec("execute", "results", true, true, true, true, "preview_bound", "真实执行预览绑定的验证命令，将退出码与输出写入证据并递增结果修订"),
+    ["results-batch-start"] = makeSpec("execute", "results", true, true, true, true, "serial_queue", "按预览队列串行启动多条验证命令，写入证据与结果修订"),
+    ["results-batch-stop"] = makeSpec("execute", "results", false, false, false, false, "ui_only", "仅停止继续调度下一条队列命令，不终止已运行进程"),
+    ["audit-write"] = makeSpec("execute", "export", false, true, false, false, "export_file", "将当前需求脱敏审计摘要导出到项目本地文件"),
+    ["activity-write"] = makeSpec("execute", "export", false, true, false, false, "export_file", "将项目脱敏活动记录导出到项目本地文件"),
+}
+
+function M.describeAction(act: string)
+    if exactSpecs[act] then
+        local spec = table.clone(exactSpecs[act])
+        spec.action = act
+        return spec
+    end
+    local spec: ActionSpec
+    if act:match("^wb%-open%-") or act:match("^requirement=") or act:match("^lifecycle%-open=")
+        or act:match("^review%-pick=") or act:match("^review%-inline=") or act:match("^review%-toggle=") then
+        spec = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "仅页面或条目导航，不修改业务实体或文件")
+    elseif act:match("^change:status%-") then
+        spec = makeSpec("edit", "results", true, true, true, false, "cas_revision", "更新运行计划步骤状态并递增计划修订")
+    elseif act:match("^change:") then
+        spec = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "调整本地视图筛选、排序或选择，不写业务记录")
+    elseif act:match("^resources%-remove=") then
+        spec = makeSpec("edit", "resources", true, true, true, false, "cas_revision", "解绑资源记录并递增资源修订")
+    elseif act:match("^results%-use%-candidate=") or act:match("^results%-batch%-remove=")
+        or act:match("^review%-fix%-draft=") or act:match("^review%-remove%-finding=") then
+        spec = makeSpec("edit", "ui", false, false, true, false, "draft_only", "修改本地表单或队列草稿，尚未持久化或发送")
+    else
+        spec = makeSpec("edit", "ui", false, false, true, false, "unknown", "工作台操作")
+    end
+    local result = table.clone(spec)
+    result.action = act
+    return result
+end
+
+function M.formatFailure(gate)
+    if not gate or gate.allowed then return "" end
+    local failure = gate.failure
+    if failure and failure.recovery and failure.recovery ~= "" then
+        return (failure.message or gate.reason or "操作不可用") .. "（" .. failure.recovery .. "）"
+    end
+    return (failure and failure.message) or gate.reason or "当前状态不允许执行此操作"
+end
+
+function M.evaluateAction(act: string, s, r, opts)
+    local spec = M.describeAction(act)
+    local u = s and s.ui or {}
+    local req = r or (u.selected and u.byId and u.byId[u.selected]) or nil
+    local h, t, v = u.handoff, u.trace, u.review
+    local wf = req and compatibleRecord(h and h.workflow, req.requirementId) or nil
+    local results = req and compatibleRecord(t and t.results, req.requirementId) or nil
+    local reviewsData = req and compatibleRecord(v and v.data, req.requirementId) or nil
+    local projectId = (req and req.projectId) or (s and s.payload and s.payload.binding and s.payload.binding.projectId)
+    local target = {scope = spec.target, projectId = projectId, requirementId = req and req.requirementId}
+    if act == "wb-open-implementation" then
+        target.scope = "workflow"
+    end
+
+    local gate = {action = act, spec = spec, kind = spec.kind, target = target,
+        allowed = true, reason = nil :: string?, failure = nil :: {code: string, message: string, recovery: string?}?,
+        readiness = nil :: any, approval = nil :: any, acceptance = nil :: any, sync = nil :: any}
+
+    local function deny(code: string, message: string, recovery: string?)
+        gate.allowed = false
+        gate.reason = message
+        gate.failure = {code = code, message = message, recovery = recovery}
+        return gate
+    end
+
+    if act == "wb-open-implementation" then
+        if not req then return deny("missing_requirement", "先选择一项需求", "从工作首页选择需求") end
+        local readiness = M.readiness(req, u, s)
+        gate.readiness = readiness
+        if h and (h.pending or h.pendingSend) then
+            return deny("pending_request", "已有交接或发送请求待核对", "先完成或对账当前请求")
+        end
+        if readiness and readiness.request and readiness.request.state ~= "none" then
+            return deny("unresolved_request", readiness.reasons[1] or "存在待核对原请求", "先到资料页核对原请求结果")
+        end
+        if readiness and readiness.connection and readiness.connection.state ~= "connected" then
+            return deny("source_unavailable", readiness.reasons[1] or "来源连接不可用", "在会话页检查或重新连接来源")
+        end
+        if not readiness or not readiness.next or readiness.next.activity ~= "implement" then
+            return deny("approval_required", "尚未具备当前有效的实施授权", "先在批准页完成基线检查与批准")
+        end
+        return gate
+    end
+
+    if act == "handoff-baseline" or act == "handoff-preview" or act == "handoff-candidate" or act == "handoff-import-file" then
+        if not u.writable or not h or not h.safe or not req then
+            return deny("readonly_or_unsafe", "请启用项目编辑并选择有效需求", "在顶栏启用编辑模式")
+        end
+        if s and s.problem then return deny("source_problem", s.problem, "恢复来源连接后再试") end
+        if h.pending or h.pendingSend then
+            return deny("pending_request", "已有请求待核对；不会重复请求", "先等待回执或到交接状态卡对账")
+        end
+        return gate
+    end
+
+    if act == "handoff-prefill" or act == "handoff-send" then
+        if not u.writable or not h or not h.safe or not req then
+            return deny("readonly_or_unsafe", "请启用项目编辑并选择有效需求", "在顶栏启用编辑模式")
+        end
+        if s and s.problem then return deny("source_problem", s.problem, "恢复来源连接后再试") end
+        if h.pending or h.pendingSend then
+            return deny("pending_request", "已有请求待核对；不会重复发送", "先核对当前在途或未知投递请求")
+        end
+        local preview = h.preview
+        if not preview or h.previewStale then
+            return deny("preview_stale", "当前预览已过期或尚未生成，请重新生成完整预览", "点击“重新生成完整预览”")
+        end
+        if preview.requirementId and preview.requirementId ~= req.requirementId then
+            return deny("preview_wrong_requirement", "此预览属于另一项需求；已拒绝发送，请针对当前需求重新生成预览", "为当前需求重新生成完整预览")
+        end
+        if opts and opts.requireToken then
+            if type(preview.previewToken) ~= "string" or #preview.previewToken == 0 then
+                return deny("preview_token_missing", "此预览令牌已失效；请显式重新生成完整预览", "重新生成预览以获取新令牌")
+            end
+            if type(preview.sha256) ~= "string" or #preview.sha256 ~= 64 then
+                return deny("preview_sha_missing", "预览缺少完整 SHA-256；请重新生成", "重新生成预览")
+            end
+        end
+        if not s or not s.snapshot or s.snapshot.state ~= "idle" then
+            return deny("session_not_idle", "目标 omp 当前非空闲；保留预览，不发送", "等待目标会话空闲后再发送")
+        end
+        if act == "handoff-send" and preview.activity == "implement" then
+            local approval = M.approvalState(req, h)
+            gate.approval = approval
+            if not approval.valid then
+                local suffix = approval.message and ("（" .. approval.message .. "）") or ""
+                return deny("approval_invalid", "实施未获当前有效批准；先批准正式方案，或单独记录直接实施授权" .. suffix, "前往批准页检查基线并授权")
+            end
+        end
+        return gate
+    end
+
+    if act == "handoff-approve" then
+        if not u.writable or not h or not h.safe or not req then
+            return deny("readonly_or_unsafe", "工作流不可写；请启用项目编辑并确认记录完整", "启用项目编辑并刷新记录")
+        end
+        if h.workflowBusy then return deny("workflow_busy", "工作流写入正在进行，请稍候", nil) end
+        if h.pending or h.pendingSend then
+            return deny("pending_request", "已有来源请求或业务发送尚待核对；不会修改方案或提交新操作", "先完成当前请求对账")
+        end
+        if not h.selectedDesign then return deny("no_selected_design", "请先选择正式方案版本", "在方案区采用并选择最新版本") end
+        if not wf or h.selectedDesign.version ~= wf.latestVersion then
+            return deny("not_latest_design", "只能批准当前最新采用的正式方案版本", "切换到最新方案版本")
+        end
+        if not h.baseline or not h.baselineCheckedAt then
+            return deny("baseline_unchecked", "批准前必须通过来源命令检查当前 Git 基线", "点击“检查最新 Git 基线”")
+        end
+        gate.approval = M.approvalState(req, h)
+        return gate
+    end
+
+    if act == "handoff-revoke" then
+        if not u.writable or not h or not h.safe or not req then
+            return deny("readonly_or_unsafe", "工作流不可写；请启用项目编辑并确认记录完整", nil)
+        end
+        if h.workflowBusy then return deny("workflow_busy", "工作流写入正在进行，请稍候", nil) end
+        if h.pending or h.pendingSend then
+            return deny("pending_request", "已有来源请求或业务发送尚待核对；不会修改方案或提交新操作", nil)
+        end
+        if not wf or not wf.approval then return deny("no_approval", "当前没有可撤销的批准记录", nil) end
+        if not trimmedField(h, "revokeReason"):match("%S") then
+            return deny("reason_required", "请填写撤销理由后再确认", "在撤销理由输入框写明原因")
+        end
+        return gate
+    end
+
+    if act == "handoff-authorize-direct" then
+        if not u.writable or not h or not h.safe or not req then
+            return deny("readonly_or_unsafe", "工作流不可写；请启用项目编辑并确认记录完整", nil)
+        end
+        if h.workflowBusy then return deny("workflow_busy", "工作流写入正在进行，请稍候", nil) end
+        if h.pending or h.pendingSend then
+            return deny("pending_request", "已有来源请求或业务发送尚待核对；不会修改方案或提交新操作", nil)
+        end
+        if not h.baseline or not h.baselineCheckedAt then
+            return deny("baseline_unchecked", "直接授权前必须通过来源命令检查当前 Git 基线", "点击“检查最新 Git 基线”")
+        end
+        if not trimmedField(h, "directReason"):match("%S") then
+            return deny("reason_required", "直接实施必须明确填写授权理由", "输入非空直接授权理由")
+        end
+        if type(req.scope) ~= "string" or not req.scope:match("%S")
+            or type(req.acceptanceCriteria) ~= "table" or #req.acceptanceCriteria == 0 then
+            return deny("scope_or_criteria_missing", "直接实施必须在需求中提供范围与至少一条验收条件", "补充需求范围与验收条件后再授权")
+        end
+        return gate
+    end
+
+    if act == "handoff-reconcile-baseline" then
+        if not req or not u.writable or not t or not t.safe or (opts and opts.requireToken and not u.token) then
+            return deny("readonly_or_unsafe", "只读或结果记录未就绪，无法补记基线", "启用编辑并确认结果记录可读")
+        end
+        if t.busy or t.pending then return deny("trace_busy", "已有代码或来源检查正在进行，请稍候", nil) end
+        local sync = M.pendingBaselineSync(req, h, t)
+        if not sync then return deny("nothing_to_reconcile", "没有待补记的已提交实施基线", nil) end
+        gate.sync = sync
+        target.requestId = sync.requestId
+        return gate
+    end
+
+    if act == "results-refresh-changes" then
+        if not req or not u.writable or not t or not t.safe then
+            return deny("readonly_or_unsafe", "只读或记录未就绪", "启用编辑并选择需求")
+        end
+        if s and s.problem then return deny("source_problem", s.problem, "恢复来源连接后再刷新快照") end
+        if t.pending then return deny("pending_request", "已有来源检查待核对；不会重复发送", "等待当前检查回执") end
+        if t.busy then return deny("trace_busy", "当前操作尚未完成", nil) end
+        return gate
+    end
+
+    if act == "results-preview-verification" or act == "results-run-verification" then
+        if not req or not u.writable or not t or not t.safe then
+            return deny("readonly_or_unsafe", "只读或记录未就绪", "启用编辑并选择需求")
+        end
+        if t.pending then return deny("pending_request", "已有来源请求待核对", "等待当前检查回执") end
+        if t.busy then return deny("trace_busy", "当前操作尚未完成", nil) end
+        local cmd = trimmedField(t, "verifyCommand")
+        if not cmd:match("%S") then return deny("command_required", "先填写验证命令", "输入白名单允许的验证命令") end
+        if not results then return deny("results_unloaded", "先读取代码变化，取得快照", "点击刷新代码变化取得快照") end
+        if act == "results-run-verification" then
+            if s and s.problem then return deny("source_problem", s.problem, "恢复来源连接后再运行") end
+            if not t.runPreview then return deny("preview_required", "先预览确切命令", "点击“预览验证命令”") end
+            local criteriaText = trimmedField(t, "verifyCriteria")
+            if not currentVerifyMatches(t, req, s, results, cmd, criteriaText) then
+                return deny("preview_mismatch", "预览上下文已变化，请重新预览", "命令或关联条件已改，请重新预览")
+            end
+        end
+        return gate
+    end
+
+    if act == "review-accept" then
+        if not req or not u.writable or not v or not v.safe then
+            return deny("readonly_or_unsafe", "只读或记录未就绪", "启用编辑并确认审查记录可读")
+        end
+        if v.busy then return deny("review_busy", "审查记录操作正在进行，请稍候", nil) end
+        if t and t.safe == false then return deny("results_unsafe", "结果记录损坏或未就绪，禁止验收", "修复或重新读取结果记录") end
+        if req.stage ~= "implementing" and req.stage ~= "verifying" and req.stage ~= "awaiting_acceptance" then
+            return deny("invalid_stage", "当前阶段不允许接受；请先重新实施或刷新需求", nil)
+        end
+        local acceptance = Validity.acceptance(req, results, reviewsData)
+        gate.acceptance = acceptance
+        if not acceptance.ok then
+            return deny("gate_blocked", table.concat(acceptance.problems, "；"), "补齐快照/验证证据并处置全部阻断发现")
+        end
+        return gate
+    end
+
+    if act == "review-reject" then
+        if not req or not u.writable or not v or not v.safe then
+            return deny("readonly_or_unsafe", "只读或记录未就绪", nil)
+        end
+        if v.busy then return deny("review_busy", "审查记录操作正在进行，请稍候", nil) end
+        if t and t.safe == false then return deny("results_unsafe", "结果记录损坏或未就绪", nil) end
+        if req.stage ~= "implementing" and req.stage ~= "verifying" and req.stage ~= "awaiting_acceptance" then
+            return deny("invalid_stage", "当前阶段不能驳回", nil)
+        end
+        if not results or not results.changes or type(results.changes.fingerprint) ~= "string" then
+            return deny("snapshot_missing", "先读取代码快照", "到交付页读取当前代码变化")
+        end
+        if not trimmedField(v, "reviewReject"):match("%S") then
+            return deny("reason_required", "先填写驳回原因", "填写具体驳回理由与退回阶段说明")
+        end
+        return gate
+    end
+
+    if act == "review-reopen" then
+        local guard = M.lifecycleGuard(s, req)
+        if guard then return deny("lifecycle_guard", guard, "先保存草稿或处理未决请求") end
+        if not req or req.stage ~= "done" then
+            return deny("invalid_stage", "只有已完成需求可以重新打开", nil)
+        end
+        if not trimmedField(v, "lifecycleReason"):match("%S") then
+            return deny("reason_required", "先填写重新打开原因", "写明重新打开原因")
+        end
+        return gate
+    end
+
+    if spec.requiresLock and not u.writable then
+        return deny("lock_required", "当前处于只读模式；请先启用项目编辑", "点击启用编辑获取项目锁")
+    end
+    if spec.requiresSource and s and s.problem then
+        return deny("source_problem", s.problem, "等待或恢复来源连接")
+    end
+    return gate
 end
 
 return M

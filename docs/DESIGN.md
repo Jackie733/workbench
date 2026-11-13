@@ -284,7 +284,7 @@ JSON 导入保留在“更多 → 导入外部结果”，作为显式兼容入�
 
 键盘：原生 Tab 顺序跟随视觉顺序；Escape 关闭顶层临时界面并恢复焦点；编辑器 Enter 换行，绝不借主按钮默认提交批准或执行。中文 IME 组合期间不触发快捷键。切换需求时草稿按项目/需求/动作隔离，提交成功清理该动作草稿，失败保留。外部事件不得重建正在输入的编辑器。
 
-宿主能力必须按当前观测判断，不能将历史“没有 a11y 节点”的记录当成所有新 surface 的结论。AF-02 在隔离 Tern 0.9.18 真窗口观察到 Heading/TextInput/Button/ComboBox 节点和禁用原因；这不等于已通过读屏器/完整焦点验收。探针支持原生 select 菜单、overlay 和 Markdown。关键决定默认采用替换阅读页：overlay 的焦点进入/循环/退出仍须宿主显式实现与验证。Tab 在探针编辑器仍留原焦点，不能假定原生遍历已就绪。
+宿主能力必须按当前观测判断，不能将历史“没有 a11y 节点”的记录当成所有新 surface 的结论。AF-02 在隔离 Tern 0.9.18 真窗口观察到 Dialog/Heading/TextInput/Button/ComboBox 节点和禁用原因，并完成了跨字段 Tab、modal 焦点闭环与组合撤销分组矩阵（见 §9.1）：原生不提供跨字段自动 Tab 遍历、button 获得 `frame focus` 时不显示 `.focused` 且不自动以 Enter/Space 触发 `action`、打开 `modal=true` overlay 时背景 `.sf-main` 节点仍留在 `a11y` 树中（未自动 inert）。因此关键决定默认采用**替换阅读页**彻底规避假模态背景泄露；必要的轻量弹层与表单由宿主显式维护焦点环/顺序、`Enter`/`Space` 按钮激活、Escape 回焦与 60ms 输入突发撤销分组，并在 AF-15 做整页与辅助技术实测。
 
 ### 9.1 AF-02 已观测能力与未决边界
 
@@ -292,15 +292,19 @@ JSON 导入保留在“更多 → 导入外部结果”，作为显式兼容入�
 - `.path` 探针插件仅安装在 `target/af-baseline/native-config/plugins`，同时隔离 TERN_CONFIG_DIR 与 TERN_DAEMON_SOCKET；只改配置目录不足以隔离默认 daemon 的插件清单。真实窗口使用独立 control 57994，未操作日常 pane、需求或会话。
 - 离屏 shot 未加载探针 host，显式 new_block 断言失败；不得将空白图算支持。改用独立真实窗口后，原生 Markdown 标题/列表/代码/链接、select 弹层、modal overlay、长内容滚动和 `cx:frame` 关闭恢复编辑器焦点均有观察证据。链接仅验证呈现，未打开外网。
 - 原生 API 的 `cx.cols/rows` 是字符单位，不是 CSS 像素。整窗 resize 360 被系统最小宽度夹到 720；通过真实分栏得到 371px surface、339px 编辑器，布局可用。这不是严格 360/492/800/1100 全矩阵验收；实现按单栏保守布局，不按 cols 冒充精确像素断点。
-- commit/type 按 [原生输入契约](https://docs.stencil.so/tern/elements/input.md) 通过 key 事件进入，不由 Tern 自动编辑正文。最初探针没有回应 focus 事件，导致 preedit 不显示；补充 `cx:frame({{"focus",ev.id}})` 后，真窗口观察到 `.sf-ed-preedit` 的“智能”和“组合”。F6 先安排 300ms 重绘，再进入组合输入，500ms 后组合 span 仍存在且 refresh=1，提交后持久文本为“初始保留”。中文/多行提交与单键撤销均有真实事件证据；整段组合的撤销分组、跨字段 Tab 与 modal 焦点循环尚未完成，属于宿主输入适配和最终验收要求，不得假定原生自动提供。
+- commit/type 按 [原生输入契约](https://docs.stencil.so/tern/elements/input.md) 通过 key 事件进入，不由 Tern 自动编辑正文。最初探针没有回应 focus 事件，导致 preedit 不显示；补充 `cx:frame({{"focus",ev.id}})` 后，真窗口观察到 `.sf-ed-preedit` 的“智能”和“组合”。F6 先安排 300ms 重绘，再进入组合输入，500ms 后组合 span 仍存在且 refresh=1，提交后持久文本为“初始保留”。
+- 组合撤销分组、跨字段 Tab 与 modal 焦点闭环矩阵（`tests/native-capabilities/host.luau` matrix 模式，控制端口 `0` 隔离窗口）：
+  - **组合撤销分组（grouped-undo）：** `commit "工作台"` 以约 13–15ms 间隔的单个 `key` 事件到达；在宿主缓冲层基于 `tern.now()` 实施 ≤60ms 单次非换行插字突发合并后，`Ctrl+z`（以 `meta=true` 或 `ctrl=true` 到达）单次将 `"工作台"` 整组撤销回 `"初始"`；间隔 120ms 后的独立输入 `"AB"` 与提交 `"新"` 在 `Ctrl+z` 后仅撤销 `"新"`，保留 `"初始AB"`（`native-matrix-grouped-undo.json` / `.log`）。生产 `host.luau` 尚未接入该突发合并，须在工作台编辑器辅助层落地。
+  - **跨字段 Tab 与按钮/Select 限制（native-tab vs host-tab）：** `native-tab` 下 `key` 对 `tab` 返回 `false` 时，原生不移动焦点，输入 `"B"` 与 modal 内 `"M2"` 仍停留在原控件（`native-matrix-native-tab.json`）。改由宿主维护可见焦点顺序表并调用 `cx:frame({{"focus", nextId}})` 后，`host-tab` 验证输入可从 `input`(`main.title`="标题1") 切换至 `editor`(`main.draft`="初始2")，`open` 后进入 `layer.dialog.modalNote`（"X"），连续三次 `Tab` 在 `modalNote → modalConfirm → close → modalNote` 闭环不穿出底层（"Y" 写入 `modalNote="XY"`），`Escape` 恢复原焦点 `main.open`（`native-matrix-host-tab.json`）。但同时观测到两项原生限制：`cx:frame` 聚焦 `button` 时不加 `.focused` 类且按键 `Enter`/`Space` 不原生触发 `action`；因此宿主需自绘非文本控件焦点态并处理 `Enter`/`Space` 激活。
+  - **modal a11y 边界：** `overlay({modal=true})` 在 `a11y` 中呈现 `role="Dialog"`（`states=["modal"]`），输入光标由隐藏代理 `MultilineTextInput`（`Terminal input`）跟随；但背景 `.sf-main` 节点仍留在 `a11y` 树中未被原生置为 inert（`native-matrix-a11y-modal.json`）。基于该真实 AT 限制，关键流程坚持默认替换阅读页，仅对非关键轻量确认使用 overlay。
 - 最初 `appearance dark`/`theme titanium` 未变色的原因是隔离配置 `theme="Light"` 固定了外观。通过 Settings API 读取真实枚举，再只在隔离配置设置 Dark 后，真窗口和 surface 均切成深色（`dark-confirmed.png`）。自定义主题与对比度全矩阵仍由 AF-04/15 验证。禁用按钮无 forbidden 事件，a11y description 有原因。
 - 离线 SDK 探针：隔离无凭据 RPC 进程显式选择模型名称后可注册工具，getAllTools/getActiveTools 可见，session_start 有 main/rpc/hasUI=false、sessionId/cwd；此模式不调用模型，不证明真实 execute 调度。
 - 另执行一次独立 `/tmp/af-sdk-*` 项目中的真实单回合工具探针：限定 af_capability_probe、无会话保存、不加载项目上下文/扩展/规则，无业务面板。真实 native dispatch 收到 toolCallId、main/print 上下文、独立 sessionId/cwd，providerRequests=1，execute 期间 addAdditionalContext 存在。此回合读取正常配置中的既有提供方凭据但未复制凭据、改默认模型或向日常会话发送请求。`sdk-dispatch-report.json` 为真实分发证据，不再拿直接调用 handler 代替。
-- 固定版本 [ToolDefinition](https://github.com/can1357/oh-my-pi/blob/v18.20.0/packages/coding-agent/src/extensibility/extensions/types.ts) 的 approval read/write/exec 是工具级权限，不是工作台方案批准或人工验收。本次只调用无业务副作用的 read 工具，没有伪造或验证业务授权。AF-11 必须定义独立可信授权；AF-02 的完整输入/焦点策略仍未关闭，任务状态见 TASKS。
+- 固定版本 [ToolDefinition](https://github.com/can1357/oh-my-pi/blob/v18.20.0/packages/coding-agent/src/extensibility/extensions/types.ts) 的 approval read/write/exec 是工具级权限，不是工作台方案批准或人工验收。本次只调用无业务副作用的 read 工具，没有伪造或验证业务授权。AF-02 能力基线已完成观测并关闭；AF-11 必须定义独立可信授权，AF-04/AF-15 负责在生产 UI 中落实上述宿主替代机制并完成端到端验收。
 
 ### 9.2 AF-01 确认的实现差异
 
-现有读取不是全面纯读：refreshHandoff 可能为历史 submitted 实施请求补记 baseline，results-refresh-changes 显式保存代码观察。下一步须把命令结果对账与普通导航分离，不能只改动作分类掩盖写入。已有验收是记录→阶段的分步发布，不宣称原子。
+AF-03 已完成只读/执行边界分离与动作契约收口：`refreshHandoff` 不再隐式补记 `results.json`（历史已提交实施基线改由 `Context.pendingBaselineSync` 派生并通过显式 `handoff-reconcile-baseline` 补记）；`results-refresh-changes`、`handoff-send`、`results-run-verification` 等在 `Context.describeAction` 中显式标记修订与文件副作用；`Context.evaluateAction` 将 UI 禁用原因与 `host.luau` 最终命令门禁/失败原因统一为同一来源，且 `readiness` 按 `requirementId` 隔离 `workflow`、`results`、`reviews` 与 `pendingSend`。已有验收仍保持记录→阶段的分步发布，不宣称跨文件原子事务。
 
 现有条件编辑按行重建 ID 且将 required 设为 true；普通审查 source=native_review 是人工声明；批量队列/部分草稿并未全面按需求隔离；部分旧路由无效；完整验证日志/diff 历史缺少可达阅读入口。分别在 AF-07、AF-09、AF-10、AF-06/08 处理，不能作为已完成能力继承。AF-03 先修正派生状态与建议动作；AF-09 明确零条件验收规则。
 

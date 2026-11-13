@@ -407,6 +407,7 @@ local function refreshHandoff(s)
     if not h.pendingSend and newest and live.token(newest.requestId) then
         h.pendingSend = {requestId = newest.requestId, activity = newest.activity, sessionId = newest.sessionId,
             instanceId = newest.instanceId, payloadSha256 = newest.payloadSha256, state = newest.status,
+            requirementId = requirement.requirementId, createdAt = newest.createdAt,
             receiptApplied = newest.status == "delivery_unknown", receiptAppliedStatus = newest.status == "delivery_unknown" and "delivery_unknown" or nil,
             receiptStatus = newest.status == "delivery_unknown" and "delivery_unknown" or nil, receiptReason = newest.reason}
         matched = newest
@@ -431,10 +432,7 @@ local function refreshHandoff(s)
                 createdAt = created, expiresAt = created + 30000, recovered = true}
         end
     end
-    if matched and matched.status == "submitted" and matched.activity == "implement"
-        and recordBaselineReference and h.workflow and h.workflow.approval and h.workflow.approval.baseline then
-        recordBaselineReference(s, matched.requestId, h.workflow.approval.baseline, s.cx)
-    end
+    -- Never mutate results.json during read/navigation refresh; historical baseline reconciliation is explicit via handoff-reconcile-baseline.
     if h.pending and (h.pending.instanceId ~= s.payload.binding.instanceId
         or h.pending.sessionId ~= s.payload.binding.sessionId) then h.pending.staleBinding = true end
     local state = Workflow.approvalState(workflow, requirement)
@@ -1012,6 +1010,7 @@ local function sendPreview(s, cx, prefillOnly)
     local id = newRequestId(s)
     local pending = {requestId = id, activity = preview.activity, sessionId = s.payload.binding.sessionId,
         instanceId = s.payload.binding.instanceId, payloadSha256 = preview.sha256, state = "recording_intent",
+        requirementId = requirement.requirementId, createdAt = live.epoch(),
         baseline = preview.activity == "implement" and preview.baseline or nil}
     h.pendingSend, h.error = pending, nil
     saveHandoffAndRender(s, cx)
@@ -1032,12 +1031,16 @@ local function sendPreview(s, cx, prefillOnly)
         issueSourceCommand(s, ctx, "send", {previewToken = preview.previewToken}, "send", id)
     end)
 end
-recordBaselineReference = function(s, requestId, baseline, cx)
+recordBaselineReference = function(s, requestId, baseline, cx, targetRequirementId)
     local u = s.ui
     if not u or not u.trace or type(baseline) ~= "table" or not requestId then return end
     if u.trace.baselineAttempt == requestId then return end
     local requirement = selectedRequirement(s)
-    if not requirement or not u.writable or not u.trace.safe or not u.token then return end
+    if not requirement or (type(targetRequirementId) == "string" and requirement.requirementId ~= targetRequirementId) then return end
+    if u.handoff and u.handoff.pendingSend and u.handoff.pendingSend.requestId == requestId
+        and u.handoff.pendingSend.requirementId and u.handoff.pendingSend.requirementId ~= requirement.requirementId then return end
+    if u.handoff and u.handoff.workflow and u.handoff.workflow.requirementId and u.handoff.workflow.requirementId ~= requirement.requirementId then return end
+    if not u.writable or not u.trace.safe or not u.token then return end
     u.trace.baselineAttempt = requestId
     Results.recordBaseline(u.paths, requirement, u.token, baseline, requestId, function(saved, reason, freshCx)
         local ctx = freshCx or cx or s.cx
@@ -1797,6 +1800,8 @@ local function traceAction(s, act, cx)
         applyTracePlan(s, cx, "links", {stepId=t.selectedStep, criterionIds=criteria, filePaths=files}); return
     end
     if act == "results-refresh-changes" then
+        local gate = context.evaluateAction(act, s, selectedRequirement(s))
+        if not gate.allowed then t.error = context.formatFailure(gate); cx:render(); return end
         local baseline = t.results and t.results.baseline
         issueTraceCommand(s, cx, "changes", {since = baseline and baseline.head or ""}, "refresh")
     elseif act == "results-preview-verification" then
@@ -1944,7 +1949,10 @@ local function handoffAction(s, act, cx)
     local u, h, requirement = s.ui, s.ui.handoff, selectedRequirement(s)
     if act == "handoff-end-wait" then endHandoffWait(s,cx)
     elseif act == "handoff-preview" then startPreview(s, cx)
-    elseif act == "handoff-baseline" then inspect(s, cx, "baseline", {})
+    elseif act == "handoff-baseline" then
+        local gate = context.evaluateAction(act, s, requirement)
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
+        else inspect(s, cx, "baseline", {}) end
     elseif act == "handoff-candidate" then inspect(s, cx, "candidate", {})
     elseif act == "handoff-import-file" then
         local path = h.fields.importPath.text:gsub("^%s+", ""):gsub("%s+$", "")
@@ -1978,8 +1986,14 @@ local function handoffAction(s, act, cx)
             saveHandoffAndRender(s, cx)
         end
     elseif act == "handoff-adopt" then adoptProposal(s, cx)
-    elseif act == "handoff-prefill" then sendPreview(s, cx, true)
-    elseif act == "handoff-send" then sendPreview(s, cx, false)
+    elseif act == "handoff-prefill" or act == "handoff-send" then
+        local gate = context.evaluateAction(act, s, requirement, {requireToken = true})
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
+        else sendPreview(s, cx, act == "handoff-prefill") end
+    elseif act == "handoff-reconcile-baseline" then
+        local gate = context.evaluateAction(act, s, requirement, {requireToken = true})
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
+        else h.error = nil; recordBaselineReference(s, gate.sync.requestId, gate.sync.baseline, cx, requirement.requirementId) end
     elseif act == "handoff-comment" and h.selectedDesign then
         local text = h.fields.comment.text
         if text:match("%S") then
@@ -1987,19 +2001,18 @@ local function handoffAction(s, act, cx)
                 if ok then h.fields.comment.text, h.fields.comment.cursor = "", 0; saveUi(s); ctx:render() end
             end)
         end
-    elseif act == "handoff-approve" and h.selectedDesign then
-        if not h.baseline or not h.baselineCheckedAt then handoffError(h, "批准前必须通过来源命令检查当前 Git 基线"); cx:render()
+    elseif act == "handoff-approve" then
+        local gate = context.evaluateAction(act, s, requirement)
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
         else applyWorkflow(s, cx, "approve", {designVersion = h.selectedDesign.version, baseline = h.baseline, clicked = true}) end
-    elseif act == "handoff-revoke" and h.workflow and h.workflow.approval then
-        local reason = h.fields.revokeReason.text
-        if not reason:match("%S") then handoffError(h, "请填写撤销理由后再确认"); cx:render()
-        else applyWorkflow(s, cx, "revoke", {reason = reason}) end
+    elseif act == "handoff-revoke" then
+        local gate = context.evaluateAction(act, s, requirement)
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
+        else applyWorkflow(s, cx, "revoke", {reason = h.fields.revokeReason.text}) end
     elseif act == "handoff-authorize-direct" then
-        local reason = h.fields.directReason.text
-        if not h.baseline or not h.baselineCheckedAt then handoffError(h, "直接授权前必须通过来源命令检查当前 Git 基线"); cx:render()
-        elseif not reason:match("%S") or type(requirement.scope) ~= "string" or not requirement.scope:match("%S")
-            then handoffError(h, "直接实施必须明确填写授权理由，并在需求中提供范围"); cx:render()
-        else applyWorkflow(s, cx, "authorize_direct", {baseline = h.baseline, reason = reason, clicked = true}) end
+        local gate = context.evaluateAction(act, s, requirement)
+        if not gate.allowed then handoffError(h, context.formatFailure(gate)); cx:render()
+        else applyWorkflow(s, cx, "authorize_direct", {baseline = h.baseline, reason = h.fields.directReason.text, clicked = true}) end
     elseif act == "handoff-prepare" then
         h.panel = not h.panel
         refreshHandoff(s)
@@ -2307,11 +2320,9 @@ local function reviewAction(s, act, cx)
             saveUi(s); ctx:render()
         end)
     elseif act == "review-accept" then
-        if requirement.stage ~= "implementing" and requirement.stage ~= "verifying" and requirement.stage ~= "awaiting_acceptance" then
-            reviewFail(s, cx, "当前阶段不允许接受；请先重新实施或刷新需求"); return
-        end
-        local gate = Review.acceptanceGate(requirement, u.trace and u.trace.results, v.data)
-        if not gate.ok then reviewFail(s, cx, table.concat(gate.problems, "；")); return end
+        local actionGate = context.evaluateAction(act, s, requirement)
+        if not actionGate.allowed then reviewFail(s, cx, context.formatFailure(actionGate)); return end
+        local gate = actionGate.acceptance
         local reviewIds = tern.json.array()
         for _, review in v.data.reviews do table.insert(reviewIds, review.id) end
         v.busy = true
@@ -2834,10 +2845,9 @@ end
 local function openPage(s, tab, sub)
     if tab == "implementation" then
         local requirement = selectedRequirement(s)
-        local next = requirement and context.readiness(requirement, s.ui, s)
-        if not next or not next.next or next.next.activity ~= "implement" then return end
+        local gate = context.evaluateAction("wb-open-implementation", s, requirement)
+        if not gate.allowed then return end
         local h = s.ui.handoff
-        if h.pending or h.pendingSend then return end
         if h.activity ~= "implement" then h.activity = "implement"; invalidatePreview(h) end
         tab, sub = "design", "materials"
     end

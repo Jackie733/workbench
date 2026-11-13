@@ -238,8 +238,8 @@ function M.build(s)
         }, {key = "changesCard", tone = "muted"}))
     end
     table.insert(nodes, row("changesActions", {
-        button(changes and "刷新当前代码变化" or "读取当前代码变化", "results-refresh-changes", "quiet",
-            not writable or t.pending ~= nil or s.problem ~= nil),
+        button(changes and "刷新并保存当前代码变化" or "读取并保存代码快照", "results-refresh-changes", "quiet",
+            Context.evaluateAction("results-refresh-changes", s).reason or false),
     }))
 
     table.insert(nodes, field("verifyCommand", "验证命令", t.fields.verifyCommand.text, t.fields.verifyCommand.cursor, t.fields.verifyCommand.anchor,
@@ -311,15 +311,9 @@ function M.build(s)
     end
     table.insert(nodes, row("verifyActions", {
         button("预览验证命令", "results-preview-verification", "default",
-            (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
-                or (not trimmedCommand:match("%S") and "先填写验证命令")
-                or (not t.results and "先读取代码变化，取得快照") or false),
+            Context.evaluateAction("results-preview-verification", s).reason or false),
         button(t.busy and "正在记录…" or "确认并运行验证", "results-run-verification", "primary",
-            (not writable and "只读或记录未就绪") or (t.pending ~= nil and "已有来源请求待核对")
-                or (not trimmedCommand:match("%S") and "先填写验证命令")
-                or (not t.results and "先读取代码变化，取得快照")
-                or (not preview and "先预览确切命令")
-                or (not matches and "预览上下文已变化，请重新预览") or false),
+            Context.evaluateAction("results-run-verification", s).reason or false),
     }))
 
     local batchEntries = t.batchEntries or {}

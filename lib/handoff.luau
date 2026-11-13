@@ -223,7 +223,7 @@ function M.preparePanel(s)
     table.insert(nodes, row("previewActions", {
         button(h.preview and "重新生成完整预览" or "生成完整资料预览", "handoff-preview",
             h.preview and "default" or "primary", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
-        button("检查当前 Git 基线", "handoff-baseline", "quiet", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
+        button("检查当前 Git 基线", "handoff-baseline", "quiet", Context.evaluateAction("handoff-baseline", s).reason or false),
     }))
     local preview = h.preview
     if preview and preview.requirementId ~= r.requirementId then preview = nil end
@@ -240,9 +240,8 @@ function M.preparePanel(s)
             h.previewStale and ui.text({ui.span("此预览来自上次运行；来源令牌已失效。请显式重新生成预览。", "warning")}) or note("SHA-256：" .. tostring(preview.sha256)),
             ui.node("scroll", {key = "fullPreview", max = {h = "22lines"}}, {ui.text(preview.text)}),
             row("previewDelivery", {
-                button("只预填到 omp（不发送）", "handoff-prefill", "default", h.previewStale or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
-                button("明确发送并开始推理", "handoff-send", "primary", h.previewStale or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil
-                    or not s.snapshot or s.snapshot.state ~= "idle" or (preview.activity == "implement" and not h.approvalValid)),
+                button("只预填到 omp（不发送）", "handoff-prefill", "default", Context.evaluateAction("handoff-prefill", s).reason or false),
+                button("明确发送并开始推理", "handoff-send", "primary", Context.evaluateAction("handoff-send", s).reason or false),
             }),
         }, {key = "previewCard", tone = h.previewStale and "warning" or "muted"}))
     end
@@ -309,7 +308,7 @@ function M.build(s)
                 .. (wf.approval.revokedAt and (" · 撤销 " .. tostring(wf.approval.revokedAt)) or "")) or note("尚无有效批准记录。"),
         }, {key = "approvalState", tone = h.approvalValid and "success" or "warning"}))
         table.insert(nodes, row("baselineActions", {
-            button("检查最新 Git 基线", "handoff-baseline", "quiet", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
+            button("检查最新 Git 基线", "handoff-baseline", "quiet", Context.evaluateAction("handoff-baseline", s).reason or false),
             h.baseline and note("HEAD " .. (h.baseline.head ~= "" and h.baseline.head or "（尚无提交）") .. " · 指纹 " .. h.baseline.fingerprint .. " · 工作区 " .. (h.baseline.dirty and "有改动" or "干净")) or note("请先检查基线，再明确作出授权决定。"),
         }))
         if h.selectedDesign then table.insert(nodes, ui.card("将被批准的完整版本 v" .. tostring(h.selectedDesign.version), {
@@ -317,11 +316,24 @@ function M.build(s)
         }, {key = "approvalDesignCard", tone = "muted"})) end
         table.insert(nodes, editor("revokeReason", "撤销理由", h.fields.revokeReason.text, h.fields.revokeReason.cursor, h.fields.revokeReason.anchor,
             3, not editable, "撤销保留历史，并立即使当前授权失效"))
+        local req = s.ui and s.ui.selected and s.ui.byId and s.ui.byId[s.ui.selected] or nil
+        local approveGate = Context.evaluateAction("handoff-approve", s, req)
+        local revokeGate = Context.evaluateAction("handoff-revoke", s, req)
+        local currentApproval = Context.approvalState(req, h)
+        if currentApproval.valid then
+            table.insert(nodes, note("当前实施授权已有效，可直接查看实施准备；仅当方案版本、内容或基线改变时才需要重新批准。"))
+        end
         table.insert(nodes, row("approveActions", {
-            button("明确批准当前最新方案", "handoff-approve", "primary", not writable or not h.baseline or not h.baselineCheckedAt or not h.selectedDesign
-                or h.selectedDesign.version ~= (wf and wf.latestVersion) or h.pendingSend ~= nil),
-            button("明确撤销当前批准", "handoff-revoke", "danger", not writable or not wf or not wf.approval or h.pendingSend ~= nil or #h.fields.revokeReason.text == 0),
+            button("明确批准当前最新方案", "handoff-approve", currentApproval.valid and "default" or "primary", approveGate.reason or false),
+            button("明确撤销当前批准", "handoff-revoke", "danger", revokeGate.reason or false),
         }))
+        if Context.pendingBaselineSync(req, h, s.ui and s.ui.trace) then
+            local syncGate = Context.evaluateAction("handoff-reconcile-baseline", s, req)
+            table.insert(nodes, note("检测到历史已提交的实施请求尚未写入 results 基线；手动补记会递增 results 修订并清空旧变更缓存。"))
+            table.insert(nodes, row("baselineSyncActions", {
+                button("显式补记已提交基线到 results", "handoff-reconcile-baseline", "default", syncGate.reason or false),
+            }))
+        end
         local criteria, scope = {}, type(r.scope) == "string" and r.scope or ""
         for _, item in r.acceptanceCriteria or {} do table.insert(criteria, "• " .. item.description) end
         table.insert(nodes, ui.card("直接实施授权所依据的需求范围", {
@@ -333,8 +345,8 @@ function M.build(s)
             note("不批准方案版本。授权仅针对当前需求范围与验收条件，保存后仍必须生成实施预览并明确发送；源端会重新核对基线和需求摘要。"),
             editor("directReason", "授权理由与实施范围", h.fields.directReason.text, h.fields.directReason.cursor, h.fields.directReason.anchor,
                 5, not editable, "说明为何可以直接实施及边界；需求本身必须已有范围与至少一项验收条件"),
-            button("检查基线后明确授权直接实施", "handoff-authorize-direct", "quiet", not writable or not h.baseline or not h.baselineCheckedAt or h.pendingSend ~= nil
-                or #h.fields.directReason.text == 0 or not scope:match("%S") or #criteria == 0),
+            button("检查基线后明确授权直接实施", "handoff-authorize-direct", "quiet",
+                Context.evaluateAction("handoff-authorize-direct", s).reason or false),
         }, {key = "directAuthorization", tone = "warning"}))
         if h.workflow then
             table.insert(nodes, ui.node("section", {key = "approvalHistory", head = "授权与撤销历史", collapsible = true, collapsed = true}, (function()

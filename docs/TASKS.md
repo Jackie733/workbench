@@ -88,7 +88,7 @@
 
 “查看不写业务状态”特指阅读已有资料；显式采集代码观察、导出、预填均有可解释副作用，不能伪装为普通导航。UI 写保护不等于操作系统沙箱，领域低层方法也不是独立的权限服务。
 
-### [ ] AF-02 验证原生组件与扩展能力
+### [x] AF-02 验证原生组件与扩展能力
 
 **设计映射：** §7.4、§9；历史探针只作为线索。
 
@@ -102,19 +102,22 @@
 
 **验收：** 每个设计所需能力有真实观测或明确替代；不操作日常工程、不向日常会话发送测试请求。
 
-**执行记录（已执行探针，未完成验收，2026-11-13）：**
+**执行记录（2026-11-13，已完成验收）：**
 - 新增可复用隔离插件 `tests/native-capabilities/` 与 SDK 探针 `tests/af-extension-probe.ts`；只安装到临时 Tern 配置，不修改日常插件安装/设置、默认模型、Provider 或业务项目。独立 control 57994 的真实窗口已关闭；不是在日常窗口内创建标签。
 - 已核实版本：Bun 1.3.14、Lune 0.11.1、omp 18.20.0、Tern 0.9.18（6f1fa0f）、工作台 3.7.1。本项目 LSP 无配置服务器。实际 `tern plugin types` 导出在 `target/af-baseline/tern.d.luau`。
 - 实际隔离需要同时设置 TERN_CONFIG_DIR 与 TERN_DAEMON_SOCKET。单独换配置后 plugin list 仍返回日常 daemon 插件；改成独立 socket 后只显示 af-capability-probe。离屏 shot 的显式 new_block 断言失败，空白截图不算验证；改用 Windows 真窗口成功加载。
 - 真窗口已观察：Markdown 标题/列表/内联代码/链接、select/listbox 菜单、modal overlay、长内容滚动、禁用按钮的原因及点击无 forbidden 事件、Escape 后宿主 frame 恢复 editor 焦点。原生 a11y 树包含 Heading/TextInput/Button/ComboBox；推翻“所有 surface 一律没有 a11y 节点”的泛化，不等于生产界面或读屏器已验收。
 - 宽度证据为 800px 整窗下的 371px 分栏 surface、339px 编辑器；整窗请求 360px 被系统夹到 720px。不能将命令参数冒充实际容器宽度。后续查明隔离配置 theme=Light 固定外观；按 Settings API 真实枚举设置 Dark 后真窗口成功变深色，证据 `target/af-baseline/dark-confirmed.png`。
-- 输入根因已核实：commit 为 key 事件，探针必须维护缓冲；收到 focus 后必须发 frame focus。补齐后 preedit span 可见。F6 安排 300ms 重绘，在组合期间等待 500ms 后仍有“组合”span，refresh=1；提交后持久文本为“初始保留”（`native-events-redraw.json` / `native-redraw-preedit.json` / `redraw-composition.png`）。最初坐标点击未触发 refresh 的尝试不计成功。Ctrl+Z 单键撤销有事件与图证，但组合撤销分组、跨字段 Tab 与 modal 焦点循环仍未完整验收；AF-02 保持未勾选，不提前进入 AF-04 UI 实施。
+- 输入根因与矩阵（`tests/native-capabilities/host.luau` matrix 模式，Lune 编译验证通过，隔离窗口 `--control 0` / `ctl --control <port>`）已闭环：
+  - preedit / 异步重绘 / 单键撤销：`native-ime-confirmed.log`、`native-events-redraw.json`、`native-redraw-preedit.json`、`redraw-composition.png`。
+  - 组合撤销分组（`grouped-undo`）：`commit "工作台"` 以 ~13–15ms 逐字 `key`（`117.75 / 130.33 / 145.50ms`）进入；在宿主用 `tern.now()` 做 ≤60ms 单次非换行突发合并后，`Ctrl+z` 单次撤销整段回 `"初始"`；间隔 120ms 的独立 `"AB"` 与 `"新"` 在 `Ctrl+z` 后仅撤销 `"新"`，保留 `"初始AB"`（`native-matrix-grouped-undo.json` / `.log`）。
+  - 跨字段 Tab 与 modal 焦点闭环（`native-tab` vs `host-tab`）：`native-tab` 对 `tab` 返回 `false` 时聚焦停留在 `main.title`/`modalNote`（`native-matrix-native-tab.json`）；`host-tab` 下宿主通过 `cx:frame({{"focus", id}})` 完成 `main.title` → `main.draft` 输入切换、modal 内 `modalNote → modalConfirm → close → modalNote` 闭环循环与 `Escape` 恢复原触发控件 `main.open`（`native-matrix-host-tab.json`），同时实测确认 `button` 获焦无原生 `.focused`、`Enter`/`Space` 需宿主自处理，且 `modal=true` overlay 的背景 `.sf-main` 节点仍留在 `a11y` 树中未自动 inert（`native-matrix-a11y-modal.json`）。所有不支持项、宿主替代策略与关键流程默认使用替换阅读页的决策已写入 `docs/DESIGN.md` §9/§9.1。
 - SDK 离线注册结果在 `sdk-report.json`；另执行一次真实隔离单回合，工具白名单仅 af_capability_probe，不保存会话、不加载项目上下文/扩展/规则，未使用日常会话。`sdk-dispatch-report.json` 显示 native tool dispatch、真实 toolCallId、main/print、独立 sessionId/cwd、providerRequests=1、执行期 addAdditionalContext=true。只验证 read 工具和无面板上下文；未验证业务授权，AF-11 仍必须自建可信契约。
 - 日志/状态位于 `target/af-baseline/`；截图在 `target/shots/tern/live/af-capability-*.png`。最终输入证据为 `native-ime-confirmed.log` 和 `native-events-redraw.json`；早期失败/直接 handler 调用不冒充最终成功。隔离窗口已关闭，未对日常项目作写入。
 
 ## B. 公共基础
 
-### [ ] AF-03 统一只读状态与动作模型
+### [x] AF-03 统一只读状态与动作模型
 
 **设计映射：** §5、§6、§10。
 
@@ -132,7 +135,7 @@
 - 有效批准的下一步改为“查看实施准备”，通过独立导航路由打开 implement 草稿并失效原活动的预览；没有自动批准、生成请求或发送。`host.luau` 在路由入口重新取当前派生结果，未知/待核对请求不切实施活动。
 - 新增 `tests/run-context.luau`（17 checks、0 failures）；宿主回归 179 checks、0 failures；视图回归 1480 checks、0 failures。实际日志 `target/af-baseline/read-model.log`。后续将归属回归收紧为“相同内容/修订、不同 requirementId”的场景，仍为 17 checks、0 failures，见 `read-model-ownership.log`。已有门禁回归在 AF-01 已运行，本轮未改 `Validity` 规则。
 - 使用隔离 native 插件加载真实 context 模块与合成 approved/delivery_unknown 夹具，观察主操作分别为“查看实施准备”“查看请求结果”。截图 `target/af-baseline/approved-final.png`、`unknown-final.png`；这验证现有生产 context 的修正，不是新界面完成证据。
-- **未完成部分：** 当前导航中的历史基线补记仍可能写 results；完整命令权限/动作影响与各入口的统一尚未切换。不能把已通过的只读 readiness 测试推广为“所有导航都纯读”。AF-03 保持未勾选；不得跳过这些边界进入 AF-05。
+- **已完成收口（2026-11-13）：** 移除 `host.luau` `refreshHandoff` 对 `results.json` 的隐式 `recordBaselineReference` 写入，改为 `Context.pendingBaselineSync` 派生提示并由显式动作 `handoff-reconcile-baseline` 完成（同时为 `pendingSend` 与 `recordBaselineReference` 增加 `requirementId` 归属守卫）；在 `lib/context.luau` 定义 `M.actionKinds`、`M.describeAction`、`M.evaluateAction`、`M.formatFailure` 与 `M.approvalState`，覆盖 `navigate`/`read`/`edit`/`decide`/`execute` 分类、目标、权限、影响及失败恢复文案，并使 `M.readiness` 对 `workflow`、`results`、`reviews` 与 `pendingSend` 严格按 `requirementId` 隔离。`lib/handoff.luau`、`lib/runview.luau`、`lib/reviewview.luau` 与 `host.luau` 的关键门禁与“已批准待执行不推重新批准”（降级重批按钮为 `default`）已统一接通至同一套判定。实测全量回归：`tests/run-context.luau`（75 checks, 0 failures）、`tests/run-host.luau`（190 checks, 0 failures）、`tests/run-views.luau`（1512 checks, 0 failures）及全部 `tests/run-*.luau` 与 `bun test omp/handoff.test.ts omp/runtime.test.ts`（34 pass, 0 fail）全部通过；日志见 `target/af-baseline/af03-action-model.log`。
 
 ### [ ] AF-04 落地视觉 Token 与基础组件
 
