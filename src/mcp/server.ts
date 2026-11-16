@@ -1,3 +1,4 @@
+import packageInfo from "../../package.json";
 import { WorkbenchError } from "../core/errors.ts";
 import { isRecord } from "../core/validate.ts";
 import { executeWorkbenchTool, WORKBENCH_TOOL_DEFINITIONS } from "./tools.ts";
@@ -60,7 +61,7 @@ export async function handleMcpMessage(root: string, message: unknown): Promise<
             },
             serverInfo: {
               name: "workbench-mcp",
-              version: "4.0.0",
+              version: packageInfo.version,
             },
           },
         };

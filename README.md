@@ -2,14 +2,14 @@
 
 本地优先、常驻运行、Agent 无关的 **Spec & Verification Workbench Hub**（基于 **Lightweight SDD + VDD**）。帮助开发者在同一个常驻三栏 Web 指挥舱内统筹**多个本地 Git 项目**与**多份 AI 订阅算力（ChatGPT Plus / Google AI Pro / QoderCN / OpenCode Go / omp）**——由人类守住方案审批与真实验证验收两头关口，中间调度最合适的模型接力执行、探讨与交叉审查。
 
-仓库：[Jackie733/workbench](https://github.com/Jackie733/workbench)。本机源码：`/home/jackie/code/workbench`。
+仓库：[Jackie733/workbench](https://github.com/Jackie733/workbench)。
 
 ---
 
 ## 核心特性（v5.0 Hub）
 
 1. **常驻多项目控制中心（`wb start` / `wb open`）**
-   - 全局 `wb` CLI（已通过 `bun link` 安装到 `$PATH`）一键后台启动常驻 Hub 守护进程（默认端口 `4318`，数据存放在 `~/.workbench-hub/`）。
+   - 全局 `wb` CLI 可通过 `bun link` 安装到 `$PATH`；推荐使用用户级服务托管 Hub（默认端口 `4318`，数据存放在 `~/.workbench-hub/`）。
    - 三栏式 Web 指挥舱左栏提供**多项目实时切换**、**本机目录浏览器与初始化引导**、以及待拍板数与后台执行状态呼吸灯。
 2. **多 Harness 自动探测与分阶段算力路由**
    - 自动探测本机 `codex`、`qodercn`、`opencode`、`gemini`、`omp` 及模型目录，支持自定义追加付费模型（如 OpenCode Go）。
@@ -25,34 +25,42 @@
 
 ## 快速上手
 
-### 1. 日常一键使用（推荐）
+### 1. 用户级服务部署（推荐）
 
-已在全局安装 `wb` 命令，可在任意 Git 项目或任意目录运行：
+准备 Git、当前稳定版 Bun 和固定位置的源码，在源码根执行：
 
 ```sh
-# 确保 Hub 后台常驻运行并自动在浏览器打开工作台
+bun run deploy --port 4318
+wb service status
+# 新项目按需初始化；已有项目无需重建
+wb --root /absolute/path/to/project init
+bun run deploy:check --url http://127.0.0.1:4318 --root /absolute/path/to/project
 wb open
+```
 
-# 查看或管理后台守护进程
-wb status
-wb start --port 4318
-wb restart
-wb stop
+macOS 使用 LaunchAgent；Linux/WSL2 使用 systemd 用户服务，WSL2 需要先启用 systemd 和可用用户会话。服务仅监听本地 loopback，复用当前用户的 Agent CLI 与认证，不自动修改登录状态。
+
+完整的安装、启停、更新、日志、备份、卸载与 Windows MCP 配置见 [部署指南](docs/DEPLOYMENT.md)。`wb start/open/stop/restart` 在安装后由服务管理器执行；`wb status` 同时报告管理器与 Hub 健康状态。
+
+未安装服务时仍可用 `wb start` / `wb open` 启动原有未托管后台 Hub，或主动选择前台运行（不要与同一 Hub 的托管服务同时启动）：
+
+```sh
+bun run src/cli/index.ts serve --hub --host 127.0.0.1 --port 4318 --root "$HOME"
 ```
 
 首次进入 Web 工作台后，可在左侧栏点击 **`+ 添加`** 直接浏览并纳管你的本地 Git 仓库，或在 **`⚙ 路由`** 中调整各订阅模型配比。
 
 ### 2. 在 `omp` 中联动或挂载其他 Agent MCP
 
-- **`omp` 会话联动**：本机 `~/.omp/agent/extensions/workbench.ts` 已重导出 [omp/index.ts](omp/index.ts)，会话中输入 `/wb` 即可打开工作台并建立实时指令桥接。
-- **其他 MCP 客户端（Claude Code / Codex / Cursor / OpenCode 等）**：
+- **`omp` 会话联动**：可将 [omp/index.ts](omp/index.ts) 配置为 omp 扩展，加载后输入 `/wb` 打开工作台并建立实时指令桥接；项目级服务器生命周期独立于全局 Hub 服务。
+- **其他 MCP 客户端（Claude Code / Codex / Cursor / OpenCode 等）**：MCP 是客户端启动的独立 stdio 子进程，不存在 `/mcp` 网络入口。使用真实绝对路径和已初始化的项目：
 
 ```json
 {
   "mcpServers": {
     "workbench": {
-      "command": "wb",
-      "args": ["mcp"]
+      "command": "/absolute/path/to/bun",
+      "args": ["run", "/absolute/path/to/workbench/src/cli/index.ts", "mcp", "--root", "/absolute/path/to/project"]
     }
   }
 }
@@ -73,6 +81,7 @@ bun run typecheck
 | 文档 | 用途 |
 | :--- | :--- |
 | [设计规范](docs/DESIGN.md) | v5.0 Hub 产品定位、多 Harness 路由矩阵、双层交接、共创闭环与三栏指挥舱设计 |
+| [部署指南](docs/DEPLOYMENT.md) | macOS/Linux/WSL2 用户级服务、真实 HTTP/WS/MCP 检查、Windows 客户端与恢复边界 |
 | [领域契约](docs/DOMAIN_CONTRACT.md) | `.workbench/` 与 `~/.workbench-hub/` 存储分层、不变量与验证/主权门禁 |
 | [实施任务](docs/TASKS.md) | Phase 1（`WB-01`–`WB-07`）与 Phase 2（`WB-08`–`WB-12`）实施进度与实测记录 |
 | [历史归档](docs/archive/README.md) | 旧版 Tern-Luau 方案（2026-11-16 归档），仅供追溯 |

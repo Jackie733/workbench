@@ -15,6 +15,7 @@ import { startMcpServer } from "../mcp/server.ts";
 import { executeWorkbenchTool } from "../mcp/tools.ts";
 import { startWorkbenchServer } from "../server/index.ts";
 import { getDaemonStatus, openUrlInBrowser, startDaemon, stopDaemon } from "./daemon.ts";
+import * as userService from "./service.ts";
 
 interface ParsedArgs {
   command: string;
@@ -117,6 +118,8 @@ function helpText(): string {
     "  restart [--port 4318]                      重启全局 Workbench Hub 守护进程",
     "  status                                     查看守护进程与已纳管项目状态",
     "  open                                       确保 Hub 运行并在浏览器打开工作台",
+    "  service install [--port 4318]             安装并启动当前用户的原生 Hub 服务",
+    "  service start|stop|restart|status|uninstall 管理当前用户的原生 Hub 服务",
     "  init [--name <name>] [--local|--tracked]   初始化项目 .workbench/ 存储",
     "  list [--scope active|done|cancelled|all]   列出需求摘要",
     "  get <REQ-ID> [--diff]                      查看需求详情与覆盖状态",
@@ -138,7 +141,7 @@ function helpText(): string {
   ].join("\n");
 }
 
-export async function runCli(argv: string[]): Promise<number> {
+export async function runCli(argv: string[], services: Pick<typeof userService, "readServiceInstallation" | "installUserService" | "controlUserService"> = userService): Promise<number> {
   const parsed = parseCliArgs(argv);
   const asJson = parsed.flags.get("json") === true;
 
@@ -149,20 +152,49 @@ export async function runCli(argv: string[]): Promise<number> {
 
   try {
     const rootArg = parsed.flags.get("root");
-    const root = typeof rootArg === "string" ? canonicalRoot(rootArg) : resolveDefaultRoot();
+    const root = parsed.command === "service" ? process.cwd() : typeof rootArg === "string" ? canonicalRoot(rootArg) : resolveDefaultRoot();
 
     switch (parsed.command) {
+      case "service": {
+        const action = parsed.positionals[0];
+        if (!action || !["install", "uninstall", "start", "stop", "restart", "status"].includes(action) || parsed.positionals.length !== 1) {
+          throw new WorkbenchError("invalid_input", "用法: wb service install [--port <1..65535>] | start | stop | restart | status | uninstall");
+        }
+        for (const flag of parsed.flags.keys()) {
+          if (flag !== "json" && !(action === "install" && flag === "port")) throw new WorkbenchError("invalid_input", `未知服务参数: --${flag}`);
+        }
+        const portFlag = parsed.flags.get("port");
+        if (portFlag !== undefined && (typeof portFlag !== "string" || !/^\d+$/.test(portFlag) || Number(portFlag) < 1 || Number(portFlag) > 65535)) {
+          throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
+        }
+        const result = action === "install"
+          ? await services.installUserService({ ...(typeof portFlag === "string" ? { port: Number(portFlag) } : {}) })
+          : await services.controlUserService(action as "start" | "stop" | "restart" | "status" | "uninstall");
+        printResult(result, asJson);
+        return 0;
+      }
+
       case "start": {
+        const installation = services.readServiceInstallation();
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
-        const port = typeof portFlag === "string" ? Number(portFlag) : 4318;
+        const port = typeof portFlag === "string" ? Number(portFlag) : installation?.port ?? 4318;
         const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
-        if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+        if ((portFlag !== undefined && typeof portFlag !== "string") || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
+        }
+        if (installation && (port !== installation.port || hostname !== "127.0.0.1" || hostFlag === true)) {
+          throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
         }
         const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
         if (maybeGitOrWb) {
           registerHubProject(root, { activate: true });
+        }
+        if (installation) {
+          const service = await services.controlUserService("start");
+          const daemon = await getDaemonStatus();
+          printResult({ ...daemon.info, started: service.healthy, service }, asJson);
+          return 0;
         }
         const res = await startDaemon({
           port,
@@ -174,16 +206,33 @@ export async function runCli(argv: string[]): Promise<number> {
       }
 
       case "stop": {
+        if (services.readServiceInstallation()) {
+          printResult(await services.controlUserService("stop"), asJson);
+          return 0;
+        }
         const res = await stopDaemon();
         printResult(res, asJson);
         return 0;
       }
 
       case "restart": {
+        const installation = services.readServiceInstallation();
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
-        const port = typeof portFlag === "string" ? Number(portFlag) : 4318;
+        const port = typeof portFlag === "string" ? Number(portFlag) : installation?.port ?? 4318;
         const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
+        if ((portFlag !== undefined && typeof portFlag !== "string") || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+          throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
+        }
+        if (installation) {
+          if (port !== installation.port || hostname !== "127.0.0.1" || hostFlag === true) {
+            throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
+          }
+          const service = await services.controlUserService("restart");
+          const daemon = await getDaemonStatus();
+          printResult({ ...daemon.info, restarted: true, service }, asJson);
+          return 0;
+        }
         await stopDaemon();
         const res = await startDaemon({ port, hostname });
         printResult({ ...res.info, restarted: true }, asJson);
@@ -191,15 +240,31 @@ export async function runCli(argv: string[]): Promise<number> {
       }
 
       case "status": {
+        const service = services.readServiceInstallation() ? await services.controlUserService("status") : null;
         const status = await getDaemonStatus();
-        printResult(status, asJson);
+        printResult({ ...status, service }, asJson);
         return 0;
       }
 
       case "open": {
+        const installation = services.readServiceInstallation();
+        if (installation) {
+          const portFlag = parsed.flags.get("port");
+          const hostFlag = parsed.flags.get("host");
+          if ((portFlag !== undefined && (typeof portFlag !== "string" || Number(portFlag) !== installation.port)) || (hostFlag !== undefined && hostFlag !== "127.0.0.1")) {
+            throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
+          }
+        }
         const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
         if (maybeGitOrWb) {
           registerHubProject(root, { activate: true });
+        }
+        if (installation) {
+          const service = await services.controlUserService("start");
+          if (!service.healthy || !service.url) throw new WorkbenchError("execution_failed", "用户服务未通过健康检查，不能打开 Web");
+          openUrlInBrowser(service.url);
+          printResult({ url: service.url, service }, asJson);
+          return 0;
         }
         const res = await startDaemon({ registerRoot: maybeGitOrWb ? root : undefined });
         openUrlInBrowser(res.info.url);

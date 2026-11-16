@@ -1,3 +1,4 @@
+import packageInfo from "../../package.json";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -1135,7 +1136,7 @@ export async function startWorkbenchServer(options: {
       hostname,
       url: serverUrl,
       startedAt: info.startedAt,
-      version: "5.0.0",
+      version: packageInfo.version,
     });
   }
 

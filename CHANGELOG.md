@@ -1,5 +1,10 @@
 # 变更记录
 
+## 未发布 — 用户级跨平台部署
+
+- 新增 macOS LaunchAgent、Linux/WSL2 systemd 用户服务与部署入口，既有 Hub 生命周期命令遵循托管所有权。
+- 新增独立 HTTP/WebSocket/stdio MCP 部署检查及 [部署指南](docs/DEPLOYMENT.md)，覆盖固定源码更新、数据保留卸载、Windows WSL MCP 参数数组与实机验收边界；不以健康探针或隔离测试宣称跨平台运行已验证。
+
 ## 未发布 — REQ-001 统一图标组件库
 
 - 引入 `lucide-react@1.73.0`（ISC，peer `react ^19`），新增 `src/web/components/Icon.tsx` 共享包装器：默认 16px、`strokeWidth 2`、`currentColor`、`aria-hidden="true"`、`focusable="false"` 与 `.ui-icon` 对齐样式；`TASK_ICONS` / `COVERAGE_ICONS` 以 `satisfies Record` 穷尽映射任务与验证状态。
