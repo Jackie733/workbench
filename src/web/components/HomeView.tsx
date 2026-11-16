@@ -1,7 +1,9 @@
 import { useLayoutEffect } from "react";
+import { ArrowRight, Plus } from "lucide-react";
 import type { RequirementSummary, Stage } from "../../core/types.ts";
 import { useWorkbench } from "../context.tsx";
 import { filteredItems, relativeTime, STAGE_META } from "../state.ts";
+import { Icon } from "./Icon.tsx";
 
 export function InitCard() {
   const { state, setState, initProjectSubmit } = useWorkbench();
@@ -227,7 +229,7 @@ export function HomeView() {
           data-testid="new-req-btn"
           onClick={() => setState((prev) => ({ ...prev, modal: { kind: "new_req", goal: "" } }))}
         >
-          + 新建需求
+          <Icon icon={Plus} /> 新建需求
         </button>
       </div>
 
@@ -252,7 +254,7 @@ export function HomeView() {
                   <span className="badge warning">{item.decisionReason ?? "待确认"}</span>
                 </div>
                 <button className="btn xs" type="button" onClick={() => void openRequirement(item.id)}>
-                  去处理 →
+                  去处理 <Icon icon={ArrowRight} size={14} />
                 </button>
               </div>
             ))}
@@ -273,7 +275,7 @@ export function HomeView() {
                 data-testid="empty-new-req-btn"
                 onClick={() => setState((prev) => ({ ...prev, modal: { kind: "new_req", goal: "" } }))}
               >
-                + 新建第一条需求
+                <Icon icon={Plus} /> 新建第一条需求
               </button>
             </div>
           ) : visible.length === 0 ? (

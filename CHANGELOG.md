@@ -1,5 +1,13 @@
 # 变更记录
 
+## 未发布 — REQ-001 统一图标组件库
+
+- 引入 `lucide-react@1.73.0`（ISC，peer `react ^19`），新增 `src/web/components/Icon.tsx` 共享包装器：默认 16px、`strokeWidth 2`、`currentColor`、`aria-hidden="true"`、`focusable="false"` 与 `.ui-icon` 对齐样式；`TASK_ICONS` / `COVERAGE_ICONS` 以 `satisfies Record` 穷尽映射任务与验证状态。
+- 替换 Topbar、HubSidebar、HomeView、WorkspaceView、RightDrawer、Modals、Primitives 中所有应用自有字形（含 `+`/`x`/`>_` ASCII 替代），保留 W 品牌、CSS 状态点、散文箭头、`+/-` diff 计数与用户 Markdown 内容；原生 `option` 保持纯文本。
+- `render.ts` 的 Markdown 批注按钮改为空图标槽 + 文本标签，`MarkdownView` 用作用域 `createPortal` 挂载图标并按渲染结果重算槽位；容器级原生事件委托保证点击 SVG/path 与键盘 Enter 仍能命中，转义规则不变。
+- 新增 `tests/web/icons.test.tsx`、`icons_browser.test.ts`（真实 Chromium，无 skip）、`icons_bundle.test.ts`；同配置浏览器构建 raw 1,311,626 / gzip 237,596 字节（引入前 1,285,575 / 230,480）。
+- 全量回归 `bun test` 54 pass / 0 fail；`bun run typecheck` 通过。
+
 ## 5.0.0 — 2026-11-16（Workbench Hub 多项目中心 + 多 Harness 路由 + 三栏式 Web UI）
 
 - **常驻后台守护进程与多项目注册中心（`WB-08`）**：

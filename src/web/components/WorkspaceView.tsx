@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Ellipsis, MessageSquare, Plus, Search, Zap } from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
 import { api } from "../api.ts";
 import { useWorkbench } from "../context.tsx";
@@ -13,6 +14,7 @@ import {
   TASK_META,
   VERDICT_META,
 } from "../state.ts";
+import { COVERAGE_ICONS, Icon, TASK_ICONS } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
@@ -208,7 +210,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
               disabled={state.busy}
               onClick={() => void triggerActiveRun(s.id, "review")}
             >
-              🔍 重新审查
+              <Icon icon={Search} size={14} /> 重新审查
             </button>
           </div>
           <div style={{ fontWeight: 500, marginBottom: 6 }}>{review.summary}</div>
@@ -307,7 +309,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     }))
                   }
                 >
-                  + 添加条件
+                  <Icon icon={Plus} size={14} /> 添加条件
                 </button>
               </div>
               {state.specDraftCriteria.map((c, idx) => (
@@ -402,7 +404,8 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
             return (
               <div key={item.criterion.id} className="criteria-row" data-testid={`crit-${item.criterion.id}`}>
                 <span className={`badge ${meta.tone}`}>
-                  {meta.symbol} {meta.label}
+                  <Icon icon={COVERAGE_ICONS[item.state]} size={14} />
+                  {meta.label}
                 </span>
                 <div>
                   <div style={{ fontSize: 13.5, fontWeight: 500 }}>
@@ -428,9 +431,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     data-action="annotate-anchor"
                     data-anchor={`条件 ${item.criterion.id}`}
                     title="对此条件提问或批注"
+                    aria-label="对此条件提问或批注"
                     onClick={() => openAnnotate(`条件 ${item.criterion.id}`)}
                   >
-                    💬
+                    <Icon icon={MessageSquare} size={14} />
                   </button>
                   {item.criterion.command && s.stage !== "done" && s.stage !== "cancelled" && (
                     <button
@@ -599,7 +603,8 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
             return (
               <div key={t.id} className="task-row">
                 <span className={`badge ${tm.tone}`}>
-                  {tm.symbol} {tm.label}
+                  <Icon icon={TASK_ICONS[t.status]} size={14} />
+                  {tm.label}
                 </span>
                 <div>
                   <div style={{ fontSize: 13.5, fontWeight: 500 }}>{t.title}</div>
@@ -867,7 +872,7 @@ export function WorkspaceView() {
             data-testid="more-menu-btn"
             onClick={() => setState((prev) => ({ ...prev, moreMenuOpen: !prev.moreMenuOpen }))}
           >
-            ⋯ 更多
+            <Icon icon={Ellipsis} /> 更多
           </button>
           {state.moreMenuOpen && (
             <div className="more-menu" data-testid="more-menu">
@@ -1008,7 +1013,11 @@ export function WorkspaceView() {
                 disabled={state.busy || runningThis}
                 onClick={() => void triggerActiveRun(s.id, defaultAct)}
               >
-                {runningThis ? "执行中…" : "⚡ 后台执行"}
+                {runningThis ? "执行中…" : (
+                  <>
+                    <Icon icon={Zap} size={14} /> 后台执行
+                  </>
+                )}
               </button>
               {canReview && (
                 <button
@@ -1018,7 +1027,7 @@ export function WorkspaceView() {
                   disabled={state.busy || runningThis}
                   onClick={() => void triggerActiveRun(s.id, "review")}
                 >
-                  🔍 跨模型审查
+                  <Icon icon={Search} size={14} /> 跨模型审查
                 </button>
               )}
             </div>

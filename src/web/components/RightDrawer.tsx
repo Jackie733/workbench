@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
+import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
 import { useWorkbench } from "../context.tsx";
 import { formatDateTime } from "../state.ts";
+import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
 export function RightDrawer() {
@@ -68,7 +70,7 @@ export function RightDrawer() {
             data-testid="drawer-tab-discuss"
             onClick={() => setDrawerTab("discuss")}
           >
-            💬 研讨与批注{state.pendingAnnotations.length > 0 ? ` (${state.pendingAnnotations.length})` : ""}
+            <Icon icon={MessageSquare} size={14} /> 研讨与批注{state.pendingAnnotations.length > 0 ? ` (${state.pendingAnnotations.length})` : ""}
           </button>
           <button
             className={`drawer-tab ${state.drawerTab === "console" ? "active" : ""}`}
@@ -78,16 +80,18 @@ export function RightDrawer() {
             data-testid="drawer-tab-console"
             onClick={() => setDrawerTab("console")}
           >
-            &gt;_ 执行终端{activeRun ? " ●" : ""}
+            <Icon icon={Terminal} size={14} /> 执行终端
+            {activeRun && <span className="pulse-dot" role="img" aria-label="执行中" />}
           </button>
         </div>
         <button
           className="btn ghost xs"
           type="button"
           title="收起右侧栏"
+          aria-label="收起右侧栏"
           onClick={() => setDrawerOpen(false)}
         >
-          ×
+          <Icon icon={X} />
         </button>
       </div>
 
@@ -116,6 +120,7 @@ export function RightDrawer() {
                   <button
                     className="btn ghost xs"
                     type="button"
+                    aria-label="移除此批注"
                     onClick={() =>
                       setState((prev) => ({
                         ...prev,
@@ -123,7 +128,7 @@ export function RightDrawer() {
                       }))
                     }
                   >
-                    ×
+                    <Icon icon={X} size={14} />
                   </button>
                 </div>
               ))}
@@ -133,7 +138,7 @@ export function RightDrawer() {
           <div className="discuss-thread" data-testid="discuss-thread" ref={threadRef}>
             {discussions.length === 0 && !activeRun ? (
               <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                针对方案有疑问或不满意之处？可悬停正文段落点「💬 批注」，或在下方直接向任意模型提问探讨（不会擅自改写方案）。
+                针对方案有疑问或不满意之处？可悬停正文段落点「批注」，或在下方直接向任意模型提问探讨（不会擅自改写方案）。
               </div>
             ) : (
               discussions.map((item) => (
@@ -174,8 +179,8 @@ export function RightDrawer() {
               <div className="discuss-msg agent discuss-streaming" data-testid="discuss-stream-card">
                 <div className="discuss-meta">
                   <span className="pulse-dot" />
-                  <span>
-                    ⚡ {activeRun.harness} · {activeRun.model}
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <Icon icon={Zap} size={14} /> {activeRun.harness} · {activeRun.model}
                   </span>
                   <span className="badge info">
                     流式输出中 · <LiveTimer startedAt={activeRun.startedAt} />
@@ -195,9 +200,10 @@ export function RightDrawer() {
                 <button
                   className="btn ghost xs"
                   type="button"
+                  aria-label="清除锚点"
                   onClick={() => setState((prev) => ({ ...prev, discussAnchor: null }))}
                 >
-                  ×
+                  <Icon icon={X} size={14} />
                 </button>
               </div>
             )}
@@ -222,7 +228,7 @@ export function RightDrawer() {
                 disabled={state.busy || Boolean(activeRun)}
                 onClick={() => void runAskFromDrawer()}
               >
-                💡 仅提问探讨
+                <Icon icon={Lightbulb} size={14} /> 仅提问探讨
               </button>
               <button
                 className="btn primary"
@@ -232,7 +238,7 @@ export function RightDrawer() {
                 disabled={state.busy || Boolean(activeRun)}
                 onClick={() => void runRefineFromDrawer()}
               >
-                ✏️ 让 Agent 修订
+                <Icon icon={Pencil} size={14} /> 让 Agent 修订
               </button>
             </div>
           </div>
@@ -247,7 +253,7 @@ export function RightDrawer() {
               data-testid="view-handoff-btn"
               onClick={() => void openHandoff()}
             >
-              📄 交接简报 handoff.md
+              <Icon icon={FileText} size={14} /> 交接简报 handoff.md
             </button>
             {runs.length > 0 && (
               <select
@@ -323,7 +329,7 @@ export function RightDrawer() {
             </>
           ) : (
             <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-              尚未通过调度器触发 Agent 执行。可在主横幅选择模型后点击「⚡ 后台执行」。
+              尚未通过调度器触发 Agent 执行。可在主横幅选择模型后点击「后台执行」。
             </div>
           )}
         </div>

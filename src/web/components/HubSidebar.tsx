@@ -1,4 +1,6 @@
+import { Plus, Settings, X } from "lucide-react";
 import { useWorkbench } from "../context.tsx";
+import { Icon } from "./Icon.tsx";
 
 export function HubSidebar() {
   const { state, setState, switchProject, openAddProjectModal } = useWorkbench();
@@ -22,9 +24,10 @@ export function HubSidebar() {
           className="btn ghost xs sb-close-btn"
           type="button"
           title="收起侧边栏"
+          aria-label="收起侧边栏"
           onClick={() => setState((prev) => ({ ...prev, sidebarOpen: false }))}
         >
-          ×
+          <Icon icon={X} />
         </button>
       </div>
 
@@ -39,7 +42,7 @@ export function HubSidebar() {
             title="添加或初始化项目"
             onClick={() => void openAddProjectModal()}
           >
-            + 添加
+            <Icon icon={Plus} size={14} /> 添加
           </button>
         </div>
         <div className="sb-list" data-testid="hub-project-list">
@@ -100,7 +103,7 @@ export function HubSidebar() {
               }))
             }
           >
-            ⚙ 配置
+            <Icon icon={Settings} size={14} /> 配置
           </button>
         </div>
         <div

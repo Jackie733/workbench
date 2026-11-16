@@ -50,7 +50,7 @@ export function renderMarkdown(markdown: string, options: MarkdownRenderOptions 
     const inner = renderInline(rawHeading);
     if (!annotatable) return `<h${level}>${inner}</h${level}>`;
     const anchor = `${docLabel}#${rawHeading.trim().slice(0, 60)}`;
-    return `<div class="md-annot-row"><h${level}>${inner}</h${level}><button class="btn ghost xs md-annot-btn" type="button" data-action="annotate-anchor" data-anchor="${escapeHtml(anchor)}" title="对此段提问或批注">💬 批注</button></div>`;
+    return `<div class="md-annot-row"><h${level}>${inner}</h${level}><button class="btn ghost xs md-annot-btn" type="button" data-action="annotate-anchor" data-anchor="${escapeHtml(anchor)}" title="对此段提问或批注"><span class="md-annot-icon" data-icon-slot="annotate" aria-hidden="true"></span>批注</button></div>`;
   };
 
   const lines = normalized.split("\n");

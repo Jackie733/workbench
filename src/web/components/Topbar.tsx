@@ -1,5 +1,7 @@
+import { ArrowLeft, Menu, MessageSquare, Moon, RefreshCw, Settings, Sun } from "lucide-react";
 import { useWorkbench } from "../context.tsx";
 import { bridgeStatusLabel } from "../state.ts";
+import { Icon } from "./Icon.tsx";
 
 export function Topbar() {
   const { state, setState, backHome, refreshAll, refreshHubMetadata, toggleTheme, setDrawerOpen } = useWorkbench();
@@ -15,9 +17,10 @@ export function Topbar() {
           className="btn ghost xs mobile-only"
           type="button"
           title="项目与算力侧栏"
+          aria-label="项目与算力侧栏"
           onClick={() => setState((prev) => ({ ...prev, sidebarOpen: !prev.sidebarOpen }))}
         >
-          ☰
+          <Icon icon={Menu} />
         </button>
         {state.selectedId ? (
           <>
@@ -28,7 +31,7 @@ export function Topbar() {
               data-testid="back-home-btn"
               onClick={() => void backHome()}
             >
-              ← 工作
+              <Icon icon={ArrowLeft} /> 工作
             </button>
             <span className="muted">/</span>
             <strong>{state.selectedId}</strong>
@@ -47,21 +50,23 @@ export function Topbar() {
           type="button"
           data-action="refresh"
           title="刷新状态"
+          aria-label="刷新状态"
           onClick={() => {
             void refreshHubMetadata(true);
             void refreshAll(true);
           }}
         >
-          ⟳
+          <Icon icon={RefreshCw} />
         </button>
         <button
           className="btn ghost xs"
           type="button"
           data-action="toggle-theme"
-          title="切换主题"
+          title={state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+          aria-label={state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
           onClick={toggleTheme}
         >
-          {state.theme === "dark" ? "☀" : "☾"}
+          <Icon icon={state.theme === "dark" ? Sun : Moon} />
         </button>
         {state.selectedId ? (
           <button
@@ -72,7 +77,7 @@ export function Topbar() {
             onClick={() => setDrawerOpen(!state.drawerOpen)}
           >
             {activeRunCount > 0 && <span className="pulse-dot" />}
-            💬 研讨 / 终端
+            <Icon icon={MessageSquare} /> 研讨 / 终端
           </button>
         ) : (
           <button
@@ -86,7 +91,7 @@ export function Topbar() {
               }))
             }
           >
-            ⚙ 路由
+            <Icon icon={Settings} /> 路由
           </button>
         )}
       </div>

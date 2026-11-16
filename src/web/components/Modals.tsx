@@ -1,8 +1,10 @@
 import { useRef } from "react";
+import { ArrowUp, Folder, Lightbulb, Pencil, RefreshCw } from "lucide-react";
 import type { PrivacyMode } from "../../core/types.ts";
 import { HARNESS_IDS, ROUTING_STAGES, type HarnessId, type RoutingPreset, type RoutingStage } from "../../hub/types.ts";
 import { api, setApiProjectScope } from "../api.ts";
 import { useWorkbench } from "../context.tsx";
+import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
 
 const STAGE_LABEL: Record<RoutingStage, string> = {
@@ -169,7 +171,7 @@ export function Modals() {
                   {browse.workbenchInitialized && <span className="badge info">已初始化</span>}
                   {browse.parentPath && (
                     <button className="btn ghost xs" type="button" onClick={() => void browseDir(browse.parentPath!)}>
-                      ↑ 上级目录
+                      <Icon icon={ArrowUp} size={14} /> 上级目录
                     </button>
                   )}
                 </div>
@@ -182,7 +184,9 @@ export function Modals() {
                 ) : (
                   browse.entries.map((e) => (
                     <div key={e.path} className="browse-entry" onClick={() => void browseDir(e.path)}>
-                      <span>📁 {e.name}</span>
+                      <span className="browse-entry-name">
+                        <Icon icon={Folder} size={14} /> {e.name}
+                      </span>
                       <span style={{ display: "flex", gap: 6 }}>
                         {e.isGitRepo && <span className="badge success">git</span>}
                         {e.workbenchInitialized && <span className="badge info">wb</span>}
@@ -317,7 +321,7 @@ export function Modals() {
             disabled={state.busy}
             onClick={() => void refreshHarnesses()}
           >
-            ⟳ 重新探测本机模型
+            <Icon icon={RefreshCw} size={14} /> 重新探测本机模型
           </button>
         </div>
 
@@ -494,7 +498,7 @@ export function Modals() {
             data-testid="annotate-ask-btn"
             onClick={() => void submitAnnotation(m.anchor, m.message, "ask")}
           >
-            💡 加入并立即提问
+            <Icon icon={Lightbulb} size={14} /> 加入并立即提问
           </button>
           <button
             className="btn primary"
@@ -502,7 +506,7 @@ export function Modals() {
             data-testid="annotate-queue-btn"
             onClick={() => void submitAnnotation(m.anchor, m.message, "refine")}
           >
-            ✏️ 加入待修订批注
+            <Icon icon={Pencil} size={14} /> 加入待修订批注
           </button>
         </div>
       </ModalShell>

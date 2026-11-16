@@ -111,18 +111,18 @@ export const STAGE_META: Record<Stage, { label: string; tone: string }> = {
   cancelled: { label: "已取消", tone: "neutral" },
 };
 
-export const TASK_META: Record<TaskStatus, { symbol: string; label: string; tone: string }> = {
-  pending: { symbol: "○", label: "待开始", tone: "neutral" },
-  in_progress: { symbol: "●", label: "进行中", tone: "info" },
-  done: { symbol: "✓", label: "已完成", tone: "success" },
-  blocked: { symbol: "!", label: "受阻", tone: "danger" },
+export const TASK_META: Record<TaskStatus, { label: string; tone: string }> = {
+  pending: { label: "待开始", tone: "neutral" },
+  in_progress: { label: "进行中", tone: "info" },
+  done: { label: "已完成", tone: "success" },
+  blocked: { label: "受阻", tone: "danger" },
 };
 
-export const COVERAGE_META: Record<CriterionCoverageState, { symbol: string; label: string; tone: string }> = {
-  passed: { symbol: "✓", label: "通过", tone: "success" },
-  failed: { symbol: "×", label: "失败", tone: "danger" },
-  stale: { symbol: "⟳", label: "需重跑", tone: "warning" },
-  unverified: { symbol: "○", label: "未验证", tone: "neutral" },
+export const COVERAGE_META: Record<CriterionCoverageState, { label: string; tone: string }> = {
+  passed: { label: "通过", tone: "success" },
+  failed: { label: "失败", tone: "danger" },
+  stale: { label: "需重跑", tone: "warning" },
+  unverified: { label: "未验证", tone: "neutral" },
 };
 
 export const EVIDENCE_META: Record<EffectiveVerificationState, { label: string; tone: string }> = {
