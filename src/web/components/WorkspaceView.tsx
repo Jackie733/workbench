@@ -2,7 +2,23 @@ import { useState } from "react";
 import { Ellipsis, MessageSquare, Plus, Search, Zap } from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
 import { api } from "../api.ts";
-import { useWorkbench } from "../context.tsx";
+import {
+  cancelRun,
+  executeVerify,
+  handleBannerAction,
+  invalidateAllWorkbenchQueries,
+  openHandoff,
+  openRunConsole,
+  queryClient,
+  queryKeys,
+  runBusy,
+  toggleVerificationLog,
+  triggerActiveRun,
+  useDiffQuery,
+  useHubStateQuery,
+  useProjectQuery,
+  useRequirementQuery,
+} from "../queries.ts";
 import { parseUnifiedDiff, renderDiffLinesHtml, renderSimpleLineDiff } from "../render.ts";
 import {
   collectModelOptions,
@@ -14,6 +30,9 @@ import {
   TASK_META,
   VERDICT_META,
 } from "../state.ts";
+import { useDraftStore } from "../stores/draftStore.ts";
+import { useStreamStore } from "../stores/streamStore.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { COVERAGE_ICONS, Icon, TASK_ICONS } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
@@ -66,8 +85,12 @@ function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }
   );
 }
 
-function LiveAgentBanner({ run, liveText }: { run: AgentRunRecord; liveText: string }) {
-  const { setDrawerTab, cancelRun } = useWorkbench();
+function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const selectedId = useUiStore((s) => s.selectedId);
+  const liveText = useStreamStore((s) => s.liveRunLogs[run.id] ?? "");
+
   const actionLabels: Record<string, string> = {
     design: "梳理规范与方案设计",
     implement: "编写代码与运行验证",
@@ -97,14 +120,17 @@ function LiveAgentBanner({ run, liveText }: { run: AgentRunRecord; liveText: str
             className="btn xs"
             type="button"
             data-testid="open-console-tab-btn"
-            onClick={() => setDrawerTab("console")}
+            onClick={() => {
+              setDrawerOpen(true);
+              setDrawerTab("console");
+            }}
           >
             查看终端流
           </button>
           <button
             className="btn danger xs"
             type="button"
-            onClick={() => void cancelRun(run.id)}
+            onClick={() => selectedId && void cancelRun(selectedId, run.id)}
           >
             终止
           </button>
@@ -124,19 +150,43 @@ function LiveAgentBanner({ run, liveText }: { run: AgentRunRecord; liveText: str
 }
 
 function SpecDesignTab({ d }: { d: RequirementDetail }) {
-  const { state, setState, runBusy, triggerActiveRun, executeVerify, showToast } = useWorkbench();
+  const busy = useUiStore((s) => s.busy);
+  const designViewVersion = useUiStore((s) => s.designViewVersion);
+  const designComparePrev = useUiStore((s) => s.designComparePrev);
+  const designCompareText = useUiStore((s) => s.designCompareText);
+  const setModal = useUiStore((s) => s.setModal);
+  const showToast = useUiStore((s) => s.showToast);
+  const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
+  const setDesignComparePrev = useUiStore((s) => s.setDesignComparePrev);
+  const setDesignCompareText = useUiStore((s) => s.setDesignCompareText);
+
+  const editingSpec = useDraftStore((s) => s.editingSpec);
+  const specDraftTitle = useDraftStore((s) => s.specDraftTitle);
+  const specDraftBody = useDraftStore((s) => s.specDraftBody);
+  const specDraftCriteria = useDraftStore((s) => s.specDraftCriteria);
+  const editingDesign = useDraftStore((s) => s.editingDesign);
+  const designDraftBody = useDraftStore((s) => s.designDraftBody);
+  const startEditSpec = useDraftStore((s) => s.startEditSpec);
+  const cancelEditSpec = useDraftStore((s) => s.cancelEditSpec);
+  const setSpecDraftTitle = useDraftStore((s) => s.setSpecDraftTitle);
+  const setSpecDraftBody = useDraftStore((s) => s.setSpecDraftBody);
+  const setSpecDraftCriteria = useDraftStore((s) => s.setSpecDraftCriteria);
+  const startEditDesign = useDraftStore((s) => s.startEditDesign);
+  const cancelEditDesign = useDraftStore((s) => s.cancelEditDesign);
+  const setDesignDraftBody = useDraftStore((s) => s.setDesignDraftBody);
+
   const { state: s, validity } = d;
   const historyVers = d.designHistoryVersions;
-  const activeVer = state.designViewVersion ?? s.designVersion;
+  const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
   const revValid = validity.reviewValidity;
 
   const openAnnotate = (anchor: string) => {
-    setState((prev) => ({ ...prev, modal: { kind: "annotate_anchor", anchor, message: "", mode: "refine" } }));
+    setModal({ kind: "annotate_anchor", anchor, message: "", mode: "refine" });
   };
 
   const saveSpec = async () => {
-    const criteria = state.specDraftCriteria
+    const criteria = specDraftCriteria
       .filter((c) => c.description.trim().length > 0)
       .map((c) => ({
         id: c.id.trim() || undefined,
@@ -146,12 +196,13 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
       }));
     const res = await runBusy(async () => {
       const out = await api.updateSpec(s.id, {
-        title: state.specDraftTitle,
-        specMarkdown: state.specDraftBody,
+        title: specDraftTitle,
+        specMarkdown: specDraftBody,
         criteria,
         expectedRevision: s.revision,
       });
-      setState((prev) => ({ ...prev, detail: out.detail, editingSpec: false }));
+      cancelEditSpec();
+      await invalidateAllWorkbenchQueries();
       return out;
     });
     if (res) showToast("已保存规范与验收条件");
@@ -160,32 +211,32 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
   const saveDesign = async () => {
     const res = await runBusy(async () => {
       const out = await api.updateDesign(s.id, {
-        designMarkdown: state.designDraftBody,
+        designMarkdown: designDraftBody,
         expectedRevision: s.revision,
       });
-      setState((prev) => ({ ...prev, detail: out.detail, editingDesign: false }));
+      cancelEditDesign();
+      setDesignComparePrev(false);
+      setDesignCompareText(null);
+      await invalidateAllWorkbenchQueries();
       return out;
     });
     if (res) showToast("已保存技术方案");
   };
 
   const toggleDesignDiff = async () => {
-    if (state.designComparePrev) {
-      setState((prev) => ({ ...prev, designComparePrev: false }));
+    if (designComparePrev) {
+      setDesignComparePrev(false);
       return;
     }
-    if (!state.designCompareText) {
-      const ver = state.designViewVersion ?? s.designVersion;
+    if (!designCompareText) {
+      const ver = designViewVersion ?? s.designVersion;
       const curr = ver === s.designVersion ? d.designMarkdown : (await api.getDesignHistory(s.id, ver)).markdown;
       const prevVer = ver > 1 ? ver - 1 : ver;
       const prev = ver > 1 ? (await api.getDesignHistory(s.id, prevVer)).markdown : curr;
-      setState((p) => ({
-        ...p,
-        designComparePrev: true,
-        designCompareText: { prev, curr, prevVer, currVer: ver },
-      }));
+      setDesignCompareText({ prev, curr, prevVer, currVer: ver });
+      setDesignComparePrev(true);
     } else {
-      setState((p) => ({ ...p, designComparePrev: true }));
+      setDesignComparePrev(true);
     }
   };
 
@@ -207,7 +258,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
             <button
               className="btn xs"
               type="button"
-              disabled={state.busy}
+              disabled={busy}
               onClick={() => void triggerActiveRun(s.id, "review")}
             >
               <Icon icon={Search} size={14} /> 重新审查
@@ -226,13 +277,13 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
       <div className="card">
         <div className="card-head">
           <h3>需求目标与范围（spec.md）</h3>
-          {state.editingSpec ? (
+          {editingSpec ? (
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 className="btn xs"
                 type="button"
                 data-action="start-edit-spec"
-                onClick={() => setState((prev) => ({ ...prev, editingSpec: false }))}
+                onClick={() => cancelEditSpec()}
               >
                 取消
               </button>
@@ -240,7 +291,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                 className="btn primary xs"
                 type="button"
                 data-testid="save-spec-btn"
-                disabled={state.busy}
+                disabled={busy}
                 onClick={() => void saveSpec()}
               >
                 保存规范与条件
@@ -254,21 +305,19 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                 className="btn xs"
                 type="button"
                 data-action="start-edit-spec"
-                onClick={() =>
-                  setState((prev) => ({
-                    ...prev,
-                    moreMenuOpen: false,
-                    editingSpec: true,
-                    specDraftTitle: s.title,
-                    specDraftBody: d.specMarkdown,
-                    specDraftCriteria: s.criteria.map((c) => ({
+                onClick={() => {
+                  setMoreMenuOpen(false);
+                  startEditSpec(
+                    s.title,
+                    d.specMarkdown,
+                    s.criteria.map((c) => ({
                       id: c.id,
                       description: c.description,
                       required: c.required,
                       command: c.command ?? "",
                     })),
-                  }))
-                }
+                  );
+                }}
               >
                 编辑规范与条件
               </button>
@@ -276,21 +325,21 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
           )}
         </div>
 
-        {state.editingSpec ? (
+        {editingSpec ? (
           <div data-testid="spec-editor">
             <input
               className="input"
               id="spec-title-input"
-              value={state.specDraftTitle}
+              value={specDraftTitle}
               placeholder="需求标题"
               style={{ marginBottom: 8 }}
-              onChange={(e) => setState((prev) => ({ ...prev, specDraftTitle: e.target.value }))}
+              onChange={(e) => setSpecDraftTitle(e.target.value)}
             />
             <textarea
               className="textarea"
               id="spec-body-input"
-              value={state.specDraftBody}
-              onChange={(e) => setState((prev) => ({ ...prev, specDraftBody: e.target.value }))}
+              value={specDraftBody}
+              onChange={(e) => setSpecDraftBody(e.target.value)}
             />
             <div style={{ marginTop: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -300,19 +349,16 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                   type="button"
                   data-action="add-criterion"
                   onClick={() =>
-                    setState((prev) => ({
+                    setSpecDraftCriteria((prev) => [
                       ...prev,
-                      specDraftCriteria: [
-                        ...prev.specDraftCriteria,
-                        { id: `AC-${prev.specDraftCriteria.length + 1}`, description: "", required: true, command: "" },
-                      ],
-                    }))
+                      { id: `AC-${prev.length + 1}`, description: "", required: true, command: "" },
+                    ])
                   }
                 >
                   <Icon icon={Plus} size={14} /> 添加条件
                 </button>
               </div>
-              {state.specDraftCriteria.map((c, idx) => (
+              {specDraftCriteria.map((c, idx) => (
                 <div key={idx} className="crit-edit-row" data-criterion-idx={idx}>
                   <input
                     className="input"
@@ -320,10 +366,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     value={c.id}
                     placeholder={`AC-${idx + 1}`}
                     onChange={(e) =>
-                      setState((prev) => {
-                        const next = [...prev.specDraftCriteria];
+                      setSpecDraftCriteria((prev) => {
+                        const next = [...prev];
                         next[idx] = { ...next[idx]!, id: e.target.value };
-                        return { ...prev, specDraftCriteria: next };
+                        return next;
                       })
                     }
                   />
@@ -333,10 +379,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     value={c.description}
                     placeholder="条件描述"
                     onChange={(e) =>
-                      setState((prev) => {
-                        const next = [...prev.specDraftCriteria];
+                      setSpecDraftCriteria((prev) => {
+                        const next = [...prev];
                         next[idx] = { ...next[idx]!, description: e.target.value };
-                        return { ...prev, specDraftCriteria: next };
+                        return next;
                       })
                     }
                   />
@@ -346,10 +392,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     value={c.command}
                     placeholder="验证命令（可选）"
                     onChange={(e) =>
-                      setState((prev) => {
-                        const next = [...prev.specDraftCriteria];
+                      setSpecDraftCriteria((prev) => {
+                        const next = [...prev];
                         next[idx] = { ...next[idx]!, command: e.target.value };
-                        return { ...prev, specDraftCriteria: next };
+                        return next;
                       })
                     }
                   />
@@ -358,10 +404,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                       type="checkbox"
                       checked={c.required}
                       onChange={(e) =>
-                        setState((prev) => {
-                          const next = [...prev.specDraftCriteria];
+                        setSpecDraftCriteria((prev) => {
+                          const next = [...prev];
                           next[idx] = { ...next[idx]!, required: e.target.checked };
-                          return { ...prev, specDraftCriteria: next };
+                          return next;
                         })
                       }
                     />{" "}
@@ -370,12 +416,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                   <button
                     className="btn ghost xs"
                     type="button"
-                    onClick={() =>
-                      setState((prev) => ({
-                        ...prev,
-                        specDraftCriteria: prev.specDraftCriteria.filter((_, i) => i !== idx),
-                      }))
-                    }
+                    onClick={() => setSpecDraftCriteria((prev) => prev.filter((_, i) => i !== idx))}
                   >
                     删除
                   </button>
@@ -440,7 +481,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                     <button
                       className="btn xs"
                       type="button"
-                      disabled={state.busy}
+                      disabled={busy}
                       onClick={() =>
                         void executeVerify(s.id, {
                           command: item.criterion.command!,
@@ -476,16 +517,16 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                 data-action="toggle-design-diff"
                 onClick={() => void toggleDesignDiff()}
               >
-                {state.designComparePrev ? "关闭版本对比" : `对比 v${activeVer - 1} → v${activeVer}`}
+                {designComparePrev ? "关闭版本对比" : `对比 v${activeVer - 1} → v${activeVer}`}
               </button>
             )}
-            {state.editingDesign ? (
+            {editingDesign ? (
               <>
                 <button
                   className="btn xs"
                   type="button"
                   data-action="add-criterion"
-                  onClick={() => setState((prev) => ({ ...prev, editingDesign: false }))}
+                  onClick={() => cancelEditDesign()}
                 >
                   取消
                 </button>
@@ -493,7 +534,7 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                   className="btn primary xs"
                   type="button"
                   data-testid="save-design-btn"
-                  disabled={state.busy}
+                  disabled={busy}
                   onClick={() => void saveDesign()}
                 >
                   保存方案修改
@@ -507,14 +548,10 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                   className="btn xs"
                   type="button"
                   data-testid="start-edit-design-btn"
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      moreMenuOpen: false,
-                      editingDesign: true,
-                      designDraftBody: d.designMarkdown,
-                    }))
-                  }
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    startEditDesign(d.designMarkdown);
+                  }}
                 >
                   直接编辑方案
                 </button>
@@ -523,22 +560,22 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
           </div>
         </div>
 
-        {state.editingDesign ? (
+        {editingDesign ? (
           <div data-testid="design-editor">
             <textarea
               className="textarea"
               id="design-body-input"
               data-testid="design-body-input"
               style={{ minHeight: 220, fontFamily: "var(--mono)", fontSize: 12.5 }}
-              value={state.designDraftBody}
-              onChange={(e) => setState((prev) => ({ ...prev, designDraftBody: e.target.value }))}
+              value={designDraftBody}
+              onChange={(e) => setDesignDraftBody(e.target.value)}
             />
           </div>
-        ) : state.designComparePrev && state.designCompareText ? (
+        ) : designComparePrev && designCompareText ? (
           <div
             className="diff-code"
             dangerouslySetInnerHTML={{
-              __html: renderSimpleLineDiff(state.designCompareText.prev, state.designCompareText.curr),
+              __html: renderSimpleLineDiff(designCompareText.prev, designCompareText.curr),
             }}
           />
         ) : d.designMarkdown.trim() ? (
@@ -553,13 +590,21 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
   );
 }
 
-function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
-  const { state, setState, handleBannerAction, toggleVerificationLog, executeVerify, refreshDiff, showToast } =
-    useWorkbench();
+function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const busy = useUiStore((s) => s.busy);
+  const selectedDiffFile = useUiStore((s) => s.selectedDiffFile);
+  const expandedLogs = useUiStore((s) => s.expandedLogs);
+  const setSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
+  const showToast = useUiStore((s) => s.showToast);
+
   const [manualCmd, setManualCmd] = useState("");
   const [manualCriteria, setManualCriteria] = useState("");
 
   const { state: s, validity } = d;
+  const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true);
+  const diffObs = diffRes?.changes ?? null;
+
   const tasksDone = s.tasks.filter((t) => t.status === "done").length;
 
   const grouped = new Map<string, { command: string; latest: (typeof validity.verifications)[number] }>();
@@ -568,8 +613,8 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
   }
   const evCards = Array.from(grouped.values()).reverse();
 
-  const parsedFiles = state.diffObs ? parseUnifiedDiff(state.diffObs.diff) : [];
-  const activeDiffFile = parsedFiles.find((f) => f.path === state.selectedDiffFile) ?? parsedFiles[0] ?? null;
+  const parsedFiles = diffObs ? parseUnifiedDiff(diffObs.diff) : [];
+  const activeDiffFile = parsedFiles.find((f) => f.path === selectedDiffFile) ?? parsedFiles[0] ?? null;
 
   const runManualVerify = async () => {
     const command = manualCmd.trim();
@@ -627,8 +672,8 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
             <button
               className="btn primary xs"
               type="button"
-              disabled={state.busy}
-              onClick={() => void handleBannerAction("run_all_verifications")}
+              disabled={busy}
+              onClick={() => void handleBannerAction(d, "run_all_verifications", bridgeConnected)}
             >
               运行全部验证
             </button>
@@ -642,7 +687,7 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
         ) : (
           evCards.map(({ command, latest }) => {
             const meta = EVIDENCE_META[latest.effectiveState];
-            const log = state.expandedLogs[latest.record.id];
+            const log = expandedLogs[latest.record.id];
             return (
               <div key={latest.record.id} className="evidence-card" data-testid={`ev-${latest.record.id}`}>
                 <div className="evidence-head">
@@ -658,14 +703,14 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
                       className="btn xs"
                       type="button"
                       data-action="toggle-log"
-                      onClick={() => void toggleVerificationLog(latest.record.id)}
+                      onClick={() => void toggleVerificationLog(s.id, latest.record.id)}
                     >
                       {log !== undefined ? "收起日志" : "查看输出"}
                     </button>
                     <button
                       className="btn xs"
                       type="button"
-                      disabled={state.busy}
+                      disabled={busy}
                       onClick={() =>
                         void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
                           if (res) showToast(res.runs[0]?.passed ? "验证通过" : "验证失败", !res.runs[0]?.passed);
@@ -707,7 +752,7 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
           <button
             className="btn"
             type="button"
-            disabled={state.busy}
+            disabled={busy}
             onClick={() => void runManualVerify()}
           >
             执行验证
@@ -718,19 +763,26 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
       <div className="card">
         <div className="card-head">
           <h3>代码改动（Git Diff）</h3>
-          <button className="btn xs" type="button" onClick={() => void refreshDiff()}>
+          <button
+            className="btn xs"
+            type="button"
+            onClick={() => {
+              void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id) });
+              showToast("已刷新工作区 Git Diff");
+            }}
+          >
             刷新 Diff
           </button>
         </div>
-        {!state.diffObs ? (
+        {!diffObs ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             正在加载代码变更…
           </p>
-        ) : !state.diffObs.isGitRepo ? (
+        ) : !diffObs.isGitRepo ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             当前目录不是 Git 仓库。
           </p>
-        ) : state.diffObs.files.length === 0 ? (
+        ) : diffObs.files.length === 0 ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             自基线以来工作区暂无代码变更。
           </p>
@@ -742,7 +794,7 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
                   key={f.path}
                   className={`diff-file-btn ${activeDiffFile?.path === f.path ? "active" : ""}`}
                   type="button"
-                  onClick={() => setState((prev) => ({ ...prev, selectedDiffFile: f.path }))}
+                  onClick={() => setSelectedDiffFile(f.path)}
                 >
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.path}</span>
                   <span className="muted" style={{ fontSize: 11 }}>
@@ -756,7 +808,7 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
               dangerouslySetInnerHTML={{
                 __html: activeDiffFile
                   ? renderDiffLinesHtml(activeDiffFile.lines)
-                  : renderDiffLinesHtml(state.diffObs.diff.split("\n")),
+                  : renderDiffLinesHtml(diffObs.diff.split("\n")),
               }}
             />
           </div>
@@ -767,7 +819,6 @@ function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
 }
 
 function TimelineRunsTab({ d }: { d: RequirementDetail }) {
-  const { openHandoff, openRunConsole } = useWorkbench();
   const events = [...d.state.timeline].reverse();
   const runs = [...(d.state.agentRuns ?? [])].reverse();
 
@@ -777,7 +828,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
         <div className="card">
           <div className="card-head">
             <h3>Agent 模型执行历史</h3>
-            <button className="btn xs" type="button" onClick={() => void openHandoff()}>
+            <button className="btn xs" type="button" onClick={() => void openHandoff(d.state.id)}>
               查看交接简报 handoff.md
             </button>
           </div>
@@ -802,7 +853,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
                   {r.durationMs}ms
                 </span>
               </div>
-              <button className="btn ghost xs" type="button" onClick={() => void openRunConsole(r.id)}>
+              <button className="btn ghost xs" type="button" onClick={() => void openRunConsole(d.state.id, r.id)}>
                 查看终端输出
               </button>
             </div>
@@ -835,18 +886,36 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
 }
 
 export function WorkspaceView() {
-  const { state, setState, setWorkspaceTab, handleBannerAction, triggerActiveRun, openHandoff } = useWorkbench();
-  const d = state.detail;
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const selectedId = useUiStore((s) => s.selectedId);
+  const workspaceTab = useUiStore((s) => s.workspaceTab);
+  const busy = useUiStore((s) => s.busy);
+  const moreMenuOpen = useUiStore((s) => s.moreMenuOpen);
+  const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
+  const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
+  const setModal = useUiStore((s) => s.setModal);
+
+  const startEditSpec = useDraftStore((s) => s.startEditSpec);
+  const startEditDesign = useDraftStore((s) => s.startEditDesign);
+  const activeRuns = useStreamStore((s) => s.activeRuns);
+
+  const { data: hub } = useHubStateQuery();
+  const { data: project } = useProjectQuery(activeProjectId);
+  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+
+  const d = reqData?.detail ?? null;
   if (!d) return <p className="muted">正在加载需求详情…</p>;
 
   const { state: s, validity } = d;
   const stageMeta = STAGE_META[s.stage];
   const { banner } = validity;
+  const bridgeConnected = Boolean(project?.bridge.connected);
 
-  const modelOptions = collectModelOptions(state.harnesses);
+  const harnesses = hub?.harnesses ?? [];
+  const modelOptions = collectModelOptions(harnesses);
   const defaultAct = defaultActionForRequirement(d);
   const activeRun =
-    Object.values(state.activeRuns).find((r) => r.requirementId === s.id && r.status === "running") ?? null;
+    Object.values(activeRuns).find((r) => r.requirementId === s.id && r.status === "running") ?? null;
   const runningThis = Boolean(activeRun);
   const canRunModel =
     s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && modelOptions.length > 0;
@@ -870,63 +939,60 @@ export function WorkspaceView() {
             className="btn"
             type="button"
             data-testid="more-menu-btn"
-            onClick={() => setState((prev) => ({ ...prev, moreMenuOpen: !prev.moreMenuOpen }))}
+            onClick={() => setMoreMenuOpen(!moreMenuOpen)}
           >
             <Icon icon={Ellipsis} /> 更多
           </button>
-          {state.moreMenuOpen && (
+          {moreMenuOpen && (
             <div className="more-menu" data-testid="more-menu">
               <button
                 type="button"
-                onClick={() =>
-                  setState((prev) => ({
-                    ...prev,
-                    moreMenuOpen: false,
-                    editingSpec: true,
-                    specDraftTitle: s.title,
-                    specDraftBody: d.specMarkdown,
-                    specDraftCriteria: s.criteria.map((c) => ({
+                onClick={() => {
+                  setMoreMenuOpen(false);
+                  startEditSpec(
+                    s.title,
+                    d.specMarkdown,
+                    s.criteria.map((c) => ({
                       id: c.id,
                       description: c.description,
                       required: c.required,
                       command: c.command ?? "",
                     })),
-                  }))
-                }
+                  );
+                }}
               >
                 编辑需求与验收条件
               </button>
               <button
                 type="button"
-                onClick={() =>
-                  setState((prev) => ({
-                    ...prev,
-                    moreMenuOpen: false,
-                    editingDesign: true,
-                    designDraftBody: d.designMarkdown,
-                  }))
-                }
+                onClick={() => {
+                  setMoreMenuOpen(false);
+                  startEditDesign(d.designMarkdown);
+                }}
               >
                 直接编辑技术方案
               </button>
-              <button type="button" onClick={() => void openHandoff()}>
+              <button type="button" onClick={() => void openHandoff(s.id)}>
                 查看交接简报 handoff.md
               </button>
               {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
-                <button type="button" onClick={() => void handleBannerAction("authorize_fast_track")}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    void handleBannerAction(d, "fast_track", bridgeConnected);
+                  }}
+                >
                   切换快速通道
                 </button>
               )}
               {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
                 <button
                   type="button"
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      moreMenuOpen: false,
-                      modal: { kind: "lifecycle", action: "block", reason: "" },
-                    }))
-                  }
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setModal({ kind: "lifecycle", action: "block", reason: "" });
+                  }}
                 >
                   标记阻塞
                 </button>
@@ -934,13 +1000,10 @@ export function WorkspaceView() {
               {s.stage !== "done" && s.stage !== "cancelled" && (
                 <button
                   type="button"
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      moreMenuOpen: false,
-                      modal: { kind: "lifecycle", action: "cancel", reason: "" },
-                    }))
-                  }
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setModal({ kind: "lifecycle", action: "cancel", reason: "" });
+                  }}
                 >
                   取消需求
                 </button>
@@ -948,42 +1011,36 @@ export function WorkspaceView() {
               {(s.stage === "done" || s.stage === "cancelled") && (
                 <button
                   type="button"
-                  onClick={() =>
-                    setState((prev) => ({
-                      ...prev,
-                      moreMenuOpen: false,
-                      modal: { kind: "lifecycle", action: "reopen", reason: "" },
-                    }))
-                  }
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setModal({ kind: "lifecycle", action: "reopen", reason: "" });
+                  }}
                 >
                   重新打开
                 </button>
               )}
               <button
                 type="button"
-                onClick={() =>
-                  setState((prev) => ({
-                    ...prev,
-                    moreMenuOpen: false,
-                    modal: {
-                      kind: "debug_info",
-                      text: JSON.stringify(
-                        {
-                          projectRoot: prev.project?.root,
-                          projectId: prev.project?.project?.projectId,
-                          id: s.id,
-                          revision: s.revision,
-                          specHash: s.specHash,
-                          designVersion: s.designVersion,
-                          designHash: s.designHash,
-                          baseline: s.baseline,
-                        },
-                        null,
-                        2,
-                      ),
-                    },
-                  }))
-                }
+                onClick={() => {
+                  setMoreMenuOpen(false);
+                  setModal({
+                    kind: "debug_info",
+                    text: JSON.stringify(
+                      {
+                        projectRoot: project?.root,
+                        projectId: project?.project?.projectId,
+                        id: s.id,
+                        revision: s.revision,
+                        specHash: s.specHash,
+                        designVersion: s.designVersion,
+                        designHash: s.designHash,
+                        baseline: s.baseline,
+                      },
+                      null,
+                      2,
+                    ),
+                  });
+                }}
               >
                 查看调试信息
               </button>
@@ -1010,7 +1067,7 @@ export function WorkspaceView() {
                 className="btn xs"
                 type="button"
                 data-testid="run-selected-model-btn"
-                disabled={state.busy || runningThis}
+                disabled={busy || runningThis}
                 onClick={() => void triggerActiveRun(s.id, defaultAct)}
               >
                 {runningThis ? "执行中…" : (
@@ -1024,7 +1081,7 @@ export function WorkspaceView() {
                   className="btn xs"
                   type="button"
                   data-testid="run-review-btn"
-                  disabled={state.busy || runningThis}
+                  disabled={busy || runningThis}
                   onClick={() => void triggerActiveRun(s.id, "review")}
                 >
                   <Icon icon={Search} size={14} /> 跨模型审查
@@ -1039,8 +1096,8 @@ export function WorkspaceView() {
               className="btn primary"
               type="button"
               data-testid={`action-${banner.primaryAction.id}`}
-              disabled={state.busy}
-              onClick={() => void handleBannerAction(banner.primaryAction!.id)}
+              disabled={busy}
+              onClick={() => void handleBannerAction(d, banner.primaryAction!.id, bridgeConnected)}
             >
               {banner.primaryAction.label}
             </button>
@@ -1051,8 +1108,8 @@ export function WorkspaceView() {
               className="btn"
               type="button"
               data-testid={`action-${sec.id}`}
-              disabled={state.busy}
-              onClick={() => void handleBannerAction(sec.id)}
+              disabled={busy}
+              onClick={() => void handleBannerAction(d, sec.id, bridgeConnected)}
             >
               {sec.label}
             </button>
@@ -1060,39 +1117,39 @@ export function WorkspaceView() {
         </div>
       </section>
 
-      {activeRun && <LiveAgentBanner run={activeRun} liveText={state.liveRunLogs[activeRun.id] ?? ""} />}
+      {activeRun && <LiveAgentBanner run={activeRun} />}
 
       <div className="tabs">
         <button
-          className={`tab ${state.workspaceTab === "spec" ? "active" : ""}`}
+          className={`tab ${workspaceTab === "spec" ? "active" : ""}`}
           type="button"
           data-testid="tab-spec"
-          onClick={() => void setWorkspaceTab("spec")}
+          onClick={() => setWorkspaceTab("spec")}
         >
           规范与方案
         </button>
         <button
-          className={`tab ${state.workspaceTab === "changes" ? "active" : ""}`}
+          className={`tab ${workspaceTab === "changes" ? "active" : ""}`}
           type="button"
           data-testid="tab-changes"
-          onClick={() => void setWorkspaceTab("changes")}
+          onClick={() => setWorkspaceTab("changes")}
         >
           变更与验证
         </button>
         <button
-          className={`tab ${state.workspaceTab === "timeline" ? "active" : ""}`}
+          className={`tab ${workspaceTab === "timeline" ? "active" : ""}`}
           type="button"
           data-testid="tab-timeline"
-          onClick={() => void setWorkspaceTab("timeline")}
+          onClick={() => setWorkspaceTab("timeline")}
         >
           时间线与运行
         </button>
       </div>
 
-      {state.workspaceTab === "spec" ? (
+      {workspaceTab === "spec" ? (
         <SpecDesignTab d={d} />
-      ) : state.workspaceTab === "changes" ? (
-        <ChangesVerifyTab d={d} />
+      ) : workspaceTab === "changes" ? (
+        <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
       ) : (
         <TimelineRunsTab d={d} />
       )}

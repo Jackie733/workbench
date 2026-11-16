@@ -1,56 +1,76 @@
 import { useEffect, useRef } from "react";
 import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
-import { useWorkbench } from "../context.tsx";
+import {
+  adoptDiscussion,
+  cancelRun,
+  openHandoff,
+  openRunConsole,
+  runAskFromDrawer,
+  runRefineFromDrawer,
+  triggerActiveRun,
+  useRequirementQuery,
+} from "../queries.ts";
 import { formatDateTime } from "../state.ts";
+import { useDraftStore } from "../stores/draftStore.ts";
+import { useStreamStore } from "../stores/streamStore.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
 export function RightDrawer() {
-  const {
-    state,
-    setState,
-    setDrawerOpen,
-    setDrawerTab,
-    openHandoff,
-    openRunConsole,
-    cancelRun,
-    triggerActiveRun,
-    runAskFromDrawer,
-    runRefineFromDrawer,
-    adoptDiscussion,
-  } = useWorkbench();
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const selectedId = useUiStore((s) => s.selectedId);
+  const drawerOpen = useUiStore((s) => s.drawerOpen);
+  const drawerTab = useUiStore((s) => s.drawerTab);
+  const busy = useUiStore((s) => s.busy);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
 
-  const d = state.detail;
-  const openCls = state.drawerOpen ? "open" : "collapsed";
+  const pendingAnnotations = useDraftStore((s) => s.pendingAnnotations);
+  const discussDraft = useDraftStore((s) => s.discussDraft);
+  const discussAnchor = useDraftStore((s) => s.discussAnchor);
+  const setDiscussDraft = useDraftStore((s) => s.setDiscussDraft);
+  const setDiscussAnchor = useDraftStore((s) => s.setDiscussAnchor);
+  const removePendingAnnotation = useDraftStore((s) => s.removePendingAnnotation);
+  const clearPendingAnnotations = useDraftStore((s) => s.clearPendingAnnotations);
+
+  const activeRuns = useStreamStore((s) => s.activeRuns);
+  const selectedRunId = useStreamStore((s) => s.selectedRunId);
+
+  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const d = reqData?.detail ?? null;
+
+  const openCls = drawerOpen ? "open" : "collapsed";
   const threadRef = useRef<HTMLDivElement | null>(null);
   const consolePreRef = useRef<HTMLPreElement | null>(null);
 
   const reqId = d?.state.id ?? "";
   const activeRun = d
-    ? Object.values(state.activeRuns).find((r) => r.requirementId === reqId) ?? null
+    ? Object.values(activeRuns).find((r) => r.requirementId === reqId) ?? null
     : null;
   const runs = d ? [...(d.state.agentRuns ?? [])].reverse() : [];
-  const currentRunId = activeRun?.id ?? state.selectedRunId ?? runs[0]?.id ?? null;
+  const currentRunId = activeRun?.id ?? selectedRunId ?? runs[0]?.id ?? null;
   const currentRun =
     currentRunId
       ? activeRun?.id === currentRunId
         ? activeRun
         : runs.find((r) => r.id === currentRunId) ?? null
       : null;
-  const liveText = currentRun ? state.liveRunLogs[currentRun.id] ?? "" : "";
-  const streamText = activeRun ? state.liveRunLogs[activeRun.id] ?? "" : "";
+
+  const liveText = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] ?? "" : ""));
+  const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
 
   useEffect(() => {
-    if (state.drawerOpen && state.drawerTab === "discuss" && threadRef.current && activeRun) {
+    if (drawerOpen && drawerTab === "discuss" && threadRef.current && activeRun) {
       threadRef.current.scrollTop = threadRef.current.scrollHeight;
     }
-  }, [state.drawerOpen, state.drawerTab, activeRun, streamText]);
+  }, [drawerOpen, drawerTab, activeRun, streamText]);
 
   useEffect(() => {
-    if (state.drawerOpen && state.drawerTab === "console" && consolePreRef.current) {
+    if (drawerOpen && drawerTab === "console" && consolePreRef.current) {
       consolePreRef.current.scrollTop = consolePreRef.current.scrollHeight;
     }
-  }, [state.drawerOpen, state.drawerTab, liveText]);
+  }, [drawerOpen, drawerTab, liveText]);
 
   if (!d) {
     return <aside className={`drawer ${openCls}`} data-testid="right-drawer" />;
@@ -63,17 +83,18 @@ export function RightDrawer() {
       <div className="drawer-head">
         <div className="drawer-tabs">
           <button
-            className={`drawer-tab ${state.drawerTab === "discuss" ? "active" : ""}`}
+            className={`drawer-tab ${drawerTab === "discuss" ? "active" : ""}`}
             type="button"
             data-action="set-drawer-tab"
             data-tab="discuss"
             data-testid="drawer-tab-discuss"
             onClick={() => setDrawerTab("discuss")}
           >
-            <Icon icon={MessageSquare} size={14} /> 研讨与批注{state.pendingAnnotations.length > 0 ? ` (${state.pendingAnnotations.length})` : ""}
+            <Icon icon={MessageSquare} size={14} /> 研讨与批注
+            {pendingAnnotations.length > 0 ? ` (${pendingAnnotations.length})` : ""}
           </button>
           <button
-            className={`drawer-tab ${state.drawerTab === "console" ? "active" : ""}`}
+            className={`drawer-tab ${drawerTab === "console" ? "active" : ""}`}
             type="button"
             data-action="set-drawer-tab"
             data-tab="console"
@@ -95,21 +116,21 @@ export function RightDrawer() {
         </button>
       </div>
 
-      {state.drawerTab === "discuss" ? (
+      {drawerTab === "discuss" ? (
         <div className="drawer-body" data-testid="discuss-pane">
-          {state.pendingAnnotations.length > 0 && (
+          {pendingAnnotations.length > 0 && (
             <div className="annot-queue" data-testid="pending-annotations">
               <div className="annot-queue-head">
-                <strong>待提交批注 ({state.pendingAnnotations.length})</strong>
+                <strong>待提交批注 ({pendingAnnotations.length})</strong>
                 <button
                   className="btn ghost xs"
                   type="button"
-                  onClick={() => setState((prev) => ({ ...prev, pendingAnnotations: [] }))}
+                  onClick={() => clearPendingAnnotations()}
                 >
                   清空
                 </button>
               </div>
-              {state.pendingAnnotations.map((a) => (
+              {pendingAnnotations.map((a) => (
                 <div key={a.id} className="annot-chip">
                   <div>
                     <span className="badge info">{a.anchor}</span>
@@ -121,12 +142,7 @@ export function RightDrawer() {
                     className="btn ghost xs"
                     type="button"
                     aria-label="移除此批注"
-                    onClick={() =>
-                      setState((prev) => ({
-                        ...prev,
-                        pendingAnnotations: prev.pendingAnnotations.filter((x) => x.id !== a.id),
-                      }))
-                    }
+                    onClick={() => removePendingAnnotation(a.id)}
                   >
                     <Icon icon={X} size={14} />
                   </button>
@@ -165,7 +181,7 @@ export function RightDrawer() {
                       <button
                         className="btn ghost xs"
                         type="button"
-                        onClick={() => void adoptDiscussion(item.id)}
+                        onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                       >
                         采纳此回复并更新方案
                       </button>
@@ -194,14 +210,14 @@ export function RightDrawer() {
           </div>
 
           <div className="drawer-composer">
-            {state.discussAnchor && (
+            {discussAnchor && (
               <div className="xs muted" style={{ marginBottom: 4 }}>
-                锚点：<strong>{state.discussAnchor}</strong>{" "}
+                锚点：<strong>{discussAnchor}</strong>{" "}
                 <button
                   className="btn ghost xs"
                   type="button"
                   aria-label="清除锚点"
-                  onClick={() => setState((prev) => ({ ...prev, discussAnchor: null }))}
+                  onClick={() => setDiscussAnchor(null)}
                 >
                   <Icon icon={X} size={14} />
                 </button>
@@ -215,9 +231,9 @@ export function RightDrawer() {
               id="discuss-input"
               data-testid="discuss-input"
               rows={3}
-              value={state.discussDraft}
+              value={discussDraft}
               placeholder="向选定模型提问探讨（Ask），或写下修改要求让 Agent 修订方案…"
-              onChange={(e) => setState((prev) => ({ ...prev, discussDraft: e.target.value }))}
+              onChange={(e) => setDiscussDraft(e.target.value)}
             />
             <div className="drawer-composer-actions">
               <button
@@ -225,8 +241,8 @@ export function RightDrawer() {
                 type="button"
                 data-action="run-ask"
                 data-testid="run-ask-btn"
-                disabled={state.busy || Boolean(activeRun)}
-                onClick={() => void runAskFromDrawer()}
+                disabled={busy || Boolean(activeRun)}
+                onClick={() => void runAskFromDrawer(d.state.id)}
               >
                 <Icon icon={Lightbulb} size={14} /> 仅提问探讨
               </button>
@@ -235,8 +251,8 @@ export function RightDrawer() {
                 type="button"
                 data-action="run-refine"
                 data-testid="run-refine-btn"
-                disabled={state.busy || Boolean(activeRun)}
-                onClick={() => void runRefineFromDrawer()}
+                disabled={busy || Boolean(activeRun)}
+                onClick={() => void runRefineFromDrawer(d.state.id)}
               >
                 <Icon icon={Pencil} size={14} /> 让 Agent 修订
               </button>
@@ -251,7 +267,7 @@ export function RightDrawer() {
               type="button"
               data-action="open-handoff"
               data-testid="view-handoff-btn"
-              onClick={() => void openHandoff()}
+              onClick={() => void openHandoff(d.state.id)}
             >
               <Icon icon={FileText} size={14} /> 交接简报 handoff.md
             </button>
@@ -259,7 +275,7 @@ export function RightDrawer() {
               <select
                 className="select xs"
                 value={currentRunId ?? ""}
-                onChange={(e) => void openRunConsole(e.target.value)}
+                onChange={(e) => void openRunConsole(d.state.id, e.target.value)}
               >
                 {runs.map((r) => (
                   <option key={r.id} value={r.id}>
@@ -302,7 +318,7 @@ export function RightDrawer() {
                       type="button"
                       data-action="cancel-run"
                       data-testid="cancel-run-btn"
-                      onClick={() => void cancelRun(currentRun.id)}
+                      onClick={() => void cancelRun(d.state.id, currentRun.id)}
                     >
                       终止任务
                     </button>

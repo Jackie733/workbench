@@ -1,15 +1,16 @@
-import React, { useEffect } from "react";
-import { createPortal } from "react-dom";
+import React from "react";
+import { Content, Overlay, Portal, Root, Title } from "@radix-ui/react-dialog";
 import { MessageSquare } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { AgentAction } from "../../core/types.ts";
-import { useWorkbench } from "../context.tsx";
-import { renderMarkdown } from "../render.ts";
-import { activeRunnerChoice, collectModelOptions } from "../state.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
 
 export function LiveTimer({ startedAt }: { startedAt: number }) {
   const [now, setNow] = React.useState(() => Date.now());
-  useEffect(() => {
+  React.useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 200);
     return () => clearInterval(timer);
   }, [startedAt]);
@@ -20,6 +21,16 @@ export function LiveTimer({ startedAt }: { startedAt: number }) {
       {elapsedSec}s
     </span>
   );
+}
+
+function extractNodeText(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractNodeText).join("");
+  if (React.isValidElement(node)) {
+    const props = node.props as { children?: React.ReactNode };
+    return extractNodeText(props.children);
+  }
+  return "";
 }
 
 export function MarkdownView({
@@ -35,47 +46,66 @@ export function MarkdownView({
   onAnnotate?: (anchor: string) => void;
   className?: string;
 }) {
-  const html = React.useMemo(
-    () => renderMarkdown(markdown, { annotatable, docLabel }),
-    [markdown, annotatable, docLabel],
-  );
-  const containerRef = React.useRef<HTMLDivElement | null>(null);
-  const slotGen = React.useRef(0);
-  const [iconSlots, setIconSlots] = React.useState<Array<{ el: Element; key: string }>>([]);
+  const normalized = markdown.trim();
+  if (!normalized) {
+    return (
+      <div className={className}>
+        <p className="muted">（暂无内容）</p>
+      </div>
+    );
+  }
 
-  // Generated annotation buttons live inside dangerouslySetInnerHTML; mount the
-  // shared icon into their marked slots via portals scoped to this view only.
-  React.useLayoutEffect(() => {
-    const root = containerRef.current;
-    if (!root) return;
-    const gen = ++slotGen.current;
-    const els = Array.from(root.querySelectorAll('[data-icon-slot="annotate"]'));
-    setIconSlots(els.map((el, i) => ({ el, key: `${gen}-${i}` })));
-  }, [html]);
-
-  // Portal content bubbles through the React tree, not through the host div,
-  // so use a native delegated listener to keep SVG/path clicks working too.
-  const annotateRef = React.useRef(onAnnotate);
-  annotateRef.current = onAnnotate;
-  React.useEffect(() => {
-    const root = containerRef.current;
-    if (!root) return;
-    const onClick = (event: MouseEvent) => {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      const btn = target.closest('[data-action="annotate-anchor"]');
-      const anchor = btn?.getAttribute("data-anchor");
-      if (anchor) annotateRef.current?.(anchor);
+  const renderHeading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => {
+    return ({ children }: { children?: React.ReactNode }) => {
+      if (!annotatable) return <Tag>{children}</Tag>;
+      const rawText = extractNodeText(children).trim().slice(0, 60);
+      const anchor = `${docLabel}#${rawText}`;
+      return (
+        <div className="md-annot-row">
+          <Tag>{children}</Tag>
+          <button
+            className="btn ghost xs md-annot-btn"
+            type="button"
+            data-action="annotate-anchor"
+            data-anchor={anchor}
+            title="对此段提问或批注"
+            onClick={() => onAnnotate?.(anchor)}
+          >
+            <span className="md-annot-icon" data-icon-slot="annotate" aria-hidden="true">
+              <Icon icon={MessageSquare} size={14} />
+            </span>
+            批注
+          </button>
+        </div>
+      );
     };
-    root.addEventListener("click", onClick);
-    return () => root.removeEventListener("click", onClick);
-  }, []);
+  };
 
   return (
-    <>
-      <div ref={containerRef} className={className} dangerouslySetInnerHTML={{ __html: html }} />
-      {iconSlots.map(({ el, key }) => createPortal(<Icon icon={MessageSquare} size={14} />, el, key))}
-    </>
+    <div className={className}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(url) => (/^(https?:\/\/|\/|#)/i.test(url.trim()) ? url : "")}
+        components={{
+          h1: renderHeading("h1"),
+          h2: renderHeading("h2"),
+          h3: renderHeading("h3"),
+          h4: renderHeading("h4"),
+          h5: renderHeading("h5"),
+          h6: renderHeading("h6"),
+          a: ({ href, children }) =>
+            href ? (
+              <a href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+              </a>
+            ) : (
+              <span>{children}</span>
+            ),
+        }}
+      >
+        {normalized}
+      </ReactMarkdown>
+    </div>
   );
 }
 
@@ -88,34 +118,7 @@ export function RunnerSelect({
   testId: string;
   includeManualCopy?: boolean;
 }) {
-  const { state, setSelectedRunnerKey } = useWorkbench();
-  const modelOptions = collectModelOptions(state.harnesses);
-  const choice = activeRunnerChoice(state.selectedRunnerKey, state.routing, stageAction);
-  const selectedKey =
-    state.selectedRunnerKey === "manual_copy"
-      ? "manual_copy"
-      : state.selectedRunnerKey || (choice.harness && choice.model ? `${choice.harness}::${choice.model}` : "");
-
-  return (
-    <select
-      className="select xs"
-      data-field="runner-select"
-      data-testid={testId}
-      value={selectedKey}
-      onChange={(e) => setSelectedRunnerKey(e.target.value)}
-    >
-      <option value="">
-        {includeManualCopy ? "自动路由" : "默认路由"}
-        {choice.harness ? ` (${choice.harness}/${choice.model ?? ""})` : ""}
-      </option>
-      {modelOptions.map((o) => (
-        <option key={o.key} value={o.key}>
-          {o.label}
-        </option>
-      ))}
-      {includeManualCopy && <option value="manual_copy">仅生成提示词 (手动复制)</option>}
-    </select>
-  );
+  return <ModelRunnerBar stageAction={stageAction} testId={testId} includeManualCopy={includeManualCopy} />;
 }
 
 export function ModalShell({
@@ -129,34 +132,36 @@ export function ModalShell({
   testId?: string;
   children: React.ReactNode;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   return (
-    <div
-      className="modal-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+    <Root
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
       }}
     >
-      <div className={`modal ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" data-testid={testId}>
-        {children}
-      </div>
-    </div>
+      <Portal>
+        <Overlay className="modal-backdrop" />
+        <Content
+          aria-describedby={undefined}
+          className={`modal ${wide ? "modal-wide" : ""}`}
+          data-testid={testId}
+          onEscapeKeyDown={onClose}
+          onPointerDownOutside={onClose}
+        >
+          <Title className="sr-only">Dialog</Title>
+          {children}
+        </Content>
+      </Portal>
+    </Root>
   );
 }
 
 export function ToastBanner() {
-  const { state } = useWorkbench();
-  if (!state.toast) return null;
+  const toast = useUiStore((s) => s.toast);
+  if (!toast) return null;
   return (
-    <div className={`toast ${state.toast.isError ? "error" : ""}`} role="status">
-      {state.toast.message}
+    <div className={`toast ${toast.isError ? "error" : ""}`} role="status">
+      {toast.message}
     </div>
   );
 }

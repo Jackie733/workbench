@@ -1,13 +1,27 @@
 import { useLayoutEffect } from "react";
 import { ArrowRight, Plus } from "lucide-react";
 import type { RequirementSummary, Stage } from "../../core/types.ts";
-import { useWorkbench } from "../context.tsx";
+import {
+  initProjectSubmit,
+  openRequirement,
+  useProjectQuery,
+  useRequirementsQuery,
+} from "../queries.ts";
 import { filteredItems, relativeTime, STAGE_META } from "../state.ts";
+import { useStreamStore } from "../stores/streamStore.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export function InitCard() {
-  const { state, setState, initProjectSubmit } = useWorkbench();
-  const rootLabel = state.project?.root ?? "";
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const initName = useUiStore((s) => s.initName);
+  const initPrivacy = useUiStore((s) => s.initPrivacy);
+  const busy = useUiStore((s) => s.busy);
+  const setInitName = useUiStore((s) => s.setInitName);
+  const setInitPrivacy = useUiStore((s) => s.setInitPrivacy);
+
+  const { data: project } = useProjectQuery(activeProjectId);
+  const rootLabel = project?.root ?? "";
 
   return (
     <div className="init-card" data-testid="init-card">
@@ -22,17 +36,17 @@ export function InitCard() {
         <input
           className="input"
           id="init-name"
-          value={state.initName}
+          value={initName}
           placeholder="输入项目名称（默认使用目录名）"
-          onChange={(e) => setState((prev) => ({ ...prev, initName: e.target.value }))}
+          onChange={(e) => setInitName(e.target.value)}
         />
       </div>
       <div className="radio-row">
         <label
-          className={`radio-card ${state.initPrivacy === "local" ? "selected" : ""}`}
-          onClick={() => setState((prev) => ({ ...prev, initPrivacy: "local" }))}
+          className={`radio-card ${initPrivacy === "local" ? "selected" : ""}`}
+          onClick={() => setInitPrivacy("local")}
         >
-          <input type="radio" name="privacy" checked={state.initPrivacy === "local"} readOnly />
+          <input type="radio" name="privacy" checked={initPrivacy === "local"} readOnly />
           <div>
             <strong>仅本机跟踪（推荐）</strong>
             <div className="muted" style={{ fontSize: 12 }}>
@@ -41,10 +55,10 @@ export function InitCard() {
           </div>
         </label>
         <label
-          className={`radio-card ${state.initPrivacy === "tracked" ? "selected" : ""}`}
-          onClick={() => setState((prev) => ({ ...prev, initPrivacy: "tracked" }))}
+          className={`radio-card ${initPrivacy === "tracked" ? "selected" : ""}`}
+          onClick={() => setInitPrivacy("tracked")}
         >
-          <input type="radio" name="privacy" checked={state.initPrivacy === "tracked"} readOnly />
+          <input type="radio" name="privacy" checked={initPrivacy === "tracked"} readOnly />
           <div>
             <strong>随仓库 Git 跟踪</strong>
             <div className="muted" style={{ fontSize: 12 }}>
@@ -58,7 +72,7 @@ export function InitCard() {
         type="button"
         data-action="submit-init"
         data-testid="init-submit-btn"
-        disabled={state.busy}
+        disabled={busy}
         onClick={() => void initProjectSubmit()}
       >
         立即初始化
@@ -68,7 +82,6 @@ export function InitCard() {
 }
 
 function RequirementBoard({ items }: { items: RequirementSummary[] }) {
-  const { openRequirement } = useWorkbench();
   const cols: Array<{ key: string; title: string; stages: Stage[] }> = [
     { key: "prep", title: "准备中", stages: ["draft", "designing", "awaiting_approval"] },
     { key: "doing", title: "执行中", stages: ["implementing"] },
@@ -119,7 +132,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                       tabIndex={0}
                       onClick={() => void openRequirement(item.id)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") {
+                        if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           void openRequirement(item.id);
                         }
@@ -129,7 +142,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                         <span className="req-id">{item.id}</span>
                         <span className={`badge ${meta.tone}`}>{meta.label}</span>
                       </div>
-                      <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 4 }}>{item.title}</div>
+                      <div style={{ fontWeight: 500, fontSize: 13.5, marginBottom: 6 }}>{item.title}</div>
                       <div className="muted" style={{ fontSize: 12 }}>
                         {item.progressText}
                       </div>
@@ -146,24 +159,37 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
 }
 
 export function HomeView() {
-  const { state, setState, setScope, setLayout, setQuery, openRequirement } = useWorkbench();
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const scope = useUiStore((s) => s.scope);
+  const layout = useUiStore((s) => s.layout);
+  const query = useUiStore((s) => s.query);
+  const homeScrollY = useUiStore((s) => s.homeScrollY);
+  const setScope = useUiStore((s) => s.setScope);
+  const setLayout = useUiStore((s) => s.setLayout);
+  const setQuery = useUiStore((s) => s.setQuery);
+  const setModal = useUiStore((s) => s.setModal);
 
-  // Restore scroll position when returning from requirement detail to home list
+  const activeRuns = useStreamStore((s) => s.activeRuns);
+
+  const { data: project } = useProjectQuery(activeProjectId);
+  const { data: reqList } = useRequirementsQuery(activeProjectId, scope, Boolean(project?.initialized));
+  const rawItems = reqList?.items ?? [];
+
   useLayoutEffect(() => {
-    if (state.homeScrollY > 0) {
-      window.scrollTo(0, state.homeScrollY);
+    if (homeScrollY > 0) {
+      window.scrollTo(0, homeScrollY);
     }
-  }, [state.homeScrollY]);
+  }, [homeScrollY]);
 
-  const activeCnt = state.items.filter((i) => i.stage !== "done" && i.stage !== "cancelled").length;
-  const decisionCnt = state.items.filter((i) => i.needsDecision).length;
-  const doneCnt = state.items.filter((i) => i.stage === "done").length;
+  const activeCnt = rawItems.filter((i) => i.stage !== "done" && i.stage !== "cancelled").length;
+  const decisionCnt = rawItems.filter((i) => i.needsDecision).length;
+  const doneCnt = rawItems.filter((i) => i.stage === "done").length;
 
-  const visible = filteredItems(state.items, state.query);
-  const pendingDecisions = state.items.filter((i) => i.needsDecision);
+  const visible = filteredItems(rawItems, query);
+  const pendingDecisions = rawItems.filter((i) => i.needsDecision);
 
   return (
-    <>
+    <div data-testid="home-view">
       <div className="mission-stats">
         <div className="stat-pill">
           <span className="muted xs">活跃需求</span>
@@ -184,28 +210,29 @@ export function HomeView() {
           className="search-box"
           id="search-input"
           data-testid="search-input"
-          value={state.query}
+          type="search"
+          value={query}
           placeholder="搜索需求编号、标题或进度…"
           onChange={(e) => setQuery(e.target.value)}
         />
-        <div className="segmented" role="tablist">
-          {(["active", "done", "all"] as const).map((s) => (
+        <div className="segmented" role="tablist" data-testid="scope-tabs">
+          {(["active", "done", "all"] as const).map((sc) => (
             <button
-              key={s}
+              key={sc}
               type="button"
-              className={state.scope === s ? "active" : ""}
+              className={scope === sc ? "active" : ""}
               data-action="set-scope"
-              data-value={s}
-              onClick={() => void setScope(s)}
+              data-value={sc}
+              onClick={() => setScope(sc)}
             >
-              {s === "active" ? "活跃" : s === "done" ? "已完成" : "全部"}
+              {sc === "active" ? "活跃" : sc === "done" ? "已完成" : "全部"}
             </button>
           ))}
         </div>
-        <div className="segmented">
+        <div className="segmented" data-testid="layout-toggle">
           <button
             type="button"
-            className={state.layout === "list" ? "active" : ""}
+            className={layout === "list" ? "active" : ""}
             data-action="set-layout"
             data-value="list"
             onClick={() => setLayout("list")}
@@ -214,7 +241,7 @@ export function HomeView() {
           </button>
           <button
             type="button"
-            className={state.layout === "board" ? "active" : ""}
+            className={layout === "board" ? "active" : ""}
             data-action="set-layout"
             data-value="board"
             onClick={() => setLayout("board")}
@@ -227,14 +254,14 @@ export function HomeView() {
           type="button"
           data-action="open-new-req"
           data-testid="new-req-btn"
-          onClick={() => setState((prev) => ({ ...prev, modal: { kind: "new_req", goal: "" } }))}
+          onClick={() => setModal({ kind: "new_req", goal: "" })}
         >
-          <Icon icon={Plus} /> 新建需求
+          <Icon icon={Plus} size={14} /> 新建需求
         </button>
       </div>
 
       <div id="home-content">
-        {pendingDecisions.length > 0 && !state.query.trim() && (
+        {pendingDecisions.length > 0 && !query.trim() && (
           <section className="decision-box" data-testid="decision-box">
             <h2>待你拍板 ({pendingDecisions.length})</h2>
             {pendingDecisions.map((item) => (
@@ -262,8 +289,8 @@ export function HomeView() {
         )}
 
         <div id="home-body">
-          {state.items.length === 0 ? (
-            <div className="empty-card" style={{ textAlign: "center" }}>
+          {rawItems.length === 0 ? (
+            <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
               <p style={{ margin: "0 0 8px", fontWeight: 500 }}>还没有需求</p>
               <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}>
                 用一句话描述你想实现或修复的内容，工作台会自动组织规范、方案、验证与代码对比。
@@ -273,15 +300,15 @@ export function HomeView() {
                 type="button"
                 data-action="open-new-req"
                 data-testid="empty-new-req-btn"
-                onClick={() => setState((prev) => ({ ...prev, modal: { kind: "new_req", goal: "" } }))}
+                onClick={() => setModal({ kind: "new_req", goal: "" })}
               >
-                <Icon icon={Plus} /> 新建第一条需求
+                <Icon icon={Plus} size={14} /> 新建第一条需求
               </button>
             </div>
           ) : visible.length === 0 ? (
-            <div className="empty-card" style={{ textAlign: "center" }}>
+            <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
               <p className="muted" style={{ margin: "0 0 12px" }}>
-                没有匹配“{state.query}”的需求
+                没有匹配“{query}”的需求
               </p>
               <button
                 className="btn"
@@ -292,11 +319,11 @@ export function HomeView() {
                 清除搜索
               </button>
             </div>
-          ) : state.layout === "list" ? (
+          ) : layout === "list" ? (
             <div className="req-list" data-testid="req-list">
               {visible.map((item) => {
                 const meta = STAGE_META[item.stage];
-                const activeReqRun = Object.values(state.activeRuns).find(
+                const activeReqRun = Object.values(activeRuns).find(
                   (r) => r.requirementId === item.id && r.status === "running",
                 );
                 return (
@@ -309,7 +336,7 @@ export function HomeView() {
                     tabIndex={0}
                     onClick={() => void openRequirement(item.id)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") {
+                      if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
                         void openRequirement(item.id);
                       }
@@ -338,6 +365,6 @@ export function HomeView() {
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

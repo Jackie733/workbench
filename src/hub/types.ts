@@ -1,5 +1,8 @@
-export const HARNESS_IDS = ["codex", "qodercn", "opencode", "gemini", "omp"] as const;
+export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
+
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export const ROUTING_PRESETS = ["balanced", "sota_first", "quota_saver"] as const;
 export type RoutingPreset = (typeof ROUTING_PRESETS)[number];
@@ -10,7 +13,7 @@ export type RoutingStage = (typeof ROUTING_STAGES)[number];
 export interface ModelTarget {
   harness: HarnessId;
   model: string;
-  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface StageRouteRule {
@@ -26,8 +29,11 @@ export interface RoutingConfig {
 export interface DiscoveredModel {
   id: string;
   label?: string;
+  provider?: string;
   tier: "sota" | "balanced" | "fast" | "review";
   source: "detected" | "custom";
+  supportedEfforts?: ReasoningEffort[];
+  defaultEffort?: ReasoningEffort;
 }
 
 export interface HarnessInfo {

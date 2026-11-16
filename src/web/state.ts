@@ -1,6 +1,5 @@
 import type {
   AgentAction,
-  AgentRunRecord,
   CriterionCoverageState,
   EffectiveVerificationState,
   PrivacyMode,
@@ -10,10 +9,9 @@ import type {
   Stage,
   TaskStatus,
 } from "../core/types.ts";
-import type { GitObservation } from "../core/git.ts";
-import type { HarnessId, HarnessInfo, ModelTarget, RoutingConfig } from "../hub/types.ts";
+import { REASONING_EFFORTS, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
-import type { BrowseResponse, HubProjectSummary, ProjectInfoResponse } from "./api.ts";
+import type { BrowseResponse } from "./api.ts";
 
 export type Scope = "active" | "done" | "cancelled" | "all";
 export type LayoutMode = "list" | "board";
@@ -33,72 +31,17 @@ export interface PendingAnnotation {
   message: string;
 }
 
-export interface AppState {
-  theme: "light" | "dark";
-  loading: boolean;
-  busy: boolean;
-
-  hubMode: boolean;
-  hubLoaded: boolean;
-  sidebarOpen: boolean;
-  activeProjectId: string | null;
-  hubProjects: HubProjectSummary[];
-  harnesses: HarnessInfo[];
-  routing: RoutingConfig | null;
-  customModels: Record<string, string[]>;
-
-  project: ProjectInfoResponse | null;
-  initPrivacy: PrivacyMode;
-  initName: string;
-  scope: Scope;
-  layout: LayoutMode;
-  query: string;
-  items: RequirementSummary[];
-  homeScrollY: number;
-
-  selectedId: string | null;
-  workspaceTab: WorkspaceTab;
-  detail: RequirementDetail | null;
-  diffObs: GitObservation | null;
-  selectedDiffFile: string | null;
-
-  designViewVersion: number | null;
-  designComparePrev: boolean;
-  designCompareText: { prev: string; curr: string; prevVer: number; currVer: number } | null;
-
-  expandedLogs: Record<string, string>;
-  editingSpec: boolean;
-  specDraftTitle: string;
-  specDraftBody: string;
-  specDraftCriteria: CriterionDraft[];
-  editingDesign: boolean;
-  designDraftBody: string;
-
-  // Runner, co-design & right drawer state
-  selectedRunnerKey: string; // "" means follow routed primary for current stage, else "harness::model"
-  drawerOpen: boolean;
-  drawerTab: DrawerTab;
-  discussDraft: string;
-  discussAnchor: string | null;
-  pendingAnnotations: PendingAnnotation[];
-  activeRuns: Record<string, AgentRunRecord & { requirementId: string }>; // keyed by runId
-  liveRunLogs: Record<string, string>; // keyed by runId
-  selectedRunId: string | null;
-
-  moreMenuOpen: boolean;
-  modal:
-    | null
-    | { kind: "new_req"; goal: string }
-    | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
-    | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
-    | { kind: "prompt_fallback"; title: string; subtitle: string; prompt: string }
-    | { kind: "add_project"; browse: BrowseResponse | null; pathInput: string; nameInput: string; initPrivacy: PrivacyMode | "none" }
-    | { kind: "routing"; draft: RoutingConfig | null; customHarness: HarnessId; customModel: string }
-    | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
-    | { kind: "handoff_preview"; markdown: string }
-    | { kind: "debug_info"; text: string };
-  toast: { message: string; isError: boolean } | null;
-}
+export type ModalState =
+  | null
+  | { kind: "new_req"; goal: string }
+  | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
+  | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
+  | { kind: "prompt_fallback"; title: string; subtitle: string; prompt: string }
+  | { kind: "add_project"; browse: BrowseResponse | null; pathInput: string; nameInput: string; initPrivacy: PrivacyMode | "none" }
+  | { kind: "routing"; draft: RoutingConfig | null; customHarness: HarnessId; customModel: string }
+  | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
+  | { kind: "handoff_preview"; markdown: string }
+  | { kind: "debug_info"; text: string };
 
 export const STAGE_META: Record<Stage, { label: string; tone: string }> = {
   draft: { label: "草稿", tone: "neutral" },
@@ -138,67 +81,22 @@ export const VERDICT_META: Record<ReviewVerdict, { label: string; tone: string }
   block: { label: "建议阻塞修改", tone: "danger" },
 };
 
+export const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  minimal: "Minimal (极速)",
+  low: "Low (低)",
+  medium: "Medium (中)",
+  high: "High (高)",
+  xhigh: "XHigh (极高)",
+  max: "Max (最大)",
+  ultra: "Ultra (极致)",
+  auto: "Auto (自动)",
+};
+
 export function initialTheme(): "light" | "dark" {
+  if (typeof localStorage === "undefined") return "light";
   const saved = localStorage.getItem("wb-theme");
   if (saved === "light" || saved === "dark") return saved;
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-export function createInitialState(): AppState {
-  return {
-    theme: initialTheme(),
-    loading: true,
-    busy: false,
-    hubMode: false,
-    hubLoaded: false,
-    sidebarOpen: false,
-    activeProjectId: null,
-    hubProjects: [],
-    harnesses: [],
-    routing: null,
-    customModels: {},
-
-    project: null,
-    initPrivacy: "local",
-    initName: "",
-    scope: "active",
-    layout: "list",
-    query: "",
-    items: [],
-    homeScrollY: 0,
-
-    selectedId: null,
-    workspaceTab: "spec",
-    detail: null,
-    diffObs: null,
-    selectedDiffFile: null,
-
-    designViewVersion: null,
-    designComparePrev: false,
-    designCompareText: null,
-
-    expandedLogs: {},
-    editingSpec: false,
-    specDraftTitle: "",
-    specDraftBody: "",
-    specDraftCriteria: [],
-    editingDesign: false,
-    designDraftBody: "",
-
-    selectedRunnerKey: "",
-    drawerOpen: false,
-    drawerTab: "discuss",
-    discussDraft: "",
-    discussAnchor: null,
-    pendingAnnotations: [],
-    activeRuns: {},
-    liveRunLogs: {},
-    selectedRunId: null,
-
-    moreMenuOpen: false,
-    modal: null,
-    toast: null,
-  };
+  return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 export function relativeTime(ms: number): string {
@@ -245,21 +143,71 @@ export function activeRunnerChoice(
   selectedRunnerKey: string,
   routing: RoutingConfig | null,
   action: AgentAction,
-): { harness?: string; model?: string; effort?: ModelTarget["reasoningEffort"] } {
+  selectedEffort?: ReasoningEffort | "",
+): { harness?: string; model?: string; effort?: ReasoningEffort } {
   if (selectedRunnerKey && selectedRunnerKey !== "manual_copy") {
     const [harness, model] = selectedRunnerKey.split("::");
-    if (harness && model) return { harness, model };
+    if (harness && model) {
+      return { harness, model, ...(selectedEffort ? { effort: selectedEffort } : {}) };
+    }
   }
   const primary = routedTargetForAction(routing, action);
-  return primary ? { harness: primary.harness, model: primary.model, effort: primary.reasoningEffort } : {};
+  const effort = selectedEffort || primary?.reasoningEffort;
+  return primary ? { harness: primary.harness, model: primary.model, ...(effort ? { effort } : {}) } : {};
 }
 
-export function collectModelOptions(harnesses: HarnessInfo[]): Array<{ key: string; label: string }> {
-  const opts: Array<{ key: string; label: string }> = [];
+export function supportedEffortsForModel(
+  harnesses: HarnessInfo[],
+  harnessId?: string,
+  modelId?: string,
+): ReasoningEffort[] {
+  if (!harnessId || !modelId) return ["low", "medium", "high", "xhigh"];
+  const h = harnesses.find((x) => x.id === harnessId);
+  const m = h?.models.find((x) => x.id === modelId);
+  if (m?.supportedEfforts && m.supportedEfforts.length > 0) return m.supportedEfforts;
+  if (harnessId === "codex" || harnessId === "agy" || harnessId === "qodercn") {
+    return ["low", "medium", "high", "xhigh", "max"];
+  }
+  if (harnessId === "omp") return ["minimal", "low", "medium", "high", "xhigh", "max", "auto"];
+  if (harnessId === "opencode") return ["low", "medium", "high"];
+  return [...REASONING_EFFORTS];
+}
+
+export function collectModelOptions(
+  harnesses: HarnessInfo[],
+): Array<{
+  key: string;
+  label: string;
+  harnessId: HarnessId;
+  harnessLabel: string;
+  modelId: string;
+  displayLabel: string;
+  tier: string;
+  provider?: string;
+}> {
+  const opts: Array<{
+    key: string;
+    label: string;
+    harnessId: HarnessId;
+    harnessLabel: string;
+    modelId: string;
+    displayLabel: string;
+    tier: string;
+    provider?: string;
+  }> = [];
   for (const h of harnesses) {
     if (!h.installed) continue;
     for (const m of h.models) {
-      opts.push({ key: `${h.id}::${m.id}`, label: `${h.label} · ${m.id}` });
+      opts.push({
+        key: `${h.id}::${m.id}`,
+        label: `${h.label} · ${m.id}`,
+        harnessId: h.id,
+        harnessLabel: h.label,
+        modelId: m.id,
+        displayLabel: m.label ?? m.id,
+        tier: m.tier,
+        ...(m.provider ? { provider: m.provider } : {}),
+      });
     }
   }
   return opts;

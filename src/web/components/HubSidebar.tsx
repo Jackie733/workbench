@@ -1,20 +1,30 @@
 import { Plus, Settings, X } from "lucide-react";
-import { useWorkbench } from "../context.tsx";
+import { openAddProjectModal, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export function HubSidebar() {
-  const { state, setState, switchProject, openAddProjectModal } = useWorkbench();
-  const projects = state.hubProjects;
-  const harnesses = state.harnesses;
+  const sidebarOpen = useUiStore((s) => s.sidebarOpen);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
+  const setModal = useUiStore((s) => s.setModal);
+
+  const { data: hub } = useHubStateQuery();
+  const { data: project } = useProjectQuery(activeProjectId);
+
+  const projects = hub?.projects ?? [];
+  const harnesses = hub?.harnesses ?? [];
+  const routing = hub?.routing ?? null;
+
   const presetLabel =
-    state.routing?.activePreset === "sota_first"
+    routing?.activePreset === "sota_first"
       ? "SOTA 优先"
-      : state.routing?.activePreset === "quota_saver"
+      : routing?.activePreset === "quota_saver"
         ? "极致省流"
         : "性价比均衡";
 
   return (
-    <aside className={`sidebar ${state.sidebarOpen ? "open" : ""}`} data-testid="hub-sidebar">
+    <aside className={`sidebar ${sidebarOpen ? "open" : ""}`} data-testid="hub-sidebar">
       <div className="sb-brand">
         <div className="sb-brand-title">
           <span className="sb-logo">W</span>
@@ -25,7 +35,7 @@ export function HubSidebar() {
           type="button"
           title="收起侧边栏"
           aria-label="收起侧边栏"
-          onClick={() => setState((prev) => ({ ...prev, sidebarOpen: false }))}
+          onClick={() => setSidebarOpen(false)}
         >
           <Icon icon={X} />
         </button>
@@ -53,8 +63,7 @@ export function HubSidebar() {
           ) : (
             projects.map((p) => {
               const active =
-                p.id === state.activeProjectId ||
-                (state.activeProjectId === null && p.root === state.project?.root);
+                p.id === activeProjectId || (activeProjectId === null && p.root === project?.root);
               return (
                 <div
                   key={p.id}
@@ -97,10 +106,7 @@ export function HubSidebar() {
             data-action="open-routing"
             data-testid="open-routing-btn"
             onClick={() =>
-              setState((prev) => ({
-                ...prev,
-                modal: { kind: "routing", draft: prev.routing, customHarness: "opencode", customModel: "" },
-              }))
+              setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" })
             }
           >
             <Icon icon={Settings} size={14} /> 配置
@@ -111,17 +117,11 @@ export function HubSidebar() {
           role="button"
           tabIndex={0}
           onClick={() =>
-            setState((prev) => ({
-              ...prev,
-              modal: { kind: "routing", draft: prev.routing, customHarness: "opencode", customModel: "" },
-            }))
+            setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" })
           }
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              setState((prev) => ({
-                ...prev,
-                modal: { kind: "routing", draft: prev.routing, customHarness: "opencode", customModel: "" },
-              }));
+              setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" });
             }
           }}
         >

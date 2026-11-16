@@ -18,6 +18,7 @@ interface BrowserPage {
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
   click(sel: string): Promise<void>;
+  select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   on(ev: string, fn: (...args: any[]) => void): void;
@@ -419,10 +420,11 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
-      // 2. Routing Center: switch preset + add custom model + save
+      // 2. Routing Center: switch preset + set effort + add custom model + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="preset-quota_saver"]');
+      await page.select('[data-testid="route-effort-design"]', "xhigh");
       await page.type('[data-testid="custom-model-input"]', "opencode-go/my-pro");
       await clickReady(page, '[data-testid="add-custom-model-btn"]');
       await clickReady(page, '[data-testid="save-routing-btn"]');
@@ -454,9 +456,11 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="save-design-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="design-editor"]'), { timeout: 5000 });
 
-      // Approve only -> trigger live model execution + cross-model review
+      // Approve only -> trigger live model execution + effort selection + cross-model review
       await clickReady(page, '[data-testid="action-approve_only"]');
       await page.waitForSelector('[data-testid="run-review-btn"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="banner-runner-select-trigger"]', { timeout: 5000 });
+      await page.select('[data-testid="banner-runner-select-effort"]', "high");
       await clickReady(page, '[data-testid="run-selected-model-btn"]');
       await page.waitForFunction(
         () =>

@@ -45,7 +45,7 @@ import {
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
-import { ROUTING_PRESETS, type RoutingConfig, type RoutingPreset } from "../hub/types.ts";
+import { ROUTING_PRESETS, REASONING_EFFORTS, type ReasoningEffort, type RoutingConfig, type RoutingPreset } from "../hub/types.ts";
 import { buildAgentPrompt, type DispatchAction } from "./prompts.ts";
 import { removeServerDiscovery, writeServerDiscovery, type ServerRuntimeInfo } from "./runtime.ts";
 
@@ -139,7 +139,15 @@ async function buildWebBundle(webDir: string): Promise<{ html: string; css: stri
   if (!fs.existsSync(htmlPath) || !fs.existsSync(entryTs)) return null;
 
   const html = fs.readFileSync(htmlPath, "utf8");
-  const css = fs.existsSync(cssPath) ? fs.readFileSync(cssPath, "utf8") : "";
+  let css = fs.existsSync(cssPath) ? fs.readFileSync(cssPath, "utf8") : "";
+  if (css.includes('@import "tailwindcss"') || css.includes("@import 'tailwindcss'")) {
+    const { compile } = await import("@tailwindcss/node");
+    const { Scanner } = await import("@tailwindcss/oxide");
+    const scanner = new Scanner({ sources: [{ base: webDir, pattern: "**/*", negated: false }] });
+    const candidates = scanner.scan();
+    const compiler = await compile(css, { base: webDir, onDependency() {} });
+    css = compiler.build(candidates);
+  }
   const build = await Bun.build({
     entrypoints: [entryTs],
     target: "browser",
@@ -618,11 +626,8 @@ export async function startWorkbenchServer(options: {
           harness: typeof body.harness === "string" ? body.harness : undefined,
           model: typeof body.model === "string" ? body.model : undefined,
           reasoningEffort:
-            body.reasoningEffort === "low" ||
-            body.reasoningEffort === "medium" ||
-            body.reasoningEffort === "high" ||
-            body.reasoningEffort === "xhigh"
-              ? body.reasoningEffort
+            typeof body.reasoningEffort === "string" && (REASONING_EFFORTS as readonly string[]).includes(body.reasoningEffort)
+              ? (body.reasoningEffort as ReasoningEffort)
               : undefined,
           message: typeof body.message === "string" ? body.message : undefined,
           anchor: typeof body.anchor === "string" ? body.anchor : undefined,

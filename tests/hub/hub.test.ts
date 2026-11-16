@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -123,18 +124,53 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     fs.mkdirSync(path.join(fakeHome, ".codex"), { recursive: true });
     fs.writeFileSync(
       path.join(fakeHome, ".codex/models_cache.json"),
-      JSON.stringify({ models: [{ slug: "gpt-6-astra" }, { slug: "codex-auto-review" }] }),
+      JSON.stringify({
+        models: [
+          {
+            slug: "gpt-6-astra",
+            display_name: "GPT-6 Astra",
+            default_reasoning_level: "low",
+            supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }],
+          },
+          { slug: "codex-auto-review" },
+        ],
+      }),
     );
     fs.writeFileSync(path.join(fakeHome, ".codex/config.toml"), 'model = "gpt-6-astra"\n');
+
+    // Create mock ~/.omp/agent/agent.db and models.db for multi-provider OMP discovery
+    const ompDir = path.join(fakeHome, ".omp/agent");
+    fs.mkdirSync(ompDir, { recursive: true });
+    const agentDb = new Database(path.join(ompDir, "agent.db"));
+    agentDb.exec("CREATE TABLE auth_credentials (provider TEXT, disabled_cause TEXT)");
+    agentDb.exec("INSERT INTO auth_credentials VALUES ('opencode-go', NULL), ('qoder-cn', NULL)");
+    agentDb.exec("CREATE TABLE model_usage (model_key TEXT, last_used_at INTEGER)");
+    agentDb.exec("INSERT INTO model_usage VALUES ('qoder-cn/DeepSeek-Flash', 100)");
+    agentDb.exec("CREATE TABLE model_perf (model_key TEXT, updated_at INTEGER)");
+    agentDb.exec("INSERT INTO model_perf VALUES ('openai-codex/gpt-6.1-sol', 200)");
+    agentDb.close();
+
+    const modelsDb = new Database(path.join(ompDir, "models.db"));
+    modelsDb.exec("CREATE TABLE model_cache (provider_id TEXT, updated_at INTEGER, models TEXT)");
+    modelsDb.exec(
+      `INSERT INTO model_cache VALUES ('opencode-go:v3', 100, '${JSON.stringify([{ id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" }])}')`,
+    );
+    modelsDb.close();
 
     const harnesses = await discoverHarnesses(
       { opencode: ["opencode-go/custom-coder"] },
       {
         homeDir: fakeHome,
-        which: (cmd) => (cmd === "codex" || cmd === "opencode" ? `/usr/bin/${cmd}` : null),
+        which: (cmd) => (cmd === "codex" || cmd === "opencode" || cmd === "agy" || cmd === "omp" ? `/usr/bin/${cmd}` : null),
         runCmd: async (cmd) => {
           if (cmd.includes("opencode")) {
             return { code: 0, stdout: "opencode/deepseek-v4.1-flash-free\nopencode/glm-5.3-flash-free\n" };
+          }
+          if (cmd.includes("agy")) {
+            return {
+              code: 0,
+              stdout: "\r⠋ Fetching available models...\ngemini-4-hydrogen-xhigh         Gemini 4 Hydrogen (XHigh)\ngemini-4-argon-medium           Gemini 4 Argon (Medium)\n",
+            };
           }
           return { code: 1, stdout: "" };
         },
@@ -144,17 +180,27 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     const codex = harnesses.find((h) => h.id === "codex")!;
     const qoder = harnesses.find((h) => h.id === "qodercn")!;
     const oc = harnesses.find((h) => h.id === "opencode")!;
+    const agy = harnesses.find((h) => h.id === "agy")!;
+    const omp = harnesses.find((h) => h.id === "omp")!;
     expect(codex.installed).toBe(true);
     expect(codex.defaultModel).toBe("gpt-6-astra");
+    expect(codex.models[0]?.supportedEfforts).toContain("xhigh");
     expect(qoder.installed).toBe(false);
+    expect(qoder.models.some((m) => m.id === "DeepSeek-Flash")).toBe(true);
     expect(oc.models.some((m) => m.id === "opencode-go/custom-coder" && m.source === "custom")).toBe(true);
+    expect(oc.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
+    expect(agy.installed).toBe(true);
+    expect(agy.models.some((m) => m.id === "gemini-4-hydrogen-xhigh")).toBe(true);
+    expect(omp.installed).toBe(true);
+    expect(omp.models.some((m) => m.id === "qoder-cn/DeepSeek-Flash")).toBe(true);
+    expect(omp.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
   });
 
   test("applies presets, custom models, routing overrides, and rate-limit detection", () => {
     makeTempHub();
     const sota = buildPresetRouting("sota_first");
     expect(sota.stages.design.primary.model).toBe("gpt-6.1-sol");
-    expect(sota.stages.review.primary.harness).toBe("gemini");
+    expect(sota.stages.review.primary.harness).toBe("agy");
 
     applyHubRoutingPreset("quota_saver");
     const cfg = addCustomModel("opencode", "opencode-go/pro-model");
@@ -385,14 +431,34 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(codexRead.args).toContain("read-only");
 
     const qoderCmd = buildHarnessCommand(
-      { harness: "qodercn", model: "Qwen3.8-Flash" },
+      { harness: "qodercn", model: "Qwen3.8-Flash", reasoningEffort: "high" },
       { root: repo, action: "ask", prompt: "explain", harnesses: [] },
     );
     expect(qoderCmd.args).toContain("-o");
     expect(qoderCmd.args).toContain("stream-json");
     expect(qoderCmd.args).toContain("--permission-mode");
     expect(qoderCmd.args).toContain("auto");
+    expect(qoderCmd.args).toContain("--reasoning-effort");
+    expect(qoderCmd.args).toContain("high");
     expect(qoderCmd.args).toContain("-p");
+
+    const agyCmd = buildHarnessCommand(
+      { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "xhigh" },
+      { root: repo, action: "review", prompt: "review", harnesses: [] },
+    );
+    expect(agyCmd.args).toContain("--mode");
+    expect(agyCmd.args).toContain("plan");
+    expect(agyCmd.args).toContain("--model");
+    expect(agyCmd.args).toContain("gemini-4-hydrogen-high");
+    expect(agyCmd.args).toContain("--effort");
+    expect(agyCmd.args).toContain("xhigh");
+
+    const ompCmd = buildHarnessCommand(
+      { harness: "omp", model: "opencode-go/deepseek-v4.1-flash", reasoningEffort: "max" },
+      { root: repo, action: "implement", prompt: "do", harnesses: [] },
+    );
+    expect(ompCmd.args).toContain("--model=opencode-go/deepseek-v4.1-flash");
+    expect(ompCmd.args).toContain("--thinking=max");
 
     const streamChunks: string[] = [];
     const executor = new HubExecutor({

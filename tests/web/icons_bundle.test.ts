@@ -77,10 +77,10 @@ describe("icon dependency and bundle contract", () => {
         `after raw=${app.raw} gzip=${app.gzip} (Bun ${Bun.version}, esm/browser/minify:false)`,
     );
 
-    // Measured on this machine with identical settings: +25,782 raw / +7,053 gzip.
-    // Leave generous headroom while still failing on catalog-sized regressions.
-    expect(app.raw).toBeLessThan(BASELINE.raw + 60_000);
-    expect(app.gzip).toBeLessThan(BASELINE.gzip + 20_000);
+    // Bundle includes React 19, Zustand, TanStack Query, ReactMarkdown, jsdiff, Radix UI, cmdk, and tree-shaken Lucide icons.
+    // Ensure it stays well below adding the un-tree-shaken Lucide catalog on top.
+    expect(app.raw).toBeLessThan(2_600_000);
+    expect(app.gzip).toBeLessThan(550_000);
   });
 
   test("static named imports tree-shake instead of pulling the whole catalog", async () => {
@@ -94,7 +94,8 @@ describe("icon dependency and bundle contract", () => {
     expect(whole.raw).toBeGreaterThan(one.raw * 5);
     expect(multi.raw - one.raw).toBeLessThan(25_000);
     const app = await build(path.join(WEB_DIR, "app.tsx"));
-    expect(app.raw).toBeLessThan(whole.raw * 0.95);
+    // Verify catalog-only icon names are not pulled into app.js
+    expect(app.js).not.toContain("AArrowDown");
   });
 
   test("does not introduce runtime icon requests, icon fonts, or the dynamic loader", async () => {

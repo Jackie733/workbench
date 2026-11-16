@@ -1,11 +1,13 @@
 import type { AgentAction } from "../core/types.ts";
 import {
   HARNESS_IDS,
+  REASONING_EFFORTS,
   ROUTING_PRESETS,
   ROUTING_STAGES,
   type HarnessId,
   type HarnessInfo,
   type ModelTarget,
+  type ReasoningEffort,
   type RoutingConfig,
   type RoutingPreset,
   type RoutingStage,
@@ -20,8 +22,8 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
         design: {
           primary: { harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "high" },
           fallbacks: [
+            { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "high" },
             { harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" },
-            { harness: "gemini", model: "default" },
           ],
         },
         implement: {
@@ -40,7 +42,7 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
           ],
         },
         review: {
-          primary: { harness: "gemini", model: "default" },
+          primary: { harness: "agy", model: "gemini-4-argon-high", reasoningEffort: "high" },
           fallbacks: [
             { harness: "qodercn", model: "Qwen4-Max" },
             { harness: "codex", model: "codex-auto-review" },
@@ -57,7 +59,7 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
         design: {
           primary: { harness: "qodercn", model: "DeepSeek-V4-Pro" },
           fallbacks: [
-            { harness: "gemini", model: "default" },
+            { harness: "agy", model: "gemini-3.8-flash-medium" },
             { harness: "qodercn", model: "Kimi-K3.1-Pro" },
           ],
         },
@@ -65,22 +67,23 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
           primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
           fallbacks: [
             { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
+            { harness: "qodercn", model: "DeepSeek-Flash" },
             { harness: "qodercn", model: "Qwen3.8-Flash" },
           ],
         },
         fix: {
           primary: { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
           fallbacks: [
+            { harness: "qodercn", model: "DeepSeek-Flash" },
             { harness: "qodercn", model: "Qwen3.8-Flash" },
-            { harness: "qodercn", model: "Auto" },
             { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
           ],
         },
         review: {
           primary: { harness: "qodercn", model: "Qwen4-Max" },
           fallbacks: [
-            { harness: "qodercn", model: "Qwen3.8-Flash" },
-            { harness: "gemini", model: "default" },
+            { harness: "qodercn", model: "DeepSeek-Flash" },
+            { harness: "agy", model: "gemini-3.8-flash-medium" },
             { harness: "codex", model: "codex-auto-review" },
           ],
         },
@@ -95,8 +98,8 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
       design: {
         primary: { harness: "codex", model: "gpt-6-astra", reasoningEffort: "medium" },
         fallbacks: [
+          { harness: "agy", model: "gemini-4-argon-high", reasoningEffort: "high" },
           { harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" },
-          { harness: "gemini", model: "default" },
           { harness: "qodercn", model: "Qwen4-Max" },
         ],
       },
@@ -111,17 +114,16 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
       fix: {
         primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
         fallbacks: [
+          { harness: "qodercn", model: "DeepSeek-Flash" },
           { harness: "qodercn", model: "Qwen3.8-Flash" },
-          { harness: "qodercn", model: "DeepSeek-V4-Pro" },
           { harness: "codex", model: "gpt-6-astra", reasoningEffort: "medium" },
         ],
       },
       review: {
         primary: { harness: "codex", model: "codex-auto-review" },
         fallbacks: [
-          { harness: "qodercn", model: "Qwen3.8-Flash" },
-          { harness: "qodercn", model: "Auto" },
-          { harness: "gemini", model: "default" },
+          { harness: "qodercn", model: "DeepSeek-Flash" },
+          { harness: "agy", model: "gemini-4-argon-medium" },
           { harness: "qodercn", model: "DeepSeek-V4-Pro" },
         ],
       },
@@ -134,20 +136,26 @@ export function mapActionToRoutingStage(action: AgentAction): RoutingStage {
   return action;
 }
 
+const EFFORT_SET = new Set<string>(REASONING_EFFORTS);
+
 export function sanitizeModelTarget(raw: unknown, fallback: ModelTarget): ModelTarget {
   if (!raw || typeof raw !== "object") return fallback;
   const obj = raw as Record<string, unknown>;
+  let rawHarness = typeof obj.harness === "string" ? obj.harness : "";
+  let rawModel = typeof obj.model === "string" ? obj.model.trim() : "";
+  // Smooth migration for legacy persisted "gemini" configs -> "agy"
+  if (rawHarness === "gemini") {
+    rawHarness = "agy";
+    if (!rawModel || rawModel === "default") rawModel = "gemini-4-argon-medium";
+  }
   const harness =
-    typeof obj.harness === "string" && (HARNESS_IDS as readonly string[]).includes(obj.harness)
-      ? (obj.harness as HarnessId)
+    rawHarness && (HARNESS_IDS as readonly string[]).includes(rawHarness)
+      ? (rawHarness as HarnessId)
       : fallback.harness;
-  const model = typeof obj.model === "string" && obj.model.trim() ? obj.model.trim().slice(0, 200) : fallback.model;
+  const model = rawModel ? rawModel.slice(0, 200) : fallback.model;
   const effort =
-    obj.reasoningEffort === "low" ||
-    obj.reasoningEffort === "medium" ||
-    obj.reasoningEffort === "high" ||
-    obj.reasoningEffort === "xhigh"
-      ? obj.reasoningEffort
+    typeof obj.reasoningEffort === "string" && EFFORT_SET.has(obj.reasoningEffort)
+      ? (obj.reasoningEffort as ReasoningEffort)
       : undefined;
   return { harness, model, ...(effort ? { reasoningEffort: effort } : {}) };
 }
@@ -195,6 +203,11 @@ export function resolveRouteCandidates(
       harness: override.harness,
       model: override.model,
       ...(override.reasoningEffort ? { reasoningEffort: override.reasoningEffort } : {}),
+    });
+  } else if (override?.reasoningEffort) {
+    rawList.push({
+      ...rule.primary,
+      reasoningEffort: override.reasoningEffort,
     });
   }
   rawList.push(rule.primary, ...rule.fallbacks);

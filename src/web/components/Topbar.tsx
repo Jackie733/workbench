@@ -1,14 +1,28 @@
 import { ArrowLeft, Menu, MessageSquare, Moon, RefreshCw, Settings, Sun } from "lucide-react";
-import { useWorkbench } from "../context.tsx";
+import { backHome, invalidateAllWorkbenchQueries, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { bridgeStatusLabel } from "../state.ts";
+import { useStreamStore } from "../stores/streamStore.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export function Topbar() {
-  const { state, setState, backHome, refreshAll, refreshHubMetadata, toggleTheme, setDrawerOpen } = useWorkbench();
-  const projName = state.project?.project?.name ?? state.project?.root.split("/").pop() ?? "Workbench";
-  const bridge = state.project?.bridge;
+  const theme = useUiStore((s) => s.theme);
+  const selectedId = useUiStore((s) => s.selectedId);
+  const drawerOpen = useUiStore((s) => s.drawerOpen);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const sidebarOpen = useUiStore((s) => s.sidebarOpen);
+  const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setModal = useUiStore((s) => s.setModal);
+  const toggleTheme = useUiStore((s) => s.toggleTheme);
+
+  const activeRunCount = useStreamStore((s) => Object.keys(s.activeRuns).length);
+  const { data: hub } = useHubStateQuery();
+  const { data: project } = useProjectQuery(activeProjectId);
+
+  const projName = project?.project?.name ?? project?.root.split("/").pop() ?? "Workbench";
+  const bridge = project?.bridge;
   const working = Boolean(bridge?.connected && bridge.state !== "idle");
-  const activeRunCount = Object.keys(state.activeRuns).length;
 
   return (
     <header className="topbar">
@@ -18,23 +32,23 @@ export function Topbar() {
           type="button"
           title="项目与算力侧栏"
           aria-label="项目与算力侧栏"
-          onClick={() => setState((prev) => ({ ...prev, sidebarOpen: !prev.sidebarOpen }))}
+          onClick={() => setSidebarOpen(!sidebarOpen)}
         >
           <Icon icon={Menu} />
         </button>
-        {state.selectedId ? (
+        {selectedId ? (
           <>
             <button
               className="btn ghost"
               type="button"
               data-action="back-home"
               data-testid="back-home-btn"
-              onClick={() => void backHome()}
+              onClick={() => backHome()}
             >
               <Icon icon={ArrowLeft} /> 工作
             </button>
             <span className="muted">/</span>
-            <strong>{state.selectedId}</strong>
+            <strong>{selectedId}</strong>
           </>
         ) : (
           <span className="brand">{projName}</span>
@@ -51,10 +65,7 @@ export function Topbar() {
           data-action="refresh"
           title="刷新状态"
           aria-label="刷新状态"
-          onClick={() => {
-            void refreshHubMetadata(true);
-            void refreshAll(true);
-          }}
+          onClick={() => void invalidateAllWorkbenchQueries()}
         >
           <Icon icon={RefreshCw} />
         </button>
@@ -62,19 +73,19 @@ export function Topbar() {
           className="btn ghost xs"
           type="button"
           data-action="toggle-theme"
-          title={state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
-          aria-label={state.theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+          title={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
+          aria-label={theme === "dark" ? "切换到浅色主题" : "切换到深色主题"}
           onClick={toggleTheme}
         >
-          <Icon icon={state.theme === "dark" ? Sun : Moon} />
+          <Icon icon={theme === "dark" ? Sun : Moon} />
         </button>
-        {state.selectedId ? (
+        {selectedId ? (
           <button
-            className={`btn ${state.drawerOpen ? "primary" : ""}`}
+            className={`btn ${drawerOpen ? "primary" : ""}`}
             type="button"
             data-action="toggle-drawer"
             data-testid="toggle-drawer-btn"
-            onClick={() => setDrawerOpen(!state.drawerOpen)}
+            onClick={() => setDrawerOpen(!drawerOpen)}
           >
             {activeRunCount > 0 && <span className="pulse-dot" />}
             <Icon icon={MessageSquare} /> 研讨 / 终端
@@ -85,10 +96,12 @@ export function Topbar() {
             type="button"
             title="模型路由配置"
             onClick={() =>
-              setState((prev) => ({
-                ...prev,
-                modal: { kind: "routing", draft: prev.routing, customHarness: "opencode", customModel: "" },
-              }))
+              setModal({
+                kind: "routing",
+                draft: hub?.routing ?? null,
+                customHarness: "opencode",
+                customModel: "",
+              })
             }
           >
             <Icon icon={Settings} /> 路由

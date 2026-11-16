@@ -1,3 +1,6 @@
+@import "tailwindcss";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 :root {
   --bg: #f7f8fa;
   --surface: #ffffff;
@@ -37,6 +40,16 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
 button, input, textarea, select { font: inherit; color: inherit; }
+
+/* cmdk ModelCombobox group headers */
+.cmdk-group [cmdk-group-heading] {
+  padding: 5px 8px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 
 /* Three-column Command Center layout (preserves natural window scrollY) */
 .hub-layout {
@@ -313,10 +326,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .card-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
 
 .md-body { overflow-wrap: anywhere; }
-.md-body h1, .md-body h2, .md-body h3 { margin: 14px 0 8px; line-height: 1.35; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { margin: 14px 0 8px; line-height: 1.35; font-weight: 600; }
 .md-body h1 { font-size: 18px; }
 .md-body h2 { font-size: 16px; }
 .md-body h3 { font-size: 14.5px; }
+.md-body p { margin: 6px 0; }
+.md-body ul { list-style: disc; padding-left: 1.4em; margin: 6px 0; }
+.md-body ol { list-style: decimal; padding-left: 1.4em; margin: 6px 0; }
+.md-body li { margin: 2px 0; }
 .md-body pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; }
 .md-body code { font-family: var(--mono); font-size: 0.9em; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
 .md-body pre code { background: transparent; padding: 0; }
@@ -355,13 +372,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .timeline-item:first-child { border-top: 0; }
 
 .empty-card, .init-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; max-width: 680px; margin: 24px auto; }
+.init-card h2 { margin: 0 0 10px; font-size: 18px; font-weight: 600; }
 .radio-row { display: flex; flex-direction: column; gap: 8px; margin: 14px 0; }
 .radio-card { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
 .radio-card.selected { border-color: var(--accent); background: var(--accent-soft); }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 40; }
-.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 560px; padding: 18px; box-shadow: 0 20px 50px rgba(0,0,0,0.22); max-height: 90vh; overflow-y: auto; }
-.modal.modal-wide { max-width: 720px; }
+.modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: calc(100% - 32px); max-width: 560px; padding: 18px; box-shadow: 0 20px 50px rgba(0,0,0,0.22); max-height: 90vh; overflow-y: auto; }
+.modal.modal-wide { max-width: 780px; }
 .modal h3 { margin: 0 0 12px; font-size: 16px; }
 .textarea, .input { width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
 .textarea { min-height: 110px; resize: vertical; }
@@ -379,7 +397,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .preset-card { text-align: left; border: 1px solid var(--border); background: var(--surface-2); border-radius: 8px; padding: 10px; cursor: pointer; }
 .preset-card.active { border-color: var(--accent); background: var(--accent-soft); }
 .routing-table { display: flex; flex-direction: column; gap: 8px; }
-.routing-row { display: grid; grid-template-columns: 1fr 260px; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.routing-row { display: grid; grid-template-columns: minmax(160px, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .custom-model-bar { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .handoff-preview-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 55vh; overflow-y: auto; background: var(--surface-2); }
 

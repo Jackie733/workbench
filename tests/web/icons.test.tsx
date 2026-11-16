@@ -170,8 +170,10 @@ describe("application icon inventory", () => {
       }
     }
     const primitives = read("src/web/components/Primitives.tsx");
-    expect(primitives).toContain("仅生成提示词 (手动复制)");
+    const modelBar = read("src/web/components/ui/ModelRunnerBar.tsx");
+    expect(modelBar).toContain("仅生成提示词 (手动复制)");
     expect(primitives).not.toContain("📋");
+    expect(modelBar).not.toContain("📋");
   });
 
   test("preserves documented text/prose exceptions", () => {

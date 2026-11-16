@@ -1,3 +1,5 @@
+import { diffLines } from "diff";
+
 export function escapeHtml(input: string): string {
   return input
     .replaceAll("&", "&amp;")
@@ -232,52 +234,18 @@ export function renderDiffLinesHtml(lines: string[]): string {
     .join("");
 }
 
-/** Computes a simple readable line diff between two markdown design versions. */
+/** Computes a readable line diff between two markdown design versions using jsdiff. */
 export function renderSimpleLineDiff(beforeText: string, afterText: string): string {
-  const a = beforeText.replace(/\r\n/g, "\n").split("\n");
-  const b = afterText.replace(/\r\n/g, "\n").split("\n");
-  const m = a.length;
-  const n = b.length;
-
-  // Guard LCS memory for very large texts
-  if (m * n > 250_000) {
-    return renderDiffLinesHtml([
-      "@@ 文档较大，显示行级摘要 @@",
-      ...a.map((l) => `-${l}`),
-      ...b.map((l) => `+${l}`),
-    ]);
-  }
-
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      dp[i]![j] = a[i] === b[j] ? 1 + dp[i + 1]![j + 1]! : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+  const normalizedA = beforeText.replace(/\r\n/g, "\n");
+  const normalizedB = afterText.replace(/\r\n/g, "\n");
+  const changes = diffLines(normalizedA, normalizedB);
+  const diffLinesOut: string[] = [];
+  for (const part of changes) {
+    const prefix = part.added ? "+" : part.removed ? "-" : " ";
+    const lines = part.value.replace(/\n$/, "").split("\n");
+    for (const line of lines) {
+      diffLinesOut.push(`${prefix}${line}`);
     }
   }
-
-  const diffLines: string[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < m && j < n) {
-    if (a[i] === b[j]) {
-      diffLines.push(` ${a[i]}`);
-      i += 1;
-      j += 1;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      diffLines.push(`-${a[i]}`);
-      i += 1;
-    } else {
-      diffLines.push(`+${b[j]}`);
-      j += 1;
-    }
-  }
-  while (i < m) {
-    diffLines.push(`-${a[i]}`);
-    i += 1;
-  }
-  while (j < n) {
-    diffLines.push(`+${b[j]}`);
-    j += 1;
-  }
-  return renderDiffLinesHtml(diffLines);
+  return renderDiffLinesHtml(diffLinesOut);
 }

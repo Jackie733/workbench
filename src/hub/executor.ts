@@ -157,25 +157,31 @@ export function buildHarnessCommand(
         "run",
         "--auto",
         ...(model && model !== "default" ? ["--model", model] : []),
+        ...(effort && effort !== "minimal" ? ["--thinking"] : []),
         ...(ctx.nativeSessionId ? ["--session", ctx.nativeSessionId] : []),
         ctx.prompt,
       ];
       return { command: bin, args, displayCommand: `${bin} run --model ${model}` };
     }
 
-    case "gemini": {
-      const usesMise = Boolean(exe && exe.startsWith("mise "));
-      const baseCmd = usesMise ? "mise" : exe || "gemini";
-      const prefixArgs = usesMise ? ["x", "node@24.4.1", "--", "gemini"] : [];
+    case "agy": {
+      const bin = exe || "agy";
+      const mode = ctx.action === "ask" || ctx.action === "review" ? "plan" : "auto";
+      const agyEffort =
+        effort && (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max")
+          ? effort
+          : undefined;
       const args = [
-        ...prefixArgs,
         "-p",
         ctx.prompt,
-        ...(ctx.action === "ask" || ctx.action === "review" ? ["--approval-mode", "plan"] : ["--yolo"]),
-        ...(model && model !== "default" ? ["-m", model] : []),
-        ...(ctx.nativeSessionId ? ["--resume", ctx.nativeSessionId] : []),
+        "--mode",
+        mode,
+        ...(mode === "auto" ? ["--dangerously-skip-permissions"] : []),
+        ...(model && model !== "default" ? ["--model", model] : []),
+        ...(agyEffort ? ["--effort", agyEffort] : []),
+        ...(ctx.nativeSessionId ? ["--conversation", ctx.nativeSessionId] : []),
       ];
-      return { command: baseCmd, args, displayCommand: `gemini -p (model=${model})` };
+      return { command: bin, args, displayCommand: `${bin} -p --mode ${mode} (model=${model})` };
     }
 
     case "omp": {
@@ -184,6 +190,7 @@ export function buildHarnessCommand(
         "-p",
         `--cwd=${ctx.root}`,
         ...(model && model !== "default" ? [`--model=${model}`] : []),
+        ...(effort ? [`--thinking=${effort}`] : []),
         ...(ctx.nativeSessionId ? [`--resume=${ctx.nativeSessionId}`] : []),
         ctx.prompt,
       ];
@@ -504,7 +511,9 @@ export class HubExecutor {
     const override: Partial<ModelTarget> | null =
       input.harness && input.model
         ? { harness: input.harness as ModelTarget["harness"], model: input.model, reasoningEffort: input.reasoningEffort }
-        : null;
+        : input.reasoningEffort
+          ? { reasoningEffort: input.reasoningEffort }
+          : null;
     const candidates = resolveRouteCandidates(cfg.routing, harnesses, input.action, override);
 
     let target = candidates[0]!;

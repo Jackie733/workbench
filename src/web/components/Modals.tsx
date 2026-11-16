@@ -1,9 +1,30 @@
 import { useRef } from "react";
 import { ArrowUp, Folder, Lightbulb, Pencil, RefreshCw } from "lucide-react";
 import type { PrivacyMode } from "../../core/types.ts";
-import { HARNESS_IDS, ROUTING_STAGES, type HarnessId, type RoutingPreset, type RoutingStage } from "../../hub/types.ts";
+import {
+  HARNESS_IDS,
+  ROUTING_STAGES,
+  type HarnessId,
+  type ReasoningEffort,
+  type RoutingPreset,
+  type RoutingStage,
+} from "../../hub/types.ts";
 import { api, setApiProjectScope } from "../api.ts";
-import { useWorkbench } from "../context.tsx";
+import {
+  invalidateAllWorkbenchQueries,
+  queryClient,
+  queryKeys,
+  runBusy,
+  submitAnnotation,
+  submitFeedback,
+  submitLifecycle,
+  submitNewRequirement,
+  useHubStateQuery,
+  useProjectQuery,
+  useRequirementQuery,
+} from "../queries.ts";
+import { EFFORT_LABELS, supportedEffortsForModel } from "../state.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
 
@@ -15,30 +36,35 @@ const STAGE_LABEL: Record<RoutingStage, string> = {
 };
 
 const PRESET_INFO: Array<{ id: RoutingPreset; name: string; desc: string }> = [
-  { id: "balanced", name: "性价比均衡 (推荐)", desc: "Codex/Pro 规划与审查，QoderCN/OpenCode 承担高频编码" },
+  { id: "balanced", name: "性价比均衡 (推荐)", desc: "Codex/AGY 规划与审查，QoderCN/OpenCode 承担高频编码" },
   { id: "sota_first", name: "SOTA 攻坚优先", desc: "关键阶段全线优先调用高推理主力模型" },
   { id: "quota_saver", name: "极致省流保额", desc: "最大化使用 QoderCN 与 OpenCode 免费模型保留 SOTA 额度" },
 ];
 
 export function Modals() {
-  const {
-    state,
-    setState,
-    showToast,
-    runBusy,
-    refreshHubMetadata,
-    refreshAll,
-    submitNewRequirement,
-    submitFeedback,
-    submitLifecycle,
-    submitAnnotation,
-  } = useWorkbench();
+  const m = useUiStore((s) => s.modal);
+  const busy = useUiStore((s) => s.busy);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const selectedId = useUiStore((s) => s.selectedId);
+  const setModal = useUiStore((s) => s.setModal);
+  const showToast = useUiStore((s) => s.showToast);
+  const setActiveProjectId = useUiStore((s) => s.setActiveProjectId);
+  const setSelectedId = useUiStore((s) => s.setSelectedId);
+  const setSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
+  const setQuery = useUiStore((s) => s.setQuery);
+
+  const { data: hub } = useHubStateQuery();
+  const { data: project } = useProjectQuery(activeProjectId);
+  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
 
   const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
-  const m = state.modal;
   if (!m) return null;
 
-  const close = () => setState((prev) => ({ ...prev, modal: null }));
+  const close = () => setModal(null);
+  const bridgeConnected = Boolean(project?.bridge.connected);
+  const harnesses = hub?.harnesses ?? [];
+  const routing = hub?.routing ?? null;
+  const detail = reqData?.detail ?? null;
 
   if (m.kind === "new_req") {
     return (
@@ -55,7 +81,7 @@ export function Modals() {
           value={m.goal}
           placeholder="用一句话描述需求目标，细节与验收标准可交给 Agent 整理…"
           onChange={(e) =>
-            setState((prev) => (prev.modal?.kind === "new_req" ? { ...prev, modal: { ...prev.modal, goal: e.target.value } } : prev))
+            setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
           }
         />
         <div className="modal-actions">
@@ -66,8 +92,8 @@ export function Modals() {
             className="btn"
             type="button"
             data-testid="save-draft-btn"
-            disabled={state.busy}
-            onClick={() => void submitNewRequirement(m.goal, false)}
+            disabled={busy}
+            onClick={() => void submitNewRequirement(m.goal, false, bridgeConnected)}
           >
             仅保存草稿
           </button>
@@ -75,8 +101,8 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="create-and-dispatch-btn"
-            disabled={state.busy}
-            onClick={() => void submitNewRequirement(m.goal, true)}
+            disabled={busy}
+            onClick={() => void submitNewRequirement(m.goal, true, bridgeConnected)}
           >
             创建并让 Agent 整理方案
           </button>
@@ -90,10 +116,8 @@ export function Modals() {
     const browseDir = async (targetPath: string) => {
       try {
         const next = await api.browseFs(targetPath);
-        setState((prev) =>
-          prev.modal?.kind === "add_project"
-            ? { ...prev, modal: { ...prev.modal, browse: next, pathInput: next.currentPath } }
-            : prev,
+        setModal((prev) =>
+          prev?.kind === "add_project" ? { ...prev, browse: next, pathInput: next.currentPath } : prev,
         );
       } catch (err) {
         showToast(err instanceof Error ? err.message : "无法打开目录", true);
@@ -113,21 +137,15 @@ export function Modals() {
           initPrivacy: m.initPrivacy === "none" ? undefined : m.initPrivacy,
         });
         setApiProjectScope(out.project.id);
-        setState((prev) => ({
-          ...prev,
-          modal: null,
-          activeProjectId: out.project.id,
-          hubProjects: out.projects,
-          selectedId: null,
-          detail: null,
-          diffObs: null,
-          query: "",
-        }));
+        setModal(null);
+        setActiveProjectId(out.project.id);
+        setSelectedId(null);
+        setSelectedDiffFile(null);
+        setQuery("");
         return out;
       });
       if (res) {
-        await refreshHubMetadata(true);
-        await refreshAll(true);
+        await invalidateAllWorkbenchQueries();
         showToast(`已切换到项目 ${res.project.name}`);
       }
     };
@@ -147,9 +165,7 @@ export function Modals() {
             value={m.pathInput}
             placeholder="/home/jackie/code/your-project"
             onChange={(e) =>
-              setState((prev) =>
-                prev.modal?.kind === "add_project" ? { ...prev, modal: { ...prev.modal, pathInput: e.target.value } } : prev,
-              )
+              setModal((prev) => (prev?.kind === "add_project" ? { ...prev, pathInput: e.target.value } : prev))
             }
           />
           <button
@@ -167,10 +183,18 @@ export function Modals() {
               <div className="browse-head">
                 <span className="xs muted">{browse.currentPath}</span>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  {browse.isGitRepo ? <span className="badge success">Git 仓库</span> : <span className="badge neutral">普通目录</span>}
+                  {browse.isGitRepo ? (
+                    <span className="badge success">Git 仓库</span>
+                  ) : (
+                    <span className="badge neutral">普通目录</span>
+                  )}
                   {browse.workbenchInitialized && <span className="badge info">已初始化</span>}
                   {browse.parentPath && (
-                    <button className="btn ghost xs" type="button" onClick={() => void browseDir(browse.parentPath!)}>
+                    <button
+                      className="btn ghost xs"
+                      type="button"
+                      onClick={() => void browseDir(browse.parentPath!)}
+                    >
                       <Icon icon={ArrowUp} size={14} /> 上级目录
                     </button>
                   )}
@@ -213,9 +237,7 @@ export function Modals() {
               value={m.nameInput}
               placeholder="默认取文件夹名"
               onChange={(e) =>
-                setState((prev) =>
-                  prev.modal?.kind === "add_project" ? { ...prev, modal: { ...prev.modal, nameInput: e.target.value } } : prev,
-                )
+                setModal((prev) => (prev?.kind === "add_project" ? { ...prev, nameInput: e.target.value } : prev))
               }
             />
           </div>
@@ -229,9 +251,9 @@ export function Modals() {
               style={{ width: "100%" }}
               value={m.initPrivacy}
               onChange={(e) =>
-                setState((prev) =>
-                  prev.modal?.kind === "add_project"
-                    ? { ...prev, modal: { ...prev.modal, initPrivacy: e.target.value as PrivacyMode | "none" } }
+                setModal((prev) =>
+                  prev?.kind === "add_project"
+                    ? { ...prev, initPrivacy: e.target.value as PrivacyMode | "none" }
                     : prev,
                 )
               }
@@ -250,7 +272,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="submit-add-project-btn"
-            disabled={state.busy}
+            disabled={busy}
             onClick={() => void submitAddProject()}
           >
             添加并切换到此项目
@@ -261,24 +283,21 @@ export function Modals() {
   }
 
   if (m.kind === "routing") {
-    const cfg = m.draft ?? state.routing;
+    const cfg = m.draft ?? routing;
 
     const refreshHarnesses = async () => {
-      const res = await runBusy(async () => api.refreshHarnesses());
+      const res = await runBusy(() => api.refreshHarnesses());
       if (res) {
-        setState((prev) => ({ ...prev, harnesses: res.harnesses }));
+        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast("已刷新本机 CLI 与模型列表");
       }
     };
 
     const applyPreset = async (preset: RoutingPreset) => {
-      const res = await runBusy(async () => api.applyPreset(preset));
+      const res = await runBusy(() => api.applyPreset(preset));
       if (res) {
-        setState((prev) => ({
-          ...prev,
-          routing: res.routing,
-          modal: prev.modal?.kind === "routing" ? { ...prev.modal, draft: res.routing } : prev.modal,
-        }));
+        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: res.routing } : prev));
+        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast(`已应用策略预设：${preset}`);
       }
     };
@@ -289,23 +308,20 @@ export function Modals() {
         showToast("请输入模型 ID", true);
         return;
       }
-      const res = await runBusy(async () => api.addCustomModel(m.customHarness, modelId));
+      const res = await runBusy(() => api.addCustomModel(m.customHarness, modelId));
       if (res) {
-        setState((prev) => ({
-          ...prev,
-          harnesses: res.harnesses,
-          customModels: res.customModels,
-          modal: prev.modal?.kind === "routing" ? { ...prev.modal, customModel: "" } : prev.modal,
-        }));
+        setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: "" } : prev));
+        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast(`已添加模型 ${modelId}`);
       }
     };
 
     const saveRouting = async () => {
       if (!cfg) return;
-      const res = await runBusy(async () => api.saveRouting(cfg));
+      const res = await runBusy(() => api.saveRouting(cfg));
       if (res) {
-        setState((prev) => ({ ...prev, routing: res.routing, modal: null }));
+        setModal(null);
+        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast("模型路由配置已保存");
       }
     };
@@ -318,7 +334,7 @@ export function Modals() {
             className="btn xs"
             type="button"
             data-testid="refresh-harnesses-btn"
-            disabled={state.busy}
+            disabled={busy}
             onClick={() => void refreshHarnesses()}
           >
             <Icon icon={RefreshCw} size={14} /> 重新探测本机模型
@@ -347,58 +363,96 @@ export function Modals() {
             {ROUTING_STAGES.map((stg) => {
               const rule = cfg.stages[stg];
               const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
-              const customInList = state.harnesses.some(
+              const customInList = harnesses.some(
                 (h) => h.id === rule.primary.harness && h.models.some((x) => x.id === rule.primary.model),
               );
+              const efforts = supportedEffortsForModel(harnesses, rule.primary.harness, rule.primary.model);
+
               return (
                 <div key={stg} className="routing-row">
-                  <div>
+                  <div className="min-w-0">
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{STAGE_LABEL[stg]}</div>
-                    <div className="xs muted">
+                    <div className="xs muted truncate">
                       备援：{rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") || "无"}
                     </div>
                   </div>
-                  <select
-                    className="select"
-                    data-testid={`route-select-${stg}`}
-                    value={selectedVal}
-                    onChange={(e) => {
-                      const [harness, model] = e.target.value.split("::");
-                      if (!harness || !model || !cfg) return;
-                      const nextCfg = {
-                        ...cfg,
-                        stages: {
-                          ...cfg.stages,
-                          [stg]: { ...cfg.stages[stg], primary: { harness: harness as HarnessId, model } },
-                        },
-                      };
-                      setState((prev) =>
-                        prev.modal?.kind === "routing" ? { ...prev, modal: { ...prev.modal, draft: nextCfg } } : prev,
-                      );
-                    }}
-                  >
-                    {!customInList && (
-                      <option value={selectedVal}>
-                        {rule.primary.harness} · {rule.primary.model}
-                      </option>
-                    )}
-                    {state.harnesses.map((h) => (
-                      <optgroup
-                        key={h.id}
-                        label={`${h.label} (${h.installed ? h.subscription : "未安装"})`}
-                      >
-                        {h.models.map((mod) => {
-                          const val = `${h.id}::${mod.id}`;
-                          return (
-                            <option key={val} value={val}>
-                              {h.id} · {mod.id}
-                              {mod.source === "custom" ? " [自定义]" : ""}
-                            </option>
-                          );
-                        })}
-                      </optgroup>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      className="select min-w-[230px]"
+                      data-testid={`route-select-${stg}`}
+                      value={selectedVal}
+                      onChange={(e) => {
+                        const [harness, model] = e.target.value.split("::");
+                        if (!harness || !model || !cfg) return;
+                        const nextEfforts = supportedEffortsForModel(harnesses, harness, model);
+                        const keepEffort =
+                          rule.primary.reasoningEffort && nextEfforts.includes(rule.primary.reasoningEffort)
+                            ? rule.primary.reasoningEffort
+                            : undefined;
+                        const nextCfg = {
+                          ...cfg,
+                          stages: {
+                            ...cfg.stages,
+                            [stg]: {
+                              ...cfg.stages[stg],
+                              primary: {
+                                harness: harness as HarnessId,
+                                model,
+                                ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
+                              },
+                            },
+                          },
+                        };
+                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                      }}
+                    >
+                      {!customInList && (
+                        <option value={selectedVal}>
+                          {rule.primary.harness} · {rule.primary.model}
+                        </option>
+                      )}
+                      {harnesses.map((h) => (
+                        <optgroup key={h.id} label={`${h.label} (${h.installed ? h.subscription : "未安装"})`}>
+                          {h.models.map((mod) => {
+                            const val = `${h.id}::${mod.id}`;
+                            return (
+                              <option key={val} value={val}>
+                                {h.id} · {mod.id}
+                                {mod.source === "custom" ? " [自定义]" : ""}
+                              </option>
+                            );
+                          })}
+                        </optgroup>
+                      ))}
+                    </select>
+                    <select
+                      className="select font-mono w-[135px]"
+                      data-testid={`route-effort-${stg}`}
+                      title="该阶段推理强度 (Reasoning Effort)"
+                      value={rule.primary.reasoningEffort ?? ""}
+                      onChange={(e) => {
+                        const eff = e.target.value as ReasoningEffort | "";
+                        const nextPrimary = { ...rule.primary };
+                        if (eff) nextPrimary.reasoningEffort = eff;
+                        else delete nextPrimary.reasoningEffort;
+                        const nextCfg = {
+                          ...cfg,
+                          stages: {
+                            ...cfg.stages,
+                            [stg]: { ...cfg.stages[stg], primary: nextPrimary },
+                          },
+                        };
+                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                      }}
+                    >
+                      <option value="">默认强度</option>
+                      {efforts.map((eff) => (
+                        <option key={eff} value={eff}>
+                          {EFFORT_LABELS[eff] ?? eff}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               );
             })}
@@ -414,10 +468,8 @@ export function Modals() {
               style={{ width: 140 }}
               value={m.customHarness}
               onChange={(e) =>
-                setState((prev) =>
-                  prev.modal?.kind === "routing"
-                    ? { ...prev, modal: { ...prev.modal, customHarness: e.target.value as HarnessId } }
-                    : prev,
+                setModal((prev) =>
+                  prev?.kind === "routing" ? { ...prev, customHarness: e.target.value as HarnessId } : prev,
                 )
               }
             >
@@ -434,9 +486,7 @@ export function Modals() {
               value={m.customModel}
               placeholder="例如 opencode-go/claude-sonnet-4.6"
               onChange={(e) =>
-                setState((prev) =>
-                  prev.modal?.kind === "routing" ? { ...prev, modal: { ...prev.modal, customModel: e.target.value } } : prev,
-                )
+                setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: e.target.value } : prev))
               }
             />
             <button
@@ -458,7 +508,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="save-routing-btn"
-            disabled={state.busy}
+            disabled={busy}
             onClick={() => void saveRouting()}
           >
             保存路由配置
@@ -483,8 +533,8 @@ export function Modals() {
           value={m.message}
           placeholder="输入对该段落的疑问（仅探讨）或修改意见（将汇总至待提交批注列表）…"
           onChange={(e) =>
-            setState((prev) =>
-              prev.modal?.kind === "annotate_anchor" ? { ...prev, modal: { ...prev.modal, message: e.target.value } } : prev,
+            setModal((prev) =>
+              prev?.kind === "annotate_anchor" ? { ...prev, message: e.target.value } : prev,
             )
           }
         />
@@ -496,7 +546,7 @@ export function Modals() {
             className="btn"
             type="button"
             data-testid="annotate-ask-btn"
-            onClick={() => void submitAnnotation(m.anchor, m.message, "ask")}
+            onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "ask")}
           >
             <Icon icon={Lightbulb} size={14} /> 加入并立即提问
           </button>
@@ -504,7 +554,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="annotate-queue-btn"
-            onClick={() => void submitAnnotation(m.anchor, m.message, "refine")}
+            onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "refine")}
           >
             <Icon icon={Pencil} size={14} /> 加入待修订批注
           </button>
@@ -543,9 +593,7 @@ export function Modals() {
           value={m.feedback}
           placeholder="清晰写下需要调整的规范、方案或修复问题…"
           onChange={(e) =>
-            setState((prev) =>
-              prev.modal?.kind === "feedback" ? { ...prev, modal: { ...prev.modal, feedback: e.target.value } } : prev,
-            )
+            setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: e.target.value } : prev))
           }
         />
         <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, fontSize: 13 }}>
@@ -554,10 +602,8 @@ export function Modals() {
             id="feedback-dispatch"
             checked={m.dispatchAgent}
             onChange={(e) =>
-              setState((prev) =>
-                prev.modal?.kind === "feedback"
-                  ? { ...prev, modal: { ...prev.modal, dispatchAgent: e.target.checked } }
-                  : prev,
+              setModal((prev) =>
+                prev?.kind === "feedback" ? { ...prev, dispatchAgent: e.target.checked } : prev,
               )
             }
           />
@@ -570,8 +616,8 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
-            disabled={state.busy}
-            onClick={() => void submitFeedback(m.feedback, m.dispatchAgent)}
+            disabled={busy}
+            onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
             确认退回修改
           </button>
@@ -592,9 +638,7 @@ export function Modals() {
           value={m.reason}
           placeholder="请说明原因…"
           onChange={(e) =>
-            setState((prev) =>
-              prev.modal?.kind === "lifecycle" ? { ...prev, modal: { ...prev.modal, reason: e.target.value } } : prev,
-            )
+            setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, reason: e.target.value } : prev))
           }
         />
         <div className="modal-actions">
@@ -604,8 +648,8 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
-            disabled={state.busy}
-            onClick={() => void submitLifecycle(m.action, m.reason)}
+            disabled={busy}
+            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason)}
           >
             确认
           </button>
