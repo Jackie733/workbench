@@ -3,7 +3,10 @@
 return function(native, repo, fixture)
     local cache={}
     local sources={store="lib\\store.luau",validity="lib\\validity.luau",workflow="lib\\workflow.luau",
-        context="lib\\context.luau",fixtures="tests\\af-fixtures.luau"}
+        context="lib\\context.luau",fixtures="tests\\af-fixtures.luau",ui="lib\\ui.luau",
+        handoff="lib\\handoff.luau",runview="lib\\runview.luau",reviewview="lib\\reviewview.luau",
+        auditview="lib\\auditview.luau",audit="lib\\audit.luau",results="lib\\results.luau",
+        review="lib\\review.luau",batch="lib\\batch.luau",diff="lib\\diff.luau",candidates="lib\\candidates.luau"}
     local function load(name)
         if cache[name] then return cache[name] end
         local source=assert(sources[name],"unsupported native probe module")
@@ -16,5 +19,5 @@ return function(native, repo, fixture)
         return cache[name]
     end
     local context=load("context")
-    return {module=context,state=load("fixtures").make(fixture)}
+    return {module=context,state=load("fixtures").make(fixture),load=load}
 end

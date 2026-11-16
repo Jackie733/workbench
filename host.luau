@@ -706,6 +706,7 @@ local function saveUi(s)
     tern.kv.set(projectKey(s), {tab = s.ui.tab, selected = s.ui.selected, sort = s.ui.sort,
         priorityFilter = s.ui.priorityFilter, stageFilter = s.ui.stageFilter, query = s.ui.query,
         queryCursor = s.ui.queryCursor, privacyMode = s.ui.privacyMode, layout = s.ui.layout,
+        scope = s.ui.scope, filterOpen = s.ui.filterOpen, more = s.ui.more,
         detailMode = s.ui.detailMode, drafts = s.ui.drafts, formMode = s.ui.formMode,
         mode = s.ui.mode, editing = s.ui.editing, draftKey = s.ui.draftKey, handoff = handoffSnapshot(s.ui.handoff),
         trace = traceSnapshot(s.ui.trace), review = reviewSnapshot(s.ui.review),
@@ -2496,6 +2497,9 @@ local function loadWorkbench(s, cx)
         queryCursor = type(saved) == "table" and saved.queryCursor or nil,
         privacyMode = type(saved) == "table" and saved.privacyMode or "local",
         layout = layout,
+        scope = (type(saved) == "table" and (saved.scope == "all" or saved.scope == "done" or saved.scope == "cancelled")) and saved.scope or "active",
+        filterOpen = type(saved) == "table" and saved.filterOpen == true or false,
+        more = type(saved) == "table" and saved.more == true or false,
         detailMode = detailMode,
         drafts = type(saved) == "table" and saved.drafts or {}, fields = {}, type = "feature",
         priority = "normal", writable = false, busy = false, token = s.token,
@@ -2818,8 +2822,13 @@ local function applyChange(s, cx, name, value)
     elseif name == "priority" then s.ui.priority = value; s.ui.dirty = true; persistForm(s)
     elseif name == "sort" then
         s.ui.sort = value
-        table.sort(s.ui.requirements, requirementOrder(s.ui))
+        table.sort(s.ui.requirements, requirementOrder(s))
         saveUi(s)
+    elseif name == "scope" then
+        if value == "active" or value == "all" or value == "done" or value == "cancelled" then
+            s.ui.scope = value
+            saveUi(s)
+        end
     elseif name == "layout" then
         if value == "list" or value == "board" then s.ui.layout = value; saveUi(s) end
     elseif name == "resourceKind" then
@@ -3024,6 +3033,9 @@ tern.block.define("live", {
                 s.ui.handoff.tab = ev.item
                 saveUi(s)
             end
+        elseif ev.ev == "select" and type(ev.item) == "string" and ev.id:match("%.([%w%-]+)Seg$") then
+            local name = ev.id:match("%.([%w%-]+)Seg$")
+            applyChange(s, cx, name, ev.item)
         elseif ev.ev == "select" and ev.id:match("%.tabs$") then
             local item = tostring(ev.item)
             if context.workspaceTab[item] then
@@ -3131,6 +3143,16 @@ tern.block.define("live", {
             elseif act == "enable-edit" then initProject(s, cx, false, false)
             elseif act == "takeover" and s.ui.takeoverAvailable then initProject(s, cx, true, false)
             elseif act == "takeover-initialize" and s.ui.takeoverAvailable then initProject(s, cx, true, true)
+            elseif act == "home-filter" then
+                s.ui.filterOpen = not s.ui.filterOpen
+                saveUi(s)
+            elseif act == "more-toggle" then
+                s.ui.more = not s.ui.more
+                saveUi(s)
+            elseif act == "clear-filters" then
+                s.ui.query, s.ui.queryCursor = "", 0
+                s.ui.priorityFilter, s.ui.stageFilter, s.ui.scope = "all", "all", "active"
+                saveUi(s)
             elseif act == "reload" then s.ui.notice = nil; scheduleProjectRefresh(s, cx); saveUi(s)
             elseif act == "new-requirement" and s.ui.writable then openForm(s, "new")
             elseif act == "edit-requirement" and s.ui.writable and s.ui.selected then openForm(s, "edit", s.ui.byId[s.ui.selected])

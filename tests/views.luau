@@ -105,6 +105,7 @@ return function(tern, repo)
 
     -- Dispatch contract: everything the views emit must be handled by host.luau.
     local simpleActions = {prefill = true, reload = true, ["enable-edit"] = true, initialize = true, takeover = true,
+        ["home-filter"] = true, ["more-toggle"] = true, ["clear-filters"] = true,
         ["takeover-initialize"] = true, ["new-requirement"] = true, ["edit-requirement"] = true, ["save-requirement"] = true,
         back = true, ["back-workspace"] = true, ["prefill-selected"] = true, rebase = true, ["acknowledge-unknown"] = true, ["open-handoff"] = true,
         ["review-open-native"] = true, ["review-create"] = true, ["review-dispose"] = true, ["review-accept"] = true,
@@ -556,6 +557,89 @@ return function(tern, repo)
     local acceptBtn = findByKey(reviewview.build(baseState()), "review-accept")
     check(acceptBtn ~= nil and acceptBtn.p.disabled == require("../lib/context").evaluateAction("review-accept", baseState()).reason,
         "验收按钮禁用原因必须直接来自 Context.evaluateAction")
+
+    -- AF-04 consumer contract: one filled primary per page, native choice
+    -- controls instead of button walls, and no button-based page navigation.
+    local function countPrimary(root)
+        local n = 0
+        local function walk(value)
+            if type(value) ~= "table" then return end
+            if value.k == "button" and value.p and value.p.variant == "primary" then n += 1 end
+            for _, child in value.c or {} do walk(child) end
+        end
+        walk(root)
+        return n
+    end
+    local pages = {
+        {"需求首页", function(s) s.ui.tab, s.ui.detailMode = "requirements", false end},
+        {"新建表单", function(s) s.ui.tab, s.ui.formMode = true end},
+        {"需求概览", function(s) s.ui.tab, s.ui.detailMode = "requirement", true end},
+        {"方案页", function(s) s.ui.tab, s.ui.detailMode = "design", true; s.ui.handoff.tab = "design" end},
+        {"批准页", function(s) s.ui.tab, s.ui.detailMode = "design", true; s.ui.handoff.tab = "approval" end},
+        {"交付页", function(s) s.ui.tab, s.ui.detailMode = "delivery", true end},
+        {"验收页", function(s) s.ui.tab, s.ui.detailMode = "acceptance", true end},
+        {"历史页", function(s) s.ui.tab, s.ui.detailMode = "history", true end},
+        {"活动页", function(s) s.ui.tab, s.ui.detailMode = "activity", false end},
+        {"会话页", function(s) s.ui.tab, s.ui.detailMode = "session", false end},
+    }
+    for _, page in pages do
+        local state = copy(baseState())
+        page[2](state)
+        local tree = ui.build(state)
+        check(countPrimary(tree) <= 1, page[1] .. " 至多一个 filled primary")
+    end
+    local home = copy(baseState())
+    home.ui.tab, home.ui.detailMode = "requirements", false
+    local homeTree = ui.build(home)
+    local layout = findByKey(homeTree, "layoutSeg")
+    check(layout ~= nil and layout.k == "tabs" and layout.p.variant == "segmented",
+        "列表/分组是原生 segmented，不是按钮组")
+    check(findByKey(homeTree, "layout-list") == nil, "布局切换不得再渲染成按钮")
+    check(findByKey(homeTree, "filterPanel") == nil and findByKey(homeTree, "stageFilter") == nil,
+        "筛选面板默认收起，不在首屏铺满筛选项")
+    home.ui.filterOpen = true
+    local openTree = ui.build(home)
+    local scopeSeg = findByKey(openTree, "scopeSeg")
+    check(scopeSeg ~= nil and scopeSeg.k == "tabs" and scopeSeg.p.variant == "segmented", "范围筛选使用原生 segmented")
+    local stageSelect = findByKey(openTree, "stageFilter")
+    check(stageSelect ~= nil and stageSelect.k == "select", "多阶段筛选使用原生 select")
+
+    -- Default scope is active: done/cancelled stay out until the user asks.
+    local doneRow = copy(baseState().ui.byId["req-1"])
+    doneRow.requirementId, doneRow.number, doneRow.stage = "req-done", "REQ-9001", "done"
+    local scoped = copy(baseState())
+    scoped.ui.tab, scoped.ui.detailMode = "requirements", false
+    table.insert(scoped.ui.requirements, doneRow)
+    scoped.ui.byId[doneRow.requirementId] = doneRow
+    local scopedTree = ui.build(scoped)
+    local scopedList = findByKey(scopedTree, "requirements")
+    check(scopedList ~= nil and #scopedList.c == 2, "默认活跃范围排除已完成需求")
+    scoped.ui.scope = "all"
+    local allList = findByKey(ui.build(scoped), "requirements")
+    check(allList ~= nil and #allList.c == 3, "切到全部范围后才显示已完成需求")
+
+    -- Read-only four-group board, with blocked and unknown kept explicit.
+    local blockedRow = copy(baseState().ui.byId["req-1"])
+    blockedRow.requirementId, blockedRow.number, blockedRow.stage, blockedRow.blockedReason = "req-blocked", "REQ-9002", "blocked", "等待外部输入"
+    local oddRow = copy(baseState().ui.byId["req-1"])
+    oddRow.requirementId, oddRow.number, oddRow.stage = "req-odd", "REQ-9003", "legacy_stage"
+    local boardState = copy(baseState())
+    boardState.ui.tab, boardState.ui.detailMode, boardState.ui.layout, boardState.ui.scope = "requirements", false, "board", "all"
+    table.insert(boardState.ui.requirements, blockedRow)
+    table.insert(boardState.ui.requirements, oddRow)
+    boardState.ui.byId[blockedRow.requirementId] = blockedRow
+    boardState.ui.byId[oddRow.requirementId] = oddRow
+    local boardTree = ui.build(boardState)
+    for _, group in {"preparing", "running", "acceptance", "done"} do
+        check(findByKey(boardTree, "group-" .. group) ~= nil, "看板保留 " .. group .. " 分组")
+    end
+    check(findByKey(boardTree, "blockedGroup") ~= nil, "受阻需求有独立分组，不混入普通阶段")
+    check(findByKey(boardTree, "unknownGroup") ~= nil, "未知阶段进入其他状态，不丢失")
+    check(findByKey(boardTree, "stage-backlog") == nil, "看板不再按每个持久阶段平铺列")
+    local formState = copy(baseState())
+    formState.ui.formMode, formState.ui.tab = true, "requirement"
+    local formTree = ui.build(formState)
+    check(findByKey(formTree, "typeSeg") ~= nil, "表单类型使用原生 segmented")
 
     return {checks = checks, failures = failures}
 end

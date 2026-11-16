@@ -1,6 +1,6 @@
 # Agent-first 重构任务
 
-唯一进度清单。设计依据：[DESIGN](DESIGN.md)；不可削弱的约束：[DOMAIN_CONTRACT](DOMAIN_CONTRACT.md)。本轮开始按 AF-01 → AF-02 执行；不继承历史 R0–R5 的完成状态。勾选与下面的执行记录是进度依据。
+唯一进度清单。设计依据：[DESIGN](DESIGN.md)；不可削弱的约束：[DOMAIN_CONTRACT](DOMAIN_CONTRACT.md)。AF-01–04 已完成，AF-11 仅完成协议设计；后续按依赖继续，不继承历史 R0–R5 的完成状态。勾选与下面的执行记录是进度依据。
 
 ## 执行规则
 
@@ -137,19 +137,36 @@
 - 使用隔离 native 插件加载真实 context 模块与合成 approved/delivery_unknown 夹具，观察主操作分别为“查看实施准备”“查看请求结果”。截图 `target/af-baseline/approved-final.png`、`unknown-final.png`；这验证现有生产 context 的修正，不是新界面完成证据。
 - **已完成收口（2026-11-13）：** 移除 `host.luau` `refreshHandoff` 对 `results.json` 的隐式 `recordBaselineReference` 写入，改为 `Context.pendingBaselineSync` 派生提示并由显式动作 `handoff-reconcile-baseline` 完成（同时为 `pendingSend` 与 `recordBaselineReference` 增加 `requirementId` 归属守卫）；在 `lib/context.luau` 定义 `M.actionKinds`、`M.describeAction`、`M.evaluateAction`、`M.formatFailure` 与 `M.approvalState`，覆盖 `navigate`/`read`/`edit`/`decide`/`execute` 分类、目标、权限、影响及失败恢复文案，并使 `M.readiness` 对 `workflow`、`results`、`reviews` 与 `pendingSend` 严格按 `requirementId` 隔离。`lib/handoff.luau`、`lib/runview.luau`、`lib/reviewview.luau` 与 `host.luau` 的关键门禁与“已批准待执行不推重新批准”（降级重批按钮为 `default`）已统一接通至同一套判定。实测全量回归：`tests/run-context.luau`（75 checks, 0 failures）、`tests/run-host.luau`（190 checks, 0 failures）、`tests/run-views.luau`（1512 checks, 0 failures）及全部 `tests/run-*.luau` 与 `bun test omp/handoff.test.ts omp/runtime.test.ts`（34 pass, 0 fail）全部通过；日志见 `target/af-baseline/af03-action-model.log`。
 
-### [ ] AF-04 落地视觉 Token 与基础组件
+### [x] AF-04 落地视觉 Token 与基础组件（纠偏版已实现）
 
 **设计映射：** §6、§8、§9。
 
-**范围：** `styles.css`、共享视图组件，作用域限定工作台。
+**范围：** `styles.css`、`lib/context.luau`、共享视图组件与隔离 gallery；共享组件/动作强调入口保持单一集成负责人。
 
-**交付：** 浅深色语义 token、字体/间距/圆角、按钮等级、状态标签、列表、输入、弹层、焦点与异常提示；移除旧黑色胶囊、普遍彩条、嵌套卡片和装饰发光。保留宿主主题映射。
+**交付：** 按 DESIGN §8.1–8.8 实施 Tern-native 三层 Token；原生 underline/segmented 分离；Status/Tag/Button 轮廓与行为分离；页级唯一 primaryAction 与 kind/emphasis/risk 分离；保留主题适配与原生两档密度，删除旧全局描边/高度/`.on` 强覆盖。不引入 Web 组件库、不改业务 schema 或权限协议。
 
-**验收：** 普通文本对比度达到 4.5:1；必要边界/焦点达到 3:1；状态不只靠颜色；主操作与导航明显不同；360px 下没有整页横向溢出。
+**验收：** 普通文本 ≥4.5:1、必要边界/焦点 ≥3:1只是底线；灰度下组件种类仍可区分；静态状态无操作/焦点；全页至多一个高强调动作，选择/导航不提交；360/492/800/1100px 原生 surface 中页签、原因、主动作可达，无整页横向溢出。
 
-**验证：** 隔离原生表面的浅/深/自定义主题截图与实际对比度记录，不以 CSS 数值推断视觉通过。
+**验证：** 真实 Tern 的浅/深/自定义主题、灰度、组件状态矩阵与消费者行为证据；gallery 事件适配不冒充生产焦点实现。按 DESIGN §8.8 收齐后才能重新勾选。
 
-**执行记录：** 未开始。
+**纠偏实现记录（2026-11-16）：**
+- 用户报告组件相似、动作功能及优先级不明确。核对代码确认 `.sf-tab` 被统一描边覆盖、`.sf-badge` 借用控件边界、`Context.choices`/stepper 使用按钮与 `.on`，且缺少页级主动作仲裁；据此重写 DESIGN §6/§8 并重新实现。
+- `styles.css` 落成 reference → system → component 三层 Token：host surface/ink/accent 优先，仅对必要边界与语气文字做实测适配；danger 仅确认区填充 `bad-fill`。原生 underline/segmented 恢复各自几何；status 改纯文字＋语义符号；tag 为 18px 轻容器；按钮分 filled primary / outlined secondary / text quiet / outlined danger / disabled，并补 hover、pressed、busy、focus。列表改为行分隔而非卡片；Markdown 标题不再借用语气色。
+- `lib/context.luau`：`M.status`/`M.tag` 分离；`M.choices` 在 ≤4 项时输出原生 segmented、更多输出原生 select，禁用时只读文字；删除按钮式 stepper；新增 `M.beginRender`/`primaryFor`/`M.risk`，`M.button` 在渲染期把非页面主动作降级，destructive 只影响风险呈现。`host.luau` 将 `…Seg` 的 select 路由到既有 `applyChange`；`lib/ui.luau` 的列表/分组切换改为原生 segmented。
+- 真实 Tern 0.9.22 隔离窗口：`styles.css` 注入 **104 条规则、0 errors**。组件矩阵浅/深/自定义主题截图 `target/shots/tern/live/af04b-final-{light,dark,custom}.png`，灰度 `af04b-foundation-gray.png`，确认面板 `af04b-final-confirm.png`，焦点 `af04b-focus-final.png`。主操作像素：base (83,121,121) → hover (71,104,104) → pressed (65,94,94)，三种状态可区分；busy 显示原生 spinner。
+- 文本取样每主题 48 项，最低对比度：浅色 **4.53:1**、深色 **4.61:1**、自定义 **4.50:1**，无失败；控件边界实测 141/255 = **3.32:1**（对 canvas 3.12:1）；焦点环可见。记录 `target/af04/contrast-final2.jsonl`。这是取样证据，不宣称完整 WCAG/第三方配色认证。
+- 生产需求页真实 surface：**331 / 483 / 800 / 1100 CSS px**（前两者略低于名义 360/492，因此更保守）；331px 下页签、分段、原因与主动作可达，工作台内容无横向溢出（仅窗口 chrome 越界）。截图 `af04b-requirements-{331,492,800,1100}.png` 与裁剪 `target/af04/requirements-331.png`。
+- 消费者契约回归：每页至多一个 filled primary；非页级动作不能被调用点升级；≤4/＞4/禁用 choice 分别输出 segmented/select/文字；状态无 action；布局切换为 segmented 而非按钮。全量 `run-context` **84**、`run-host` **190**、`run-views` **1161** checks，均 0 failures；日志 `target/af04/tests-final.log`。使用临时 Lune 0.11.1，未运行模型、未操作日常项目。
+- **遗留边界：** gallery 用宿主自绘焦点环演示按钮焦点；真实生产页尚无跨字段焦点层，原生 editor 焦点可能与自绘环并存。该层属于 AF-06/AF-15，不在 AF-04 宣称完成。旧页头与常驻筛选行的信息架构仍由 AF-05 处理。
+
+**历史首轮证据（保留，不作为纠偏版依据）：**
+- 保留已有样式并完成工作台作用域 token、蓝色主操作/轻导航、描边危险动作、带符号状态、输入/列表/表格/弹层/焦点及异常提示；共享视图仅调整视觉，不改领域门禁、存储或业务协议。
+- 核对实际安装为 Tern **0.9.22 (3fd4def)**，不同于 AF-02 的旧环境；真实渲染使用 `.sf-tbl-c`、`.sel`、`.bad`、`.sf-ov-card`，表格按钮不一定带 `.sf`。宿主 accent 为 teal，不能将其误当工作台默认蓝；surface/正文仍继承主题，自定义可覆盖工作台变量。
+- 原生解析器拒绝 `container-type`/`@container`；删除不支持规则，使用 min-width:0、换行与局部滚动。最终注入 **100 条规则、0 errors**。不依赖浏览器 CSS 支持推断 Tern 能力。
+- 独立配置/socket 的 Windows 真窗口加载生产共享组件及真实视图，数据全部来自内存合成夹具；新增 `tests/native-capabilities/gallery.luau`，所有生产写入/执行动作被隔离拦截。浅/深/自定义截图：`target/shots/tern/live/af04-{light,dark,custom}-final.png`；对应 layout JSON 为实测计算输入。
+- 可见正文/元数据/按钮/状态等每主题 **66 个文本样本**，最低对比度：浅色 **4.79:1**、深色 **4.61:1**、自定义 **4.59:1**。原生截图像素取样：输入边界对相邻内外背景最低 **3.123:1**，键盘焦点最低 **5.037:1**。记录：`target/af04/contrast-final.jsonl`、`boundaries-final.json`。这是本轮表面取样证据，不宣称完整无障碍认证或任意第三方配色通过。
+- 原生 surface 实测 **360 CSS px**（不是整窗宽度），基础组件、长中文需求及交付内容换行，无整页横向溢出；表格/代码在局部处理长内容。截图 `af04-requirement-360.png`、`af04-delivery-360.png`、`af04-gallery-lower-360.png`。焦点环由真实 Tab 路径观察；gallery 的键盘适配不等于生产完整焦点契约已交付，后续交互/无障碍验收仍按任务执行。
+- 使用临时官方 Lune **0.11.1**（校验发布包 SHA-256，未安装到用户环境）运行 context **75**、host **190**、views **1461** checks，均 **0 failures**。未运行模型、未触碰日常项目；协议设计没有运行时代码变更。
 
 ## C. 主界面
 
@@ -165,7 +182,15 @@
 
 **验证：** 真正打开单需求与多需求场景，分别在窄/宽面板导航和过滤。
 
-**执行记录：** 未开始。
+**执行记录（实现完成，桌面窄宽与滚动恢复未收口，2026-11-16）：**
+- 首页改为“项目一行上下文 → 工作标题＋唯一新建按钮 → 搜索/筛选/视图 → 需要你决定 → 平面列表”。移除全局目的地 tabs，活动记录与连接诊断进入项目菜单；项目菜单同时承载刷新与只读时的启用编辑。
+- 筛选默认收起：无筛选时只显示搜索、筛选、视图；打开后使用原生 segmented/select（范围、优先级、阶段、排序），并显示清除/完成。范围默认“活跃”，已完成/已取消需显式切换；零待办不显示决策区。
+- 列表行只保留标题、编号、状态与更新时间；选择/行点击仍只导航。看板改为准备中/执行中/待验收/已完成四组只读投影，受阻单独分组，未知阶段进入“其他状态”，取消只通过范围筛选出现；不再按八个持久阶段平铺列。
+- 真实 Tern 0.9.22 隔离窗口：单需求与 multi 夹具（6 项）列表、筛选面板、活跃/全部范围、四组看板、项目菜单、活动页返回均已观察；截图 `target/shots/tern/live/af05-{home,filters,board,multi-active,multi-all,multi-board,menu,activity,return}.png`。`styles.css` 仍为 104 规则 0 errors。
+- 宽度复核：真实窗口请求 331/483/360 均被 Tern 夹到 **720 CSS 内容宽度**，800/1100 正常；因此“窄”证据实际是窗口最小宽度 720，不是 360。列表在 720/800/1100、看板在 720/800/1100 均无横向溢出；布局 JSON 只有两个位于画布外的装饰圆点。360 CSS 的组件证据仍由 AF-04 离屏 shot 承担，不能当作 AF-05 页面证据。截图 `af05-list-{360,800,1100}.png`、`af05-home-{331,483,800,1100}.png`、`af05-true-360.png`。
+- 回归：`run-context` 84、`run-host` 190、`run-views` 1175、`bun test omp/handoff.test.ts omp/runtime.test.ts` 38，全部 0 failures；日志 `target/af05/tests-final.log`。新增消费者断言覆盖默认活跃范围、筛选默认收起、四组看板、受阻/未知保留与旧阶段列移除。
+- **行选择与返回（2026-11-16 复核）：** gallery 适配器原先把完整节点路径直接当 id 查 `byId`，已改为取末段（与生产 host 的 `select` 分支一致）。修正后 720 CSS 窗口、25 行列表可点击行进入详情，再点“← 工作”返回；搜索/筛选/排序/选中项保留。
+- **滚动恢复被原生契约阻塞：** 返回前首行 y=-14 CSS，返回后 y=250，滚动归零。尝试“取消选中→下一帧恢复选中”强制列表把选中行带入视野，仍归零。生成的 `tern.d.luau` 显示 `list` 仅支持 `selected` 与 `max={lines}`，没有滚动偏移、`scrollTo` 或滚动事件。因此精确滚动恢复不是本页状态遗漏，而是 Tern 未暴露该能力。AF-05 保持未勾选；需 Tern 提供滚动 API，或产品明确接受“返回回到列表顶部”。
 
 ### [ ] AF-06 建立三页签工作区与成果阅读
 
@@ -247,7 +272,10 @@
 
 **验收：** 旧端不理解的新意图明确拒绝且可识别，不伪装成 design；同键异载荷拒绝；回调丢失可核对；模型无法自授人工身份；不新增旁路业务写入器、后台服务或模型客户端。
 
-**执行记录：** 未开始。
+**执行记录（协议设计完成；协商原语已实现，其余未实施）：** 已静态核对真实 TS/host/领域路径，设计固定在 DESIGN §7.3–7.11 与 DOMAIN_CONTRACT §7.1–7.8。选择独立新通道、可信会话工作租约、精确单次验证 grant、单一 Luau 命令分发器、JCS 摘要、持久幂等账本、project v2/lock v2 双栅栏升级及保守恢复。到期禁止新执行但不隐藏既有 operation 查询；未知执行不自动重跑。旧二进制拒绝、容量/CAS/回调丢失/关闭面板/完整回滚仍需实现并实证。本轮仅改设计，不注册工具、不改 IPC 或业务 schema，不运行模型；AF-11 整体保持未勾选。
+
+- **实现起点（2026-11-16）：** `omp/runtime.ts` 新增独立命名空间 `omp-workbench.tools` v1 的 offer/host/ready 类型与严格验证器（字段白名单、身份、活动/操作交集、摘要绑定、6 秒 ready 与 60 秒 offer 时限），以及私有 `tools/` 下的原子发布/读取/撤销原语；offer/host 摘要使用递归键排序的确定性 JSON，ready 必须同时匹配已发布 offer、host 摘要与身份。未接入 host 发布、未注册工具、未写信封/账本，因此不能把这部分当作可用 Agent 能力或 AF-11 完成。
+- 新增 `bun test omp/runtime.test.ts` 协商回归（4 项）：未知字段/过期/超时/非法能力、摘要与身份不匹配、ready 时限与序号、私有文件发布/读取/撤销；与 handoff 合计 38 pass、0 fail。
 
 ### [ ] AF-12 实现结构化查询、候选与计划工具
 

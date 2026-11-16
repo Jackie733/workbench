@@ -40,8 +40,8 @@ M.stageNames = {}
 for _, stage in M.stages do M.stageNames[stage[1]] = stage[2] end
 M.priorities = {low = "低", normal = "普通", high = "高", urgent = "紧急"}
 M.types = {feature = "功能", bug = "缺陷", chore = "维护"}
-M.tones = {backlog = "muted", clarifying = "accent", designing = "accent", awaiting_approval = "pending",
-    implementing = "accent", verifying = "accent", awaiting_acceptance = "pending", done = "success", blocked = "warning", cancelled = "muted"}
+M.tones = {backlog = "muted", clarifying = "muted", designing = "muted", awaiting_approval = "pending",
+    implementing = "muted", verifying = "muted", awaiting_acceptance = "pending", done = "muted", blocked = "warning", cancelled = "muted"}
 
 M.stepOrder = {backlog = 1, clarifying = 2, designing = 3, awaiting_approval = 4, implementing = 5,
     verifying = 5, awaiting_acceptance = 6, done = 6, blocked = 2, cancelled = 1}
@@ -89,18 +89,133 @@ function M.openAction(target: {tab: string, sub: string?, activity: string?})
     return "wb-open-" .. target.tab .. (target.sub and ("-" .. target.sub) or "")
 end
 
--- The stepper is navigation, not a gate: every step is clickable, the current one
--- is primary, and completed ones carry a check so the path already taken is visible.
-function M.stepper(r)
-    local current = M.stepOrder[r.stage] or 1
-    local chips = {}
-    for index, item in M.steps do
-        table.insert(chips, ui.button((index < current and "✓ " or "") .. item.label, {
-            key = "workflow-step-" .. tostring(index), size = "sm", title = item.help,
-            variant = (if index == current then "primary" else "default") :: "primary" | "default", on = index == current,
-            actions = {click = M.openAction(item)}}))
+local toneSymbols = {
+    success = "✓",
+    warning = "!",
+    error = "×",
+    bad = "×",
+    info = "•",
+    accent = "•",
+    pending = "…",
+    muted = "",
+}
+local function hasToneCue(text: string): boolean
+    return text:sub(1, 3) == "✓" or text:sub(1, 2) == "! " or text:sub(1, 2) == "×"
+        or text:sub(1, 3) == "•" or text:sub(1, 3) == "…"
+end
+function M.badgeText(label: string, tone: string?, countOnly: boolean?): string
+    local text = tostring(label or "")
+    if countOnly or text == "" then return text end
+    local cue = toneSymbols[tone or "muted"] or ""
+    if cue == "" or hasToneCue(text) then return text end
+    return cue .. " " .. text
+end
+-- Status is information, not a control: a tone-coloured word with its cue, no
+-- pill, border, hover or focus target. Tags are the neutral classification chip.
+function M.status(label: string, tone: string?, countOnly: boolean?)
+    local text = M.badgeText(label, tone, countOnly)
+    local token = tone == "pending" and "pending" or (toneSymbols[tone or "muted"] ~= "" and (tone or "muted") or "muted")
+    if token == "muted" or token == "bad" then return ui.text({ui.span(text, token == "bad" and "error" or "muted")}) end
+    return ui.text({ui.span(text, token)})
+end
+function M.tag(label: string)
+    return ui.badge(tostring(label or ""), "muted")
+end
+function M.note(s: string?)
+    return ui.text({ui.span(s or "", "muted")})
+end
+-- Render-scoped page contract. A synchronous build sets the one page primary;
+-- call sites cannot promote a second action to primary during that build.
+M.risk = {
+    ["lifecycle-confirm"] = "destructive",
+    ["review-reject"] = "destructive",
+    ["handoff-revoke"] = "destructive",
+}
+
+local function pageOf(s)
+    local u = s and s.ui or {}
+    if u.formMode then return "form" end
+    if u.tab == "design" and u.handoff and u.handoff.tab == "approval" then return "approval" end
+    return u.tab or "requirements"
+end
+
+local function primaryFor(s)
+    local u = s and s.ui or {}
+    local page = pageOf(s)
+    local r = u.selected and u.byId and u.byId[u.selected] or nil
+    if page == "requirements" then return u.writable and "new-requirement" or nil end
+    if page == "form" then return "save-requirement" end
+    if not r then return nil end
+    if page == "design" then
+        local proposal = u.handoff and u.handoff.fields and u.handoff.fields.proposal
+        return proposal and proposal.text:match("%S") and "handoff-adopt" or "handoff-preview"
     end
-    return ui.node("row", {key = "workflowStepRow", role = "workbench.stepper", gap = "xs", wrap = true}, chips)
+    if page == "approval" then
+        return M.approvalState(r, u.handoff).valid and "handoff-send" or "handoff-approve"
+    end
+    if page == "delivery" then
+        local preview = u.trace and u.trace.runPreview
+        return preview and "results-run-verification" or "results-preview-verification"
+    end
+    if page == "acceptance" then return "review-accept" end
+    if page == "history" then return "audit-write" end
+    if page == "activity" then return "activity-write" end
+    if page == "session" then return "prefill" end
+    return nil
+end
+
+function M.beginRender(s)
+    M.renderState, M.renderPage, M.renderPrimary = s, pageOf(s), primaryFor(s)
+end
+
+function M.button(label: string, act: string, variant: ("default" | "primary" | "quiet" | "danger")?, disabled: (boolean | string)?)
+    local kind = M.describeAction(act).kind
+    local visual = variant
+    if visual == nil or visual == "primary" then
+        local isPrimary = M.renderState ~= nil and act == M.renderPrimary
+        visual = isPrimary and "primary" or (kind == "navigate" and "quiet" or "default")
+    elseif visual == "primary" and M.renderState ~= nil and act ~= M.renderPrimary then
+        visual = "default"
+    end
+    if kind == "navigate" and visual ~= "primary" then visual = "quiet" end
+    if kind == "read" and visual == "primary" then visual = "default" end
+    if M.risk[act] == "destructive" and visual == "primary" then visual = "danger" end
+    return ui.button(label, {key = act, role = "workbench.action." .. kind,
+        variant = visual, size = "md", disabled = disabled, actions = {click = act}})
+end
+function M.row(key: string, children: {any}, props: {[string]: any}?)
+    local out = props or {}
+    out.key = key
+    out.gap = out.gap or "sm"
+    if out.wrap == nil then out.wrap = true end
+    return ui.node("row", out, children)
+end
+-- A choice is not a row of buttons. Up to four short options use one native
+-- segmented control; more use a native select. Disabled choices render text.
+function M.choices(name: string, label: string, value: any, options: {{value: any, label: string}}, disabled: (boolean | string)?)
+    local current = tostring(value)
+    local currentLabel = current
+    for _, option in options do
+        if tostring(option.value) == current then currentLabel = option.label end
+    end
+    if disabled then
+        return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
+            {ui.text({ui.span(currentLabel, "muted")})})
+    end
+    if #options <= 4 then
+        local items = {}
+        for _, option in options do
+            table.insert(items, {id = tostring(option.value), label = option.label})
+        end
+        return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
+            {ui.node("tabs", {key = name .. "Seg", variant = "segmented", active = current, items = items})})
+    end
+    local nativeOptions = {}
+    for _, option in options do
+        table.insert(nativeOptions, {value = tostring(option.value), label = tostring(option.label)})
+    end
+    return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
+        {ui.node("select", {key = name, value = current, options = nativeOptions, aria = label})})
 end
 
 local function units(text, position)
@@ -146,7 +261,7 @@ function M.bar(s, opts)
     end
     local stageTone = M.tones[r.stage] or "muted"
     local metaRow = {
-        ui.badge(M.stageNames[r.stage] or r.stage, stageTone),
+        M.status(M.stageNames[r.stage] or r.stage, stageTone),
         ui.text({ui.span((M.types[r.type] or r.type) .. " · 优先级 " .. (M.priorities[r.priority] or r.priority)
             .. " · " .. M.identity(r), "muted")}),
     }
@@ -156,15 +271,15 @@ function M.bar(s, opts)
     local onPage = current and nextStep and nextStep.tab == current.tab
         and ((nextStep.sub or "") == (current.sub or "") or nextStep.sub == nil)
     if nextStep and not onPage then
-        table.insert(metaRow, ui.button(nextStep.label, {key = "next-step", variant = "primary", size = "sm",
+        table.insert(metaRow, ui.button(nextStep.label, {key = "next-step", variant = "quiet", size = "md",
+            role = "workbench.action." .. M.describeAction(M.openAction(nextStep)).kind,
             actions = {click = M.openAction(nextStep)}}))
     end
     local children = {
         ui.node("row", {key = "contextMeta", role = "workbench.contextMeta", gap = "sm", wrap = true}, metaRow),
-        M.stepper(r),
     }
     if readiness then
-        local row = {ui.badge(readiness.label or "状态未知", readiness.tone or "muted")}
+        local row = {M.status(readiness.label or "状态未知", readiness.tone or "muted")}
         local reasons = readiness.reasons or {}
         if reasons[1] then
             local extra = #reasons > 1 and ("；另有 " .. tostring(#reasons - 1) .. " 项") or ""
@@ -173,7 +288,7 @@ function M.bar(s, opts)
         table.insert(children, ui.node("row", {key = "readinessRow", role = "workbench.readiness", gap = "xs", wrap = true}, row))
     end
     if r.stage == "blocked" and r.blockedReason then
-        table.insert(children, ui.text({ui.span("阻塞：" .. r.blockedReason, "warning")}))
+        table.insert(children, ui.text({ui.span("! 阻塞：" .. r.blockedReason, "warning")}))
     end
     local v = u.review
     local guard = M.lifecycleGuard(s)
@@ -182,20 +297,23 @@ function M.bar(s, opts)
         and {"reopen"} or (r.stage == "blocked" and {"unblock", "cancel"} or {"block", "cancel"})
     local names = {block = "阻塞", unblock = "解除阻塞", cancel = "取消需求", reopen = "重新打开"}
     for _, action in allowed do
-        table.insert(actions, ui.button(names[action] .. "…", {key = "lifecycle-open=" .. action, size = "sm",
+        table.insert(actions, ui.button(names[action] .. "…", {key = "lifecycle-open=" .. action, size = "md",
             disabled = guard, actions = {click = "lifecycle-open=" .. action}}))
     end
     table.insert(children, ui.node("row", {key = "lifecycleActions", gap = "xs", wrap = true}, actions))
     if v and v.lifecycleAction and v.lifecycleRequirement == r.requirementId then
         local f = v.fields.lifecycleReason or {text = ""}
-        table.insert(children, ui.node("card", {key = "lifecycleConfirm", head = names[v.lifecycleAction] .. " · 明确确认", tone = "warning"}, {
+        table.insert(children, ui.node("col", {key = "lifecycleConfirm", role = "workbench.confirmPanel", tone = "warning", gap = "sm"}, {
+            ui.text({ui.span("! " .. names[v.lifecycleAction] .. " · 明确确认", "strong")}),
             ui.text("仅改变需求生命周期；不会终止外部进程，也不会撤回已发送请求。历史与旧验收保留。"),
             ui.node("editor", {key = "lifecycleReason", text = f.text, cursor = units(f.text, f.cursor or utf8.len(f.text)),
                 anchor = f.anchor and units(f.text, f.anchor) or nil, maxLines = 3, readonly = guard ~= false,
                 placeholder = "必填原因，最多 2000 UTF-8 字节", aria = "生命周期变更原因", variant = "field"}),
-            ui.button("确认" .. names[v.lifecycleAction], {key = "lifecycle-confirm", size = "sm", variant = "danger",
-                disabled = guard or (not f.text:match("%S") and "先填写原因") or false, actions = {click = "lifecycle-confirm"}}),
-            ui.button("返回，不变更", {key = "lifecycle-dismiss", size = "sm", actions = {click = "lifecycle-dismiss"}}),
+            M.row("lifecycleConfirmActions", {
+                ui.button("确认" .. names[v.lifecycleAction], {key = "lifecycle-confirm", size = "md", variant = "danger",
+                    disabled = guard or (not f.text:match("%S") and "先填写原因") or false, actions = {click = "lifecycle-confirm"}}),
+                ui.button("返回，不变更", {key = "lifecycle-dismiss", size = "md", actions = {click = "lifecycle-dismiss"}}),
+            }, {gap = "xs"}),
         }))
     end
     if u.lifecycleError then table.insert(children, ui.text({ui.span(u.lifecycleError, "error")})) end
@@ -421,6 +539,9 @@ local exactSpecs: {[string]: ActionSpec} = {
     requirement = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "切换所选需求视图，不修改业务修订"),
     back = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "返回工作区，不保存草稿修改"),
     ["back-workspace"] = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "返回需求列表并保留筛选位置"),
+    ["home-filter"] = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "展开或收起首页筛选面板，不修改需求"),
+    ["more-toggle"] = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "展开或收起项目菜单，不修改需求"),
+    ["clear-filters"] = makeSpec("navigate", "ui", false, false, false, false, "ui_only", "清除本地搜索与筛选，不修改需求"),
     ["new-requirement"] = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "打开新建需求表单，暂未写入实体"),
     ["edit-requirement"] = makeSpec("navigate", "requirement", false, false, false, false, "ui_only", "打开需求编辑表单，暂未写入实体"),
     ["handoff-prepare"] = makeSpec("navigate", "workflow", false, false, false, false, "ui_only", "打开交接准备面板，不生成意图或发送"),

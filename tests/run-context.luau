@@ -1,6 +1,13 @@
 --!strict
 local serde=require("@lune/serde")
-tern={ui={},json={array=function() return {} end,encode=function(v) return serde.encode("json",v) end}}
+local function node(k,p,c) return {k=k,p=p or {},c=c} end
+tern={ui={
+    node=node,
+    span=function(t,s) return {t=t,s=s} end,
+    text=function(spans) return node("text",{spans=spans}) end,
+    badge=function(t,tone) return node("badge",{text=t,tone=tone}) end,
+    button=function(t,p) local o=p or {};o.text=t;return node("button",o) end,
+},json={array=function() return {} end,encode=function(v) return serde.encode("json",v) end}}
 local Context=require("../lib/context")
 local Fixtures=require("./af-fixtures")
 local checks=0
@@ -120,5 +127,40 @@ for _, name in Fixtures.names do
         check(Context.readiness(nil,s.ui,s)==nil,"empty fixture has nil readiness")
     end
 end
+
+-- AF-04 component contract: a choice is not a button wall, a status is not a
+-- control, and one synchronous build exposes at most one filled primary.
+local few=Context.choices("priority","优先级","normal",{{value="low",label="低"},{value="normal",label="普通"},{value="high",label="高"}})
+check(few.c and few.c[1] and few.c[1].k=="tabs" and few.c[1].p.variant=="segmented",
+    "up to four choices use one native segmented control")
+local many=Context.choices("stage","阶段","all",{{value="a",label="A"},{value="b",label="B"},{value="c",label="C"},{value="d",label="D"},{value="e",label="E"}})
+check(many.c and many.c[1] and many.c[1].k=="select","more than four choices use a native select")
+local locked=Context.choices("type","类型","bug",{{value="bug",label="缺陷"}}, "只读")
+check(locked.c and locked.c[1] and locked.c[1].k=="text","a disabled choice is read-only text, not a control")
+local status=Context.status("待批准","pending")
+check(status.k=="text" and status.p.actions==nil,"status renders as text with no action")
+local tag=Context.tag("维护")
+check(tag.k=="badge" and tag.p.actions==nil,"classification tag is a passive chip")
+
+local function countPrimary(view)
+    local n=0
+    local function walk(value)
+        if type(value)~="table" then return end
+        if value.k=="button" and value.p.variant=="primary" then n+=1 end
+        for _,child in value.c or {} do walk(child) end
+    end
+    walk(view)
+    return n
+end
+local page=Fixtures.make("approved")
+page.ui.writable, page.ui.tab = true, "requirements"
+Context.beginRender(page)
+check(countPrimary(Context.button("新建","new-requirement","primary"))==1,"page primary stays primary")
+check(countPrimary(Context.button("保存","save-requirement","primary"))==0,"a non-page action cannot be promoted to primary")
+page.ui.tab="form"
+Context.beginRender(page)
+check(countPrimary(Context.button("保存","save-requirement"))==1,"the form page promotes only its save action")
+check(countPrimary(Context.button("新建","new-requirement"))==0,"navigation is not promoted on the form page")
+Context.renderState, Context.renderPage, Context.renderPrimary = nil, nil, nil
 
 print(string.format("%d checks, 0 failures",checks))

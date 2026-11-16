@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
 export const MAX_TEXT_BYTES = 16_384;
@@ -253,6 +253,225 @@ export function prefillStateRejection(source: PrefillSourceState): string | null
 }
 
 export const SOURCE_ICON = "⚒";
+
+/** Tool-channel negotiation is a separate namespace from the v1 prefill IPC. */
+export const TOOLS_PROTOCOL = "omp-workbench.tools";
+export const TOOLS_VERSION = 1;
+export const TOOLS_MAX_BYTES = 16_384;
+const TOOL_ACTIVITIES = ["clarify", "design", "implement", "review", "analyze"] as const;
+const TOOL_OPERATIONS = ["list", "get", "propose", "update_plan", "request_decision", "run_verification", "get_evidence"] as const;
+const HEX64 = /^[0-9a-f]{64}$/;
+
+export interface ToolsOffer {
+	schemaVersion: 1;
+	protocol: typeof TOOLS_PROTOCOL;
+	protocolVersion: typeof TOOLS_VERSION;
+	instanceId: string;
+	sessionId: string;
+	openRequestId: string;
+	activities: string[];
+	operations: string[];
+	payloadBytes: number;
+	responseBytes: number;
+	issuedAt: number;
+	expiresAt: number;
+}
+
+export interface ToolsHostAck {
+	schemaVersion: 1;
+	protocol: typeof TOOLS_PROTOCOL;
+	protocolVersion: typeof TOOLS_VERSION;
+	offerSha256: string;
+	hostEpoch: string;
+	instanceId: string;
+	sessionId: string;
+	openRequestId: string;
+	window: string;
+	sourcePane: number;
+	panel: number;
+	projectId: string;
+	writerProtocol: string;
+	writerVersion: number;
+	activities: string[];
+	operations: string[];
+	issuedAt: number;
+	expiresAt: number;
+}
+
+export interface ToolsReady {
+	schemaVersion: 1;
+	protocol: typeof TOOLS_PROTOCOL;
+	protocolVersion: typeof TOOLS_VERSION;
+	offerSha256: string;
+	hostSha256: string;
+	instanceId: string;
+	sessionId: string;
+	openRequestId: string;
+	hostEpoch: string;
+	leaseId: string;
+	sequence: number;
+	issuedAt: number;
+	expiresAt: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function exactFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+	for (const key in value) if (Object.hasOwn(value, key) && !fields.includes(key)) return false;
+	for (const field of fields) if (!Object.hasOwn(value, field)) return false;
+	return true;
+}
+function safeText(value: unknown, max = 96): value is string {
+	return typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
+}
+function safeTime(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) > 0;
+}
+function stringSet(value: unknown, allowed: readonly string[]): value is string[] {
+	return Array.isArray(value) && value.length <= allowed.length
+		&& value.every(item => typeof item === "string" && allowed.includes(item))
+		&& new Set(value).size === value.length;
+}
+
+export function validateToolsOffer(value: unknown, now: number): string | null {
+	if (!isRecord(value)) return "invalid_offer";
+	if (!exactFields(value, ["schemaVersion", "protocol", "protocolVersion", "instanceId", "sessionId", "openRequestId",
+		"activities", "operations", "payloadBytes", "responseBytes", "issuedAt", "expiresAt"])) return "invalid_offer";
+	if (value.schemaVersion !== 1 || value.protocol !== TOOLS_PROTOCOL || value.protocolVersion !== TOOLS_VERSION) return "unsupported_protocol";
+	if (!safeText(value.instanceId, 96) || !safeText(value.sessionId, 96) || !safeText(value.openRequestId, 96)) return "invalid_identity";
+	if (!stringSet(value.activities, TOOL_ACTIVITIES) || !stringSet(value.operations, TOOL_OPERATIONS)) return "invalid_capabilities";
+	if (!Number.isSafeInteger(value.payloadBytes) || !Number.isSafeInteger(value.responseBytes)
+		|| (value.payloadBytes as number) < 1 || (value.payloadBytes as number) > 16_384
+		|| (value.responseBytes as number) < 1 || (value.responseBytes as number) > 65_536) return "invalid_limits";
+	if (!safeTime(value.issuedAt) || !safeTime(value.expiresAt)) return "invalid_time";
+	if ((value.issuedAt as number) > now || (value.expiresAt as number) <= now
+		|| (value.expiresAt as number) <= (value.issuedAt as number)
+		|| (value.expiresAt as number) - (value.issuedAt as number) > 60_000) return "invalid_time";
+	return null;
+}
+
+export function validateToolsHost(value: unknown, expected: { offerSha256: string; now: number }): string | null {
+	if (!isRecord(value)) return "invalid_host";
+	if (!exactFields(value, ["schemaVersion", "protocol", "protocolVersion", "offerSha256", "hostEpoch", "instanceId", "sessionId",
+		"openRequestId", "window", "sourcePane", "panel", "projectId", "writerProtocol", "writerVersion",
+		"activities", "operations", "issuedAt", "expiresAt"])) return "invalid_host";
+	if (value.schemaVersion !== 1 || value.protocol !== TOOLS_PROTOCOL || value.protocolVersion !== TOOLS_VERSION) return "unsupported_protocol";
+	if (typeof value.offerSha256 !== "string" || !HEX64.test(value.offerSha256) || value.offerSha256 !== expected.offerSha256) return "offer_mismatch";
+	if (!safeText(value.instanceId, 96) || !safeText(value.sessionId, 96) || !safeText(value.openRequestId, 96)
+		|| !safeText(value.hostEpoch, 96) || typeof value.window !== "string" || value.window.length > 96
+		|| /[\x00-\x1f\x7f]/.test(value.window) || !safeText(value.projectId, 96)
+		|| !safeText(value.writerProtocol, 96) || !Number.isSafeInteger(value.sourcePane) || !Number.isSafeInteger(value.panel)
+		|| !Number.isSafeInteger(value.writerVersion)) return "invalid_identity";
+	if (!stringSet(value.activities, TOOL_ACTIVITIES) || !stringSet(value.operations, TOOL_OPERATIONS)) return "invalid_capabilities";
+	if (!safeTime(value.issuedAt) || !safeTime(value.expiresAt)) return "invalid_time";
+	if ((value.issuedAt as number) > expected.now || (value.expiresAt as number) <= expected.now
+		|| (value.expiresAt as number) <= (value.issuedAt as number)
+		|| (value.expiresAt as number) - (value.issuedAt as number) > 60_000) return "invalid_time";
+	return null;
+}
+
+export function validateToolsReady(value: unknown, expected: { offerSha256: string; now: number }): string | null {
+	if (!isRecord(value)) return "invalid_ready";
+	if (!exactFields(value, ["schemaVersion", "protocol", "protocolVersion", "offerSha256", "hostSha256", "instanceId", "sessionId",
+		"openRequestId", "hostEpoch", "leaseId", "sequence", "issuedAt", "expiresAt"])) return "invalid_ready";
+	if (value.schemaVersion !== 1 || value.protocol !== TOOLS_PROTOCOL || value.protocolVersion !== TOOLS_VERSION) return "unsupported_protocol";
+	if (typeof value.offerSha256 !== "string" || value.offerSha256 !== expected.offerSha256
+		|| typeof value.hostSha256 !== "string" || !HEX64.test(value.hostSha256)) return "offer_mismatch";
+	if (!safeText(value.instanceId, 96) || !safeText(value.sessionId, 96) || !safeText(value.openRequestId, 96)
+		|| !safeText(value.hostEpoch, 96) || !safeText(value.leaseId, 96)) return "invalid_identity";
+	if (!Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1) return "invalid_sequence";
+	if (!safeTime(value.issuedAt) || !safeTime(value.expiresAt)) return "invalid_time";
+	if ((value.issuedAt as number) > expected.now || (value.expiresAt as number) <= expected.now
+		|| (value.expiresAt as number) <= (value.issuedAt as number)
+		|| (value.expiresAt as number) - (value.issuedAt as number) > 6_000) return "invalid_time";
+	return null;
+}
+
+/** Deterministic bytes for the offer digest; object keys sort, arrays keep order. */
+function canonical(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+	if (isRecord(value)) {
+		return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+export function toolsOfferSha256(offer: ToolsOffer): string {
+	return createHash("sha256").update(canonical(offer), "utf8").digest("hex");
+}
+
+export function toolsHostSha256(host: ToolsHostAck): string {
+	return createHash("sha256").update(canonical(host), "utf8").digest("hex");
+}
+
+function toolsDirectory(runtime: Runtime): string {
+	const directory = path.join(runtime.directory, "tools");
+	privateDirectory(directory, true);
+	return directory;
+}
+
+function readPrivateJson(file: string, max: number): unknown {
+	const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+	try {
+		const info = fs.fstatSync(fd);
+		if (!info.isFile() || info.uid !== process.getuid!() || info.size > max) throw new Error("invalid_tools_file");
+		const buffer = Buffer.alloc(max + 1);
+		let bytes = 0;
+		while (bytes < buffer.length) {
+			const count = fs.readSync(fd, buffer, bytes, buffer.length - bytes, null);
+			if (!count) break;
+			bytes += count;
+		}
+		if (bytes > max) throw new Error("tools_file_too_large");
+		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytes)));
+	} finally { fs.closeSync(fd); }
+}
+
+export function publishToolsOffer(runtime: Runtime, offer: ToolsOffer): string {
+	runtime.assertPrivate();
+	const problem = validateToolsOffer(offer, Date.now());
+	if (problem) throw new Error(problem);
+	atomicJson(path.join(toolsDirectory(runtime), "offer.json"), offer);
+	return toolsOfferSha256(offer);
+}
+
+export function readToolsHost(runtime: Runtime, offerSha256: string): { value: ToolsHostAck | null; problem: string | null } {
+	runtime.assertPrivate();
+	try {
+		const value = readPrivateJson(path.join(toolsDirectory(runtime), "host.json"), TOOLS_MAX_BYTES);
+		const problem = validateToolsHost(value, { offerSha256, now: Date.now() });
+		return problem ? { value: null, problem } : { value: value as ToolsHostAck, problem: null };
+	} catch (error) {
+		return { value: null, problem: (error as Error).message || "host_unavailable" };
+	}
+}
+
+export function publishToolsReady(runtime: Runtime, ready: ToolsReady): void {
+	runtime.assertPrivate();
+	const directory = toolsDirectory(runtime);
+	const offer = readPrivateJson(path.join(directory, "offer.json"), TOOLS_MAX_BYTES);
+	const offerProblem = validateToolsOffer(offer, Date.now());
+	if (offerProblem) throw new Error(offerProblem);
+	const offerDigest = toolsOfferSha256(offer as ToolsOffer);
+	if (offerDigest !== ready.offerSha256) throw new Error("offer_mismatch");
+	const host = readPrivateJson(path.join(directory, "host.json"), TOOLS_MAX_BYTES);
+	const hostProblem = validateToolsHost(host, { offerSha256: offerDigest, now: Date.now() });
+	if (hostProblem) throw new Error(hostProblem);
+	const bound = host as ToolsHostAck;
+	if (bound.instanceId !== ready.instanceId || bound.sessionId !== ready.sessionId
+		|| bound.openRequestId !== ready.openRequestId || bound.hostEpoch !== ready.hostEpoch
+		|| toolsHostSha256(bound) !== ready.hostSha256) throw new Error("host_mismatch");
+	const problem = validateToolsReady(ready, { offerSha256: offerDigest, now: Date.now() });
+	if (problem) throw new Error(problem);
+	atomicJson(path.join(directory, "ready.json"), ready);
+}
+
+export function revokeToolsReady(runtime: Runtime): void {
+	runtime.assertPrivate();
+	try { fs.unlinkSync(path.join(toolsDirectory(runtime), "ready.json")); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+}
 
 /**
  * Visible source title: workbench icon, project directory name (not the full

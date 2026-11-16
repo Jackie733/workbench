@@ -12,11 +12,8 @@ local function units(text, position)
     return n
 end
 local M = {}
-local function note(text) return ui.text({ui.span(text or "", "muted")}) end
-local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
-        actions = {click = action}})
-end
+local note = Context.note
+local button = Context.button
 function M.build(s)
     local u, r = s.ui, s.ui.byId[s.ui.selected]
     local a, v = u.audit, u.review

@@ -21,28 +21,10 @@ local severityOrder = {"blocking", "major", "minor", "note"}
 local stateNames = {open = "未处置", resolved = "已解决", waived = "已豁免"}
 local stateTones = {open = "warning", resolved = "success", waived = "muted"}
 local decisionNames = {accepted = "已接受", rejected = "已驳回"}
-local function note(text) return ui.text({ui.span(text or "", "muted")}) end
-local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
-        actions = {click = action}})
-end
-local function row(key, children, props)
-    props = props or {}
-    props.key = key
-    props.gap = props.gap or "sm"
-    props.wrap = true
-    return ui.node("row", props, children)
-end
-local function choices(name, label, value, options, disabled)
-    local chips = {}
-    for _, option in options do
-        local selected = value == option.value
-        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
-            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
-            actions = {click = "change:" .. name .. "=" .. option.value}}))
-    end
-    return ui.node("field", {key = name .. "Field", label = label}, {row(name, chips)})
-end
+local note = Context.note
+local button = Context.button
+local row = Context.row
+local choices = Context.choices
 local function field(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
     return ui.node("field", {key = "reviewField-" .. key, label = label, help = placeholder}, {
@@ -84,20 +66,20 @@ local function shortTime(value)
 end
 local function statusStrip(s, v, writable): any
     local badges = {}
-    if s.problem then table.insert(badges, ui.badge("连接异常", "warning")) end
+    if s.problem then table.insert(badges, Context.status("连接异常", "warning")) end
     if s.receipt then
         local names = {pending = "预填等待回执", prefilled = "已预填（未发送）", rejected = "预填被拒绝", delivery_unknown = "投递待核对"}
-        table.insert(badges, ui.badge(names[s.receipt.status] or "预填状态", s.receipt.status == "prefilled" and "success" or "muted"))
+        table.insert(badges, Context.status(names[s.receipt.status] or "预填状态", s.receipt.status == "prefilled" and "success" or "muted"))
     end
-    if v.busy then table.insert(badges, ui.badge("正在记录…", "pending")) end
-    if not writable then table.insert(badges, ui.badge("只读", "muted")) end
+    if v.busy then table.insert(badges, Context.status("正在记录…", "pending")) end
+    if not writable then table.insert(badges, Context.status("只读", "muted")) end
     if #badges == 0 then return nil end
     return ui.node("row", {key = "reviewStatus", role = "workbench.status", gap = "xs", wrap = true}, badges)
 end
 local function snapshotLine(snapshot, writable)
     if snapshot then
         return row("reviewSnapshot", {
-            ui.badge("快照 " .. snapshot:sub(1, 12), "muted"),
+            Context.status("快照 " .. snapshot:sub(1, 12), "muted"),
             ui.text({ui.span("审查与验收绑定此快照", "muted")}),
         }, {gap = "xs"})
     end
@@ -115,8 +97,9 @@ local function findingsBuilder(v, writable, invalid)
     local severityChips = {}
     for _, level in severityOrder do
         local selected = v.draftSeverity == level
-        table.insert(severityChips, ui.button(severityNames[level], {key = "draftSeverity-" .. level,
-            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = not writable,
+        local text = severityNames[level]
+        table.insert(severityChips, ui.button(selected and ("✓ " .. text) or text, {key = "draftSeverity-" .. level,
+            variant = "default", size = "md", on = selected, disabled = not writable,
             actions = {click = "change:draftSeverity=" .. level}}))
     end
     local nodes = {
@@ -185,7 +168,7 @@ local function recordCard(s, v, writable, snapshot)
         meta = count > 0 and ("已记录 " .. tostring(count) .. " 次") or "来源、范围与发现",
         collapsible = true, collapsed = count > 0, tone = "muted"}, {
         row("recordTools", {
-            ui.button("预填 /review 到 omp", {key = "review-open-native", variant = "quiet", size = "sm",
+            ui.button("预填 /review 到 omp", {key = "review-open-native", variant = "quiet", size = "md",
                 title = "只把 omp 原生 /review 放入输入框；不发送，范围与提交方式由 omp 选择。",
                 disabled = nativeDisabled, actions = {click = "review-open-native"}}),
         }, {gap = "xs", role = "workbench.panelTools"}),
@@ -198,8 +181,10 @@ local function findingsTable(v, review, writable)
     for _, finding in review.findings do
         local state, reason = Review.findingState(review, finding.id)
         local key = review.id .. "|" .. finding.id
+        local severityTone = severityTones[finding.severity] or "muted"
+        local severityText = severityNames[finding.severity] or finding.severity
         table.insert(rows, {id = key, title = reason, cells = {
-            {badge = {text = severityNames[finding.severity] or finding.severity, tone = severityTones[finding.severity] or "muted"}},
+            {badge = {text = Context.badgeText(severityText, severityTone), tone = severityTone}},
             {text = finding.description},
             {text = stateNames[state] or state, dot = stateTones[state] or "muted", title = reason},
             {button = {text = "处置", act = "review-inline=" .. key, variant = "default",
@@ -224,8 +209,8 @@ local function dispositionPanel(v, writable)
         end
     end
     if not selected then return nil end
-    return ui.node("card", {key = "dispositionPanel", role = "workbench.disposition", tone = "accent",
-        head = "处置发现", meta = severityNames[selected.severity] or selected.severity}, {
+    return ui.node("section", {key = "dispositionPanel", role = "workbench.disposition", tone = "accent",
+        head = "处置发现 · " .. (severityNames[selected.severity] or selected.severity)}, {
         row("dispositionGrid", {
             ui.node("col", {key = "dispositionWhat", role = "workbench.dispositionWhat", gap = "xs"}, {
                 ui.text(selected.description),
@@ -258,11 +243,12 @@ local function findingsCard(v, writable)
             for _, finding in review.findings do
                 if Review.findingState(review, finding.id) == "open" then reviewOpen += 1 end
             end
-            table.insert(children, ui.node("card", {key = "review-" .. tostring(index), role = "workbench.reviewRecord",
+            local reviewMeta = review.scope:sub(1, 40) .. " · " .. tostring(#review.findings) .. " 发现"
+                .. (reviewOpen > 0 and (" · " .. tostring(reviewOpen) .. " 未处置") or "")
+            table.insert(children, ui.node("section", {key = "review-" .. tostring(index), role = "workbench.reviewRecord",
                 head = (sourceNames[review.source] or review.source) .. " · " .. shortTime(review.createdAt),
-                meta = review.scope:sub(1, 40) .. " · " .. tostring(#review.findings) .. " 发现"
-                    .. (reviewOpen > 0 and (" · " .. tostring(reviewOpen) .. " 未处置") or ""),
                 collapsible = true, collapsed = index ~= #items, tone = reviewOpen > 0 and "warning" or "muted"}, {
+                note(reviewMeta),
                 findingsTable(v, review, writable),
                 note("快照 " .. review.codeSnapshotSha256:sub(1, 12) .. " · " .. Context.identity(review)),
             }))
@@ -302,7 +288,7 @@ local function acceptanceCard(s, v, r, writable, snapshot)
     end
     if latest then
         table.insert(evidenceChildren, row("latestDecision", {
-            ui.badge("历史决定：" .. (decisionNames[latest.decision] or latest.decision), "muted"),
+            Context.status("历史决定：" .. (decisionNames[latest.decision] or latest.decision), latest.decision == "accepted" and "success" or "muted"),
             ui.text({ui.span(shortTime(latest.createdAt) .. " · " .. Context.identity(latest)
                 .. (latest.comment ~= "" and (" · " .. latest.comment:sub(1, 80)) or ""), "muted")}),
         }, {gap = "xs"}))
@@ -369,7 +355,7 @@ local function historyCard(v)
     for index = #acceptances, 1, -1 do
         local item = acceptances[index]
         table.insert(rows, row("acceptance-" .. tostring(index), {
-            ui.badge(decisionNames[item.decision] or item.decision, item.decision == "accepted" and "success" or "warning"),
+            Context.status(decisionNames[item.decision] or item.decision, item.decision == "accepted" and "success" or "warning"),
             ui.text({ui.span(shortTime(item.createdAt) .. " · 历史决定 · " .. Context.identity(item)
                 .. " · 快照 " .. item.codeSnapshotSha256:sub(1, 12)
                 .. (item.comment ~= "" and (" · " .. item.comment:sub(1, 100)) or ""), "muted")}),
@@ -378,7 +364,7 @@ local function historyCard(v)
     for index = #reopenings, 1, -1 do
         local item = reopenings[index]
         table.insert(rows, row("reopening-" .. tostring(index), {
-            ui.badge("重新打开", "pending"),
+            Context.status("重新打开", "pending"),
             ui.text({ui.span(shortTime(item.at) .. " · " .. item.reason:sub(1, 100), "muted")}),
         }, {gap = "xs"}))
     end

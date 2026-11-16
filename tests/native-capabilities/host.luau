@@ -2,9 +2,12 @@
 -- Isolated probe only; install exclusively in a temporary TERN_CONFIG_DIR.
 local ui=tern.ui
 local contextDriver=require("./context")
+local galleryDriver=require("./gallery")
 local function persist(s)
     local out={text=s.text,title=s.titleText,modalNote=s.modalNoteText,open=s.open,focusId=s.focusId,
         submitCount=s.submitCount,confirmCount=s.confirmCount,events=s.events,refresh=s.refresh,cols=s.cols,rows=s.rows}
+    if s.gallery then out.gallery={page=s.gallery.page,fixture=s.gallery.fixture,focusId=s.gallery.focusId,
+        input=s.gallery.input,editor=s.gallery.editor,notice=s.gallery.notice} end
     tern.kv.set("af-probe:result",out)
     if s.output then tern.fs.write(s.output,tern.json.encode(out)) end
 end
@@ -75,12 +78,14 @@ tern.block.define("probe",{
             submitCount=0,confirmCount=0,
             mode=args[2] or "default",variant=args[3] or "native-tab",
             groupedUndo=(args[2]=="matrix" and args[3]=="grouped-undo"),
-            events=tern.json.array(),output=args[1]~="" and args[1] or nil,refresh=0,cols=cx.cols,rows=cx.rows}
+            events=tern.json.array(),output=(args[1]~="" and args[1]~="none") and args[1] or nil,refresh=0,cols=cx.cols,rows=cx.rows}
         if args[2]=="context" then s.context=contextDriver(tern,args[3],args[4]) end
+        if args[2]=="gallery" then s.gallery=galleryDriver.new(tern,args[3],args[4],args[5]) end
         return s
     end,
     title=function() return "AF 隔离能力探针" end,
     view=function(s,cx)
+        if s.gallery then return s.gallery.view() end
         if s.context then return {main=ui.col({s.context.module.bar(s.context.state)})} end
         if s.mode=="matrix" then
             local children={
@@ -118,6 +123,11 @@ tern.block.define("probe",{
     end,
     resize=function(s,cols,rows) s.cols=cols;s.rows=rows;persist(s) end,
     key=function(s,key,cx)
+        if s.gallery then
+            local handled=s.gallery.key(key,cx)
+            persist(s)
+            return handled
+        end
         local now=tern.now()
         table.insert(s.events,{ev="key",at=now,name=key.name,ctrl=key.ctrl,meta=key.meta,shift=key.shift,text=key.text,focusId=s.focusId})
         if key.name=="escape" and s.open then
@@ -161,6 +171,7 @@ tern.block.define("probe",{
         local now=tern.now()
         ev.at=now
         table.insert(s.events,ev)
+        if s.gallery then s.gallery.event(ev,cx);persist(s);return end
         if ev.ev=="focus" then
             s.focusId=ev.id
             cx:frame({{"focus",ev.id}})

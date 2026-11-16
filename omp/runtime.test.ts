@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MAX_TEXT_BYTES, MAX_COMMAND_BYTES, prefillStateRejection, readCommand, sourceMarkerFor, SOURCE_ICON, validateCommand } from "./runtime";
+import { atomicJson, MAX_TEXT_BYTES, MAX_COMMAND_BYTES, prefillStateRejection, publishToolsOffer, publishToolsReady, readCommand, readToolsHost, revokeToolsReady, sourceMarkerFor, SOURCE_ICON, TOOLS_PROTOCOL, TOOLS_VERSION, toolsHostSha256, toolsOfferSha256, validateCommand, validateToolsHost, validateToolsOffer, validateToolsReady } from "./runtime";
 import { observeDelivery, observePlan } from "./index";
 
 const now = 1_800_000_000_000;
@@ -151,5 +151,69 @@ describe("abandoned runtime cleanup", () => {
       expect(fs.existsSync(abandoned)).toBe(false);
       for (const kept of [running, young, wrongMarker, own, loose]) expect(fs.existsSync(kept)).toBe(true);
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+});
+
+describe("versioned tool negotiation", () => {
+  const offer = {
+    schemaVersion: 1 as const, protocol: TOOLS_PROTOCOL, protocolVersion: TOOLS_VERSION,
+    instanceId: "instance-1", sessionId: "session-1", openRequestId: "open-1",
+    activities: ["design", "implement"], operations: ["list", "get"],
+    payloadBytes: 16_384, responseBytes: 32_768, issuedAt: now, expiresAt: now + 30_000,
+  };
+  const host = {
+    schemaVersion: 1 as const, protocol: TOOLS_PROTOCOL, protocolVersion: TOOLS_VERSION,
+    offerSha256: toolsOfferSha256(offer), hostEpoch: "host-epoch-1",
+    instanceId: "instance-1", sessionId: "session-1", openRequestId: "open-1",
+    window: "", sourcePane: 7, panel: 12, projectId: "project-1",
+    writerProtocol: "omp-workbench.host", writerVersion: 1,
+    activities: ["design"], operations: ["list"], issuedAt: now, expiresAt: now + 30_000,
+  };
+  const ready = {
+    schemaVersion: 1 as const, protocol: TOOLS_PROTOCOL, protocolVersion: TOOLS_VERSION,
+    offerSha256: host.offerSha256, hostSha256: "a".repeat(64),
+    instanceId: "instance-1", sessionId: "session-1", openRequestId: "open-1",
+    hostEpoch: "host-epoch-1", leaseId: "lease-1", sequence: 1, issuedAt: now, expiresAt: now + 5_000,
+  };
+
+  test("a fresh offer is accepted and unknown fields or stale times are rejected", () => {
+    expect(validateToolsOffer(offer, now)).toBeNull();
+    expect(validateToolsOffer({ ...offer, extra: 1 }, now)).toBe("invalid_offer");
+    expect(validateToolsOffer({ ...offer, expiresAt: now - 1 }, now)).toBe("invalid_time");
+    expect(validateToolsOffer({ ...offer, expiresAt: now + 120_000 }, now)).toBe("invalid_time");
+    expect(validateToolsOffer({ ...offer, activities: ["unknown"] }, now)).toBe("invalid_capabilities");
+  });
+
+  test("the host ack must bind the exact offer digest and identity", () => {
+    expect(validateToolsHost(host, { offerSha256: host.offerSha256, now })).toBeNull();
+    expect(validateToolsHost(host, { offerSha256: "b".repeat(64), now })).toBe("offer_mismatch");
+    expect(validateToolsHost({ ...host, extra: 1 }, { offerSha256: host.offerSha256, now })).toBe("invalid_host");
+  });
+
+  test("ready is short-lived, monotonic and bound to the offer", () => {
+    expect(validateToolsReady(ready, { offerSha256: ready.offerSha256, now })).toBeNull();
+    expect(validateToolsReady({ ...ready, expiresAt: now + 7_000 }, { offerSha256: ready.offerSha256, now })).toBe("invalid_time");
+    expect(validateToolsReady({ ...ready, sequence: 0 }, { offerSha256: ready.offerSha256, now })).toBe("invalid_sequence");
+    expect(validateToolsReady({ ...ready, offerSha256: "c".repeat(64) }, { offerSha256: ready.offerSha256, now })).toBe("offer_mismatch");
+  });
+
+  test("publishing writes private bounded files and revokes ready", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wb-tools-"));
+    fs.chmodSync(directory, 0o700);
+    const runtime = { directory, assertPrivate() {} } as unknown as import("./runtime").Runtime;
+    const liveNow = Date.now();
+    const liveOffer = { ...offer, issuedAt: liveNow, expiresAt: liveNow + 30_000 };
+    const liveHost = { ...host, offerSha256: toolsOfferSha256(liveOffer), issuedAt: liveNow, expiresAt: liveNow + 30_000 };
+    const liveReady = { ...ready, offerSha256: liveHost.offerSha256, hostSha256: toolsHostSha256(liveHost), issuedAt: liveNow, expiresAt: liveNow + 5_000 };
+    try {
+      publishToolsOffer(runtime, liveOffer);
+      atomicJson(path.join(directory, "tools", "host.json"), liveHost);
+      expect(readToolsHost(runtime, liveHost.offerSha256).value?.hostEpoch).toBe("host-epoch-1");
+      expect(() => publishToolsReady(runtime, { ...liveReady, hostSha256: "d".repeat(64) })).toThrow("host_mismatch");
+      publishToolsReady(runtime, liveReady);
+      expect(fs.existsSync(path.join(directory, "tools", "ready.json"))).toBe(true);
+      revokeToolsReady(runtime);
+      expect(fs.existsSync(path.join(directory, "tools", "ready.json"))).toBe(false);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
 });

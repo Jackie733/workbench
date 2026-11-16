@@ -16,24 +16,10 @@ end
 local M = {}
 local stepNames = {pending = "待开始", active = "进行中", done = "完成", blocked = "阻塞", skipped = "跳过"}
 local stateTones = {passed = "success", failed = "error", unknown = "warning", stale = "warning"}
-local function note(text) return ui.text({ui.span(text or "", "muted")}) end
-local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
-        actions = {click = action}})
-end
-local function row(key, children)
-    return ui.node("row", {key = key, gap = "sm", wrap = true}, children)
-end
-local function choices(name, label, value, options, disabled)
-    local chips = {}
-    for _, option in options do
-        local selected = value == option.value
-        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
-            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
-            actions = {click = "change:" .. name .. "=" .. option.value}}))
-    end
-    return ui.node("field", {key = name .. "Field", label = label}, {row(name, chips)})
-end
+local note = Context.note
+local button = Context.button
+local row = Context.row
+local choices = Context.choices
 local function field(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
     return ui.node("field", {key = "traceField-" .. key, label = label, help = placeholder}, {
@@ -132,19 +118,25 @@ function M.build(s)
             if step.status == "active" then active += 1 end
         end
         local items = {}
+        local stepTones = {pending = "muted", active = "info", done = "success", blocked = "warning", skipped = "muted"}
         for index, step in plan.steps do
             local statusOptions = {}
             for _, name in {"pending", "active", "done", "blocked", "skipped"} do
                 table.insert(statusOptions, {value = name, label = stepNames[name]})
             end
-            table.insert(items, ui.card(step.title, {
+            local stepTone = stepTones[step.status] or "muted"
+            table.insert(items, ui.node("col", {key = "step-" .. tostring(index), role = "workbench.stepRow", gap = "xs", tone = stepTone}, {
+                row("stepHead-" .. tostring(index), {
+                    ui.text({ui.span(step.title, "strong")}),
+                    Context.status(stepNames[step.status] or step.status, stepTone),
+                }),
                 note("步骤 " .. tostring(step.id) .. " · 更新 " .. tostring(step.updatedAt)),
                 note("关联条件：" .. table.concat(step.criterionIds or {}, ", ") .. " · 文件：" .. table.concat(step.filePaths or {}, ", ")
                     .. "（建议链接，不是证据）"),
                 button("编辑条件 / 文件链接", "results-link-pick=" .. step.id, "quiet", not writable),
                 choices("status-" .. tostring(index), "状态", step.status, statusOptions, not writable),
-                step.reason and note("阻塞原因：" .. step.reason) or note(""),
-            }, {key = "step-" .. tostring(index), tone = step.status == "blocked" and "warning" or (step.status == "done" and "success" or "muted")}))
+                step.reason and ui.text({ui.span("! 阻塞原因：" .. step.reason, "warning")}) or note(""),
+            }))
         end
         table.insert(nodes, ui.card("实施计划 · 已完成 " .. tostring(done) .. " / 共 " .. tostring(#plan.steps),
             {(function()

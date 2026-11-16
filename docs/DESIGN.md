@@ -1,6 +1,6 @@
 # Tern 工作台重构方案：Agent 推进，用户决策
 
-状态：当前重构设计基线，已进入 AF-01/02 契约核对与隔离探针；新界面和 Agent 业务工具尚未实施。配套执行清单见 [TASKS.md](TASKS.md)，必须保持的领域约束见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)。当前用户已授权按前置条件顺序执行；禁止提前重写 UI、擅改存储协议或操作日常项目。历史证据不代表新界面已验收。
+状态：当前重构设计基线。AF-01–03 已完成，AF-04 的组件层纠偏已实现；AF-11 协议设计已定稿但未实施。精确进度见 [TASKS.md](TASKS.md)，领域约束见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)。页面信息架构、跨字段焦点层与生产安装验收仍待后续任务；历史截图不代表整体发布完成。
 
 文档分工：本文规定产品、交互、视觉和目标架构；TASKS 是唯一进度来源；DOMAIN_CONTRACT 记录不得削弱的领域约束与已记录版本基线。归档只作历史证据，不再作为并行实施计划。发现现有代码与基线冲突时先记录差异并解决，不静默放宽门禁。
 
@@ -150,15 +150,18 @@ blocked 独立显示在“受阻”区域，保留原阶段；cancelled 通过�
 
 ## 6. 交互语法
 
-| 类型 | 外观 | 示例 | 约束 |
+| 类型 | 视觉与组件 | 示例 | 约束 |
 | --- | --- | --- | --- |
-| 导航 | 文本、标签、轻量图标 | 查看变更、记录 | 无业务写入 |
-| 状态 | 图标＋文本，必要时低饱和底色 | 执行中、待批准 | 不呈现按钮 hover，不可点击假装操作 |
-| 局部编辑 | 次级描边按钮 | 编辑目标、保存 | 保存前显示授权/证据影响 |
-| 决策/执行 | 强调色实心按钮 | 批准此方案、开始执行 | 名称明确后果，最终校验在领域层 |
-| 危险管理 | 菜单内红色文字，确认后红色按钮 | 取消需求 | 不与正常主操作并列抢焦点 |
+| 页面导航 | 原生 underline tabs，选中项底部指示线 | 概览 / 变更 / 记录 | 无单项按钮外框，不写业务状态 |
+| 局部视图切换 | 一体式 segmented tabs | 列表 / 分组 | 一个共享浅色底槽；不是多个主按钮 |
+| 选择输入 | select / 明确的单选多选控件 | 优先级、状态筛选 | 选择值不是提交动作；不把所有选项铺成按钮 |
+| 状态 | 符号或小圆点＋文字 | 执行中、待批准 | 不可点击，无 hover/pressed/focus 假交互 |
+| 分类标签 | 小号低对比容器，无操作描边 | 维护、文档 | 默认只读；可移除筛选单独提供移除目标 |
+| 局部操作 | default / quiet 按钮，按任务重要性选择 | 保存、刷新、复制 | 文案说明后果；查看入口不伪装提交 |
+| 决策/执行 | 当前决策区唯一高强调按钮 | 批准此方案、开始执行 | 名称明确后果，最终校验在领域层 |
+| 危险管理 | 更多菜单内危险项；最终确认用 danger | 取消需求 | 危险性独立于优先级，不是“红色主流程” |
 
-常规区域只保留一个主按钮。弹层打开时，原页面主按钮不与弹层动作同时构成可操作焦点。不能为了“一主操作”隐藏当前运行的停止入口。
+一个可交互页面最多一个高强调动作，也允许没有。进入最终确认页后，原页面的高强调动作不再同时可操作；运行中的停止入口不能因此隐藏。组件种类、动作副作用、视觉强调是三个不同维度，不能通过颜色或 variant 授权。
 
 不使用“确定”“继续”“处理”作为关键提交文案。查看入口叫“查看方案”，最终动作叫“批准方案”；不使用“检查并批准”这样的混合语义。
 
@@ -194,82 +197,217 @@ blocked 独立显示在“受阻”区域，保留原阶段；cancelled 通过�
 - 权限决定由可信宿主/运行时产生，Agent 不能通过工具参数声明自己已经获得批准。
 - 工作台门禁不是操作系统沙箱，无法阻止同一 omp 在工作台之外直接使用其他工具；界面不得声称全局只读或全面防护。
 
-### 7.3 工具信封与持久化
+### 7.3 AF-11 设计状态与实际落点
 
-请求至少包含协议版本、项目/需求身份、请求身份、预期实体修订以及操作载荷；会话与实例由可信运行时绑定，不接受模型自行选择任意会话。涉及内容或执行时额外绑定内容身份、方案版本、快照和有效授权引用。
+**本节至 §7.11 是已选定、尚未实施的协议设计，不表示 AF-11 整体完成。** 本轮不注册工具、不改 IPC 或业务 schema、不启动模型。版本、持久文件及恢复的规范见 DOMAIN_CONTRACT §7.1–7.8；AF-12/13 必须先实现这些前置能力，再开放写入口。
 
-采用单一领域写入路径：工具适配器调用与 UI 相同的领域命令与 Store，不在 TypeScript 另写一套业务状态转换。工作台关闭后，独立只读工具可以读取已支持的数据；写命令在缺少可信宿主处理器时明确失败，不悄悄启动旁路写入器。
+已核对真实调用链：`omp/index.ts` 当前只注册 `/wb`，在工厂局部绑定 main/tui/session/cwd，750ms 发布观测；`runtime.ts` 是私有临时目录中的 v1 command/receipt/open ack；`handoff.ts` 只读 project/requirement/workflow/design 并冻结预览。`lib/live.luau` 校验来源、6 秒新鲜度并把 UI 命令发往 omp；业务单写者仍是持项目锁的 Luau host。`Workflow.apply`、`Results.applyPlan/addVerification/adoptCandidate`、`Review.adoptCandidate/recordAcceptance` 经 Store 单文件 CAS 发布。host 的 `handoff-approve`/`review-accept` 才有人工动作门禁；`clicked=true` 和低层 `recordAcceptance` 本身均不是授权服务。验证当前由 host 执行 `wsl.exe … bash -lc`，180 秒超时，先 evidence 后 results；既有函数没有通用事务恢复器。
 
-每个有副作用请求使用幂等键及载荷摘要。重复同载荷返回原结果；同键异载荷拒绝。未知执行结果先核对，不自动重试。幂等记录的保存需纳入版本化协议与恢复契约，不承诺“恰好一次”网络执行。
+选择保留这个单写者，不让 TS 工具直接写业务库，也不新增后台服务、模型客户端、隐藏队列或第二个 Agent。提取一个 Luau 领域命令分发器供 UI 和工具共同调用；它接收**由适配器构造的可信调用上下文**，执行 `Context.evaluateAction`/Validity、身份、授权、CAS、账本与发布。不是让工具模拟 UI action 字符串，也不是另写一套 TS 领域转换。旧 UI 写入口同步迁入分发器，不能只保护新工具。
 
-CAS 冲突返回当前修订与可重新读取的信息，不自动覆盖。任何跨实体更新须定义发布顺序、恢复与部分失败；不能把若干写操作包装成一个按钮就宣称原子。
+### 7.4 能力协商与路由
 
-### 7.4 与现有协议的衔接
+固定新协议名 `omp-workbench.tools`、`protocolVersion=1`；它与现有 `schemaVersion=1` 的 live/IPC 是不同命名空间。不往旧 command/open ack 塞新字段。双方另在 runtime 私有目录交换 `tools/offer.json`、`tools/host.json` 与 `tools/ready.json`（schema v1），新请求走 `tools/requests/`、回复走 `tools/responses/`。这些目录仍由 Runtime 创建和校验权限；host 只处理已证明属于该面板的 runtime，不能扫描任意项目或用户目录。
 
-现有活动协议是 clarify/design/implement；新增 review/analyze 是真正的协议扩展，必须两端能力协商，不能伪装成 design。
+offer 包含运行时身份、协议/活动/操作白名单、读写 schema 矩阵及实际上限；host 回应包含同一 offer 的 SHA-256、hostEpoch、原 openRequestId/window/sourcePane/panel、项目身份、写者协议和所选能力；runtime 最终核对原生 dock/面板绑定后发布 ready（绑定双方声明摘要）。双方各自更新单调 sequence 与时间，超过 6 秒无新鲜心跳、会话/分支/cwd/打开请求/hostEpoch 改变均撤销 ready。租约不得只凭文件 mtime 刷新；声明损坏、能力不匹配不能降级执行。
 
-现有观测 todo 没有可靠需求归属；不能把当前打开的需求当作归属。只有带可信 requestId/requirementId 的新工具记录才进入正式计划。
+实际能力取两端交集，按操作启用，不能由软件版本号猜测支持。活动白名单预留 `clarify/design/implement/review/analyze`；首版只开放已真正接通的活动，review/analyze 必须有新 workflow 读写器、来源校验和活动门禁才声明，绝不编码成 design。不支持返回 `unsupported_activity`。
 
-JSON 导入保留在“更多 → 导入外部结果”，作为显式兼容入口，不作为普通用户主路径。只有新工具端到端具备同等身份与校验能力后，才把旧入口降级；不先删 UI 再留下无法使用的能力。
-
-## 8. 视觉方向
-
-方向：安静、清晰、文档优先的开发工具。中性灰承担布局，一种蓝色承担交互；状态色只用于局部语义。避免彩色仪表盘、渐变、霓虹描边、黑色胶囊按钮、密集卡片与大面积警告背景。
-
-### 8.1 色彩 Token
-
-以下为建议基准值；实际优先绑定 Tern 主题 token。自定义主题优先，但必须测量实际渲染后的对比度，不假定继承主题就合格。
-
-| Token | 浅色 | 深色 | 用途 |
-| --- | --- | --- | --- |
-| canvas | #F7F8FA | #15171B | 工作区底层 |
-| surface | #FFFFFF | #1C1F24 | 内容与弹层 |
-| surface-subtle | #F1F3F6 | #242830 | 次级区域 |
-| text-primary | #20242C | #E8EBF0 | 正文、标题 |
-| text-secondary | #596273 | #ADB6C4 | 辅助说明 |
-| text-muted | #687386 | #98A3B4 | 时间与次要元数据 |
-| border-subtle | #E2E6ED | #353C47 | 装饰分隔线 |
-| border-control | #7A8596 | #738196 | 输入与必要控件边界 |
-| accent | #245EDB | #8CB4FF | 链接、焦点、主要交互 |
-| accent-solid | #245EDB | #396FE3 | 主按钮背景，配白色文字 |
-| accent-subtle | #EDF3FF | #222F47 | 选中背景 |
-| success | #187449 | #73D6A2 | 当前有效的成功证据 |
-| success-subtle | #EAF6EF | #1C3027 | 少量成功提示背景 |
-| warning | #8A5700 | #EDC36D | 待决策、过期、风险 |
-| warning-subtle | #FFF5DF | #352D1E | 警告提示背景 |
-| danger | #B42332 | #FF929B | 失败与破坏性操作 |
-| danger-subtle | #FFF0F1 | #382328 | 错误提示背景 |
-
-普通文本至少 4.5:1；必要控件边界和焦点至少 3:1；大字按 WCAG 对应标准验证。表内色值是设计输入，不是已通过测量的证明。禁用态也要保持可理解，不通过把重要理由一起淡化来表达禁用。
-
-准备中、已完成等生命周期默认中性显示；“完成”是历史事实，不需要永久满屏绿色。蓝色只表达交互与当前选择，绿色只表达可信的当前成功，橙色表达需要注意，红色表达失败或破坏。
-
-### 8.2 字体与排版
-
-| 元素 | 字号/行高 | 字重 |
+| 路径 | 面板打开且 ready | 面板关闭/旧 host/未协商 |
 | --- | --- | --- |
-| 工作区标题 | 20/28 px | 600 |
-| 区块标题 | 15/22 px | 600 |
-| 正文与主要输入 | 14/22 px | 400 |
-| 按钮/列表辅助信息 | 13/20 px | 500/400 |
-| 非关键元数据 | 12/18 px | 400 |
-| 代码/diff | 12–13/20 px | 400 |
+| list/get/get_evidence 的已有持久资料 | TS 严格只读投影；读前后核对相关 revision，不采集新 Git 观察、不写 results | 同样可读**已支持 schema**；标记 `hostAvailable=false`、观测时间和非原子快照；不猜未知字段 |
+| propose/update_plan/request_decision/run_verification | TS 发给唯一 host 分发器；持久认领后才回 accepted | 立即 `host_unavailable`/`capability_unavailable`，不写业务意图、不排队、不自动打开面板 |
+| 查询已提交 operationId | 只读返回原账本状态/结果 | 严格只读账本查询仍可用；无账本不能拿临时 receipt 伪造结论 |
 
-使用宿主系统无衬线字体，中文选择宿主可用的中文字体回退；代码使用等宽字体。不以 11px 小字承载权限、失败原因或验收信息。数字对齐用 tabular-nums。
+只读 TS 投影需补齐 plan/results/reviews/evidence/新 sidecar 的严格版本读取器；当前 handoff 读取器不具备这些能力。对读取期间变动最多返回 `snapshot_changed`，不循环重试；list 有稳定 ID 游标，不承诺跨页事务快照。来源项目从可信 cwd 的 canonical Git root 与 projectId 交叉确认，不接受模型提供 root、runtimeDir 或任意 evidencePath。
 
-正文单栏最大约 760px；长方案按标题、列表、代码块呈现，保持段落节奏。技术详情中的长哈希独立显示，可复制；不让哈希把主要布局撑宽。
+### 7.5 信封、绑定与摘要
 
-### 8.3 空间与组件
+工具参数只含操作必要的业务目标、expected 修订、候选/计划/验证载荷，以及可选的**引用**；禁止传 sessionId/instanceId/actor/clicked/approved/passed/任意存储路径。适配器用真实 SDK execute 的 `toolCallId`、main 会话上下文构造信封：`protocol`、`protocolVersion`、`operationId`、`toolCallId`、`operation`、`projectId`、`requirementId`（list 可空）、`expected`、`payload`、`payloadSha256`、`binding`、`issuedAt`、`deadlineAt`、`mutationToken`（仅写）、`authorizationRef`（仅需要时）。binding 是 runtime/host 注入的 instanceId/sessionId/hostEpoch/openRequestId/leaseId/requestId/branchEpoch，不是模型的自述。信封、载荷和响应按操作递归字段白名单校验，拒绝重复 JSON key、未知字段、非 UTF-8、非有限数、非安全整数和控制字符。
 
-间距序列：4/8/12/16/24/32px。默认内容内边距 20px，窄面板 16px；区块间距 24px，行内间距 8px。
+requestId 指工作台已获明确启动许可的工作请求，operationId 指一次工具变更，两者不同于 toolCallId。只读工具可以按稳定 ID 查看同项目其他需求；写工具只能作用于可信租约所属需求和请求。当前原生 todo 与 assistant 文字没有该归属，仍保留 attribution=null。
 
-按钮高 34–36px；输入高 36px；列表行约 64px，允许辅助文本换行增加高度。交互目标不小于 32px；触控场景提高到 44px。按钮圆角 6px，内容容器 8px，弹层 10px；只有真正短小的状态标签允许胶囊形。
+写键选择 host 在人工创建租约时一次签发并持久登记的随机 mutationToken（256 bit、24 小时有效，每租约共 64 个，按四种写工具各 16 个）；经只读 get 的 `purpose=prepare_mutation` 读取该操作尚未使用的令牌，不额外写库、不授权执行、不启动模型。租约过期先于 token 时仍拒绝新执行，配额用尽须人工重新授权租约。令牌绑定项目/需求/租约、允许操作与签发时限，不预绑定载荷；首次合法提交原子认领 payloadSha256。模型可以持有/引用令牌，不能创建有效登记或获得额外权限。同 token 同摘要返回原 operationId/状态/结果；异摘要 `idempotency_conflict`；已过期 token 不执行，即使旧记录已被清理。超时后通过 `get(operationId=…)` 核对，不换键重发。
 
-默认无阴影；菜单/弹层使用轻阴影。卡片边框 1px，不嵌套卡片，不为每段正文加外框。焦点环 2px，并与背景有清晰分隔；不要用发光效果代替焦点。
+载荷摘要固定为 SHA-256（小写 hex），输入是 UTF-8 的 RFC 8785/JCS 规范 JSON：`{protocolVersion,operation,projectId,requirementId,expected,payload,authorizationRef,leaseId,requestId}`，所有列出字段必有，缺省引用为 null。对象键按 JCS 排序，数组保留顺序，字符串不 trim、不改换行、不做 Unicode 归一；禁止孤立 surrogate，v1 数字仅安全整数；集合型 ID 数组先校验唯一，再按契约字节序排序。排除 toolCallId、operationId、传输时间、心跳、令牌和摘要自身，所以同一意图的查询/重传不改变摘要；换 expected、命令、目录、条件、授权或租约均改变摘要。TS 与 Luau/PowerShell 必须共用跨语言固定向量，不能直接对各自默认 JSON 编码做哈希。现有 `requirementContent` 顺序数组哈希、候选原文件字节指纹及 handoff 文本摘要保持各自旧契约，不混用。
 
-图标统一一种线性风格，16px 常规、18px 关键入口。图标不能单独表达失败、批准、执行等语义。可点击图标必须有可见提示和可访问名称能力；宿主不支持时不能宣称已满足辅助技术要求。
+### 7.6 可信授权与人工决策
 
-动效仅用于 100–160ms 的局部展开与状态过渡；尊重减少动态效果设置。不做流式事件闪烁、不因状态轮询改变页面高度、不自动滚动抢走阅读位置。
+租约只由真实工作台“开始执行/授权此请求使用工具”的最终人工动作创建，展示项目、需求、会话、活动、期限和能力；`enable-edit`、SDK approval read/write/exec、模型文字或 tool 参数都不创建租约。租约最长 30 分钟，绑定当时内容身份、方案/直接授权、instance/session/branchEpoch、hostEpoch 和 requestId；不跨重载、分支切换或来源重开续租。发送未确认、来源存在非本请求的冲突工作或请求结果未知时不激活工具租约；本请求执行工具时的 working 不作为自我拒绝条件。SDK 目前没有已证实的业务 requestId 原生传播，因此明确采用**人工绑定的单会话工作租约**，而不声称能区分同一会话每条自然语言消息的作者意图；面板持续显示当前唯一归属，换工作前结束旧租约。
+
+分发器每次重新读取当前内容、授权撤销、租约、快照及实体修订。计划维护只在租约能力内；改变目标/范围/验收条件/方案只生成候选，由人采用，按现有内容身份规则使旧授权失效。候选 source 由 host 写 `agent_candidate`，采用审查仍为 external，不升级为认证 native_review；任何候选来源、发现、摘要都不能授予权限。
+
+人工决定上下文仅由宿主受信 UI 事件生成，一次性 decisionNonce 在内存绑定展示过的动作、精确目标、内容/方案/快照与有效期（5 分钟），提交时重验并消费。它不进入模型工具 schema；重载失效。批准、采用、验收和豁免分别是不同动作，不能拿“批准方案”同时批准任意验证。零验收条件拒绝人工验收；`Review.recordAcceptance` 的低层记录函数必须被共同分发器包住，不能直接暴露。
+
+验证采取最保守的**精确单次命令授权**，不做 shell 文本前缀/正则/自然语言范围授权。人确认 command 原始字节、可信 cwd、criterionIds、timeoutMs（1–180000）、内容身份、当前代码快照与工作请求后，host 保存 grant；grant ID 不是 bearer 权限，仍须匹配租约和当前门禁。首个 operation 原子认领 grant，重放同 operation 只查结果；任何不同命令/目录/条件/超时/快照、新 operation 复用都拒绝。执行中预期代码变化不复活授权或复用证据；执行后另采集快照判断现有证据有效性。无 grant 只创建精确验证决策事项，返回 waiting_decision；批准也不自动启动命令，Agent 必须显式重新请求并引用 decisionId（新的执行 token），或用户在执行确认页点击开始。
+
+### 7.7 幂等、CAS 与恢复体验
+
+命令状态：`prepared → claimed → applying → committed`；无副作用拒绝为 `rejected`；认领前取消为 `cancelled`；无法证明副作用结果为 `outcome_unknown`，不能包装成 rejected。验证在 claimed 后先持久 `effect_started` 再启动进程，收到真实回调后保存 `effect_observed` 和证据，再 committed。waiting_decision 是已提交决策事项的业务状态，不是运行命令。生命周期、工作请求、工具 operation 与决策状态分开呈现。
+
+账本/目标不是跨文件原子事务；必须按 DOMAIN_CONTRACT §7.4 的 before/after 图像和发布步骤核对。回调丢失只重读，不重新运行；恢复写必须是人工“核对并恢复记录”动作，重载只呈现 recovery_required。结果不确定会阻塞新写和不安全生命周期转换，不使用超时淘汰它。同文件 revision 相同但内容摘要不同也视为外部冲突。CAS 返回冲突实体、expected/currentRevision 与重读引用，保留草稿，不隐式 rebase 或覆盖。
+
+取消的第一个可靠边界是认领前；进入 effect_started 后仅显示 cancel_requested，不承诺杀死 shell/子进程。现有 Tern process 未证明可确认终止整棵 WSL 进程树，首版不宣称该能力，超时或失联保留 outcome_unknown；已观察到退出码的命令即使之前请求取消仍保存真实结果。180 秒执行期限与 30 秒认领/通信期限分开；工具等待最多 30 秒，返回 operationId/pending，不代表取消执行。面板关闭立即撤销新写能力；已启动命令可能继续，未知结果不能自动续跑。人工结束等待只记录知悉，不把 unknown 改成 passed、failed 或 cancelled。
+
+运输 deadline、token 或租约到期只禁止新认领/新执行，不妨碍按 operationId 只读查询已提交的终态、pending 或 unknown；面板关闭与授权撤销也不能隐藏已发生事实。账本合法过保留期清理后才报 operation_not_found，仍不许可自动重跑。
+
+### 7.8 有界输入与有限脱敏
+
+新信封 ≤32 KiB，payload ≤16 KiB，响应（含结构化 details）≤32 KiB；JSON 深度 ≤12、单对象 ≤64 字段、ID ≤96 ASCII token 字节、路径 ≤2048 UTF-8 字节。候选正文 ≤16 KiB；计划 ≤40 步，每步标题 ≤500 字节，条件/文件各 ≤32；审查 ≤50 findings、描述 ≤4000 字节，同时受总载荷限制，超限拒绝不静默截断候选。list 一页 ≤20 条；详情文本/输出一页 ≤8 KiB。证据引用使用稳定 ID，host 解析到已验证项目内固定目录，拒绝 symlink/reparse、逃逸、设备/FIFO 和未知 schema。
+
+输出默认只有允许字段、摘要与证据 ID；不复制聊天、工具原参数/完整输出、环境变量、凭据、绝对用户路径或堆栈。正文/diff/输出仅按明确 detail 请求分页返回，按需裁剪并给 `truncated/omittedBytes/nextCursor/redacted`。先对受限源记录完成校验和原始身份核对，再脱敏，再按 UTF-8 边界分页；游标绑定源 ID/revision/hash 与脱敏规则版本，源改变报 snapshot_changed。v1 规则移除 ANSI/终端控制、掩盖 PEM 私钥块、URL userinfo/敏感 query、Bearer 与常见 token/password/secret/API-key 赋值；相对路径可以返回，home/root 前缀用展示占位符。准确命令在本地人工授权视图仍显示原文，模型输出可遮蔽敏感片段，不输出被遮蔽值的单独哈希。脱敏只降低风险，**不能保证发现所有秘密**；疑似密钥资料默认拒绝模型正文读取，本地原证据不被脱敏改写。工具 content 与 details 使用同一处理器，错误、审计导出与日志也不能绕过；本地账本不是防篡改日志或 OS 沙箱。
+
+### 7.9 AF-12/13 固定接口
+
+固定注册名就是 §7.1 的七个 `workbench_*` 名称，不另保留别名；approval 元数据 read/write/exec 只反映 SDK 工具级风险，不替代领域权限。
+
+| 所属 | 工具参数与结果边界 |
+| --- | --- |
+| AF-12 `workbench_list` | filter/cursor/limit；只读需求摘要与下一页，不写当前选择 |
+| AF-12 `workbench_get` | requirementId、section（summary/body/plan/decisions/operation）、cursor；operation 查询用 operationId；purpose=prepare_mutation 只读取人工租约预先签发的特定操作 token |
+| AF-12 `workbench_propose` | token、expected、kind=requirement/design/plan/review、完整候选；返回 candidateId/源身份/待采用，不自动写正式需求、方案、审查或批准 |
+| AF-12 `workbench_update_plan` | token、expected requirement/plan revision、一次 add/update_status/update_links；新 stepId 由 host 分配并在原操作结果重放，现有稳定 ID 不重建；不支持任意替换计划、验收条件或 evidenceIds |
+| AF-12 `workbench_request_decision` | token、expected、kind=adopt_candidate/verification、candidateId 或准确验证规格、理由；返回 decisionId/state，不能要求工具代为 approve/accept/dispose |
+| AF-12 `workbench_get_evidence` | requirementId、evidenceId、section、cursor；只读已存在证据，不执行验证、不采集新快照 |
+| AF-13 `workbench_run_verification` | token、expected requirement/results revision、准确 command/criterionIds/timeoutMs、grantRef 或 decisionId；cwd 从可信项目根派生；结果仅为 operationId/state/evidenceId，passed 只来自真实执行器 |
+
+提取后的命令分发器接口是 `execute(trustedContext, command)` 与只读 `query(queryContext, query)`：trustedContext 由 UI 或已校验桥接适配器分别构造，包含 origin、租约和真实人工事件（只在 UI）；command 是严格操作枚举而非函数名/路径。工具 proposal/decision sidecar 也走此分发器。UI 采用候选时重读原候选与当前版本，并复用 `Candidates.current`、Workflow/Results/Review 校验；plan/review 外部 JSON v1 继续读，不把模型载荷强行伪装成文件。AF-12 必须补齐 sidecar 读取、正式采用路径与稳定 ID 结果核对；AF-13 补齐 nonce/grant、执行认领、证据恢复及 UI 返回原 decisionId/requestId。等待决策不自动发模型消息；以工具查询或用户明确继续恢复原闭环，拒绝隐藏 steer。
+
+### 7.10 错误与兼容
+
+统一响应是 `{protocolVersion,operationId,state,result,error,observedAt}`，缺省 result/error 为 null；error 为 `{code,message,domainCode,recovery,current}`，message 为有界脱敏人类说明，程序按 code 处理。错误码、恢复建议与矩阵固定在 DOMAIN_CONTRACT §7.7–7.8。不把“accepted/submitted”叫交付完成，不把进程退出叫人工验收。未知状态/协议必须拒绝，不能作为成功空结果。
+
+新旧端只在原 v1 能力内交互；新工具不通过旧 IPC 发送。启用新持久协议是**独立、明确的项目升级决定**，不是安装 UI 或读工具的副作用；在读写器、旧端隔离与恢复验证全部就绪前，项目保持当前 schema。关闭面板仍保留旧只读查看/人工导入入口；新工具尚未等价接通前不移除外部 JSON 导入。回滚必须停写并恢复一致目录备份及匹配代码，不能删除 tools 目录后让旧端继续处理已产生副作用的业务状态。
+
+### 7.11 实施退出条件
+
+AF-11 余项是实现并验证协商/信封/严格读取器、统一领域命令入口、schema 双栅栏、账本 CAS/容量/恢复和错误路由；设计文本不替代它们。AF-12/13 必须覆盖同键异载荷、旧新端、关面板、主会话/子会话、换分支/项目/需求、模型自授身份、授权撤销、CAS 与相同修订异内容、发布任一步回调丢失、命令已启动但无回调、未知结果不重跑、容量满和回滚。验证使用隔离项目与真实工具分发；本次设计工作未运行测试、构建、格式化或模型。
+
+## 8. 设计系统：原生语义优先，而不是统一圆角盒子
+
+### 8.1 官方依据与取舍
+
+本轮实际阅读了 Tern 的 Architecture、Designing Views（含 Deploys 模板图与 Luau 配方）、Styling Views、tabs/badge 契约，Ant Design Button/Tabs/Tag/Customize Theme，以及浏览器渲染后的 Material Design 3 Design tokens / All buttons。Material 页面静态读取只有壳，研究结论来自加载后的正文，不以搜索摘要代替阅读。
+
+| 依据 | 采用 | 不照搬 |
+| --- | --- | --- |
+| [Tern Architecture](https://docs.stencil.so/tern/concepts/architecture.html) | host 持有块与业务状态；window 负责局部 UI/CSS；manifest styles 可随 catalog 到远端/Web | 不把主题设计变成跨 VM 状态服务；不靠 window-only CSS 支撑核心语义 |
+| [Tern Designing Views 与 Deploys 模板](https://docs.stencil.so/tern/print.html#designing-views) | 原生 kind 优先；一页一个主要动作；underline / segmented 各司其职；少卡片、两档密度、状态局部着色 | 不照搬部署仪表盘的 stats 或双栏；需求工作台无必要数据就不显示 |
+| [Tern Styling Views](https://docs.stencil.so/tern/print.html#styling-views) | CSS last，工作台作用域，稳定 role 钩子；内部 class 与支持能力按安装版本核对 | 不把浏览器 CSS 支持当成 Tern 支持，不重写所有原生组件几何 |
+| [Material Design tokens](https://m3.material.io/foundations/design-tokens/overview) | reference → system → component；按用途命名，按上下文切换值 | 不引入 Material Web、FAB、全胶囊、大阴影或为所有细节建立生成器 |
+| [Material All buttons](https://m3.material.io/components/all-buttons) | 高/中/低强调与位置共同建立层级；一个 prominent action | 不为了填满层级而常驻所有按钮类型 |
+| [Ant Button](https://ant.design/components/button/)、[Tabs](https://ant.design/components/tabs/)、[Tag](https://ant.design/components/tag/)、[主题](https://ant.design/docs/react/customize-theme/) | 主次动作、危险/禁用/忙碌独立；导航/分类分开；组件 Token 独立覆盖 | 不引入 React/Ant 运行时，不照搬后台管理模板的密集表单 |
+
+**选择一种语言：Tern-native 的安静桌面工具。** Material/Ant 提供设计方法，不提供第二套视觉皮肤。宿主决定主题色；工作台负责语义、层级、留白、信息结构。不是永久强制蓝色，更不能因为颜色相同就让所有组件形状相同。
+
+### 8.2 当前实现差异与纠偏边界
+
+用户报告“按钮、tab、tag 相似，功能与优先级不清楚”是本轮问题证据，不需要重跑截图来确认。
+
+| 实际代码 | 造成的问题 | 替换方向 |
+| --- | --- | --- |
+| `styles.css` `.sf-tab` 使用 control border、圆角、独立 surface | 页面导航变成一排描边按钮；还覆盖 segmented 的差异 | 恢复原生 underline；segmented 单独保留原生整体底槽 |
+| `.sf-badge` 使用 control border、24px 高、胶囊与统一内边距 | 只读信息借用了可操作控件的边界强度 | 状态优先符号＋文字；分类 tag 才有轻量容器，不继承操作描边 |
+| `Context.choices`、`stepper` 使用 `button`/`.on` | 表单选择、流程、页面导航都借用了按钮语法 | choices 按场景换 select/segmented；阶段按钮导航按 AF-06 删除 |
+| 全局 button min-height 34、统一描边；quiet 也普遍强调色 | 工具栏、表格、表单密度相同；次级操作争夺注意力 | 保留原生 sm/md，按组件与区域决定强调 |
+| 调用点自行传 variant；动作类别只做局部降级 | 没有全页主动作仲裁，风险与重要性混在一起 | 页读模型选 primaryAction；动作同时声明 kind/emphasis/risk |
+
+纠偏已按此契约落地（记录见 TASKS AF-04）：Token 分层、原生 Tabs/Segmented、Status/Tag/Button 分离、页级主动作仲裁与消费端回归均已接通；后续页面只消费这些组件，不再各自拼装按钮与选择控件。旧首轮截图保留为历史证据。
+
+### 8.3 Token 分层与唯一来源
+
+沿用 `styles.css` 为最终样式值来源；不新增平行 JSON、生成器、主题服务或第二套组件库。下列是目标命名，不是已存在的 SDK 属性或已实现的变量。
+
+1. **Reference（`--wb-ref-*`）**：少量固定尺度。space=4/8/12/16/24/32；radius=0/4/6/8；stroke=1/2；reading-body=14/22。只有主题适配层可定义必要的后备色，不让页面各自写 hex。
+2. **System（`--wb-sys-*`）**：主题角色与成对前景/背景。宿主变量 → 工作台语义；浅/深/自定义主题在此映射，不在每个组件重算颜色。
+3. **Component（`--wb-comp-*`）**：只为需要独立调节的部件建别名，例如 button-primary-bg、tabs-indicator、status-text。引用 system/reference，不直接引用另一个组件的私有 Token。
+
+| System 角色 | 宿主适配依据 | 用途与禁止事项 |
+| --- | --- | --- |
+| canvas / surface / surface-raised | `--bg` / `--card` 与实际 elevated surface | 页面、局部对象、弹层；不为每段正文加 surface |
+| text / text-secondary | `--t1` / `--t3`，按实测修正 | 正文、辅助文字；权限与失败原因不使用极淡字 |
+| action-container / on-action | `--accent-fill` 与原生 primary 的配对文字色 | 成对校验主按钮；不能把任意 accent-ink 当填充色，不能一律假定白字 |
+| link / focus / selected-indicator | `--accent-ink` / `--accent` 的对应用途 | 链接、焦点、导航指示；与主按钮背景分别命名 |
+| selected-container / selected-text | 原生局部选择的配对主题值 | 分段/行选择；不是主动作 |
+| divider / outline-control | `--l1`/`--l2` 与必要交互边界 | 装饰分隔和控件边界分开，不能把 control border 套给状态/tag |
+| success / pending / warning / danger | 对应原生 tone 及配对低强调背景 | 可信证据、待决策、风险、失败；不是分类标签的装饰调色板 |
+
+宿主变量的名称不是对比度保证。采用原生 primary 的完整配色而非只抽取一个变量；不满足对比度时在工作台适配层调整整对值，并验证主题切换。主题允许改变色相，不改变“下划线导航、只读状态、实心主要动作”的语法。默认不再将宿主 teal 判作错误配色。
+
+对比度：普通文本 ≥4.5:1；必要的边界/焦点 ≥3:1；大字按对应标准。非交互状态不要求为了满足“控件边界”额外画深色外框，其文本和有意义图标仍须合格。旧版的 58% 混色只是特定主题实测修正，不提升为所有组件的通用设计规则。
+
+### 8.4 组件必须有不同的轮廓与行为
+
+| 组件 | 默认形态 | 当前/选中 | 可否执行业务动作 |
+| --- | --- | --- | --- |
+| 页面 Tabs | 文字＋一条整体分隔线；每项无填充、无外框、无圆角块 | 2px 底部指示线＋字重，不加独立按钮框 | 否；只换当前内容 |
+| Segmented | 2–3 个短选项共用一个浅底槽 | 当前项为中性 surface，与强调主按钮不同 | 否；只切当前视图/局部筛选 |
+| Status | 小符号/圆点＋状态文字；无包围边框 | 不存在 selected；未知/过期/失败用明确词语 | 否；无 actions、hover、focus、手形假象 |
+| Tag | 18–20px 内容高度，4px 圆角、轻中性背景、无操作描边 | 分类 tag 没有 selected | 默认否；筛选移除必须有独立、具名的点击目标 |
+| Primary button | 强调色实心＋配对文字，6px 圆角 | hover/pressed 不改变尺寸；提交时 busy | 是；全页至多一个，名称说明实际后果 |
+| Secondary button | 中性控件轮廓或原生 default | hover 局部反馈，不持久 selected | 是；保存替代、重试等支持动作 |
+| Quiet button | 默认无背景/边框，中性文字；hover 才出现轻背景 | 一般无持久 selected | 是；刷新、复制、展开、返回等，不能伪装成静态文字 |
+| Content link | 语义链接色，必要时下划线/方向提示 | 无按钮 selected | 只打开内容或外部链接；标明目标，不充当提交 |
+| Destructive action | 平时菜单中的危险文字；独立确认区才用 danger 按钮 | 不成为页面默认选中项 | 是；领域门禁不因红色样式而省略 |
+
+形状与位置先表达组件职责，颜色再表达状态。**灰度下仍须区分 Tabs、Tag、Status、Button。** 不给静态标签添加 32px 按钮高度，也不使用“✓ 已选择”把每个视图切换伪装成流程完成。
+
+Tern 的原生 `tabs` 已有 `variant="underline"|"segmented"` 与 `select` 事件；原生 badge 默认胶囊且不换行，不能假定它同时满足状态文本与可移除 tag 的全部需求。Status 优先 text/span 的真实 tone；确需独立形态时才用 scoped role。不要给 badge 临时塞入伪造 SDK 属性。
+
+原生 underline tabs 超宽会裁切，不会自动滚动；三项短页签应在 360px 下适配，额外选项进入视图菜单，而不是强行换行成多排标签。键盘切页只在导航焦点范围内处理，不照搬模板全局 Tab 切页而截获输入字段的焦点移动。
+
+### 8.5 按钮的功能、优先级和风险分别决定
+
+动作契约保留 `kind=navigate/read/edit/decide/execute`；视图另外声明 `emphasis=primary/secondary/tertiary`、`risk=normal/destructive`。这是目标视图元数据，不新增业务持久字段，不改权限协议。
+
+- **kind** 决定行为与文案；**emphasis** 决定注意力；**risk** 决定危险呈现。不能由按钮文案正则或生命周期颜色猜测，更不能“一切写操作都 primary”。
+- 一个页面读模型返回唯一 `primaryAction`（可空）和可用原因；其余调用点不能自行升级 variant。不同页面分别挑选，不按屏幕上每个 card 都分配一个。
+- 创建页主动作“创建需求”仅保存；编辑页“保存修改”可以是主动作；审阅页“批准此方案”才写授权；开始页“开始执行”才启动；这些都是不同提交，不能合并成“检查并批准”。
+- “查看方案”“返回工作”“复制编号”通常是链接/quiet；“刷新”“重新读取”可为 default/quiet。读取如果采集文件并写快照，不能假称纯查看。
+- 没有可执行主要动作时允许没有实心按钮，不能把危险操作或无关操作升级来填空。相关门禁原因放在决策区，不平铺十几个禁用按钮。
+- 危险入口与确认分开。确认区保留醒目的退出动作，最终 danger 名称写清“取消需求”；正常“返回”不能染红。停止运行必须可见，但只有真实执行状态支持时才显示有效操作。
+- `disabled` 保留就近原因；`busy` 保持宽度、防重复触发并反映真实请求状态。`selected` 是导航/选择状态，不是 busy、批准或完成；`:active` 只表示短暂按下。
+
+组件状态表统一覆盖 enabled / hover / pressed / focused / disabled / busy；后两者禁止派发，但不能抹淡失败原因。Status/Tag 不参与按钮状态表。焦点环独立于 selected underline，不因已经选中就隐藏键盘焦点。
+
+### 8.6 排版、密度与布局
+
+方向从“大面积 34px 描边组件”回归 Tern 的两档密度；阅读正文保持中文可读，不对全部节点设同一字体/行高。
+
+| 场景 | 目标 | 取舍 |
+| --- | --- | --- |
+| 页面标题 / 区块标题 | 18/26、15/22，600 | 一页一个标题；文档正文内用标题层级，不每张卡重复 title |
+| 中文阅读 / 表单正文 | 14/22，400 | 约 66ch 阅读宽度，不能限制 diff/table 的必要宽度 |
+| 工具栏 / 操作文字 | 宿主 13px；md 约28px | 主要提交可32px；不将所有按钮最小高度抬至34 |
+| 内容行内操作 | 原生 sm 约22px | 实际指针目标满足至少24px或合规间隔；无法证明时增至32px，不凭视觉高度宣称合格 |
+| 辅助信息 / 代码 | 12–13px；代码等宽 | 权限、错误与决策说明仍用正文尺度 |
+| 触控 | 实际目标至少44px | 独立密度上下文，不全局放大桌面标签 |
+
+组件 gap 优先用原生 `xs/sm/md/lg`（当前文档为2/6/10/16px）；页面 section 使用16/24px节奏。不把 reference 的4px尺度机械替换每个原生 gap。页边距16px，窄面板12px；文档块无描边，只有输入、决策、异常和浮层需要明确边界。列表用对齐、行分隔和轻 hover，不给每行再套一张卡片。
+
+不为形状多样性增加无意义圆角：underline tabs 为0，tag 为4，按钮/输入约6，对象/弹层约8（原生可保留其合理默认）。默认无阴影，浮层才允许轻 elevation。图标遵循宿主风格，16px为主；不以 emoji 的渲染差异代替正式图标。
+
+### 8.7 页面配方与实施顺序
+
+**首页：** 一行项目上下文 → “工作”标题＋唯一创建入口 → 搜索、筛选、视图 → 有需要才出现的决策摘要 → 平面需求列表。没有数据就不显示 stats；状态词在行尾，普通优先级不做 tag。
+
+**工作区：** 返回＋编号/标题＋更多 → 一句状态 → 三项 underline tabs → 当前内容。概览的决策区承载唯一主要动作；状态、计划和文档没有各自的 primary。变更页的“方案 / 实际变更 / 验证”使用局部视图菜单或 segmented，不再增加一排同级 underline tabs。
+
+**最终确认：** 替换阅读页，内容在先、影响与范围其次、底部一组提交/返回；不让底层主按钮继续可操作。保持 AF-02 的焦点与模态限制，不假装 overlay 自动 inert。
+
+执行顺序固定为：AF-04 先交付真实组件对照表面与统一动作强调契约 → AF-05/06 移除旧按钮导航和手工选择墙 → AF-07–10 接入各流程。每步删除被替代样式，不在旧强覆盖后追加另一套“临时更高优先级”。
+
+### 8.8 视觉验收不是只数对比度
+
+AF-04 重新关闭必须同时具备：
+
+1. 同一原生 surface 展示 Tabs、Segmented、Status、Tag、三级按钮及危险确认；标签用真实消费者场景，不把所有样例拉成满宽按钮。
+2. 浅/深/自定义主题与灰度对照，能从轮廓、位置、指示线区分组件；完整显示 enabled/hover/pressed/focus/disabled/busy。灰度对照是设计证据，不代替真人可用性测试。
+3. 页面级 fixture 验证最多一个 primary、纯状态不能点击/聚焦、切页/选择不提交、最终提交才有写入/执行；测试消费者行为，不锁定文案或源文本。
+4. 360/492/800/1100 CSS px 实际 surface，页签不裁切、主动作与原因可达、表格/diff局部滚动；不按整窗宽度或 `cx.cols` 冒充。
+5. 实测文本/必要边界/焦点对比度，记录样本范围；实际焦点与 IME 路径交由生产适配验证，不能拿 gallery 自己的事件适配冒充生产已支持。
+
+正式可用性仍遵循 §12 的陌生用户任务观察。AF-04 本轮交付覆盖组件层、真实主题/状态/灰度/窄宽证据与消费者契约；页面信息架构与旧页头/筛选行仍由 AF-05/06 完成，生产跨字段焦点层仍归 AF-06/15，不能用 gallery 的焦点演示代替。
 
 ## 9. 响应式与桌面输入
 
@@ -390,7 +528,7 @@ AF-03 已完成只读/执行边界分离与动作契约收口：`refreshHandoff`
 
 ## 13. 本次决策摘要
 
-采用：单一任务入口、三页签工作区、单一主动作、文档优先、蓝灰中性色体系、Agent 工具维护机械工作、人工批准与验收、共享领域校验、现有原生技术栈。
+采用：单一任务入口、三页签工作区、单一主动作、文档优先、Tern-native 主题与组件语法、三层语义 Token、Agent 工具维护机械工作、人工批准与验收、共享领域校验、现有原生技术栈。
 
 不采用：只有聊天框、所有能力塞进折叠栏、彩色全阶段导航、拖拽推进生命周期、自动批准/自动验收、靠模型文字认定成功、重写成独立 Web 产品、把工作台权限宣称为系统沙箱。
 

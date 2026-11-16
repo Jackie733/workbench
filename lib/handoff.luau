@@ -13,25 +13,10 @@ local function units(text, position)
     return n
 end
 local M = {}
-local function note(text) return ui.text({ui.span(text or "", "muted")}) end
-local function button(label, action, variant, disabled)
-    return ui.button(label, {key = action, variant = variant or "default", size = "sm", disabled = disabled,
-        actions = {click = action}})
-end
-local function row(key, children)
-    return ui.node("row", {key = key, gap = "sm", wrap = true}, children)
-end
-local function choices(name, label, value, options, disabled)
-    local chips = {}
-    for _, option in options do
-        local selected = value == option.value
-        table.insert(chips, ui.button(option.label, {key = name .. "-" .. option.value,
-            variant = selected and "primary" or "default", size = "sm", on = selected, disabled = disabled,
-            actions = {click = "change:" .. name .. "=" .. option.value}}))
-    end
-    return ui.node("field", {key = name .. "Field", label = label, role = "workbench.choices"},
-        {row(name, chips)})
-end
+local note = Context.note
+local button = Context.button
+local row = Context.row
+local choices = Context.choices
 local function editor(key, label, text, cursor, anchor, lines, readonly, placeholder)
     text = text or ""
     return ui.node("field", {key = "handoffField-" .. key, label = label, help = placeholder}, {
@@ -176,7 +161,7 @@ function M.preparePanel(s)
     local nodes = {
         row("prepareHead", {
             ui.text({ui.span("准备交接 · " .. r.number .. " · " .. r.title, "strong")}),
-            ui.button("收起", {key = "handoff-prepare-close", variant = "quiet", size = "sm",
+            ui.button("收起", {key = "handoff-prepare-close", variant = "quiet", size = "md",
                 actions = {click = "handoff-prepare"}}),
         }),
         note("目标 " .. s.payload.binding.projectRoot .. " · 会话 " .. s.payload.binding.sessionId
@@ -204,7 +189,7 @@ function M.preparePanel(s)
                 or (status == "large" and "超过 16 KiB；预览会拒绝" or "无法读取（缺失或不可读）")
             table.insert(resourceChildren, row("resourceEntry-" .. tostring(index), {
                 ui.text({ui.span(entry.path, "code")}),
-                ui.badge(entry.kind == "verify" and "验证说明" or "上下文", entry.kind == "verify" and "info" or "muted"),
+                Context.status(entry.kind == "verify" and "验证说明" or "上下文", entry.kind == "verify" and "info" or "muted"),
                 note(statusText),
                 button("移除", "resources-remove=" .. entry.id, "quiet", not editable or resourceState.safe == false),
             }))
@@ -217,9 +202,10 @@ function M.preparePanel(s)
     table.insert(resourceChildren, button("绑定此资源", "resources-add", "default",
         not editable or not (h.fields.resourcePath.text or ""):match("%S")
             or (resourceState ~= nil and resourceState.safe == false)))
-    table.insert(nodes, ui.card("绑定资源 · 仅本需求", {
+    table.insert(nodes, ui.node("section", {key = "resourcesCard", role = "workbench.subsection", head = "绑定资源 · 仅本需求",
+        tone = (resourceState and resourceState.safe == false) and "warning" or "muted"}, {
         ui.node("col", {key = "resourceBody", gap = "sm"}, resourceChildren),
-    }, {key = "resourcesCard", tone = (resourceState and resourceState.safe == false) and "warning" or "muted"}))
+    }))
     table.insert(nodes, row("previewActions", {
         button(h.preview and "重新生成完整预览" or "生成完整资料预览", "handoff-preview",
             h.preview and "default" or "primary", not writable or h.pending ~= nil or h.pendingSend ~= nil or s.problem ~= nil),
@@ -228,7 +214,9 @@ function M.preparePanel(s)
     local preview = h.preview
     if preview and preview.requirementId ~= r.requirementId then preview = nil end
     if preview then
-        table.insert(nodes, ui.card("完整预览 · " .. tostring(#preview.text) .. " UTF-8 字节", {
+        table.insert(nodes, ui.node("section", {key = "previewCard", role = "workbench.subsection",
+            head = "完整预览 · " .. tostring(#preview.text) .. " UTF-8 字节",
+            tone = h.previewStale and "warning" or "muted"}, {
             note("目标 " .. s.payload.binding.projectRoot .. " · 会话 " .. s.payload.binding.sessionId
                 .. " · 需求 " .. tostring(preview.requirementId or r.requirementId)
                 .. " · " .. (activityNames[preview.activity] or preview.activity)
@@ -237,13 +225,13 @@ function M.preparePanel(s)
             note("来源：" .. (#(preview.sources or {}) > 0 and table.concat((function()
                 local paths = {}; for _, source in preview.sources do table.insert(paths, source.path .. " · " .. source.sha256) end; return paths
             end)(), "\n") or "无项目文件")),
-            h.previewStale and ui.text({ui.span("此预览来自上次运行；来源令牌已失效。请显式重新生成预览。", "warning")}) or note("SHA-256：" .. tostring(preview.sha256)),
+            h.previewStale and ui.text({ui.span("! 此预览来自上次运行；来源令牌已失效。请显式重新生成预览。", "warning")}) or note("SHA-256：" .. tostring(preview.sha256)),
             ui.node("scroll", {key = "fullPreview", max = {h = "22lines"}}, {ui.text(preview.text)}),
             row("previewDelivery", {
                 button("只预填到 omp（不发送）", "handoff-prefill", "default", Context.evaluateAction("handoff-prefill", s).reason or false),
                 button("明确发送并开始推理", "handoff-send", "primary", Context.evaluateAction("handoff-send", s).reason or false),
             }),
-        }, {key = "previewCard", tone = h.previewStale and "warning" or "muted"}))
+        }))
     end
     return ui.node("card", {key = "preparePanel", role = "workbench.prepare", tone = "accent"}, nodes)
 end
