@@ -5,6 +5,7 @@ import {
   isProjectInitialized,
   listRequirementIds,
   mutateRequirement,
+  readAgentRun,
   readDesignHistory,
   readProject,
   readRequirementBundle,
@@ -13,15 +14,23 @@ import {
   type RequirementBundle,
 } from "./store.ts";
 import {
+  MAX_AGENT_RUNS,
+  MAX_DISCUSSIONS,
   MAX_TIMELINE,
+  REVIEW_VERDICTS,
   SCHEMA_VERSION,
+  type AgentRunRecord,
   type BaselineSnapshot,
   type CriterionInput,
+  type DiscussionEntry,
+  type HandoffNote,
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementDetail,
   type RequirementState,
   type RequirementSummary,
+  type ReviewReport,
+  type ReviewVerdict,
   type Stage,
   type TaskInput,
   type TimelineEvent,
@@ -31,10 +40,12 @@ import {
 } from "./types.ts";
 import {
   deriveTitleFromGoal,
+  isSafeText,
   normalizeCriteria,
   normalizeReason,
   normalizeTasks,
   normalizeTitle,
+  validateAgentRunRecord,
   validateMarkdownContent,
   validateVerificationRecord,
 } from "./validate.ts";
@@ -67,6 +78,7 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
     state: bundle.state,
     specMarkdown: bundle.specMarkdown,
     designMarkdown: bundle.designMarkdown,
+    handoffMarkdown: bundle.handoffMarkdown,
     designHistoryVersions: bundle.designHistoryVersions,
     validity: evaluateRequirement(bundle.state, currentCodeSnapshotHash),
   };
@@ -185,6 +197,91 @@ export function getVerificationEvidence(
   verificationId: string,
 ): { record: VerificationRecord; log: string } {
   return readVerificationEvidence(root, id, verificationId);
+}
+
+export function getAgentRunDetail(
+  root: string,
+  id: string,
+  runId: string,
+): { record: AgentRunRecord; log: string } {
+  return readAgentRun(root, id, runId);
+}
+
+function normalizeHandoffNoteInput(
+  raw: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] } | undefined,
+  prev: HandoffNote | null | undefined,
+  now: number,
+): HandoffNote | null | undefined {
+  if (raw === undefined) return prev;
+  const clean = (arr: string[] | undefined, fallback: string[]) =>
+    arr === undefined
+      ? fallback
+      : arr
+          .filter((s) => typeof s === "string" && s.trim().length > 0)
+          .slice(0, 32)
+          .map((s) => s.trim().slice(0, 900));
+  return {
+    updatedAt: now,
+    keyDecisions: clean(raw.keyDecisions, prev?.keyDecisions ?? []),
+    deadEnds: clean(raw.deadEnds, prev?.deadEnds ?? []),
+    nextSteps: clean(raw.nextSteps, prev?.nextSteps ?? []),
+  };
+}
+
+export async function updateDesign(
+  root: string,
+  id: string,
+  input: {
+    designMarkdown: string;
+    expectedRevision?: number;
+    actor?: "human" | "agent";
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
+      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不允许直接修改技术方案`);
+    }
+    const nextDesign = validateMarkdownContent(input.designMarkdown, "design", true);
+    const nextDesignHash = computeDesignHash(nextDesign);
+    const designChanged = nextDesignHash !== state.designHash;
+
+    let nextDesignVersion = state.designVersion;
+    let snapshotDesignVersion: number | undefined;
+    if (designChanged && nextDesignHash !== "") {
+      nextDesignVersion += 1;
+      snapshotDesignVersion = nextDesignVersion;
+    }
+
+    let nextApproval = state.approval;
+    let nextStage = state.stage;
+    if (designChanged && nextApproval !== null && state.track === "plan_first") {
+      nextApproval = null;
+      nextStage = "awaiting_approval";
+    } else if (designChanged && nextDesignHash !== "" && (state.stage === "draft" || state.stage === "designing")) {
+      nextStage = "awaiting_approval";
+    }
+
+    const actor = input.actor ?? "human";
+    return {
+      designMarkdown: nextDesign,
+      snapshotDesignVersion,
+      state: {
+        ...state,
+        designVersion: nextDesignVersion,
+        designHash: nextDesignHash,
+        approval: nextApproval,
+        stage: nextStage,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "design_proposed", actor, designChanged ? `在线更新技术方案 v${nextDesignVersion}` : "保存技术方案"),
+        ),
+      },
+    };
+  });
+
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
 export async function createRequirement(
@@ -324,6 +421,7 @@ export async function propose(
     criteria?: CriterionInput[];
     designMarkdown?: string;
     summary?: string;
+    handoffNote?: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] };
     expectedRevision?: number;
     actor?: "agent" | "human";
     currentCodeSnapshotHash?: string | null;
@@ -371,9 +469,26 @@ export async function propose(
     const actor = input.actor ?? "agent";
 
     if (nextApproval !== null && (specChanged || designChanged)) {
-      // Any change to spec/criteria/design invalidates prior approval and forces human re-check.
-      nextApproval = null;
-      nextStage = "awaiting_approval";
+      if (
+        state.track === "fast_track" &&
+        state.approval?.track === "fast_track" &&
+        actor === "agent" &&
+        state.criteria.length === 0 &&
+        !designChanged &&
+        nextSpec === current.specMarkdown &&
+        nextTitle === state.title
+      ) {
+        // Fast-track started with 0 criteria; allow agent to populate initial testable criteria without resetting approval.
+        nextStage = "implementing";
+        nextApproval = {
+          ...state.approval,
+          specHash: nextSpecHash,
+        };
+      } else {
+        // Any change to spec/criteria/design invalidates prior approval and forces human re-check.
+        nextApproval = null;
+        nextStage = "awaiting_approval";
+      }
     } else if (state.stage === "draft" || state.stage === "designing") {
       if (nextDesignHash !== "" || state.track === "plan_first") {
         nextStage = "awaiting_approval";
@@ -386,6 +501,8 @@ export async function propose(
       (designChanged && nextDesignHash !== ""
         ? `提交技术方案 v${nextDesignVersion}`
         : "更新需求规范与验收条件");
+
+    const nextHandoffNote = normalizeHandoffNoteInput(input.handoffNote, state.handoffNote, now);
 
     return {
       specMarkdown: input.specMarkdown !== undefined ? nextSpec : undefined,
@@ -401,6 +518,7 @@ export async function propose(
         approval: nextApproval,
         stage: nextStage,
         lastFeedback: null,
+        ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
         timeline: appendTimeline(state.timeline, makeEvent(now, kind, actor, eventSummary)),
       },
     };
@@ -549,6 +667,7 @@ export async function updateTasks(
     tasks?: TaskInput[];
     readyForAcceptance?: boolean;
     note?: string;
+    handoffNote?: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] };
     expectedRevision?: number;
     actor?: "agent" | "human";
     currentCodeSnapshotHash?: string | null;
@@ -601,11 +720,14 @@ export async function updateTasks(
       );
     }
 
+    const nextHandoffNote = normalizeHandoffNoteInput(input.handoffNote, state.handoffNote, now);
+
     return {
       state: {
         ...state,
         tasks: nextTasks,
         stage: nextStage,
+        ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
         timeline: nextTimeline,
       },
     };
@@ -823,4 +945,211 @@ export async function reopenRequirement(
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/** Appends a discussion / inline annotation entry without mutating stage or invalidating approvals. */
+export async function addDiscussion(
+  root: string,
+  id: string,
+  input: {
+    actor: "human" | "agent";
+    mode: "ask" | "refine";
+    message: string;
+    anchor?: string;
+    harness?: string;
+    model?: string;
+    resolved?: boolean;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<{ detail: RequirementDetail; entry: DiscussionEntry }> {
+  const message = input.message.trim();
+  if (!isSafeText(message, 32 * 1024)) {
+    throw new WorkbenchError("invalid_input", "讨论或批注内容不能为空或超过长度上限");
+  }
+  const entry: DiscussionEntry = {
+    id: `D-${Date.now()}-${randomUUID().slice(0, 6)}`,
+    at: Date.now(),
+    actor: input.actor,
+    mode: input.mode,
+    ...(input.anchor?.trim() ? { anchor: input.anchor.trim().slice(0, 120) } : {}),
+    ...(input.harness?.trim() ? { harness: input.harness.trim().slice(0, 64) } : {}),
+    ...(input.model?.trim() ? { model: input.model.trim().slice(0, 200) } : {}),
+    message,
+    ...(input.resolved !== undefined ? { resolved: input.resolved } : {}),
+  };
+
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    const prev = state.discussions ?? [];
+    const next = [...prev, entry].slice(-MAX_DISCUSSIONS);
+    const label = entry.anchor ? `[${entry.anchor}] ` : "";
+    const prefix = input.actor === "human" ? (input.mode === "ask" ? "提问探讨" : "添加批注") : "Agent 回复";
+    return {
+      state: {
+        ...state,
+        discussions: next,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "discussed", input.actor, `${prefix}：${label}${message.slice(0, 80)}`),
+        ),
+      },
+    };
+  });
+
+  return { detail: toDetail(bundle, input.currentCodeSnapshotHash ?? null), entry };
+}
+
+export async function resolveDiscussions(
+  root: string,
+  id: string,
+  input: { ids?: string[]; resolved?: boolean; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  const targetResolved = input.resolved ?? true;
+  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+    const { state } = current;
+    const idSet = input.ids ? new Set(input.ids) : null;
+    const next = (state.discussions ?? []).map((item) =>
+      idSet === null || idSet.has(item.id) ? { ...item, resolved: targetResolved } : item,
+    );
+    return {
+      state: {
+        ...state,
+        discussions: next,
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+export async function startAgentRun(
+  root: string,
+  id: string,
+  recordInput: AgentRunRecord,
+  currentCodeSnapshotHash?: string | null,
+): Promise<RequirementDetail> {
+  const record = validateAgentRunRecord(recordInput);
+  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+    const { state } = current;
+    const prev = state.agentRuns ?? [];
+    const next = [...prev.filter((r) => r.id !== record.id), record].slice(-MAX_AGENT_RUNS);
+    return {
+      runWrite: { record, rawLog: "" },
+      state: {
+        ...state,
+        agentRuns: next,
+      },
+    };
+  });
+  return toDetail(bundle, currentCodeSnapshotHash ?? null);
+}
+
+export async function finishAgentRun(
+  root: string,
+  id: string,
+  runId: string,
+  patch: {
+    status: "succeeded" | "failed" | "cancelled";
+    endedAt: number;
+    exitCode: number | null;
+    durationMs: number;
+    nativeSessionId?: string;
+    rateLimited?: boolean;
+    errorSummary?: string;
+  },
+  rawLog: string,
+  currentCodeSnapshotHash?: string | null,
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+    const { state } = current;
+    const prevRuns = state.agentRuns ?? [];
+    const existing = prevRuns.find((r) => r.id === runId);
+    if (!existing) {
+      throw new WorkbenchError("not_found", `未找到运行记录 ${runId}`);
+    }
+    const updated: AgentRunRecord = validateAgentRunRecord({
+      ...existing,
+      status: patch.status,
+      endedAt: patch.endedAt,
+      exitCode: patch.exitCode,
+      durationMs: patch.durationMs,
+      ...(patch.nativeSessionId ? { nativeSessionId: patch.nativeSessionId } : {}),
+      ...(patch.rateLimited !== undefined ? { rateLimited: patch.rateLimited } : {}),
+      ...(patch.errorSummary ? { errorSummary: patch.errorSummary.slice(0, 600) } : {}),
+    });
+    const nextRuns = prevRuns.map((r) => (r.id === runId ? updated : r)).slice(-MAX_AGENT_RUNS);
+    return {
+      runWrite: { record: updated, rawLog },
+      state: {
+        ...state,
+        agentRuns: nextRuns,
+      },
+    };
+  });
+  return toDetail(bundle, currentCodeSnapshotHash ?? null);
+}
+
+/** Records a cross-model code review report without bypassing human acceptance sovereignty. */
+export async function recordReviewReport(
+  root: string,
+  id: string,
+  input: {
+    reviewerHarness: string;
+    reviewerModel: string;
+    verdict: ReviewVerdict;
+    summary: string;
+    markdown: string;
+    reviewedSpecHash: string;
+    reviewedCodeSnapshotHash: string;
+  },
+): Promise<RequirementDetail> {
+  if (!REVIEW_VERDICTS.includes(input.verdict)) {
+    throw new WorkbenchError("invalid_input", `无效的审查结论: ${String(input.verdict)}`);
+  }
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    const report: ReviewReport = {
+      id: `REV-${now}-${randomUUID().slice(0, 6)}`,
+      reviewerHarness: input.reviewerHarness.trim(),
+      reviewerModel: input.reviewerModel.trim(),
+      verdict: input.verdict,
+      summary: input.summary.trim().slice(0, 1800) || "已完成独立代码审查",
+      markdown: input.markdown.trim().slice(0, 60 * 1024) || input.summary.trim(),
+      reviewedSpecHash: input.reviewedSpecHash,
+      reviewedCodeSnapshotHash: input.reviewedCodeSnapshotHash,
+      reviewedAt: now,
+    };
+    const verdictLabel = input.verdict === "pass" ? "建议通过" : input.verdict === "concern" ? "有关注点" : "建议阻塞修复";
+    return {
+      state: {
+        ...state,
+        reviewReport: report,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "review_submitted",
+            "agent",
+            `跨模型审查 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}`,
+            report.summary,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.reviewedCodeSnapshotHash);
+}
+
+export async function saveHandoffMarkdown(
+  root: string,
+  id: string,
+  markdown: string,
+  currentCodeSnapshotHash?: string | null,
+): Promise<RequirementDetail> {
+  const valid = validateMarkdownContent(markdown, "handoff", true);
+  const bundle = await mutateRequirement(root, id, undefined, (current) => ({
+    handoffMarkdown: valid,
+    state: current.state,
+  }));
+  return toDetail(bundle, currentCodeSnapshotHash ?? null);
 }

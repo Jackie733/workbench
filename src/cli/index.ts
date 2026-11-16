@@ -2,14 +2,17 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createRequirement, initProject } from "../core/engine.ts";
+import { createRequirement, getRequirement, initProject, recordReviewReport } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
+import { observeGitSnapshot } from "../core/git.ts";
 import { runAllVerifications } from "../core/runner.ts";
-import type { CriterionInput, PrivacyMode, TaskInput } from "../core/types.ts";
+import { REVIEW_VERDICTS, WORKBENCH_DIR, type CriterionInput, type PrivacyMode, type ReviewVerdict, type TaskInput } from "../core/types.ts";
+import { registerHubProject } from "../hub/registry.ts";
 import { startMcpServer } from "../mcp/server.ts";
 import { executeWorkbenchTool } from "../mcp/tools.ts";
 import { startWorkbenchServer } from "../server/index.ts";
+import { getDaemonStatus, openUrlInBrowser, startDaemon, stopDaemon } from "./daemon.ts";
 
 interface ParsedArgs {
   command: string;
@@ -34,7 +37,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
-        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track"]);
+        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track", "hub"]);
         if (!booleanFlags.has(key) && next !== undefined && !next.startsWith("--")) {
           flags.set(key, next);
           i += 1;
@@ -107,6 +110,11 @@ function helpText(): string {
     "用法: wb [--root <path>] [--json] <command> [args]",
     "",
     "命令:",
+    "  start [--port 4318] [--host 127.0.0.1]     启动全局常驻 Workbench Hub 守护进程",
+    "  stop                                       停止全局 Workbench Hub 守护进程",
+    "  restart [--port 4318]                      重启全局 Workbench Hub 守护进程",
+    "  status                                     查看守护进程与已纳管项目状态",
+    "  open                                       确保 Hub 运行并在浏览器打开工作台",
     "  init [--name <name>] [--local|--tracked]   初始化项目 .workbench/ 存储",
     "  list [--scope active|done|cancelled|all]   列出需求摘要",
     "  get <REQ-ID> [--diff]                      查看需求详情与覆盖状态",
@@ -117,8 +125,10 @@ function helpText(): string {
     "                 [--ready] [--note <text>] [--revision <n>]",
     "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all) [--timeout <ms>]",
     "                                             运行真实验证命令并记录不可变证据",
+    "  review <REQ-ID> --verdict <pass|concern|block> --summary <text> [--body <md|@file>]",
+    "                                             提交跨模型代码审查结论（不绕过人工验收）",
     "  mcp                                        启动标准 MCP Server (stdio)",
-    "  serve [--port <n>] [--host <addr>]         启动本地 HTTP/WS 服务与 Web UI",
+    "  serve [--hub] [--port <n>] [--host <addr>] 前台启动 HTTP/WS 服务与 Web UI",
     "",
     "注: 批准方案与最终验收只能由人类在 Web UI 界面完成，CLI 与 MCP 不提供审批绕过命令。",
   ].join("\n");
@@ -138,6 +148,61 @@ export async function runCli(argv: string[]): Promise<number> {
     const root = typeof rootArg === "string" ? canonicalRoot(rootArg) : resolveDefaultRoot();
 
     switch (parsed.command) {
+      case "start": {
+        const portFlag = parsed.flags.get("port");
+        const hostFlag = parsed.flags.get("host");
+        const port = typeof portFlag === "string" ? Number(portFlag) : 4318;
+        const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
+        if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+          throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
+        }
+        const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
+        if (maybeGitOrWb) {
+          registerHubProject(root, { activate: true });
+        }
+        const res = await startDaemon({
+          port,
+          hostname,
+          registerRoot: maybeGitOrWb ? root : undefined,
+        });
+        printResult({ ...res.info, started: res.started }, asJson);
+        return 0;
+      }
+
+      case "stop": {
+        const res = await stopDaemon();
+        printResult(res, asJson);
+        return 0;
+      }
+
+      case "restart": {
+        const portFlag = parsed.flags.get("port");
+        const hostFlag = parsed.flags.get("host");
+        const port = typeof portFlag === "string" ? Number(portFlag) : 4318;
+        const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
+        await stopDaemon();
+        const res = await startDaemon({ port, hostname });
+        printResult({ ...res.info, restarted: true }, asJson);
+        return 0;
+      }
+
+      case "status": {
+        const status = await getDaemonStatus();
+        printResult(status, asJson);
+        return 0;
+      }
+
+      case "open": {
+        const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
+        if (maybeGitOrWb) {
+          registerHubProject(root, { activate: true });
+        }
+        const res = await startDaemon({ registerRoot: maybeGitOrWb ? root : undefined });
+        openUrlInBrowser(res.info.url);
+        printResult({ url: res.info.url, pid: res.info.pid }, asJson);
+        return 0;
+      }
+
       case "mcp": {
         await startMcpServer(root);
         return 0;
@@ -146,13 +211,14 @@ export async function runCli(argv: string[]): Promise<number> {
       case "serve": {
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
-        const port = typeof portFlag === "string" ? Number(portFlag) : 0;
+        const hubMode = parsed.flags.get("hub") === true;
+        const port = typeof portFlag === "string" ? Number(portFlag) : hubMode ? 4318 : 0;
         const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
         if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
         }
-        const handle = await startWorkbenchServer({ root, port, hostname });
-        printResult({ url: handle.url, port: handle.port, root: handle.root, pid: process.pid }, asJson);
+        const handle = await startWorkbenchServer({ root, port, hostname, hubMode });
+        printResult({ url: handle.url, port: handle.port, root: handle.root, pid: process.pid, hubMode }, asJson);
         await new Promise<void>((resolve) => {
           const shutdown = () => {
             handle.stop();
@@ -316,6 +382,36 @@ export async function runCli(argv: string[]): Promise<number> {
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         });
         printResult(res, asJson);
+        return 0;
+      }
+
+      case "review": {
+        const id = parsed.positionals[0];
+        if (!id) throw new WorkbenchError("invalid_input", "请提供需求编号，例如: wb review REQ-001 --verdict pass --summary ...");
+        const verdict = parsed.flags.get("verdict");
+        const summary = parsed.flags.get("summary");
+        if (typeof verdict !== "string" || !REVIEW_VERDICTS.includes(verdict as ReviewVerdict)) {
+          throw new WorkbenchError("invalid_input", "--verdict 必须是 pass | concern | block");
+        }
+        if (typeof summary !== "string" || !summary.trim()) {
+          throw new WorkbenchError("invalid_input", "请提供 --summary <一句话结论>");
+        }
+        const bodyFlag = parsed.flags.get("body");
+        const markdown = typeof bodyFlag === "string" ? readValueOrFile(bodyFlag) : summary.trim();
+        const harnessFlag = parsed.flags.get("harness");
+        const modelFlag = parsed.flags.get("model");
+        const snapshot = await observeGitSnapshot(root);
+        const detail = getRequirement(root, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const updated = await recordReviewReport(root, id, {
+          reviewerHarness: typeof harnessFlag === "string" ? harnessFlag : "cli",
+          reviewerModel: typeof modelFlag === "string" ? modelFlag : "manual",
+          verdict: verdict as ReviewVerdict,
+          summary: summary.trim(),
+          markdown,
+          reviewedSpecHash: detail.state.specHash,
+          reviewedCodeSnapshotHash: snapshot?.fingerprint ?? detail.state.specHash,
+        });
+        printResult({ id: updated.state.id, reviewReport: updated.state.reviewReport }, asJson);
         return 0;
       }
 

@@ -45,31 +45,39 @@ interface ExecResult {
 
 function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      {
-        cwd,
-        timeout: timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
-        encoding: "buffer",
-      },
-      (error, stdout, stderr) => {
-        if (error && typeof (error as NodeJS.ErrnoException).code === "string") {
-          reject(error);
-          return;
-        }
-        const exitCode =
-          error && typeof (error as { code?: unknown }).code === "number"
-            ? ((error as { code: number }).code ?? 1)
-            : 0;
-        resolve({
-          code: exitCode,
-          stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
-          stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
-        });
-      },
-    );
+    if (!fs.existsSync(cwd)) {
+      reject(Object.assign(new Error(`cwd no longer exists: ${cwd}`), { code: "ENOENT" }));
+      return;
+    }
+    try {
+      execFile(
+        "git",
+        args,
+        {
+          cwd,
+          timeout: timeoutMs,
+          maxBuffer: 16 * 1024 * 1024,
+          encoding: "buffer",
+        },
+        (error, stdout, stderr) => {
+          if (error && typeof (error as NodeJS.ErrnoException).code === "string") {
+            reject(error);
+            return;
+          }
+          const exitCode =
+            error && typeof (error as { code?: unknown }).code === "number"
+              ? ((error as { code: number }).code ?? 1)
+              : 0;
+          resolve({
+            code: exitCode,
+            stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? ""),
+            stderr: Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? ""),
+          });
+        },
+      );
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
@@ -162,10 +170,15 @@ export async function observeGitSnapshot(root: string): Promise<BaselineSnapshot
     return null;
   }
 
-  const headRes = await execGit(base, ["rev-parse", "--verify", "HEAD"]);
+  let headRes: ExecResult;
+  let statusRes: ExecResult;
+  try {
+    headRes = await execGit(base, ["rev-parse", "--verify", "HEAD"]);
+    statusRes = await execGit(base, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
+  } catch {
+    return null;
+  }
   const head = headRes.code === 0 ? headRes.stdout.toString("utf8").trim() : "";
-
-  const statusRes = await execGit(base, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
   const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
   entries.sort((a, b) => a.path.localeCompare(b.path));
 

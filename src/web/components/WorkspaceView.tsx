@@ -1,0 +1,1092 @@
+import { useState } from "react";
+import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
+import { api } from "../api.ts";
+import { useWorkbench } from "../context.tsx";
+import { parseUnifiedDiff, renderDiffLinesHtml, renderSimpleLineDiff } from "../render.ts";
+import {
+  collectModelOptions,
+  COVERAGE_META,
+  defaultActionForRequirement,
+  EVIDENCE_META,
+  formatDateTime,
+  STAGE_META,
+  TASK_META,
+  VERDICT_META,
+} from "../state.ts";
+import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
+
+function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
+  const stage = d.state.stage;
+  const steps = [
+    { key: "draft", label: "1. 需求草稿" },
+    { key: "designing", label: "2. 方案设计" },
+    { key: "awaiting_approval", label: "3. 人工审阅" },
+    { key: "implementing", label: "4. 编码与验证" },
+    { key: "done", label: "5. 验收完成" },
+  ];
+  const order: Record<Stage, number> = {
+    draft: 0,
+    designing: 1,
+    awaiting_approval: 2,
+    implementing: 3,
+    awaiting_acceptance: 3,
+    done: 4,
+    blocked: 3,
+    cancelled: 0,
+  };
+  const idx = order[stage];
+
+  return (
+    <div className="stepper" data-testid="stage-stepper">
+      {steps.map((st, i) => {
+        const isActive = stage !== "done" && i === idx;
+        const cls =
+          stage === "done"
+            ? "done"
+            : i < idx
+              ? "done"
+              : isActive
+                ? running
+                  ? "active step-running"
+                  : "active"
+                : "";
+        return (
+          <div key={st.key} style={{ display: "contents" }}>
+            {i > 0 && <div className="step-line" />}
+            <div className={`step-item ${cls}`}>
+              <span className="step-dot" />
+              <span>{st.label}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function LiveAgentBanner({ run, liveText }: { run: AgentRunRecord; liveText: string }) {
+  const { setDrawerTab, cancelRun } = useWorkbench();
+  const actionLabels: Record<string, string> = {
+    design: "梳理规范与方案设计",
+    implement: "编写代码与运行验证",
+    fix: "诊断并修复失败项",
+    review: "独立跨模型审查",
+    ask: "实时探讨解答",
+  };
+  const lines = liveText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("$ "));
+  const latestLine = lines[lines.length - 1]?.slice(0, 140) ?? "已连接模型进程，等待首段输出…";
+
+  return (
+    <section className="live-agent-banner" data-testid="live-agent-banner">
+      <div className="live-agent-head">
+        <div className="live-agent-title">
+          <span className="pulse-dot" />
+          <strong>Agent 正在执行 · {actionLabels[run.action] ?? run.action}</strong>
+          <span className="badge info">
+            {run.harness}/{run.model}
+          </span>
+        </div>
+        <div className="live-agent-controls">
+          <LiveTimer startedAt={run.startedAt} />
+          <button
+            className="btn xs"
+            type="button"
+            data-testid="open-console-tab-btn"
+            onClick={() => setDrawerTab("console")}
+          >
+            查看终端流
+          </button>
+          <button
+            className="btn danger xs"
+            type="button"
+            onClick={() => void cancelRun(run.id)}
+          >
+            终止
+          </button>
+        </div>
+      </div>
+      <div className="live-progress-track" aria-hidden="true">
+        <div className="live-shimmer-bar" />
+      </div>
+      <div className="live-preview-row">
+        <span className="muted xs">实时动态：</span>
+        <code className="live-preview-line" data-testid="live-banner-preview">
+          {latestLine}
+        </code>
+      </div>
+    </section>
+  );
+}
+
+function SpecDesignTab({ d }: { d: RequirementDetail }) {
+  const { state, setState, runBusy, triggerActiveRun, executeVerify, showToast } = useWorkbench();
+  const { state: s, validity } = d;
+  const historyVers = d.designHistoryVersions;
+  const activeVer = state.designViewVersion ?? s.designVersion;
+  const review = s.reviewReport;
+  const revValid = validity.reviewValidity;
+
+  const openAnnotate = (anchor: string) => {
+    setState((prev) => ({ ...prev, modal: { kind: "annotate_anchor", anchor, message: "", mode: "refine" } }));
+  };
+
+  const saveSpec = async () => {
+    const criteria = state.specDraftCriteria
+      .filter((c) => c.description.trim().length > 0)
+      .map((c) => ({
+        id: c.id.trim() || undefined,
+        description: c.description.trim(),
+        required: c.required,
+        command: c.command.trim() || undefined,
+      }));
+    const res = await runBusy(async () => {
+      const out = await api.updateSpec(s.id, {
+        title: state.specDraftTitle,
+        specMarkdown: state.specDraftBody,
+        criteria,
+        expectedRevision: s.revision,
+      });
+      setState((prev) => ({ ...prev, detail: out.detail, editingSpec: false }));
+      return out;
+    });
+    if (res) showToast("已保存规范与验收条件");
+  };
+
+  const saveDesign = async () => {
+    const res = await runBusy(async () => {
+      const out = await api.updateDesign(s.id, {
+        designMarkdown: state.designDraftBody,
+        expectedRevision: s.revision,
+      });
+      setState((prev) => ({ ...prev, detail: out.detail, editingDesign: false }));
+      return out;
+    });
+    if (res) showToast("已保存技术方案");
+  };
+
+  const toggleDesignDiff = async () => {
+    if (state.designComparePrev) {
+      setState((prev) => ({ ...prev, designComparePrev: false }));
+      return;
+    }
+    if (!state.designCompareText) {
+      const ver = state.designViewVersion ?? s.designVersion;
+      const curr = ver === s.designVersion ? d.designMarkdown : (await api.getDesignHistory(s.id, ver)).markdown;
+      const prevVer = ver > 1 ? ver - 1 : ver;
+      const prev = ver > 1 ? (await api.getDesignHistory(s.id, prevVer)).markdown : curr;
+      setState((p) => ({
+        ...p,
+        designComparePrev: true,
+        designCompareText: { prev, curr, prevVer, currVer: ver },
+      }));
+    } else {
+      setState((p) => ({ ...p, designComparePrev: true }));
+    }
+  };
+
+  return (
+    <>
+      {review && (
+        <div className={`card review-card ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
+          <div className="card-head">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <h3>跨模型 Code Review</h3>
+              <span className={`badge ${VERDICT_META[review.verdict].tone}`}>{VERDICT_META[review.verdict].label}</span>
+              <span className={`badge ${revValid.effectiveState === "current" ? "info" : "warning"}`}>
+                {revValid.effectiveState === "current" ? "当前快照有效" : "代码已变·建议复审"}
+              </span>
+              <span className="muted xs">
+                {review.reviewerHarness} · {review.reviewerModel}
+              </span>
+            </div>
+            <button
+              className="btn xs"
+              type="button"
+              disabled={state.busy}
+              onClick={() => void triggerActiveRun(s.id, "review")}
+            >
+              🔍 重新审查
+            </button>
+          </div>
+          <div style={{ fontWeight: 500, marginBottom: 6 }}>{review.summary}</div>
+          <details>
+            <summary className="xs muted" style={{ cursor: "pointer" }}>
+              展开完整审查意见
+            </summary>
+            <MarkdownView markdown={review.markdown} className="md-body xs" />
+          </details>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-head">
+          <h3>需求目标与范围（spec.md）</h3>
+          {state.editingSpec ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn xs"
+                type="button"
+                data-action="start-edit-spec"
+                onClick={() => setState((prev) => ({ ...prev, editingSpec: false }))}
+              >
+                取消
+              </button>
+              <button
+                className="btn primary xs"
+                type="button"
+                data-testid="save-spec-btn"
+                disabled={state.busy}
+                onClick={() => void saveSpec()}
+              >
+                保存规范与条件
+              </button>
+            </div>
+          ) : (
+            s.stage !== "done" &&
+            s.stage !== "cancelled" &&
+            s.stage !== "blocked" && (
+              <button
+                className="btn xs"
+                type="button"
+                data-action="start-edit-spec"
+                onClick={() =>
+                  setState((prev) => ({
+                    ...prev,
+                    moreMenuOpen: false,
+                    editingSpec: true,
+                    specDraftTitle: s.title,
+                    specDraftBody: d.specMarkdown,
+                    specDraftCriteria: s.criteria.map((c) => ({
+                      id: c.id,
+                      description: c.description,
+                      required: c.required,
+                      command: c.command ?? "",
+                    })),
+                  }))
+                }
+              >
+                编辑规范与条件
+              </button>
+            )
+          )}
+        </div>
+
+        {state.editingSpec ? (
+          <div data-testid="spec-editor">
+            <input
+              className="input"
+              id="spec-title-input"
+              value={state.specDraftTitle}
+              placeholder="需求标题"
+              style={{ marginBottom: 8 }}
+              onChange={(e) => setState((prev) => ({ ...prev, specDraftTitle: e.target.value }))}
+            />
+            <textarea
+              className="textarea"
+              id="spec-body-input"
+              value={state.specDraftBody}
+              onChange={(e) => setState((prev) => ({ ...prev, specDraftBody: e.target.value }))}
+            />
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <strong style={{ fontSize: 13 }}>验收条件清单</strong>
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-action="add-criterion"
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      specDraftCriteria: [
+                        ...prev.specDraftCriteria,
+                        { id: `AC-${prev.specDraftCriteria.length + 1}`, description: "", required: true, command: "" },
+                      ],
+                    }))
+                  }
+                >
+                  + 添加条件
+                </button>
+              </div>
+              {state.specDraftCriteria.map((c, idx) => (
+                <div key={idx} className="crit-edit-row" data-criterion-idx={idx}>
+                  <input
+                    className="input"
+                    data-crit-field="id"
+                    value={c.id}
+                    placeholder={`AC-${idx + 1}`}
+                    onChange={(e) =>
+                      setState((prev) => {
+                        const next = [...prev.specDraftCriteria];
+                        next[idx] = { ...next[idx]!, id: e.target.value };
+                        return { ...prev, specDraftCriteria: next };
+                      })
+                    }
+                  />
+                  <input
+                    className="input"
+                    data-crit-field="description"
+                    value={c.description}
+                    placeholder="条件描述"
+                    onChange={(e) =>
+                      setState((prev) => {
+                        const next = [...prev.specDraftCriteria];
+                        next[idx] = { ...next[idx]!, description: e.target.value };
+                        return { ...prev, specDraftCriteria: next };
+                      })
+                    }
+                  />
+                  <input
+                    className="input"
+                    data-crit-field="command"
+                    value={c.command}
+                    placeholder="验证命令（可选）"
+                    onChange={(e) =>
+                      setState((prev) => {
+                        const next = [...prev.specDraftCriteria];
+                        next[idx] = { ...next[idx]!, command: e.target.value };
+                        return { ...prev, specDraftCriteria: next };
+                      })
+                    }
+                  />
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={c.required}
+                      onChange={(e) =>
+                        setState((prev) => {
+                          const next = [...prev.specDraftCriteria];
+                          next[idx] = { ...next[idx]!, required: e.target.checked };
+                          return { ...prev, specDraftCriteria: next };
+                        })
+                      }
+                    />{" "}
+                    必需
+                  </label>
+                  <button
+                    className="btn ghost xs"
+                    type="button"
+                    onClick={() =>
+                      setState((prev) => ({
+                        ...prev,
+                        specDraftCriteria: prev.specDraftCriteria.filter((_, i) => i !== idx),
+                      }))
+                    }
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <MarkdownView markdown={d.specMarkdown} annotatable docLabel="spec.md" onAnnotate={openAnnotate} />
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>
+            验收条件（必需 {validity.coverage.requiredPassed}/{validity.coverage.requiredTotal}）
+          </h3>
+        </div>
+        {validity.coverage.items.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            尚未定义验收条件。可让 Agent 在方案中自动补全，或手动编辑添加。
+          </p>
+        ) : (
+          validity.coverage.items.map((item) => {
+            const meta = COVERAGE_META[item.state];
+            return (
+              <div key={item.criterion.id} className="criteria-row" data-testid={`crit-${item.criterion.id}`}>
+                <span className={`badge ${meta.tone}`}>
+                  {meta.symbol} {meta.label}
+                </span>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 500 }}>
+                    <span className="req-id" style={{ marginRight: 6 }}>
+                      {item.criterion.id}
+                    </span>
+                    {item.criterion.description}
+                    <span className="badge neutral" style={{ marginLeft: 6 }}>
+                      {item.criterion.required ? "必需" : "参考"}
+                    </span>
+                  </div>
+                  {item.criterion.command && <div className="crit-cmd">{item.criterion.command}</div>}
+                  {item.reason && (
+                    <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                      {item.reason}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <button
+                    className="btn ghost xs"
+                    type="button"
+                    data-action="annotate-anchor"
+                    data-anchor={`条件 ${item.criterion.id}`}
+                    title="对此条件提问或批注"
+                    onClick={() => openAnnotate(`条件 ${item.criterion.id}`)}
+                  >
+                    💬
+                  </button>
+                  {item.criterion.command && s.stage !== "done" && s.stage !== "cancelled" && (
+                    <button
+                      className="btn xs"
+                      type="button"
+                      disabled={state.busy}
+                      onClick={() =>
+                        void executeVerify(s.id, {
+                          command: item.criterion.command!,
+                          criterionIds: [item.criterion.id],
+                        }).then((res) => {
+                          if (res) {
+                            showToast(
+                              res.runs[0]?.passed ? `${item.criterion.id} 验证通过` : `${item.criterion.id} 验证未通过`,
+                              !res.runs[0]?.passed,
+                            );
+                          }
+                        })
+                      }
+                    >
+                      运行
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>技术方案（design.md{s.designVersion > 0 ? ` · v${activeVer}` : ""}）</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {historyVers.length > 1 && (
+              <button
+                className="btn xs"
+                type="button"
+                data-action="toggle-design-diff"
+                onClick={() => void toggleDesignDiff()}
+              >
+                {state.designComparePrev ? "关闭版本对比" : `对比 v${activeVer - 1} → v${activeVer}`}
+              </button>
+            )}
+            {state.editingDesign ? (
+              <>
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-action="add-criterion"
+                  onClick={() => setState((prev) => ({ ...prev, editingDesign: false }))}
+                >
+                  取消
+                </button>
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="save-design-btn"
+                  disabled={state.busy}
+                  onClick={() => void saveDesign()}
+                >
+                  保存方案修改
+                </button>
+              </>
+            ) : (
+              s.stage !== "done" &&
+              s.stage !== "cancelled" &&
+              s.stage !== "blocked" && (
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="start-edit-design-btn"
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      moreMenuOpen: false,
+                      editingDesign: true,
+                      designDraftBody: d.designMarkdown,
+                    }))
+                  }
+                >
+                  直接编辑方案
+                </button>
+              )
+            )}
+          </div>
+        </div>
+
+        {state.editingDesign ? (
+          <div data-testid="design-editor">
+            <textarea
+              className="textarea"
+              id="design-body-input"
+              data-testid="design-body-input"
+              style={{ minHeight: 220, fontFamily: "var(--mono)", fontSize: 12.5 }}
+              value={state.designDraftBody}
+              onChange={(e) => setState((prev) => ({ ...prev, designDraftBody: e.target.value }))}
+            />
+          </div>
+        ) : state.designComparePrev && state.designCompareText ? (
+          <div
+            className="diff-code"
+            dangerouslySetInnerHTML={{
+              __html: renderSimpleLineDiff(state.designCompareText.prev, state.designCompareText.curr),
+            }}
+          />
+        ) : d.designMarkdown.trim() ? (
+          <MarkdownView markdown={d.designMarkdown} annotatable docLabel="design.md" onAnnotate={openAnnotate} />
+        ) : (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            尚未生成技术方案正文（快速通道模式可留空）。
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
+
+function ChangesVerifyTab({ d }: { d: RequirementDetail }) {
+  const { state, setState, handleBannerAction, toggleVerificationLog, executeVerify, refreshDiff, showToast } =
+    useWorkbench();
+  const [manualCmd, setManualCmd] = useState("");
+  const [manualCriteria, setManualCriteria] = useState("");
+
+  const { state: s, validity } = d;
+  const tasksDone = s.tasks.filter((t) => t.status === "done").length;
+
+  const grouped = new Map<string, { command: string; latest: (typeof validity.verifications)[number] }>();
+  for (const ev of validity.verifications) {
+    grouped.set(ev.record.command, { command: ev.record.command, latest: ev });
+  }
+  const evCards = Array.from(grouped.values()).reverse();
+
+  const parsedFiles = state.diffObs ? parseUnifiedDiff(state.diffObs.diff) : [];
+  const activeDiffFile = parsedFiles.find((f) => f.path === state.selectedDiffFile) ?? parsedFiles[0] ?? null;
+
+  const runManualVerify = async () => {
+    const command = manualCmd.trim();
+    if (!command) {
+      showToast("请先输入验证命令", true);
+      return;
+    }
+    const cids = manualCriteria
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    const res = await executeVerify(s.id, { command, criterionIds: cids });
+    if (res) showToast(res.runs[0]?.passed ? "验证通过" : "验证未通过", !res.runs[0]?.passed);
+  };
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-head">
+          <h3>
+            实施任务清单（{tasksDone}/{s.tasks.length}）
+          </h3>
+        </div>
+        {s.tasks.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            Agent 开始实施后将在此自动维护步骤进度。
+          </p>
+        ) : (
+          s.tasks.map((t) => {
+            const tm = TASK_META[t.status];
+            return (
+              <div key={t.id} className="task-row">
+                <span className={`badge ${tm.tone}`}>
+                  {tm.symbol} {tm.label}
+                </span>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 500 }}>{t.title}</div>
+                  {t.note && (
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {t.note}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>真实验证证据</h3>
+          {s.criteria.some((c) => c.command) && s.stage !== "done" && s.stage !== "cancelled" && (
+            <button
+              className="btn primary xs"
+              type="button"
+              disabled={state.busy}
+              onClick={() => void handleBannerAction("run_all_verifications")}
+            >
+              运行全部验证
+            </button>
+          )}
+        </div>
+
+        {evCards.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            尚未运行任何验证命令。
+          </p>
+        ) : (
+          evCards.map(({ command, latest }) => {
+            const meta = EVIDENCE_META[latest.effectiveState];
+            const log = state.expandedLogs[latest.record.id];
+            return (
+              <div key={latest.record.id} className="evidence-card" data-testid={`ev-${latest.record.id}`}>
+                <div className="evidence-head">
+                  <div>
+                    <span className={`badge ${meta.tone}`}>{meta.label}</span>
+                    <code style={{ marginLeft: 8, fontSize: 12.5 }}>{command}</code>
+                    <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                      {latest.record.durationMs}ms · 关联 {latest.record.criterionIds.join(", ") || "无"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      className="btn xs"
+                      type="button"
+                      data-action="toggle-log"
+                      onClick={() => void toggleVerificationLog(latest.record.id)}
+                    >
+                      {log !== undefined ? "收起日志" : "查看输出"}
+                    </button>
+                    <button
+                      className="btn xs"
+                      type="button"
+                      disabled={state.busy}
+                      onClick={() =>
+                        void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
+                          if (res) showToast(res.runs[0]?.passed ? "验证通过" : "验证失败", !res.runs[0]?.passed);
+                        })
+                      }
+                    >
+                      重跑
+                    </button>
+                  </div>
+                </div>
+                {latest.staleReason && (
+                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                    {latest.staleReason}
+                  </div>
+                )}
+                {log !== undefined && <pre className="evidence-log">{log || "（无输出）"}</pre>}
+              </div>
+            );
+          })
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          <input
+            className="input"
+            id="manual-verify-cmd"
+            placeholder="手动运行命令，如 bun test"
+            style={{ flex: 2, minWidth: 180 }}
+            value={manualCmd}
+            onChange={(e) => setManualCmd(e.target.value)}
+          />
+          <input
+            className="input"
+            id="manual-verify-criteria"
+            placeholder="关联条件 ID，如 AC-1"
+            style={{ flex: 1, minWidth: 120 }}
+            value={manualCriteria}
+            onChange={(e) => setManualCriteria(e.target.value)}
+          />
+          <button
+            className="btn"
+            type="button"
+            disabled={state.busy}
+            onClick={() => void runManualVerify()}
+          >
+            执行验证
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <h3>代码改动（Git Diff）</h3>
+          <button className="btn xs" type="button" onClick={() => void refreshDiff()}>
+            刷新 Diff
+          </button>
+        </div>
+        {!state.diffObs ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            正在加载代码变更…
+          </p>
+        ) : !state.diffObs.isGitRepo ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            当前目录不是 Git 仓库。
+          </p>
+        ) : state.diffObs.files.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            自基线以来工作区暂无代码变更。
+          </p>
+        ) : (
+          <div className="diff-split">
+            <div className="diff-files">
+              {parsedFiles.map((f) => (
+                <button
+                  key={f.path}
+                  className={`diff-file-btn ${activeDiffFile?.path === f.path ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setState((prev) => ({ ...prev, selectedDiffFile: f.path }))}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.path}</span>
+                  <span className="muted" style={{ fontSize: 11 }}>
+                    +{f.additions}/-{f.deletions}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div
+              className="diff-code"
+              dangerouslySetInnerHTML={{
+                __html: activeDiffFile
+                  ? renderDiffLinesHtml(activeDiffFile.lines)
+                  : renderDiffLinesHtml(state.diffObs.diff.split("\n")),
+              }}
+            />
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function TimelineRunsTab({ d }: { d: RequirementDetail }) {
+  const { openHandoff, openRunConsole } = useWorkbench();
+  const events = [...d.state.timeline].reverse();
+  const runs = [...(d.state.agentRuns ?? [])].reverse();
+
+  return (
+    <>
+      {runs.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <h3>Agent 模型执行历史</h3>
+            <button className="btn xs" type="button" onClick={() => void openHandoff()}>
+              查看交接简报 handoff.md
+            </button>
+          </div>
+          {runs.map((r) => (
+            <div
+              key={r.id}
+              className="timeline-item"
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+            >
+              <div>
+                <span
+                  className={`badge ${
+                    r.status === "succeeded" ? "success" : r.status === "cancelled" ? "neutral" : "danger"
+                  }`}
+                >
+                  {r.action} · {r.status}
+                </span>
+                <strong style={{ fontSize: 13, marginLeft: 6 }}>
+                  {r.harness} / {r.model}
+                </strong>
+                <span className="muted xs" style={{ marginLeft: 6 }}>
+                  {r.durationMs}ms
+                </span>
+              </div>
+              <button className="btn ghost xs" type="button" onClick={() => void openRunConsole(r.id)}>
+                查看终端输出
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-head">
+          <h3>时间线</h3>
+        </div>
+        {events.map((ev, i) => (
+          <div key={`${ev.at}-${i}`} className="timeline-item">
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <strong style={{ fontSize: 13.5 }}>{ev.summary}</strong>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {formatDateTime(ev.at)}
+              </span>
+            </div>
+            {ev.detail && (
+              <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+                {ev.detail}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+export function WorkspaceView() {
+  const { state, setState, setWorkspaceTab, handleBannerAction, triggerActiveRun, openHandoff } = useWorkbench();
+  const d = state.detail;
+  if (!d) return <p className="muted">正在加载需求详情…</p>;
+
+  const { state: s, validity } = d;
+  const stageMeta = STAGE_META[s.stage];
+  const { banner } = validity;
+
+  const modelOptions = collectModelOptions(state.harnesses);
+  const defaultAct = defaultActionForRequirement(d);
+  const activeRun =
+    Object.values(state.activeRuns).find((r) => r.requirementId === s.id && r.status === "running") ?? null;
+  const runningThis = Boolean(activeRun);
+  const canRunModel =
+    s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && modelOptions.length > 0;
+  const canReview =
+    modelOptions.length > 0 && (s.stage === "implementing" || s.stage === "awaiting_acceptance");
+
+  return (
+    <>
+      <StageStepper d={d} running={runningThis} />
+
+      <div className="ws-head">
+        <span className="req-id" style={{ fontSize: 14 }}>
+          {s.id}
+        </span>
+        <h1 className="ws-title">{s.title}</h1>
+        <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
+          {stageMeta.label}
+        </span>
+        <div className="more-wrap">
+          <button
+            className="btn"
+            type="button"
+            data-testid="more-menu-btn"
+            onClick={() => setState((prev) => ({ ...prev, moreMenuOpen: !prev.moreMenuOpen }))}
+          >
+            ⋯ 更多
+          </button>
+          {state.moreMenuOpen && (
+            <div className="more-menu" data-testid="more-menu">
+              <button
+                type="button"
+                onClick={() =>
+                  setState((prev) => ({
+                    ...prev,
+                    moreMenuOpen: false,
+                    editingSpec: true,
+                    specDraftTitle: s.title,
+                    specDraftBody: d.specMarkdown,
+                    specDraftCriteria: s.criteria.map((c) => ({
+                      id: c.id,
+                      description: c.description,
+                      required: c.required,
+                      command: c.command ?? "",
+                    })),
+                  }))
+                }
+              >
+                编辑需求与验收条件
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setState((prev) => ({
+                    ...prev,
+                    moreMenuOpen: false,
+                    editingDesign: true,
+                    designDraftBody: d.designMarkdown,
+                  }))
+                }
+              >
+                直接编辑技术方案
+              </button>
+              <button type="button" onClick={() => void openHandoff()}>
+                查看交接简报 handoff.md
+              </button>
+              {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
+                <button type="button" onClick={() => void handleBannerAction("authorize_fast_track")}>
+                  切换快速通道
+                </button>
+              )}
+              {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      moreMenuOpen: false,
+                      modal: { kind: "lifecycle", action: "block", reason: "" },
+                    }))
+                  }
+                >
+                  标记阻塞
+                </button>
+              )}
+              {s.stage !== "done" && s.stage !== "cancelled" && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      moreMenuOpen: false,
+                      modal: { kind: "lifecycle", action: "cancel", reason: "" },
+                    }))
+                  }
+                >
+                  取消需求
+                </button>
+              )}
+              {(s.stage === "done" || s.stage === "cancelled") && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setState((prev) => ({
+                      ...prev,
+                      moreMenuOpen: false,
+                      modal: { kind: "lifecycle", action: "reopen", reason: "" },
+                    }))
+                  }
+                >
+                  重新打开
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  setState((prev) => ({
+                    ...prev,
+                    moreMenuOpen: false,
+                    modal: {
+                      kind: "debug_info",
+                      text: JSON.stringify(
+                        {
+                          projectRoot: prev.project?.root,
+                          projectId: prev.project?.project?.projectId,
+                          id: s.id,
+                          revision: s.revision,
+                          specHash: s.specHash,
+                          designVersion: s.designVersion,
+                          designHash: s.designHash,
+                          baseline: s.baseline,
+                        },
+                        null,
+                        2,
+                      ),
+                    },
+                  }))
+                }
+              >
+                查看调试信息
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {s.lastFeedback && (
+        <div className="callout warning" style={{ marginBottom: 14 }}>
+          <strong>最新退回意见：</strong>
+          {s.lastFeedback}
+        </div>
+      )}
+
+      <section className={`banner ${banner.tone}`} data-testid="action-banner">
+        <div>
+          <div className="banner-text">{banner.headline}</div>
+          {canRunModel && (
+            <div className="banner-runner-row">
+              <span className="xs muted">模型调度：</span>
+              <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" includeManualCopy />
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="run-selected-model-btn"
+                disabled={state.busy || runningThis}
+                onClick={() => void triggerActiveRun(s.id, defaultAct)}
+              >
+                {runningThis ? "执行中…" : "⚡ 后台执行"}
+              </button>
+              {canReview && (
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="run-review-btn"
+                  disabled={state.busy || runningThis}
+                  onClick={() => void triggerActiveRun(s.id, "review")}
+                >
+                  🔍 跨模型审查
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="banner-actions">
+          {banner.primaryAction && (
+            <button
+              className="btn primary"
+              type="button"
+              data-testid={`action-${banner.primaryAction.id}`}
+              disabled={state.busy}
+              onClick={() => void handleBannerAction(banner.primaryAction!.id)}
+            >
+              {banner.primaryAction.label}
+            </button>
+          )}
+          {banner.secondaryActions.map((sec) => (
+            <button
+              key={sec.id}
+              className="btn"
+              type="button"
+              data-testid={`action-${sec.id}`}
+              disabled={state.busy}
+              onClick={() => void handleBannerAction(sec.id)}
+            >
+              {sec.label}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {activeRun && <LiveAgentBanner run={activeRun} liveText={state.liveRunLogs[activeRun.id] ?? ""} />}
+
+      <div className="tabs">
+        <button
+          className={`tab ${state.workspaceTab === "spec" ? "active" : ""}`}
+          type="button"
+          data-testid="tab-spec"
+          onClick={() => void setWorkspaceTab("spec")}
+        >
+          规范与方案
+        </button>
+        <button
+          className={`tab ${state.workspaceTab === "changes" ? "active" : ""}`}
+          type="button"
+          data-testid="tab-changes"
+          onClick={() => void setWorkspaceTab("changes")}
+        >
+          变更与验证
+        </button>
+        <button
+          className={`tab ${state.workspaceTab === "timeline" ? "active" : ""}`}
+          type="button"
+          data-testid="tab-timeline"
+          onClick={() => void setWorkspaceTab("timeline")}
+        >
+          时间线与运行
+        </button>
+      </div>
+
+      {state.workspaceTab === "spec" ? (
+        <SpecDesignTab d={d} />
+      ) : state.workspaceTab === "changes" ? (
+        <ChangesVerifyTab d={d} />
+      ) : (
+        <TimelineRunsTab d={d} />
+      )}
+    </>
+  );
+}

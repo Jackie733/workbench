@@ -1,23 +1,34 @@
 import { WorkbenchError } from "./errors.ts";
 import {
+  AGENT_ACTIONS,
+  MAX_AGENT_RUNS,
   MAX_CRITERIA,
   MAX_DESIGN_BYTES,
+  MAX_DISCUSSIONS,
+  MAX_HANDOFF_BYTES,
   MAX_REASON_CHARS,
   MAX_SPEC_BYTES,
   MAX_TASKS,
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
+  REVIEW_VERDICTS,
   SCHEMA_VERSION,
   STAGES,
   TASK_STATUSES,
   TRACKS,
   type AcceptanceRecord,
+  type AgentAction,
+  type AgentRunRecord,
   type ApprovalRecord,
   type BaselineSnapshot,
   type Criterion,
   type CriterionInput,
+  type DiscussionEntry,
+  type HandoffNote,
   type ProjectMetadata,
   type RequirementState,
+  type ReviewReport,
+  type ReviewVerdict,
   type Stage,
   type TaskInput,
   type TaskItem,
@@ -316,6 +327,115 @@ export function validateVerificationRecord(raw: unknown): VerificationRecord {
   return raw as unknown as VerificationRecord;
 }
 
+function validateHandoffNote(raw: unknown): HandoffNote | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "handoffNote 字段无效");
+  assertAllowedKeys(raw, ["updatedAt", "keyDecisions", "deadEnds", "nextSteps"], "handoffNote");
+  const isStrList = (v: unknown) =>
+    Array.isArray(v) && v.length <= 32 && v.every((item) => isSafeText(item, 1000));
+  if (!isSafeInt(raw.updatedAt, 0) || !isStrList(raw.keyDecisions) || !isStrList(raw.deadEnds) || !isStrList(raw.nextSteps)) {
+    throw new WorkbenchError("corrupt_record", "handoffNote 记录损坏");
+  }
+  return raw as unknown as HandoffNote;
+}
+
+function validateDiscussionEntry(raw: unknown): DiscussionEntry {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "discussion 字段无效");
+  assertAllowedKeys(
+    raw,
+    ["id", "at", "actor", "mode", "anchor", "harness", "model", "message", "resolved"],
+    "discussion",
+  );
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    !isSafeInt(raw.at, 0) ||
+    (raw.actor !== "human" && raw.actor !== "agent") ||
+    (raw.mode !== "ask" && raw.mode !== "refine") ||
+    !isSafeText(raw.message, 32 * 1024)
+  ) {
+    throw new WorkbenchError("corrupt_record", "discussion 记录损坏");
+  }
+  return raw as unknown as DiscussionEntry;
+}
+
+export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun 记录必须是对象");
+  assertAllowedKeys(
+    raw,
+    [
+      "id",
+      "action",
+      "harness",
+      "model",
+      "reasoningEffort",
+      "nativeSessionId",
+      "status",
+      "startedAt",
+      "endedAt",
+      "exitCode",
+      "durationMs",
+      "rateLimited",
+      "errorSummary",
+      "logPath",
+    ],
+    "agentRun",
+  );
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    !AGENT_ACTIONS.includes(raw.action as AgentAction) ||
+    !isSafeText(raw.harness, 64) ||
+    !isSafeText(raw.model, 200) ||
+    !["running", "succeeded", "failed", "cancelled"].includes(String(raw.status)) ||
+    !isSafeInt(raw.startedAt, 0) ||
+    (raw.endedAt !== null && !isSafeInt(raw.endedAt, 0)) ||
+    (raw.exitCode !== null && !Number.isSafeInteger(raw.exitCode)) ||
+    !isSafeInt(raw.durationMs, 0) ||
+    typeof raw.logPath !== "string"
+  ) {
+    throw new WorkbenchError("corrupt_record", "agentRun 记录损坏");
+  }
+  return raw as unknown as AgentRunRecord;
+}
+
+function validateReviewReport(raw: unknown): ReviewReport | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "reviewReport 字段无效");
+  assertAllowedKeys(
+    raw,
+    [
+      "id",
+      "reviewerHarness",
+      "reviewerModel",
+      "verdict",
+      "summary",
+      "markdown",
+      "reviewedSpecHash",
+      "reviewedCodeSnapshotHash",
+      "reviewedAt",
+    ],
+    "reviewReport",
+  );
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    !isSafeText(raw.reviewerHarness, 64) ||
+    !isSafeText(raw.reviewerModel, 200) ||
+    !REVIEW_VERDICTS.includes(raw.verdict as ReviewVerdict) ||
+    !isSafeText(raw.summary, 2000) ||
+    !isSafeText(raw.markdown, 64 * 1024) ||
+    typeof raw.reviewedSpecHash !== "string" ||
+    !SHA256_RE.test(raw.reviewedSpecHash) ||
+    typeof raw.reviewedCodeSnapshotHash !== "string" ||
+    !SHA256_RE.test(raw.reviewedCodeSnapshotHash) ||
+    !isSafeInt(raw.reviewedAt, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "reviewReport 记录损坏");
+  }
+  return raw as unknown as ReviewReport;
+}
+
 export function validateRequirementState(raw: unknown, expectedId?: string): RequirementState {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "state.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -343,6 +463,10 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       "lastFeedback",
       "blockedFrom",
       "blockedReason",
+      "handoffNote",
+      "discussions",
+      "agentRuns",
+      "reviewReport",
       "createdAt",
       "updatedAt",
     ],
@@ -366,6 +490,8 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     !Array.isArray(raw.verifications) ||
     !Array.isArray(raw.timeline) ||
     raw.timeline.length > MAX_TIMELINE ||
+    (raw.discussions !== undefined && (!Array.isArray(raw.discussions) || raw.discussions.length > MAX_DISCUSSIONS)) ||
+    (raw.agentRuns !== undefined && (!Array.isArray(raw.agentRuns) || raw.agentRuns.length > MAX_AGENT_RUNS)) ||
     (raw.lastFeedback !== null && !isSafeText(raw.lastFeedback, 8000, true)) ||
     (raw.blockedFrom !== null && !STAGES.includes(raw.blockedFrom as Stage)) ||
     (raw.blockedReason !== null && !isSafeText(raw.blockedReason, 8000, true)) ||
@@ -400,6 +526,14 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   validateApproval(raw.approval);
   validateAcceptance(raw.acceptance);
   validateBaseline(raw.baseline);
+  validateHandoffNote(raw.handoffNote);
+  validateReviewReport(raw.reviewReport);
+  if (Array.isArray(raw.discussions)) {
+    for (const d of raw.discussions) validateDiscussionEntry(d);
+  }
+  if (Array.isArray(raw.agentRuns)) {
+    for (const r of raw.agentRuns) validateAgentRunRecord(r);
+  }
   for (const v of raw.verifications) validateVerificationRecord(v);
   for (const ev of raw.timeline as TimelineEvent[]) {
     if (!isRecord(ev) || typeof ev.id !== "string" || !isSafeInt(ev.at, 0) || typeof ev.summary !== "string") {
@@ -409,8 +543,8 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   return raw as unknown as RequirementState;
 }
 
-export function validateMarkdownContent(content: string, kind: "spec" | "design", allowEmpty: boolean): string {
-  const maxBytes = kind === "spec" ? MAX_SPEC_BYTES : MAX_DESIGN_BYTES;
+export function validateMarkdownContent(content: string, kind: "spec" | "design" | "handoff", allowEmpty: boolean): string {
+  const maxBytes = kind === "spec" ? MAX_SPEC_BYTES : kind === "design" ? MAX_DESIGN_BYTES : MAX_HANDOFF_BYTES;
   if (!isSafeText(content, maxBytes, allowEmpty)) {
     throw new WorkbenchError("invalid_input", `${kind}.md 内容无效或超出 ${maxBytes} 字节上限`);
   }

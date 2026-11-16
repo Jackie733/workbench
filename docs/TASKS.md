@@ -24,6 +24,11 @@
 | **WB-05** | 极简零废话 Web UI：全局首页与看板 | WB-04 | `src/web/` |
 | **WB-06** | 极简零废话 Web UI：需求工作区与拍板闭环 | WB-04, WB-05 | `src/web/` |
 | **WB-07** | 清理旧版 Luau/PowerShell 包袱与收口验收 | WB-03, WB-06 | 全仓库清理、文档与端到端回归 |
+| **WB-08** | 全局常驻守护进程与多项目注册中心（Phase 2） | WB-07 | `src/hub/registry.ts`, `src/cli/`, `src/server/` |
+| **WB-09** | 多 Harness 自动探测与分阶段模型路由矩阵（Phase 2） | WB-08 | `src/hub/discovery.ts`, `src/hub/routing.ts` |
+| **WB-10** | 主动式多 Agent 调度执行器与跨模型审查（Phase 2） | WB-09 | `src/hub/executor.ts`, `src/mcp/`, `src/core/` |
+| **WB-11** | 三栏式 Web UI 重构（上）：侧边栏、目录浏览与路由中心 | WB-08, WB-09 | `src/web/` |
+| **WB-12** | 三栏式 Web UI 重构（下）：模型选择器、审查视图与实时终端 | WB-10, WB-11 | `src/web/`, 全量与 Chromium E2E |
 
 ---
 
@@ -148,3 +153,86 @@
   - 已通过 `git rm` 彻底移除旧版 Tern-Luau 入口与测试资产（`host.luau`、`window.luau`、`styles.css`、`plugin.toml`、`lib/*.luau`、`tests/*.luau`、`tests/native-capabilities/*`、`tests/af-*`、`omp/handoff*`、`omp/runtime*`、`omp/tern.ts`），并将旧版规范归档至 [docs/archive/2026-11-16/](archive/2026-11-16/) 与 [docs/archive/README.md](archive/README.md)。
   - 已收敛 `package.json`、`tsconfig.json`、`README.md`、`CHANGELOG.md`，统一为单栈 TypeScript / Bun（`src/core/` + `src/mcp/` + `src/cli/` + `src/server/` + `src/web/` + `omp/index.ts`）。
   - 实测全量 `bun test`（6 个测试文件，24 pass，0 fail，217 expects，含真实 Chromium E2E 与真实 stdio MCP 子进程）、`bun run typecheck`（`tsc --noEmit` 0 errors）、`bun run wb --help` 与全部 Markdown 文档链接校验（6 份文档 0 broken links）均 100% 通过。
+
+---
+
+## Phase 2：Workbench Hub 多项目中心、多 Harness 路由与三栏式指挥舱升级（WB-08 – WB-12）
+
+### [x] WB-08 全局常驻守护进程与多项目注册中心 (`src/hub/registry.ts`, `src/cli/`, `src/server/`)
+
+- **前置依赖**：WB-07。
+- **设计映射**：[DESIGN.md](DESIGN.md) §1.1(5), §2.1, §3.2(1)；[DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md) §1.2, §3.1。
+- **交付物**：
+  - 将 `wb` CLI 全局安装入口打通（`bun link` / `~/.local/bin/wb` 可在任意目录直接执行），新增守护进程管理子命令：`wb start [--port 4318]`、`wb stop`、`wb restart`、`wb status`、`wb open`。
+  - 实现 `~/.workbench-hub/daemon.json`、`hub.log` 与 `~/.workbench-hub/hub.json` 的原子持久化管理，支持多项目注册、移除、活跃项目切换及跨会话记忆。
+  - 升级 HTTP/WS 服务端为多项目 Hub 模式：新增 `/api/hub/projects`（增删切换初始化）、`/api/fs/browse`（受路径安全边界约束的本机目录浏览器），并兼容按项目隔离的 `.workbench/` 路由与 `fs.watch` 实时推送。
+- **验收标准**：
+  - `wb start` 后可在后台稳定常驻，`wb status` 返回正确 PID/URL/纳管项目数，`wb stop` 干净退出无残留进程；通过 API 添加两个独立临时 Git 仓库并切换操作，项目数据与文件监听完全隔离不串扰。
+- **执行记录（WB-08 已完成，2026-11-16）**：
+  - 新增 `src/hub/types.ts`、`src/hub/registry.ts` 与 `src/cli/daemon.ts`，通过 `bun link` 注册全局 `wb`（`/home/jackie/.bun/bin/wb`），升级 `src/cli/index.ts` 与 `src/server/index.ts` 为多项目 Hub 守护进程模式（`~/.workbench-hub/{daemon.json,hub.json,hub.log}` + `/api/hub/*` + `/api/fs/browse`）。
+  - 实测 `tests/hub/hub.test.ts`（WB-08 两项用例）：双 Git 仓库独立隔离切换、安全目录浏览器、真实后台守护进程启动/状态查询/优雅终止全部通过。
+
+---
+
+### [x] WB-09 多 Harness 自动探测引擎与分阶段模型路由矩阵 (`src/hub/discovery.ts`, `src/hub/routing.ts`)
+
+- **前置依赖**：WB-08。
+- **设计映射**：[DESIGN.md](DESIGN.md) §2.2, §2.3；[DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md) §1.2。
+- **交付物**：
+  - 实现本机 Harness 与模型目录自动探测器（`discovery.ts`）：检测 `codex`（解析 `~/.codex/models_cache.json` 与 `config.toml`）、`qodercn`（执行 `qodercn --list-models` 与 `~/.qoder-cn/settings.json`）、`opencode`（执行 `opencode models` 与 auth provider 状态）、`gemini`（兼容 PATH 及 `mise x node@24.4.1 -- gemini`）及 `omp`（读取 `~/.omp/agent/config.yml`）。
+  - 实现分阶段路由引擎（`routing.ts`）：支持 `design`、`implement`、`fix`、`review` 四个阶段配置主模型、推理强度（如 Codex `reasoning_effort`）与备援链；内置 `balanced`（推荐默认）、`sota_first`、`quota_saver` 三套策略预设并支持用户自定义扩展模型与单阶段覆写。
+  - 新增 Hub API：`/api/hub/harnesses`（查询与刷新探测结果）、`/api/hub/routing`（读取/保存预设与阶段路由矩阵）。
+- **验收标准**：
+  - 在真实宿主机或模拟 CLI fixture 环境下准确识别各 Harness 可用性与模型列表（失败或未安装时优雅降级不崩溃）；预设切换与自定义模型持久化测试 100% 通过。
+- **执行记录（WB-09 已完成，2026-11-16）**：
+  - 新增 `src/hub/discovery.ts`（含零阻塞 `discoverHarnessesQuick` 与全量 CLI 探测 `discoverHarnesses`）与 `src/hub/routing.ts`（`balanced` / `sota_first` / `quota_saver` 三套预设、优先级路由解析及 429/限流关键词识别）。
+  - 实测 `tests/hub/hub.test.ts`（WB-09 两项用例）：未安装降级、自定义模型合并、预设切换与候选备援排序 100% 通过。
+
+---
+
+### [x] WB-10 主动式多 Agent 调度执行器、上下文交接协议与跨模型审查 (`src/hub/executor.ts`, `src/mcp/`, `src/core/`)
+
+- **前置依赖**：WB-09。
+- **设计映射**：[DESIGN.md](DESIGN.md) §2.1, §2.2, §2.4, §2.5；[DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md) §2, §3.4, §3.5, §4。
+- **交付物**：
+  - 实现跨 Harness 非交互执行器（`executor.ts`）：根据用户选择或阶段路由自动生成 `codex` / `qodercn` / `opencode` / `gemini` / `omp` 启动命令（同 Harness 且存在 `nativeSessionId` 时优先原生 `--resume` / `--session` 续接），并在子进程环境变量中注入 `wb` CLI 路径。
+  - 实现 **双层上下文交接包合成器（`handoff.ts`）**：切换 Harness 或上一轮中途失败/限流中断时，自动整合 `spec.md`、`design.md`、`handoffNote`（关键决策与死胡同标记）、真实 `git status / diff` 代码现场、最新失败证据及未解决 `discussions[]` 生成有界 `handoff.md`（1.5k–3k Tokens 预算）。
+  - 实现基于进程组（PGID）的实时日志流（WebSocket `agent.run.output` / `agent.run.status`）、凭据脱敏、强制终止（Kill）及额度耗尽/限流关键词识别（触发备援模型一键接力重试）。
+  - 扩展 `src/core/` 与 `src/mcp/tools.ts`：支持保存 `agentRuns`、`handoffNote`、`discussions[]`（含 `ask` 只读问答探讨与 `refine` 批注修订两模式）及人类直接编辑 `design.md`；新增跨模型代码审查能力（`reviewReport`：`pass | concern | block`，绑定当前 `specHash` 与 `codeSnapshotHash` 且严禁绕过人类 `accept`）。
+- **验收标准**：
+  - Mock CLI 与真实子进程集成测试通过：验证同构原生续接、跨 Harness 自动合成 `handoff.md`（含前一进程中途 Kill 后的脏工作区恢复）、`ask` 模式零副作用、`refine` 批量批注修订、进程组强杀、限流识别及审查报告随代码变更自动标为 `stale`。
+- **执行记录（WB-10 已完成，2026-11-16）**：
+  - 新增 `src/hub/handoff.ts` 与 `src/hub/executor.ts`，扩展 `src/core/{types,validate,store,validity,engine}.ts`、`src/mcp/tools.ts` 与 `wb review` CLI，落地 `handoff.md` 合成、`ask`/`refine` 讨论、直接编辑 `design.md`、PGID 强杀及跨模型审查报告落盘。
+  - 实测 `tests/hub/hub.test.ts`（WB-10）：验证 `ask` 零副作用问答、同 Harness `nativeSessionId` 续接、限流识别 + 备援模型切换 + 脏代码现场注入、PGID 取消及 `reviewReport` 随代码修改自动标为 `stale`。
+
+---
+
+### [x] WB-11 三栏式 Web UI 重构（上）：多项目侧边栏、目录浏览器与算力路由中心 (`src/web/`)
+
+- **前置依赖**：WB-08, WB-09。
+- **设计映射**：[DESIGN.md](DESIGN.md) §1.1(4)(5), §3.1, §3.2(1)。
+- **交付物**：
+  - 重构拆分 `src/web/` 前端模块与现代 CSS 设计系统（统一间距、层级、暗/亮色 Token 与窄屏响应式抽取逻辑），彻底告别单文件巨型渲染堆砌。
+  - 实现 **左栏（Sidebar）**：多项目实时切换（显示待拍板计数角标、活跃执行呼吸灯）、**「+ 添加项目」安全目录浏览与初始化弹窗**、以及各 Harness 在线指示列表。
+  - 实现 **「算力与模型路由中心」配置弹窗**：一键切换 `balanced | sota_first | quota_saver` 策略预设，直观调整设计/实施/修复/审查四阶段的首选模型与备援链，查看各模型目录标签并支持补充自定义模型与手动重探。
+- **验收标准**：
+  - 在真实无头 Chromium 中完成添加/初始化多个项目并实时切换（无状态串扰）、目录浏览导航、策略预设切换与自定义模型保存回显，无 console/page errors，移动端/窄屏无横向溢出。
+- **执行记录（WB-11 已完成，2026-11-16）**：
+  - 拆分重构为 `src/web/{api,render,state,app,styles.css}` 与 `src/web/views/{sidebar,workspace,drawer,modals}.ts`，实现左栏多项目切换、目录浏览初始化弹窗与算力路由配置中心。
+  - 实测 `tests/web/e2e_browser.test.ts`：真实 Chromium 验证双项目添加/隔离切换、路由预设切换与自定义模型保存，375px 窄屏零横向溢出且 0 page errors。
+
+---
+
+### [x] WB-12 三栏式 Web UI 重构（下）：协同研讨批注、模型选择器与实时终端 (`src/web/`)
+
+- **前置依赖**：WB-10, WB-11。
+- **设计映射**：[DESIGN.md](DESIGN.md) §2.4, §2.5, §3.1, §3.2(2)(3), §4。
+- **交付物**：
+  - 实现需求工作区 **可视化阶段步进条（Stepper）** 与 **智能行动横幅**：主 CTA 旁内嵌当前阶段默认匹配的 **`[执行器: Harness · Model ▾]`** 下拉选择器，支持执行前一键临时切换其他订阅模型。
+  - 实现 **方案共创与 PR 式批注体验**：支持在 `spec.md`、`design.md` 与 `criteria` 上悬停添加 **`[💬 批注 / 提问]`** 内联批注；支持人类直接在线编辑 `design.md`；Agent 修订提交后自动展开 **`v(N-1) → vN` 行级版本 Diff**；并在「规范与方案」页签展示 **跨模型 Code Review 审查卡片**。
+  - 实现可折叠 **右栏双视图协同舱（`💬 方案研讨与批注` + `>_ 实时执行终端`）**：支持发问探讨（`Ask`，附 `[采纳此回复并更新方案]`）与批量批注让 Agent 修订（`Refine`）、实时流式输出与 `[查看 handoff.md 交接简报]`、`[终止任务]`、`[使用备援模型接力重试]`；补充完整单元测试与真实 Chromium E2E 回归测试并更新 [README.md](../README.md)。
+- **验收标准**：
+  - 全量 `bun test`（含多项目切换、模型路由、上下文交接、Ask/Refine 协同闭环与三栏 Web UI 真实 Chromium 端到端闭环）、`bun run typecheck` 与全部文档链路校验 100% 通过。
+- **执行记录（WB-12 已完成，2026-11-16）**：
+  - 实现工作区 Stage Stepper、行动横幅内联模型选择器与审查触发器、段落悬停批注、直接 `design.md` 编辑、右侧可折叠协同研讨与实时终端抽屉，并更新 [package.json](../package.json)（`5.0.0`）、[README.md](../README.md) 与 [CHANGELOG.md](../CHANGELOG.md)。
+  - 实测全量 `bun test`（7 个测试文件，30 pass，0 fail，264 expects，含真实 Chromium E2E 与真实 stdio MCP 子进程）、`bun run typecheck`（`tsc --noEmit` 0 errors）与全部 Markdown 文档链路校验（0 broken links）均 100% 通过。

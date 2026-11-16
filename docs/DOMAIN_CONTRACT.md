@@ -1,95 +1,112 @@
-# 领域模型与存储契约规范（v4 极简混合存储基线）
+# 领域模型与存储契约规范（v4/v5 混合存储与 Hub 路由基线）
 
-> 本文定义新一代解耦工作台（`Workbench Core`）的数据存储格式、状态流转规则与不可削弱的工程不变量。产品与架构设计见 [DESIGN.md](DESIGN.md)，实施任务见 [TASKS.md](TASKS.md)。
+> 本文定义解耦工作台（`Workbench Core` + `Workbench Hub`）的数据存储格式、状态流转规则、模型路由/调度记录结构与不可削弱的工程不变量。产品与架构设计见 [DESIGN.md](DESIGN.md)，实施任务见 [TASKS.md](TASKS.md)。
 
 ---
 
-## 1. 仓库内混合存储结构（`.workbench/`）
+## 1. 存储分层结构
 
-借鉴 `OpenSpec` 的人类可读规范与 `Beads` 的轻量状态分离模式，项目业务数据统一存储在仓库根目录的 `.workbench/` 下，采用 **“可读 Markdown 正文 + 轻量结构化 JSON”** 的混合结构：
+工作台严格隔离**“按 Git 项目归属的业务真相（`.workbench/`）”**与**“全局 Hub 注册与算力路由偏好（`~/.workbench-hub/`）”**：
+
+### 1.1 仓库内项目业务存储（`<projectRoot>/.workbench/`）
+
+项目业务数据统一存储在各自仓库根目录的 `.workbench/` 下，采用 **“可读 Markdown 正文 + 轻量结构化 JSON”** 的混合结构：
 
 ```text
 .workbench/
-├── project.json                  # 项目级元数据 (schemaVersion, projectId, name, nextNumber, createdAt)
+├── project.json                  # 项目级元数据 (schemaVersion, projectId, name, nextNumber, privacyMode, createdAt)
 └── items/
     └── REQ-001/
         ├── spec.md               # 需求目标 (Goal) 与范围 (Scope) 的 Markdown 正文
         ├── design.md             # 当前技术方案 (Design) 的 Markdown 正文
-        ├── state.json            # 结构化状态、验收标准与验证命令映射、批准记录、任务清单、时间线事件
+        ├── handoff.md            # （v5 新增）高信噪比跨 Harness 上下文交接简报（自动合成 + 人类可预览/补充）
+        ├── state.json            # 结构化状态、验收标准、批准记录、任务清单、研讨/批注记录、运行摘要与审查结论、时间线
         ├── history/              # 历史批准过的 spec/design 快照 (如 design.v1.md)，用于版本对比
-        └── evidence/             # 真实运行的验证输出日志与元数据 (如 verify-<id>.json / .log)
+        ├── evidence/             # 真实运行的验证输出日志与元数据 (如 verify-<id>.json / .log)
+        └── runs/                 # （v5 新增）主动调度的 Harness 执行日志与完整审查文本 (run-<id>.json / .log)
 ```
 
-### 1.1 初始化与版本兼容声明
 - **隐私与 Git 策略**：首次在项目初始化 `.workbench/` 时，由用户选择：
   - **仅本机跟踪（默认推荐）**：自动将 `/.workbench/` 写入本地 `.git/info/exclude`（不修改团队 `.gitignore`）。
   - **随仓库提交**：不修改排除规则，允许将 `.workbench/` 纳入 Git 版本控制与团队审查。
-- **不兼容旧版数据**：旧版 Tern-Luau 架构存储在 `.omp/workbench/`（及早期 KV/tasks）中的 v1/v2/v3 纯 JSON 数据与双栅栏锁文件**不再读取、不再兼容、不再自动迁移**。新引擎完全独立运行于 `.workbench/`，不删除或破坏用户历史遗留目录。
+- **不兼容旧版数据**：旧版 Tern-Luau 架构存储在 `.omp/workbench/` 中的 v1/v2/v3 数据**不再读取、不再兼容、不再自动迁移**。
+
+### 1.2 全局 Hub 存储（`~/.workbench-hub/`，v5 新增）
+
+多项目统筹、守护进程状态与多订阅模型路由策略存放在用户主目录 `~/.workbench-hub/` 下，绝不污染具体业务仓库的 Git 工作区：
+
+```text
+~/.workbench-hub/
+├── daemon.json                   # 守护进程元数据 (pid, port, url, startedAt, version)
+├── hub.log                       # 守护进程运行日志（按大小自动轮转截断）
+└── hub.json                      # 多项目注册表 + 分阶段模型路由配置 + 自定义模型目录
+```
+
+`hub.json` 核心字段约束：
+- `schemaVersion`: 整数（当前 `1`）。
+- `activeProjectId`: 当前选中的默认项目 ID（可为 `null`）。
+- `projects[]`: 已纳管项目条目 `{ id, name, root, addedAt, lastOpenedAt }`（`root` 必须为经过 `canonicalRoot` 校验的真实目录）。
+- `routing`: `{ activePreset: "balanced" | "sota_first" | "quota_saver", stages: Record<"design" | "implement" | "fix" | "review", StageRouteRule> }`，其中每条 `StageRouteRule` 包含 `{ primary: ModelTarget, fallbacks: ModelTarget[] }`，且 `ModelTarget` 为 `{ harness: HarnessId, model: string, reasoningEffort?: string }`。
+- `customModels`: 用户针对任意 Harness 手动追加的模型标识列表（例如付费 Go/API 模型）。
 
 ---
 
 ## 2. 核心实体与最小数据结构
 
-所有 JSON 文件均包含 `schemaVersion: 4` 与严格的字段校验，未知格式或损坏文件应拒绝覆写并保留原文件供排障。
+所有项目 `.workbench/` JSON 文件均包含 `schemaVersion: 4` 与严格的字段校验，未知格式或损坏文件应拒绝覆写并保留原文件供排障。
 
 | 文件 | 核心字段与职责 |
 | :--- | :--- |
-| `project.json` | `schemaVersion`, `projectId`, `name`, `nextNumber`（单调递增需求编号计数器）, `createdAt`, `updatedAt`。 |
+| `project.json` | `schemaVersion`, `projectId`, `name`, `nextNumber`（单调递增需求编号计数器）, `privacyMode`, `createdAt`, `updatedAt`。 |
 | `items/REQ-xxx/spec.md` | 需求目标、背景与范围的纯 Markdown 文本；可供人类在任何编辑器直接阅读或提交 Git 审查。 |
 | `items/REQ-xxx/design.md` | 当前技术方案 Markdown 文本（`fast_track` 模式下允许为空）。 |
-| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash` (当前规范与条件摘要 SHA-256), `designVersion`, `criteria` (`[{id, description, required, command?}]`), `approval`, `tasks` (`[{id, title, status, note?}]`), `baseline`, `verifications` (索引摘要), `timeline`, `blockedFrom`, `blockedReason`, `createdAt`, `updatedAt`。 |
-| `items/REQ-xxx/evidence/verify-<id>.json` & `.log` | 不可变验证证据：包含 `id`, `command`, `cwd`, `criterionIds`, `specHash`, `codeSnapshotHash`, `exitCode`, `timedOut`, `durationMs`, `startedAt`, `endedAt`, `outputPath`, `truncated`。 |
+| `items/REQ-xxx/handoff.md`（v5） | 跨模型交接简报（控制在 1.5k–3k Tokens 预算内），整合契约摘要、关键结论/死胡同、客观 Git 改动、失败证据末尾及未解决讨论。 |
+| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, `createdAt`, `updatedAt`。 |
+| `items/REQ-xxx/evidence/verify-<id>.json` & `.log` | 不可变验证证据：包含 `id`, `command`, `cwd`, `criterionIds`, `specHash`, `codeSnapshotHash`, `exitCode`, `timedOut`, `durationMs`, `startedAt`, `endedAt`, `passed`, `outputPath`, `outputPreview`, `truncated`。 |
+| `items/REQ-xxx/runs/run-<id>.json` & `.log`（v5） | 主动调度运行记录：`id`, `action` (`ask` \| `design` \| `implement` \| `fix` \| `review`), `harness`, `model`, `reasoningEffort?`, `nativeSessionId?`, `status` (`running` \| `succeeded` \| `failed` \| `cancelled`), `startedAt`, `endedAt`, `exitCode`, `durationMs`, `rateLimited?`, `errorSummary?`, `logPath`。 |
+
+v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认 `[]` / `null`）：
+- `handoffNote`（或 `null`）：结构化交接备忘 `{ updatedAt, keyDecisions: string[], deadEnds: string[], nextSteps: string[] }`，允许 Agent 在 `wb_propose` / `wb_update_tasks` 时沉淀高价值定位与踩坑警示。
+- `discussions[]`：需求内段落批注与问答讨论流 `{ id, at, actor: "human" | "agent", mode: "ask" | "refine", anchor?: string, harness?: string, model?: string, message: string, resolved?: boolean }`。
+- `agentRuns[]`：记录最近运行摘要 `{ id, action, harness, model, nativeSessionId?, status, startedAt, endedAt, exitCode, durationMs, errorSummary? }`，便于前端重连与同构续接。
+- `reviewReport`（或 `null`）：最新一次跨模型审查结果 `{ id, reviewerHarness, reviewerModel, verdict: "pass" | "concern" | "block", summary, markdown, reviewedSpecHash, reviewedCodeSnapshotHash, reviewedAt }`；当 `specHash` 或当前代码快照发生变化时，展示层标记该审查报告已过期（`stale`）提示按需复审。
 
 ---
 
 ## 3. 核心领域不变量（Core Invariants）
 
-以下四组不变量由 `Workbench Core`（TypeScript/Bun）在领域层强制执行，UI、CLI、MCP Server 与会话适配器均共享同一套校验与计算逻辑，不允许任何旁路绕过。
+以下不变量由 `Workbench Core`（TypeScript/Bun）在领域层强制执行，UI、CLI、MCP Server 与 Hub 调度器共享同一套校验与计算逻辑，不允许任何旁路绕过。
 
 ### 3.1 单写者与原子文件更新（Atomic Persistence）
-- **统一写入入口**：所有对 `.workbench/` 的创建与更新均经过 `Workbench Core` 引擎执行；本地通过进程内队列与文件锁串行化单项目写入，彻底消除跨 OS / PowerShell 异步竞态。
-- **原子落盘**：采用同目录临时文件（`.tmp-<uuid>`）→ `fsync` → `rename` 原子替换目标文件。
-- **乐观锁防覆盖（CAS）**：修改 `state.json` 必须校验并递增单调 `revision`。当预期 `revision` 与磁盘当前值不符时拒绝写入，返回冲突详情与最新内容供调用方合并或重读，绝不采用静默“最后写入覆盖”。
-- **路径安全**：所有读写必须限制在项目规范根目录（canonical root）之内，拒绝包含 `..` 或指向目录外的符号链接（symlink）。
+- **统一写入入口**：所有对 `.workbench/` 与 `~/.workbench-hub/` 的状态持久化均通过原子写入流程（同目录临时文件 `.tmp-<uuid>` → `fsync` → `rename`）；`.workbench/` 写入串行化使用进程内队列 + 项目级 `.lock` 文件锁。
+- **乐观锁防覆盖（CAS）**：修改 `state.json` 必须校验并递增单调 `revision`。当预期 `revision` 与磁盘当前值不符时拒绝写入并返回冲突详情。
+- **路径安全**：所有项目内部文件与 Hub 目录浏览均限制在合法规范目录之内，严禁 `..` 路径穿越或追踪越界符号链接（symlink）。
 
 ### 3.2 生命周期枚举与双轨规则
-- **持久阶段枚举（8 个清晰状态）**：
-  - `draft`（草稿/待整理）
-  - `designing`（Agent 正在编写规范与方案）
-  - `awaiting_approval`（方案已提交，等待人工批准）
-  - `implementing`（正在实施与验证）
-  - `awaiting_acceptance`（已提交交付，等待人工验收）
-  - `done`（已验收完成）
-  - `blocked`（受阻，保留 `blockedFrom` 与 `blockedReason`）
-  - `cancelled`（已取消）
+- **持久阶段枚举（8 个清晰状态）**：`draft`、`designing`、`awaiting_approval`、`implementing`、`awaiting_acceptance`、`done`、`blocked`、`cancelled`。
 - **双轨模式（`track: "plan_first" | "fast_track"`）**：
   - **`plan_first`（标准模式）**：必须存在对应当前 `specHash` 与当前 `design.md` 摘要的人工批准记录（`approval`），方可进入 `implementing`。当 `spec.md`、`criteria` 或 `design.md` 发生实质修改时，旧批准自动失效并回退至 `awaiting_approval`。
-  - **`fast_track`（快速通道）**：必须由人类在 UI 显式点击「快速通道：直接实施」授权后，方可从 `draft` 直接进入 `implementing`，允许无 `design.md`，但仍须绑定需求目标与必需验收条件。
-- **终态与阻塞保护**：
-  - 进入 `blocked` 必须记录非空原因并保存 `blockedFrom`；解除阻塞后恢复原阶段，不复活已失效的批准或证据。
-  - `done` 与 `cancelled` 为终态；允许人工显式 `reopen` 重开回 `draft`（或 `implementing`），历史批准与历史验收记录保留在 `timeline` 中，不作为当前有效批准或验收。
+  - **`fast_track`（快速通道）**：必须由人类在 UI 显式点击授权后方可从 `draft` 直接进入 `implementing`，允许无 `design.md`，但仍须绑定需求目标与必需验收条件。
+- **终态与阻塞保护**：进入 `blocked` 必须记录非空原因并保存 `blockedFrom`；`done` 与 `cancelled` 允许人工显式 `reopen`，历史批准与验收记录不自动复活。
 
 ### 3.3 验证驱动与证据真实性（Verification Truthfulness）
-- **禁止口头声明完成**：Agent 的对话回复或 `wb_update_tasks` 工具参数绝不允许直接将验收条件标为 `passed`。
-- **证据三重绑定**：每一条 `VerificationRecord` 只能由工作台内置命令执行器（`runner`）真实运行后生成，并强制绑定以下三项要素：
-  1. 执行时的需求规范与条件摘要（`specHash`）；
-  2. 执行结束时的工作区 Git 快照指纹（`codeSnapshotHash`，综合当前 `HEAD`、工作区脏状态与已追踪/未追踪变更哈希）；
-  3. 真实退出码（`exitCode`）、是否超时（`timedOut`）及实际终端输出日志路径。
-- **自动过期检测（Stale Detection）**：
-  - 读取与渲染有效性（`validity.ts`）采用纯函数实时计算。
-  - 当工作区代码在验证后继续发生变化（当前 Git 快照指纹 ≠ 证据记录的 `codeSnapshotHash`），或需求规范/验收条件被修改（当前 `specHash` ≠ 证据记录的 `specHash`）时，原有的 `passed` 证据**自动派生为 `stale（已过期，需重跑验证）`**，UI 与门禁绝不将其显示为当前绿色通过。
-  - 历史 `failed` 或 `timedOut` 记录不会被自动隐藏或涂绿。
+- **禁止口头声明完成**：任何 Agent（无论是通过 MCP、`wb` CLI 还是 `codex`/`qodercn`/`opencode` 子进程）均不得直接将验收条件标为 `passed`。
+- **证据三重绑定**：每条 `VerificationRecord` 只能由工作台内置命令执行器真实运行后生成，强制绑定 `specHash`、当前工作区 Git 快照 `codeSnapshotHash` 及真实退出码/日志路径。
+- **自动过期检测（Stale Detection）**：代码快照或 `specHash` 一旦变更，旧通过记录实时派生为 `stale`，绝不伪绿。
 
 ### 3.4 人工主权边界（Human Sovereignty）
-- **不可委托的人类决策**：`approve`（批准方案）、`fast_track`（授权快速通道）与 `accept`（最终验收通过）只能由人类在工作台 UI 触发；MCP Server 与 `wb` CLI 不向 Agent 暴露这些写入接口。
-- **验收门禁（Acceptance Gate）**：人类点击「验收通过（Mark as Done）」或 Agent 请求推入 `awaiting_acceptance` 时，领域层必须实时重算并同时满足以下全部条件：
-  1. 需求处于非 `blocked` / 非 `cancelled` / 非 `done` 状态；
-  2. 至少定义了 **1 条**必需验收条件（`required === true`）——明确禁止“零条件 `0/0` 直接通过”；
-  3. **所有必需验收条件**在当前 `specHash` 与当前最新 `codeSnapshotHash` 下，均存在至少一条状态为 `passed` 且未过期的验证证据。
+- **不可委托的人类决策**：`approve`（批准方案）、`fast_track`（授权快速通道）与 `accept`（最终验收通过）只能由人类在 Web UI 触发；MCP Server 与 `wb` CLI 不向任何 Agent 暴露这些写入接口，Hub 执行器拉起的 Agent 子进程同样受此约束。
+- **跨模型审查定位（v5 明确约定）**：`codex` / `gemini` / `DeepSeek-V4-Pro` 产出的跨模型审查报告（`reviewReport`）作为人类验收时的强决策辅助信号（标注 `pass / concern / block`），**审查模型本身也不能替代人类点击 `accept` 完成最终验收**；同时单项目内不因执行子进程失败/限流而污染 `.workbench/` 状态机一致性。
+- **验收门禁（Acceptance Gate）**：必须满足非阻塞/非取消/非完成、至少定义了 1 条必需验收条件（禁止 `0/0` 直接通过）、且全部必需验收条件在当前 `specHash` 与当前最新 `codeSnapshotHash` 下均为 `passed`。
+
+### 3.5 跨 Harness 上下文交接与方案共创不变量（Context Continuity & Co-Design，v5 新增）
+- **仅提问探讨（`ask`）只读无副作用**：`ask` 模式下调用的 Agent 只能向 `discussions[]` 写入问答答复，**严禁改变需求 `stage`、不得覆盖 `spec.md`/`design.md`、也不得使既有 `approval` 失效**。
+- **跨模型切换自动现场同步**：每当切换 Harness 或在上一轮 `failed` / `cancelled` / `rateLimited` 后接力重试时，引擎必须基于磁盘权威状态（`spec.md`、`design.md`、`handoffNote`、最新 `observeGitChanges` 真实代码改动、失败 `evidence/` 摘要与未解决 `discussions[]`）重新生成有界 `handoff.md`，确保即使前一模型崩溃未总结也能精准接续，而不转储原始探索噪音。
 
 ---
 
 ## 4. 安全边界与输出裁剪
 
-- **输入输出有界**：单次工具调用载荷、验证日志文件大小及返回给 Agent 的日志摘录均设明确上限（如日志摘录截断并提示完整日志路径）；返回给 Agent 的输出默认移除 ANSI 控制符并遮蔽常见凭据模式（Bearer Token、API Key、私钥块等）。
-- **诚实边界**：工作台门禁是面向研发交付的**流程与证据护栏**，而非操作系统级沙箱（工作台无法阻止同一宿主机上运行的 Agent 进程通过自身原生 Bash 工具修改文件）。工作台通过绑定真实 Git 快照确保“只要代码动过，未在最新快照下重跑的验证一律标为过期”，以此守住交付事实的底线。
+- **输入输出有界**：单次工具载荷、验证日志、`agentRuns` 实时流缓冲与历史日志保留均设明确上限；所有展示与返回日志均执行 ANSI 控制符剥离与常见凭据脱敏（Bearer Token、API Key、私钥块等）。
+- **子进程隔离与可控终止**：Hub 执行器拉起的所有 CLI Harness 子进程绑定独立进程组（PGID），支持前端点击「终止」及 Hub 优雅退出时一键清理进程树，防止孤儿进程持续消耗账号额度。
+- **诚实边界**：工作台门禁是面向交付流程与多模型协同的工程护栏，通过 Git 快照指纹绑定与独立验证守住事实底线；不擅自更改用户各外部 CLI 的全局账号认证信息，不自动执行 `git commit`、`git push` 或分支合并。

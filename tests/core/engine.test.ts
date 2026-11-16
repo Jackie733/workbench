@@ -213,6 +213,15 @@ describe("WB-01 core store and domain engine", () => {
     });
     expect(tampered.state.stage).toBe("awaiting_approval");
     expect(tampered.state.approval).toBeNull();
+
+    // However, if a requirement started on fast_track with ZERO criteria, agent populating initial criteria preserves fast_track implementing stage
+    await createRequirement(root, { goal: "输出 hello 脚本" });
+    await authorizeFastTrack(root, "REQ-002");
+    const bootstrapped = await propose(root, "REQ-002", {
+      criteria: [{ id: "AC-1", description: "输出 hello", required: true, command: "echo hello" }],
+    });
+    expect(bootstrapped.state.stage).toBe("implementing");
+    expect(bootstrapped.validity.approval.valid).toBe(true);
   });
 
   test("enforces verification truthfulness, stale detection, zero-criteria rejection, and acceptance gate", async () => {

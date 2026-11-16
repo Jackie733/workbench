@@ -15,10 +15,12 @@ import {
 import {
   MAX_DESIGN_BYTES,
   MAX_EVIDENCE_BYTES,
+  MAX_HANDOFF_BYTES,
   MAX_SPEC_BYTES,
   MAX_STATE_BYTES,
   SCHEMA_VERSION,
   WORKBENCH_DIR,
+  type AgentRunRecord,
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementState,
@@ -28,6 +30,7 @@ import {
   assertRequirementId,
   isSafeText,
   REQUIREMENT_ID_RE,
+  validateAgentRunRecord,
   validateMarkdownContent,
   validateProjectMetadata,
   validateRequirementState,
@@ -38,6 +41,7 @@ export interface RequirementBundle {
   state: RequirementState;
   specMarkdown: string;
   designMarkdown: string;
+  handoffMarkdown: string;
   designHistoryVersions: number[];
 }
 
@@ -160,9 +164,13 @@ export function readRequirementBundle(root: string, id: string): RequirementBund
   const designMarkdown = fs.existsSync(designPath)
     ? validateMarkdownContent(readBoundedText(designPath, MAX_DESIGN_BYTES), "design", true)
     : "";
+  const handoffPath = resolveSafePath(base, `${itemRel}/handoff.md`);
+  const handoffMarkdown = fs.existsSync(handoffPath)
+    ? validateMarkdownContent(readBoundedText(handoffPath, MAX_HANDOFF_BYTES), "handoff", true)
+    : "";
   const designHistoryVersions = listDesignHistoryVersions(base, id);
 
-  return { state, specMarkdown, designMarkdown, designHistoryVersions };
+  return { state, specMarkdown, designMarkdown, handoffMarkdown, designHistoryVersions };
 }
 
 export function readDesignHistory(root: string, id: string, version: number): string {
@@ -195,6 +203,23 @@ export function readVerificationEvidence(
   return { record, log };
 }
 
+export function readAgentRun(
+  root: string,
+  id: string,
+  runId: string,
+): { record: AgentRunRecord; log: string } {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId)) {
+    throw new WorkbenchError("invalid_input", `无效的运行记录 ID: ${runId}`);
+  }
+  const jsonPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.json`);
+  const logPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.log`);
+  const record = validateAgentRunRecord(readJsonStrict<unknown>(jsonPath, 128 * 1024));
+  const log = fs.existsSync(logPath) ? readBoundedText(logPath, MAX_EVIDENCE_BYTES) : "";
+  return { record, log };
+}
+
 export async function createRequirementFiles(
   root: string,
   build: (id: string, now: number) => { state: RequirementState; specMarkdown: string; designMarkdown: string },
@@ -218,6 +243,7 @@ export async function createRequirementFiles(
     fs.mkdirSync(itemDir, { recursive: true });
     fs.mkdirSync(resolveSafePath(base, `${itemRel}/history`), { recursive: true });
     fs.mkdirSync(resolveSafePath(base, `${itemRel}/evidence`), { recursive: true });
+    fs.mkdirSync(resolveSafePath(base, `${itemRel}/runs`), { recursive: true });
 
     atomicWriteFile(resolveSafePath(base, `${itemRel}/spec.md`), specMarkdown);
     atomicWriteFile(resolveSafePath(base, `${itemRel}/design.md`), designMarkdown);
@@ -230,7 +256,7 @@ export async function createRequirementFiles(
     };
     atomicWriteJson(projectPath, updatedProject);
 
-    return { state, specMarkdown, designMarkdown, designHistoryVersions: [] };
+    return { state, specMarkdown, designMarkdown, handoffMarkdown: "", designHistoryVersions: [] };
   });
 }
 
@@ -238,9 +264,11 @@ export interface RequirementMutationResult {
   state: RequirementState;
   specMarkdown?: string;
   designMarkdown?: string;
+  handoffMarkdown?: string;
   snapshotDesignVersion?: number;
   snapshotSpecRevision?: number;
   evidenceWrite?: { record: VerificationRecord; rawLog: string };
+  runWrite?: { record: AgentRunRecord; rawLog?: string };
 }
 
 export async function mutateRequirement(
@@ -277,6 +305,7 @@ export async function mutateRequirement(
     const itemRel = `${WORKBENCH_DIR}/items/${id}`;
     const nextSpec = result.specMarkdown ?? bundle.specMarkdown;
     const nextDesign = result.designMarkdown ?? bundle.designMarkdown;
+    const nextHandoff = result.handoffMarkdown ?? bundle.handoffMarkdown;
 
     if (result.evidenceWrite) {
       const { record, rawLog } = result.evidenceWrite;
@@ -289,11 +318,24 @@ export async function mutateRequirement(
       atomicWriteJson(jsonPath, record);
     }
 
+    if (result.runWrite) {
+      const { record, rawLog } = result.runWrite;
+      const jsonPath = resolveSafePath(base, `${itemRel}/runs/run-${record.id}.json`);
+      const logPath = resolveSafePath(base, `${itemRel}/runs/run-${record.id}.log`);
+      if (rawLog !== undefined) {
+        atomicWriteFile(logPath, rawLog);
+      }
+      atomicWriteJson(jsonPath, record);
+    }
+
     if (result.specMarkdown !== undefined) {
       atomicWriteFile(resolveSafePath(base, `${itemRel}/spec.md`), result.specMarkdown);
     }
     if (result.designMarkdown !== undefined) {
       atomicWriteFile(resolveSafePath(base, `${itemRel}/design.md`), result.designMarkdown);
+    }
+    if (result.handoffMarkdown !== undefined) {
+      atomicWriteFile(resolveSafePath(base, `${itemRel}/handoff.md`), result.handoffMarkdown);
     }
     if (result.snapshotDesignVersion !== undefined) {
       const histPath = resolveSafePath(base, `${itemRel}/history/design.v${result.snapshotDesignVersion}.md`);
@@ -314,6 +356,7 @@ export async function mutateRequirement(
       state: nextState,
       specMarkdown: nextSpec,
       designMarkdown: nextDesign,
+      handoffMarkdown: nextHandoff,
       designHistoryVersions: listDesignHistoryVersions(base, id),
     };
   });

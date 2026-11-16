@@ -1,180 +1,230 @@
-# Workbench 架构与产品设计规范（SDD + VDD 解耦版）
+# Workbench 架构与产品设计规范（v5.0：Workbench Hub + 多 Harness 算力路由）
 
-> 状态：当前权威设计基线（Option B：Headless Core + 通用 MCP/CLI + 本地极简 Web UI）。  
-> 文档分工：本文定义产品定位、工作流、三层解耦架构、界面信息架构与通用 Agent 工具接口；数据与领域不变量见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)；实施与验收进度见 [TASKS.md](TASKS.md)；旧版 Tern-Luau 单体架构与 AF 系列文档已归档至 [archive/README.md](archive/README.md)。
+> 状态：当前权威设计基线（Option B 演进版：常驻多项目 Hub 守护进程 + Headless Core + 多 Harness 分阶段模型路由 + 三栏式本地 Web 工作台）。  
+> 文档分工：本文定义产品定位、工作流、三层解耦与多 Harness 路由架构、三栏式界面信息架构及通用工具接口；数据与领域不变量见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)；实施与验收进度见 [TASKS.md](TASKS.md)；旧版 Tern-Luau 单体架构与 AF 系列文档已归档至 [archive/README.md](archive/README.md)。
 
 ---
 
 ## 1. 产品定位与核心设计哲学（Lightweight SDD + VDD）
 
-**定位**：本地优先、Agent 无关的**轻规范与验证驱动交付工作台（Spec & Verification Workbench）**。它不是另一个聊天客户端，也不是繁琐的行政审批后台，而是开发者统筹多个需求、对齐 AI 意图、审阅真实交付证据的控制中心。
+**定位**：本地优先、常驻运行、Agent 无关的**轻规范与验证驱动交付工作台（Spec & Verification Workbench Hub）**。它不是另一个聊天客户端，也不是繁琐的行政审批后台，而是开发者统筹**多个本地 Git 项目与多份 AI 订阅算力**、对齐意图、调度最佳模型执行与审阅真实交付证据的控制中心。
 
 **核心公式**：
 
-> **清晰意图（Living Spec） + 弹性执行（Adaptive Track） + 真实证据（Verification Proof） + 两头人工拍板（Human Checkpoints）**
+> **清晰意图（Living Spec） + 弹性执行（Adaptive Track） + 分阶段最优模型路由（Quota-Smart Routing） + 真实证据（Verification Proof） + 两头人工拍板（Human Checkpoints）**
 
-本设计汲取了 `OpenSpec`（可读 Markdown 活规范）、`Vibe Kanban`（本地服务 + Web UI + 双向 MCP）、`Beads`（Agent 友好的极简状态记忆）与 `Spec Kit`（关键人工检查点）的工程精华，并吸收了业界对第一代重型瀑布式 SDD 的反思，确立以下四大核心原则：
-
-### 1.1 四大原则
+### 1.1 五大核心原则
 
 1. **Agent 填表搬砖，人类阅读拍板**
-   - 彻底消灭用户作为“人肉中间件”的手工操作（不再要求用户手填 JSON 路径、手贴聊天摘录、手动导入候选、逐条新建实施步骤或维护文件哈希）。
-   - 用户只需用一句话描述目标；标题拆解、范围界定、验收条件梳理、方案撰写、步骤更新与测试运行，全部由 Agent 通过工作台工具自动完成。
+   - 彻底消灭用户作为“人肉中间件”的手工操作；用户只需用一句话描述目标，标题拆解、范围界定、验收条件梳理、方案撰写、步骤更新与测试运行，全部由选定的 Agent Harness 自动完成。
 2. **守住两头，放开中间**
-   - 不对 Agent 的每一次工具写入、每一行计划修改做繁琐的令牌授权或人工盖章。
-   - 人类只守住真正决定工程质量的两道关口：
+   - 不对 Agent 的每一次文件修改做繁琐审批。人类只守住真正决定工程质量的两道关口：
      1. **写代码前**：审阅并批准规范/方案（或显式授权走快速通道）。
-     2. **交付完成前**：审阅真实的验证命令证据（`Verification Evidence`）与代码差异（`Git Diff`），点击验收通过。
+     2. **交付完成前**：审阅真实的验证命令证据（`Verification Evidence`）、代码差异（`Git Diff`）与可选的跨模型审查报告（`Cross-Model Review`），点击验收通过。
 3. **双轨自适应工作流（Plan-First vs Fast-Track）**
-   - **标准模式（Plan-First）**：适用于复杂功能、架构调整与多人/多模块改动。流程为：  
-     `draft（提需求）` → `designing（Agent 生成 spec.md / design.md）` → `awaiting_approval（人审阅并批准方案）` → `implementing（Agent 编码、更新任务、跑验证）` → `awaiting_acceptance（人看证据与 Diff 验收）` → `done`。
-   - **快速通道（Fast-Track）**：适用于明确的小特性、局部修 Bug 或脚本维护。支持从 `draft` 直接点击 **「快速通道：直接实施」** 跳过长篇方案审批，直接进入 `implementing`；但编码完成后仍须经过同等严格的**真实验证证据 + 人工验收**闭环。
+   - **标准模式（Plan-First）**：`draft` → `designing` → `awaiting_approval`（人审方案）→ `implementing` → `awaiting_acceptance`（人看证据与 Diff 验收）→ `done`。
+   - **快速通道（Fast-Track）**：针对明确小需求，人可从 `draft` 直接授权跳过方案审批进入 `implementing`；但编码完成后仍须经过同等严格的**真实验证证据 + 人工验收**闭环。
 4. **零废话 UI（Zero-Noise Interface）**
-   - 主界面只展示**业务事实**（需求目标、方案正文、任务进度、验证绿/红状态、代码 Diff）和**当前唯一的核心行动建议**。
-   - 彻底清除免责声明式的系统说教（`note`）、内部 `UUID`、`SHA-256` 指纹、双修订号和协议术语；内部诊断信息仅收纳于「更多 → 复制调试信息」中按需查看。
+   - 主界面只展示**业务事实**（需求目标、方案正文、任务进度、验证绿/红状态、代码 Diff、交叉审查结论）和**当前唯一核心行动建议 + 执行器选择**。
+   - 彻底清除免责说教、内部 UUID、SHA-256 指纹与协议术语；调试信息统一收纳于「更多 → 查看调试信息」。
+5. **多项目集中统筹与分阶段异构算力路由（Multi-Project Hub & Stage-Based Model Routing）**
+   - **单守护进程统筹多项目**：通过全局 `wb start` 启动常驻后台 Hub 服务（默认固定端口 `4318`，支持 `wb status` / `wb stop` / `wb restart` / `wb open`），在同一个 Web 工作台中切换、新增与初始化多个本地 Git 仓库，无需按项目逐一开终端起服务。
+   - **主动调度多种本地 CLI Harness**：工作台从被动“复制提示词/依赖单一会话”，升级为主动在目标项目根目录拉起本机已安装的 Coding Agent CLI（`codex`、`qodercn`、`opencode`、`gemini`、`omp`）并实时流式传输日志。
+   - **按阶段分配算力与控制 SOTA 额度**：将研发拆分为 **`design`（规划设计）**、**`implement`（编码实施）**、**`fix`（失败诊断修复）** 与 **`review`（交付前跨模型审查）** 四个执行阶段；昂贵稀缺的 SOTA 模型额度优先投入低 Token、高杠杆的 `design` 与跨模型 `review`，高频高消耗的 `implement` 与 `fix` 则优先路由至额度充裕的高性价比或免费主力编码模型。
 
 ---
 
-## 2. 系统总体架构（三层解耦）
+## 2. 系统总体架构（常驻 Hub + 多 Harness 执行 + 核心引擎）
 
-彻底放弃“Windows Tern Luau + 内嵌 PowerShell + TS 扩展三重校验”的耦合形态，重构为单一技术栈（**TypeScript / Bun**）驱动的三层清晰架构：
+在原有 `Workbench Core + MCP/CLI + Local Web UI` 单一 TypeScript / Bun 技术栈基础上，新增 **Global Hub 管理层（`src/hub/`）**，形成如下协同架构：
 
 ```mermaid
 flowchart TD
-    subgraph Agents["AI Coding Agents (左侧对话 / 后台执行)"]
-        OMP["omp (oh-my-pi)"]
-        Others["Claude Code / Codex CLI / Cursor / OpenCode"]
+    subgraph UI["展示层 (三栏式本地 Web 工作台)"]
+        Sidebar["左栏：多项目切换器 + 目录浏览 + 算力路由配置"]
+        MainStage["中栏：工作区 Stepper + 智能行动横幅 + 三平行页签"]
+        Console["右栏：实时 Agent 执行终端抽屉"]
     end
 
-    subgraph Bridge["通用工具与会话桥接层"]
-        MCP["标准 MCP Server & wb CLI\n(5 个通用工作台工具)"]
-        Adapter["极薄 omp 扩展适配器 (~150 行 TS)\n(/wb 启动与一键提示词投递)"]
+    subgraph Hub["Global Hub 常驻后台 (~/.workbench-hub/)"]
+        Daemon["守护进程 & HTTP/WS Hub (wb start/open/status/stop)"]
+        Registry["多项目注册表 (hub.json) & 安全目录浏览"]
+        Discovery["Harness 与模型自动探测 (discovery.ts)"]
+        Router["分阶段模型路由器 (routing.ts)"]
+        Executor["主动式 CLI 任务调度器 (executor.ts)"]
     end
 
-    subgraph Core["Workbench Core (纯 TypeScript / Bun 本地引擎)"]
-        Domain["领域引擎与状态机\n(双轨流转 / 门禁 / 有效性计算)"]
-        Store["混合文件存储 (.workbench/)\n(spec.md + design.md + state.json 原子写)"]
-        GitExec["Git 观察器 & 真实验证执行器\n(Diff 采集 + 命令执行 + 证据落盘)"]
-        Server["本地 HTTP / WebSocket 服务"]
+    subgraph Harnesses["本地 Coding Agent Harnesses"]
+        Codex["codex exec / review (ChatGPT Plus)"]
+        Gemini["gemini -p (Google AI Pro)"]
+        Qoder["qodercn -p (QoderCN 订阅)"]
+        OpenCode["opencode run (OpenCode Go / Free)"]
+        OMP["omp -p / live /wb TUI Bridge"]
     end
 
-    subgraph UI["展示层 (Zero-Noise Local Web UI)"]
-        Web["本地现代 Web 界面\n(首页看板 / 三页签工作区 / Markdown & Diff 渲染)"]
-        TernLink["可选：Tern 轻量打开入口 / 浏览器打开"]
+    subgraph Core["Workbench Core (按项目隔离存储 .workbench/)"]
+        Domain["领域引擎与状态机 (双轨 / 门禁 / 有效性)"]
+        Store["混合存储 (.workbench/spec.md, design.md, state.json, evidence/)"]
+        GitExec["Git 观察器 & 真实验证执行器"]
+        MCP["标准 MCP Server & wb CLI (5 个正交工具 + review)"]
     end
 
-    OMP -->|"调用工具"| MCP
-    Others -->|"调用工具"| MCP
+    UI <-->|"REST + WS 实时同步/终端流"| Daemon
+    Daemon --> Registry
+    Daemon --> Discovery
+    Daemon --> Router
+    Daemon --> Executor
+    Executor -->|"spawn 非交互执行 + 注入 wb PATH"| Harnesses
+    Harnesses -->|"调用 wb CLI / MCP"| MCP
     MCP --> Domain
-    Server <-->|"一键派发 / 忙闲状态"| Adapter
-    Adapter <--> OMP
+    Daemon --> Domain
     Domain --> Store
     Domain --> GitExec
-    Server --> Domain
-    Web <-->|"REST + WS 实时同步"| Server
-    TernLink -.->|"打开本地 URL"| Web
 ```
 
 ### 2.1 分层职责
 
-1. **核心引擎层（Workbench Core — 纯 TypeScript / Bun）**
-   - 直接运行在项目所在操作系统（Linux / WSL / macOS 原生文件环境），**彻底移除 Windows PowerShell 子进程与 Luau 重复校验器**。
-   - 负责 `.workbench/` 混合存储的原子读写与乐观锁（CAS）、双轨状态机流转、批准与证据有效性评估、原生 Git 变更观察与 Diff 生成、以及项目内验证命令的真实执行与日志落盘。
-   - 内置轻量本地 HTTP + WebSocket 服务，状态变更实时推送到前端。
-2. **通用工具与桥接层（Agent Interfaces）**
-   - **标准 MCP Server & `wb` CLI**：工作台能力通过标准协议暴露，天然支持 `omp`、Claude Code、Codex CLI、Cursor、Gemini CLI、OpenCode 等任意 Agent，不绑定特定模型或单一终端客户端。
-   - **极薄 `omp` 会话桥接适配器（`omp/index.ts`，目标 ~150 行）**：仅负责两件轻量化事情——① 在 `omp` 会话中提供 `/wb` 命令启动或打开工作台；② 将用户在 Web UI 点击「让 Agent 生成方案」「开始实施」等按钮生成的结构化指令投递到绑定的 `omp` 会话，并同步会话空闲/忙碌指示灯。
-3. **展示层（Local Web UI）**
-   - 由 `Workbench Core` 直接提供单页 Web 应用，彻底摆脱 Tern Luau 原生组件的焦点丢失、列表无法恢复滚动、无语法高亮 Diff、手写光标计算等底层局限。
-   - 原生支持完整的 Markdown 渲染（GFM、代码块、表格、任务列表）、Unified/Split 代码 Diff 视图、可折叠终端输出日志、亮/暗色主题切换以及全键盘快捷导航。
-   - 用户可通过终端输出 URL 在浏览器访问，或在 Tern 中通过轻量入口直接唤起，不再需要维护 3000+ 行 Luau 界面胶水代码。
+1. **Global Hub 常驻管理层（`src/hub/` & `~/.workbench-hub/`）**
+   - **守护进程（`daemon.ts`）**：全局 `wb` 命令提供 `wb start | stop | restart | status | open`，在 `~/.workbench-hub/` 维护 `daemon.json`、`hub.log` 与 `hub.json`，默认监听 `127.0.0.1:4318`。
+   - **多项目注册中心（`registry.ts`）**：维护已纳管本地 Git 项目列表与全局路由策略；提供安全的本地目录浏览接口（`/api/fs/browse`），支持在 Web UI 直接选择本地项目并完成初始化。
+   - **自动探测引擎（`discovery.ts`）**：自动扫描本机可执行 CLI 路径及各客户端已缓存/认证的模型清单与默认角色。
+   - **分阶段路由器与执行器（`routing.ts` / `executor.ts`）**：按阶段配置主模型与备援链，在目标项目根目录异步拉起 CLI 子进程（注入内置 `wb` 可执行路径），通过 WebSocket 实时推流标准输出，支持随时终止、识别额度/限流失败并一键切换备援模型重试。
+2. **核心引擎层（Workbench Core — `src/core/`）**
+   - 保持按项目独立存储与验证：每个项目的规范（`spec.md`）、方案（`design.md`）、状态（`state.json`）、验证证据（`evidence/`）与人工审查/跨模型审查记录均保存在该项目根目录下 `.workbench/`，绝不混入其他项目。
+3. **通用工具与适配层（`src/mcp/`、`src/cli/`、`omp/`）**
+   - MCP Server 与 `wb` CLI 保留 5 个正交交付工具（`wb_list`、`wb_get`、`wb_propose`、`wb_update_tasks`、`wb_verify`）及只写审查报告工具/命令，继续严禁暴露 `approve`、`fast_track`、`accept` 给任何 Agent。
 
 ---
 
-## 3. 信息架构与极简界面设计
+### 2.2 本机实测探测的 Harness 与模型目录
 
-借鉴 `Linear` 的克制密度、`AWS Kiro` 的活规范结构与 `Vibe Kanban` 的任务控制中心布局，界面压缩为两个核心层级：**全局首页** 与 **需求工作区**。
+系统启动或点击“重新探测”时，自动收集以下已安装 Harness 及其本机模型目录（并允许用户在设置中补充自定义模型 ID，例如 `opencode` 中付费 Go 模型）：
 
-### 3.1 全局首页（Mission Control）
-
-- **顶部工具栏**：
-  - 左侧：项目名称 + Agent 会话连接状态指示灯（绿点在线 / 灰点离线，仅占 1 个小圆点加 2 个字，不展示复杂 UUID）。
-  - 中间：搜索框（按编号、标题、正文实时过滤）+ 范围切换（`活跃 | 已完成 | 全部`）。
-  - 右侧：视图切换分段控件（`列表 | 看板`）+ 唯一主按钮 **`+ 新建需求`**。
-- **置顶「待你拍板（Needs Your Decision）」区**：
-  - 只有当存在 `awaiting_approval`（方案待批准）、`awaiting_acceptance`（验证已通过待验收）或 `blocked`（受阻）的需求时才动态出现；没有待办时完全隐藏，不占空间。
-  - 每条只显示：`REQ-002 · 标题 · 原因标签（如“方案已提交，待批准”） · [去处理 →]`，点击直达对应需求。
-- **主体内容区**：
-  - **列表视图**：干净的分割线列表，每行只保留 4 个要素：`编号`、`标题`、`当前阶段状态与一句话进展（如：实施中 · 任务 3/5 · 验证 2/2 通过）`、`相对更新时间`。
-  - **看板视图**：仅展示四个只读投影列：**`准备中`**（draft / designing / awaiting_approval）、**`执行中`**（implementing）、**`待验收`**（awaiting_acceptance）、**`已完成`**（done）；受阻需求集中置顶/独立提示，不平铺 8 个内部阶段，不支持无效的“拖拽改状态”。
-- **极简新建需求弹窗**：
-  - 默认只有**一个多行输入框**（`“你想实现或修复什么？”`），支持直接粘贴需求描述，无需强制填写标题、标签、优先级或验收标准。
-  - 提供两个按钮：
-    - 主按钮：**`创建并让 Agent 整理方案`**（保存草稿并立即投递给绑定的 Agent，由 Agent 自动提炼标题、范围、验收条件与技术方案）。
-    - 次按钮：**`仅保存草稿`**（适合先记录灵感，稍后再做或走快速通道）。
-
-### 3.2 需求工作区（Workspace）
-
-进入某个需求后，永远保持 **“紧凑单顶栏 + 动态决策横幅 + 三个平行页签”** 结构，彻底消除多层嵌套 Tab 与重复信息卡片：
-
-1. **紧凑顶栏**：
-   - `← 工作` | `REQ-001` | **需求标题** | `状态徽章` | `⋯ 更多`（内含：编辑原文、切换快速通道、标记受阻、取消需求、重新打开、复制调试信息）。
-2. **动态决策横幅（Action Banner —— 全页唯一视觉焦点）**：
-   - 紧贴顶栏下方，用一句清晰人话总结现状，并给出当前阶段**唯一的推荐主按钮（Primary CTA）**及最多 1–2 个必要次级动作：
-
-| 当前现状 | 横幅展示文案示例 | 主按钮（Primary） | 次级动作（Secondary / Ghost） |
+| Harness | 对应订阅 / 来源 | 实测探测入口与本机已发现模型 | 非交互调度调用约定 |
 | :--- | :--- | :--- | :--- |
-| `draft`（刚创建） | 需求草稿已保存，尚未生成方案 | **`让 Agent 整理并出方案`** | `快速通道：直接实施` |
-| `designing`（Agent 编写中） | Agent 正在整理规范与技术方案… | *（显示运行中指示）* | `查看进度` / `取消等待` |
-| `awaiting_approval`（待批准） | Agent 已提交方案与 N 项验收标准，请审阅 | **`批准方案并开始实施`** | `仅批准方案` / `提出修改意见…` |
-| `implementing`（未开始或进行中） | 方案已批准（或快速通道已开启），正在实施（任务 x/y） | **`继续让 Agent 实施`**（空闲时）或 **`运行全部验证`** | — |
-| `implementing` / 验证失败或过期 | 有 K 项验收条件未通过，或代码改动后验证已过期 | **`重新运行验证`** | `让 Agent 修复失败项` |
-| `awaiting_acceptance`（全部通过） | 所有必需条件已验证通过（N/N），共改动 M 个文件 | **`验收通过（完成）`** | `打回修改…` |
-| `blocked` / `done` / `cancelled` | 显示阻塞原因或最终完成/取消摘要 | `done/cancelled` 可从更多菜单重新打开 | `解除阻塞` |
-
-3. **三个平行内容页签（无二级嵌套 Tab）**：
-   - **Tab 1：`规范与方案（Spec & Design）`**
-     - **目标与范围（`spec.md`）**：渲染后的干净 Markdown 正文（支持右上角点击轻量编辑）。
-     - **验收条件清单（Acceptance Criteria）**：结构化列表，直接显示每条条件的**必需/参考**标记、绑定的测试命令，以及实时验证状态（`✓ 通过` / `× 失败` / `⟳ 代码已变需重跑` / `○ 未验证`）。
-     - **技术方案（`design.md`）**：渲染后的 Markdown 方案正文；若存在历史已批准版本，右上角提供切换对比 Diff 的轻量开关。
-   - **Tab 2：`变更与验证（Changes & Verification）`**
-     - **实施任务（Tasks）**：Agent 在执行过程中自动勾选的步骤清单（`[✓] / [●] / [ ]`）。
-     - **验证证据（Evidence）**：按验证命令分组，显示命令原文、退出码、耗时、当前代码快照匹配状态；支持展开查看完整终端输出，支持单条或一键 **`[重跑验证]`**。
-     - **代码改动（Git Diff）**：以侧边文件树 + 主区语法高亮 Unified/Split Diff 的形式展示自基线以来的所有改动。
-   - **Tab 3：`时间线（Timeline）`**
-     - 面向人类的简洁事件流（创建、提交方案、批准、验证执行、打回、验收完成），屏蔽底层轮询噪音。
+| **`codex`** | **ChatGPT Plus** | 读取 `~/.codex/models_cache.json` & `~/.codex/config.toml`：<br>• **高推理/旗舰**：`gpt-6.1-sol`、`gpt-6-astra`、`gpt-6.1-terra`、`gpt-6-sol`、`gpt-6-luna`、`codex-auto-review`<br>• **轻量**：`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 实施/设计：`codex exec -C <root> --full-auto -c model="<model>" -c model_reasoning_effort="<effort>" "<prompt>"`<br>审查：`codex exec review`（或带 Diff 提示词的 `codex exec`） |
+| **`qodercn`** | **QoderCN 订阅** | 执行 `qodercn --list-models`（及 `~/.qoder-cn/settings.json`）：<br>• **旗舰/强推理**：`DeepSeek-V4-Pro`、`Qwen4-Max`、`Kimi-K3.1-Pro`、`GLM-5.3`、`Qwen3.8-Max`、`Kimi-K2.8-Preview`、`Step-5-Preview`、`Auto`<br>• **高性价比/高速**：`Qwen3.8-Flash`、`DeepSeek-Flash`、`GLM-5.3-Flash`、`MiniMax-M3.1-Flash`、`Fast` | `qodercn -p -w <root> --permission-mode auto -m <model> [--reasoning-effort <level>] "<prompt>"` |
+| **`opencode`** | **OpenCode Go / Free & 已认证 Provider** | 执行 `opencode models` 及 `~/.local/share/opencode/auth.json`：<br>• **免费/高吞吐开源模型**：`opencode/deepseek-v4.1-flash-free`、`opencode/glm-5.3-flash-free`、`opencode/minimax-m3.1-flash-free`、`opencode/mimo-v2.6-flash-free`、`opencode/longcat-2.5-free`、`opencode/nemotron-3.5-lightning-free`、`opencode/nemotron-3.5-super-vl-free`、`opencode/flint-40b-free`、`opencode/big-pickle`<br>• **自定义**：支持补充绑定 `OpenCode Go` 付费主力模型 | `opencode run --model <model> --auto "<prompt>"`（在 `<root>` 目录执行） |
+| **`gemini`** | **Google AI Pro** | 通过 `mise x node@24.4.1 -- gemini`（或直接 `gemini` PATH）调用：<br>• 默认 Pro / Flash 路由（或用户指定 `-m gemini-2.5-pro` 等别名） | `gemini -p "<prompt>" --yolo [-m <model>]`（在 `<root>` 目录执行） |
+| **`omp`** | **oh-my-pi** | 读取 `~/.omp/agent/config.yml`（默认 `openai-codex/gpt-6.1-sol`），同时支持终端 `/wb` Live TUI Bridge | 后台批处理：`omp -p --cwd=<root> --model=<model> "<prompt>"`<br>或通过现有 `/wb` Live Bridge 投递 |
 
 ---
 
-## 4. 通用 Agent 工具接口设计（MCP Server & `wb` CLI）
+### 2.3 分阶段模型路由矩阵与预设策略（Stage Routing Matrix）
 
-工作台通过**标准化 MCP Server** 与 **同名 `wb` CLI** 向任意 AI Coding Agent 暴露同一组 **5 个正交、低 Token 消耗的工具**。无需任何私有握手、租约配额或会话令牌注入：
+Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上逐阶段自定义修改主模型、推理强度与备援链），确保 **“规划与跨模型审查用强推理，高频编码与修 Bug 用大额度高速主力”**：
 
-| 工具名 | 用途 | 关键入参 | 权限与不变量约束 |
+#### A. 默认推荐：`balanced`（性价比均衡型 — 强烈推荐日常默认）
+
+| 执行阶段 | 首选执行器与模型（Primary） | 备援链（Fallback Chain，自动/一键切换） | 额度与工程设计考量 |
 | :--- | :--- | :--- | :--- |
-| **`wb_list`** | 查询项目需求摘要列表 | `status?`, `scope?` (`active`/`all`) | 只读；返回编号、标题、阶段、轨道及条件通过数。 |
-| **`wb_get`** | 获取单个需求的完整上下文 | `id` (`REQ-001`), `includeDiff?` | 只读；返回 `spec.md`、`design.md`、验收条件与验证状态、任务列表及最新人工反馈。 |
-| **`wb_propose`** | 提交/更新需求规范与技术方案 | `id`, `title?`, `spec?`, `criteria?`, `design?`, `summary` | 写入 `spec.md`/`design.md`/验收条件，并将 `plan_first` 需求推入 `awaiting_approval`。<br>**护栏**：若原需求已批准且本次修改了核心规范或必需条件，强制清除旧批准并重新置为 `awaiting_approval`。 |
-| **`wb_update_tasks`** | 维护实施计划步骤或标记阻断 | `id`, `tasks` (增删改状态 `pending`/`in_progress`/`done`/`blocked`), `readyForAcceptance?`, `note?` | 仅允许操作任务清单与自查说明；当 `readyForAcceptance=true` 时，由引擎核对验证证据全绿后自动推入 `awaiting_acceptance`（若证据未全绿则拒绝推入并告知原因）。 |
-| **`wb_verify`** | 在项目根目录执行真实测试/检查命令 | `id`, `command`, `criterionIds[]`, `timeoutMs?` | **禁止 Agent 传入结果状态**。由工作台 Core 真实执行命令、采集 `exitCode`、截断/脱敏输出并绑定当前 Git 快照写入 `evidence/`，同时返回最新条件覆盖情况。 |
+| **`design`（架构与规范整理）** | `codex` · `gpt-6-astra`（`reasoning_effort: medium`） | 1. `qodercn` · `DeepSeek-V4-Pro`<br>2. `gemini` · 默认 Pro<br>3. `qodercn` · `Qwen4-Max` | **低频高价值**：出方案和拆验收条件一次仅需少数几轮对话，调用强推理模型可大幅减少后续返工 Token。 |
+| **`implement`（编码与自测）** | `qodercn` · `Qwen4-Max`（或 `Auto`） | 1. `opencode` · `opencode/deepseek-v4.1-flash-free`<br>2. `opencode` · `opencode/glm-5.3-flash-free`<br>3. `codex` · `gpt-6-luna` | **高频大吞吐**：编码阶段反复读写文件和跑测试，优先使用 QoderCN 与 OpenCode Go/Free 模型保护 ChatGPT Plus SOTA 额度。 |
+| **`fix`（测试失败修复）** | `opencode` · `opencode/deepseek-v4.1-flash-free` | 1. `qodercn` · `Qwen3.8-Flash`<br>2. `qodercn` · `DeepSeek-V4-Pro`<br>3. `codex` · `gpt-6-astra` | **聚焦报错快速收敛**：有清晰测试失败日志时，Fast/Flash 模型响应快、成本极低；连续失败可无缝升级至强模型。 |
+| **`review`（跨模型交付审查）** | `codex` · `codex-auto-review`（或 `gpt-6.1-sol`） | 1. `gemini` · 默认 Pro<br>2. `qodercn` · `DeepSeek-V4-Pro` | **异构交叉验收**：强制避免“同一模型自己写自己审”，由 ChatGPT Plus / Google AI Pro / DeepSeek-V4-Pro 独立审阅 Git Diff 与 Spec 一致性。 |
 
-### 4.1 明确禁止暴露给 Agent 的能力
-- **禁止暴露 `approve`（批准方案）与 `accept`（最终验收）工具**：这两项拍板动作只能由人类在 Web UI 点击触发。
-- **禁止 Agent 直接修改历史 `evidence/` 或强行覆写 `passed` 状态**：验证证据只能由 `wb_verify` 执行器产生。
+#### B. 高上限攻坚：`sota_first`（复杂架构与关键核心改动）
+- **`design`**：`codex` · `gpt-6.1-sol`（`high`）→ 备援 `qodercn` · `DeepSeek-V4-Pro`
+- **`implement`**：`codex` · `gpt-6-astra` → 备援 `qodercn` · `DeepSeek-V4-Pro` / `Qwen4-Max`
+- **`fix`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `codex` · `gpt-6.1-sol`
+- **`review`**：`gemini`（独立审查视角，避开与 Codex 同源）→ 备援 `qodercn` · `Qwen4-Max`
 
-### 4.2 `omp` 与其它 Agent 的协作方式
-- **通用模式（Claude Code / Codex / Cursor / OpenCode / omp）**：在各自配置中挂载 `wb` MCP Server（或直接允许 Agent 调用 `wb` CLI 命令），Agent 即可全程自主读取需求、更新方案与任务、跑通测试并推送到待验收状态。
-- **`omp` 增强模式**：通过极薄的 `omp/index.ts` 扩展，支持在 `omp` 终端输入 `/wb` 一键启动本地服务并打开工作台，同时允许用户在工作台点击按钮时直接把提示词发往当前活跃的 `omp` 会话，省去复制粘贴。
+#### C. 极致省流：`quota_saver`（最大程度保留 SOTA 订阅额度）
+- **`design`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `gemini`（Pro）→ `qodercn` · `Kimi-K3.1-Pro`
+- **`implement`**：`opencode` · `opencode/deepseek-v4.1-flash-free` → 备援 `opencode/glm-5.3-flash-free` → `qodercn` · `Qwen3.8-Flash`
+- **`fix`**：`opencode` · `opencode/glm-5.3-flash-free` → 备援 `qodercn` · `DeepSeek-Flash`
+- **`review`**：`qodercn` · `Qwen4-Max` → 备援 `gemini`
 
 ---
 
-## 5. 新旧架构与设计取舍对照
+## 2.4 跨 Harness 双层上下文交接协议（Two-Tier Context Handoff）
 
-| 维度 | 旧版设计（2026-11-16 归档） | 新版设计（Option B 解耦基线） |
+针对跨订阅切换模型或中途配额耗尽重跑时“重头探索浪费 Token”与“直接粘贴原始长日志污染新模型注意力”的两难问题，采用 **「同构原生续接 + 异构 5 合 1 结构化交接简报（`handoff.md`）」** 双层交接机制：
+
+1. **同 Harness 连续执行：优先复用原生 Session**
+   - 当同一需求连续调用相同 Harness（例如继续由 `codex` 或 `opencode` 补充修改）且存在有效 `nativeSessionId` 时，优先调用各 CLI 原生恢复能力（`codex exec resume`、`opencode run --session`、`omp --resume`、`gemini --resume`），保留原生对话缓存。
+2. **跨 Harness 切换或异常中断接力：自动合成精简交接包（`handoff.md`，上限约 1.5k–3k Tokens）**
+   - 一旦切换了 Harness（如 `codex` 出方案 → `qodercn` 写代码 → 限流切 `opencode` 接力），或前一进程因限流/超时/手动 Kill 中途中断，工作台**不转储原始长聊天记录**，而是自动合成并注入高信噪比 `handoff.md`：
+     - **契约事实**：当前 `spec.md`、`design.md`、已通过（`✓`）与未通过（`×`）的验收条件；
+     - **Agent 备忘与死胡同标记（`handoffNote`）**：前序 Agent 提交的关键代码定位与**已证实走不通的方案警示**；
+     - **客观 Git 现场快照**：由工作台直接运行 `git status` + 精简 `git diff` 提取（即使前序进程突然崩溃未写总结，新模型也能精确知道工作区已改到哪一行）；
+     - **最新失败证据与尾部轨迹**：`evidence/` 最新失败命令报错摘要与前一运行日志末尾关键片段；
+     - **人类最新批注与纠偏指令**：需求讨论中未解决的 `discussions[]` 与用户在切换模型时附带的一句话叮嘱。
+
+---
+
+## 2.5 交互式方案共创、段落批注与研讨闭环（Co-Design Loop）
+
+实际研发不是单向流水线，人类在审阅 `spec.md`、`design.md` 或中间产物时，常常需要先提问理解、再局部修改与多轮讨论。工作台借鉴 GitHub PR Review 与 Cursor Composer 的非破坏式协同体验，提供三种无缝交互模式：
+
+1. **段落 / 条件级内联批注（Inline Section Annotations）**
+   - 在 `规范与方案` 页签的每个标题段落、代码块或验收条件 `AC-x` 旁提供悬停按钮 **`[💬 批注 / 提问]`**；
+   - 点击即可对该精确锚点（如 `design.md#数据库迁移` 或 `AC-2`）添加一条提问或修改要求，所有批注统一汇总在右侧研讨区，避免人工描述“上面第几段那个地方”。
+2. **双模式需求研讨台（`Ask` 仅探讨 vs `Refine` 修订方案）**
+   - **仅提问与探讨（`💬 Ask / Discuss` — 只读零副作用）**：遇到对方案不理解、想权衡两种实现利弊时，选择任意模型发问。Agent 在需求专属研讨流中解答并给出理由，**严禁改动 `spec.md`/`design.md`、不触发 `designVersion` 递增，也不重置既有阶段与批准**；每条回复附带 **`[采纳并据此修订方案]`** 快捷按钮。
+   - **批量提交批注并修订（`✏️ Refine` — 更新提案并高亮对比）**：将积累的段落批注与修改意见一次性交由选定模型执行，Agent 调用 `wb_propose` 产出新版本 `design.vN.md`，前端自动展开 **`v(N-1) → vN` 行级对比视图**，让人一眼确认每处批注是否改到位。
+3. **人类直接共编主权（Direct Co-Editing）**
+   - 人类不仅可以在线编辑 `spec.md`，也可直接在线修改 `design.md` 关键片段；人类编辑会同步标注为权威约束写入 `handoff.md`，防止后续 Agent 擅自覆盖人工定稿。
+
+---
+
+## 3. 信息架构与三栏式指挥舱设计（Command Center UI）
+
+针对当前单页 Web UI 缺少项目导航、布局纵深不够与执行反馈隔离的问题，升级为现代化的 **三栏式指挥舱（Three-Column Command Center）**，在保持「零业务噪声」原则下大幅提升多项目统筹与多模型调度体验：
+
+### 3.1 总体三栏布局
+
+```text
+┌───────────────┬───────────────────────────────────────────┬──────────────────────┐
+│ 左栏 (240px)  │ 中栏 (自适应主工作区)                     │ 右栏 (360px 可折叠)  │
+│               │                                           │                      │
+│  Workbench    │  [阶段步进条] 草稿 ─▶ 方案 ─▶ 审批 ─▶ 实施│ [💬研讨批注][>_终端] │
+│               │                                           │                      │
+│ ▸ 项目列表    │  ┌─────────────────────────────────────┐ │ · #design.md§架构 (1) │
+│  ● workbench  │  │ 动态行动横幅 (现状 + 唯一主操作)    │ │ 人: 这里为什么不用锁?│
+│  ○ reader (2) │  │ [批准并实施] [执行器: QoderCN ▾]    │ │ gpt-6: 因为跨进程…   │
+│  + 添加项目…  │  └─────────────────────────────────────┘ │  [采纳此回复并更新]  │
+│               │                                           │ ──────────────────── │
+│ ───────────── │  [规范与方案] [变更与验证] [时间线]       │ > 运行中: Qwen4-Max  │
+│  算力与路由   │                                           │ > $ wb_get REQ-001   │
+│  ● codex      │  - Spec & Design (悬停段可 💬 批注)       │                      │
+│  ● qodercn    │  - 方案版本 Diff (v1 → v2) & 审查卡片    │ [输入问题/意见…]     │
+│  ● opencode   │  - 文件树 + 高亮 Git Diff & 证据日志      │ [仅提问] [让Agent改] │
+│  ⚙ 路由策略   │                                           │ [切换备援模型重试]   │
+└───────────────┴───────────────────────────────────────────┴──────────────────────┘
+```
+
+### 3.2 各栏核心能力
+
+1. **左栏：项目切换器与算力路由入口（Sidebar，窄屏可折叠为抽屉）**
+   - **已纳管项目列表**：显示项目名称、待拍板红点/数字（`awaiting_approval` / `awaiting_acceptance` / `blocked`）、以及后台是否正在运行 Agent（呼吸指示灯）。
+   - **`+ 添加项目`（目录浏览器弹窗）**：支持直接输入路径或点击浏览本机目录，识别是否为 Git 仓库；若尚未初始化 `.workbench/`，提供一键「本机排除 / 随 Git 跟踪」初始化。
+   - **算力与路由中心入口**：直接展示各 Harness（`codex` / `qodercn` / `opencode` / `gemini` / `omp`）的可用状态；点击进入配置中心切换 `balanced | sota_first | quota_saver` 预设、编辑各阶段主/备援模型、添加自定义模型并一键刷新探测。
+
+2. **中栏：项目首页（Mission Control）与需求工作区（Workspace）**
+   - **项目首页**：顶部统计摘要条（进行中 / 待拍板 / 已完成） + 动态「待你拍板」区 + 搜索/范围/布局切换（干净列表与四栏只读看板）+ `+ 新建需求`（一句话创建后可直接选模型执行）。
+   - **需求工作区**：
+     - **可视化阶段步进条（Stage Stepper）**：清晰标识当前位于 `草稿` / `方案设计` / `方案审批` / `编码与验证` / `交付验收` / `已完成` 哪一阶段。
+     - **智能行动横幅（Smart Action Banner）**：主 CTA 旁内嵌紧凑 **`[执行器: <Harness> · <Model> ▾]`** 选择器，默认自动匹配当前阶段的路由推荐；当所有必需验证通过时，横幅或页签内提供一键 **`[触发跨模型 Code Review]`**，随后由人类点击 **`[验收通过]`**。
+     - **三平行内容页签**：
+       1. **`规范与方案`**：`spec.md` 与 `design.md` 双支持在线编辑、段落/条件级悬停 **`[💬 批注 / 提问]`**、实时验证覆盖状态、方案修订后自动展开的 **版本对比 Diff（`vN-1 → vN`）**，以及置顶展示的 **跨模型 Code Review 审查报告卡片**（标明审查结论 `pass / concern / block`、模型来源与对应快照匹配状态）。
+       2. **`变更与验证`**：实施任务进度、按命令聚合的可展开验证证据卡片（含 `[重跑验证]`）、分栏文件树 Git Diff 视图。
+       3. **`时间线与运行记录`**：人类视角事件流 + 与之关联的模型调用/耗时历史与当前生成的 `handoff.md` 交接简报预览。
+
+3. **右栏：研讨与实时执行协同舱（Co-Pilot Discussion & Live Console Drawer）**
+   - 采用双子视图切换（支持折叠以释放空间）：
+     - **`💬 方案研讨与批注（Discuss & Refine）`**：展示需求内上下文问答流、待处理的段落内联批注列表、以及底部操作栏（`[执行模型 ▾]` + `[💡 仅提问探讨]` + `[✏️ 让 Agent 修订方案]`）。
+     - **`>_ 实时执行终端（Live Console）`**：流式滚动展示当前子进程 stdout/stderr 输出、耗时计时器、Harness/Model 标签、**`[查看交接上下文 handoff.md]`**、**`[终止任务]`** 与失败/限流后的 **`[使用备援模型接力重试]`**。
+
+---
+
+## 4. 新旧能力演进对照
+
+| 维度 | v4.0 基线（Phase 1） | v5.0 Hub 升级（Phase 2：WB-08 – WB-12） |
 | :--- | :--- | :--- |
-| **运行核心与语言** | Luau (`host.luau` 3,195行) + 内嵌 PowerShell/C# + TS 扩展，三端重复校验 | **纯 TypeScript / Bun 单一核心**，Linux/macOS/WSL 原生读写与执行 |
-| **UI 载体** | 强绑定 Tern Luau 原生控件（受限于焦点、滚动、Diff 与表格表达力） | **现代本地 Web UI**（完整 Markdown、高亮 Diff、键盘流、响应式） |
-| **存储格式** | 多文件纯 JSON（v1/v2/v3，大量转义正文、实体/内容双修订） | **可读 Markdown (`spec.md`/`design.md`) + 轻量 `state.json`** |
-| **工作流灵活性** | 单一重型 6 步流程，大小任务一刀切 | **Plan-First + Fast-Track 双轨自适应**，两头拍板、中间放开 |
-| **Agent 协议复杂度** | 3 次握手 + 6 秒心跳 + 64-token 租约 + JCS 哈希 + 7 态账本 | **5 个标准 MCP 工具 + `wb` CLI + 单文件原子写入与乐观锁** |
-| **信息密度与噪声** | 满屏免责 `note`、UUID、SHA-256、多层嵌套 Tab、手填表单 | **零废话 UI**：动态决策横幅 + 三平行页签，Agent 填表、人看结论 |
+| **启动与生命周期** | 需进入单个仓库执行脚本启动 | **全局 `wb start` 常驻后台服务**，支持开机自启与多终端复用 |
+| **项目范围** | 单仓库单实例 | **多项目注册中心 + 目录浏览器**，跨仓库实时切换与统一统筹 |
+| **Agent 调度与上下文** | 被动等待单一终端会话，切换模型即丢记忆 | **主动调度多 CLI Harness + 同构 Session 续接 / 异构 `handoff.md` 交接包** |
+| **模型与额度管理** | 单一默认模型，无阶段区分 | **自动探测目录 + 三套路由预设 + 分阶段主/备援链**，保护稀缺 SOTA 额度 |
+| **方案打磨与交付把关** | 仅支持整段打回重来，无提问探讨通道 | **段落级 PR 式内联批注 + Ask/Refine 双模式研讨 + 跨模型交叉 Code Review** |
+| **Web UI 形态** | 单页列表/详情跳转 | **三栏式指挥舱布局**：左栏项目与算力、中栏步进器与工作区、右栏研讨/执行终端 |

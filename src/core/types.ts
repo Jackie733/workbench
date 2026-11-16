@@ -3,13 +3,22 @@ export const WORKBENCH_DIR = ".workbench" as const;
 
 export const MAX_SPEC_BYTES = 128 * 1024;
 export const MAX_DESIGN_BYTES = 256 * 1024;
+export const MAX_HANDOFF_BYTES = 128 * 1024;
 export const MAX_STATE_BYTES = 512 * 1024;
 export const MAX_EVIDENCE_BYTES = 512 * 1024;
 export const MAX_CRITERIA = 32;
 export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
+export const MAX_DISCUSSIONS = 200;
+export const MAX_AGENT_RUNS = 30;
 export const MAX_TITLE_CHARS = 120;
 export const MAX_REASON_CHARS = 2000;
+
+export const AGENT_ACTIONS = ["ask", "design", "implement", "fix", "review"] as const;
+export type AgentAction = (typeof AGENT_ACTIONS)[number];
+
+export const REVIEW_VERDICTS = ["pass", "concern", "block"] as const;
+export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 
 export const STAGES = [
   "draft",
@@ -130,7 +139,57 @@ export type TimelineEventKind =
   | "blocked"
   | "unblocked"
   | "cancelled"
-  | "reopened";
+  | "reopened"
+  | "discussed"
+  | "review_submitted";
+
+export interface HandoffNote {
+  updatedAt: number;
+  keyDecisions: string[];
+  deadEnds: string[];
+  nextSteps: string[];
+}
+
+export interface DiscussionEntry {
+  id: string;
+  at: number;
+  actor: "human" | "agent";
+  mode: "ask" | "refine";
+  anchor?: string;
+  harness?: string;
+  model?: string;
+  message: string;
+  resolved?: boolean;
+}
+
+export interface AgentRunRecord {
+  id: string;
+  action: AgentAction;
+  harness: string;
+  model: string;
+  reasoningEffort?: string;
+  nativeSessionId?: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  startedAt: number;
+  endedAt: number | null;
+  exitCode: number | null;
+  durationMs: number;
+  rateLimited?: boolean;
+  errorSummary?: string;
+  logPath: string;
+}
+
+export interface ReviewReport {
+  id: string;
+  reviewerHarness: string;
+  reviewerModel: string;
+  verdict: ReviewVerdict;
+  summary: string;
+  markdown: string;
+  reviewedSpecHash: string;
+  reviewedCodeSnapshotHash: string;
+  reviewedAt: number;
+}
 
 export interface TimelineEvent {
   id: string;
@@ -161,6 +220,10 @@ export interface RequirementState {
   lastFeedback: string | null;
   blockedFrom: Stage | null;
   blockedReason: string | null;
+  handoffNote?: HandoffNote | null;
+  discussions?: DiscussionEntry[];
+  agentRuns?: AgentRunRecord[];
+  reviewReport?: ReviewReport | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -226,11 +289,17 @@ export interface ActionBanner {
   secondaryActions: BannerAction[];
 }
 
+export interface ReviewValidity {
+  effectiveState: "current" | "stale" | "missing";
+  reason: string | null;
+}
+
 export interface ValidityReport {
   approval: ApprovalStatus;
   verifications: EvaluatedVerification[];
   coverage: CriteriaCoverage;
   acceptanceGate: AcceptanceGate;
+  reviewValidity: ReviewValidity;
   banner: ActionBanner;
   needsDecision: boolean;
   decisionReason: string | null;
@@ -260,6 +329,7 @@ export interface RequirementDetail {
   state: RequirementState;
   specMarkdown: string;
   designMarkdown: string;
+  handoffMarkdown: string;
   designHistoryVersions: number[];
   validity: ValidityReport;
 }

@@ -1,5 +1,8 @@
 import type {
+  AgentAction,
+  AgentRunRecord,
   CriterionInput,
+  DiscussionEntry,
   PrivacyMode,
   ProjectMetadata,
   RequirementDetail,
@@ -7,6 +10,14 @@ import type {
   VerificationRecord,
 } from "../core/types.ts";
 import type { GitObservation } from "../core/git.ts";
+import type {
+  BrowseEntry,
+  HarnessInfo,
+  HubProjectEntry,
+  ModelTarget,
+  RoutingConfig,
+  RoutingPreset,
+} from "../hub/types.ts";
 import type { BridgeStatus, DispatchOutcome } from "../server/index.ts";
 import type { DispatchAction } from "../server/prompts.ts";
 
@@ -18,6 +29,32 @@ export interface ProjectInfoResponse {
   git: { isGitRepo: boolean; head?: string; dirty?: boolean; fingerprint?: string | null };
 }
 
+export interface HubProjectSummary extends HubProjectEntry {
+  initialized: boolean;
+  isGitRepo: boolean;
+  activeCount: number;
+  decisionCount: number;
+  runningCount: number;
+}
+
+export interface HubStateResponse {
+  hubMode: boolean;
+  activeProjectId: string | null;
+  projects: HubProjectSummary[];
+  harnesses: HarnessInfo[];
+  routing: RoutingConfig;
+  customModels: Record<string, string[]>;
+  activeRuns: Array<AgentRunRecord & { requirementId: string }>;
+}
+
+export interface BrowseResponse {
+  currentPath: string;
+  parentPath: string | null;
+  isGitRepo: boolean;
+  workbenchInitialized: boolean;
+  entries: BrowseEntry[];
+}
+
 export class ApiClientError extends Error {
   readonly code: string;
   readonly details?: Record<string, unknown>;
@@ -26,6 +63,19 @@ export class ApiClientError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+let activeProjectScope: string | null = null;
+
+export function setApiProjectScope(projectId: string | null): void {
+  activeProjectScope = projectId;
+}
+
+export function withProjectParam(url: string, explicitProjectId?: string | null): string {
+  const pid = explicitProjectId !== undefined ? explicitProjectId : activeProjectScope;
+  if (!pid || pid === "default") return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}project=${encodeURIComponent(pid)}`;
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -42,56 +92,140 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getProject: () => requestJson<ProjectInfoResponse>("/api/project"),
+  getHubState: () => requestJson<HubStateResponse>("/api/hub/state"),
+  addHubProject: (input: { root: string; name?: string; initPrivacy?: PrivacyMode; activate?: boolean }) =>
+    requestJson<{ project: HubProjectEntry; activeProjectId: string | null; projects: HubProjectSummary[] }>("/api/hub/projects", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  activateHubProject: (projectId: string) =>
+    requestJson<{ project: HubProjectEntry; activeProjectId: string | null; projects: HubProjectSummary[] }>(
+      `/api/hub/projects/${encodeURIComponent(projectId)}/activate`,
+      { method: "POST" },
+    ),
+  removeHubProject: (projectId: string) =>
+    requestJson<{ activeProjectId: string | null; projects: HubProjectSummary[] }>(
+      `/api/hub/projects/${encodeURIComponent(projectId)}`,
+      { method: "DELETE" },
+    ),
+  browseFs: (targetPath?: string) =>
+    requestJson<BrowseResponse>(targetPath ? `/api/fs/browse?path=${encodeURIComponent(targetPath)}` : "/api/fs/browse"),
+  refreshHarnesses: () => requestJson<{ harnesses: HarnessInfo[] }>("/api/hub/harnesses/refresh", { method: "POST" }),
+  saveRouting: (routing: RoutingConfig) =>
+    requestJson<{ routing: RoutingConfig; customModels: Record<string, string[]> }>("/api/hub/routing", {
+      method: "PUT",
+      body: JSON.stringify(routing),
+    }),
+  applyPreset: (preset: RoutingPreset) =>
+    requestJson<{ routing: RoutingConfig; customModels: Record<string, string[]> }>("/api/hub/routing/preset", {
+      method: "POST",
+      body: JSON.stringify({ preset }),
+    }),
+  addCustomModel: (harness: string, model: string) =>
+    requestJson<{ customModels: Record<string, string[]>; harnesses: HarnessInfo[] }>("/api/hub/models/custom", {
+      method: "POST",
+      body: JSON.stringify({ harness, model }),
+    }),
+
+  getProject: () => requestJson<ProjectInfoResponse>(withProjectParam("/api/project")),
   initProject: (input: { name?: string; privacyMode: PrivacyMode }) =>
-    requestJson<{ initialized: boolean; project: ProjectMetadata }>("/api/project/init", {
+    requestJson<{ initialized: boolean; project: ProjectMetadata }>(withProjectParam("/api/project/init"), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   listRequirements: (scope: "active" | "done" | "cancelled" | "all") =>
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null; bridge: BridgeStatus }>(
-      `/api/requirements?scope=${encodeURIComponent(scope)}`,
+      withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
     ),
   createRequirement: (input: { goal: string; title?: string; dispatchAgent?: boolean }) =>
-    requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>("/api/requirements", {
+    requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(withProjectParam("/api/requirements"), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   getRequirement: (id: string) =>
     requestJson<{ detail: RequirementDetail; bridge: BridgeStatus; codeSnapshotHash: string | null }>(
-      `/api/requirements/${encodeURIComponent(id)}`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}`),
     ),
   getDiff: (id: string) =>
-    requestJson<{ changes: GitObservation }>(`/api/requirements/${encodeURIComponent(id)}/diff`),
+    requestJson<{ changes: GitObservation }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/diff`)),
   getDesignHistory: (id: string, version: number) =>
     requestJson<{ version: number; markdown: string }>(
-      `/api/requirements/${encodeURIComponent(id)}/history/${version}`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/history/${version}`),
     ),
   getEvidence: (id: string, verificationId: string) =>
     requestJson<{ record: VerificationRecord; log: string }>(
-      `/api/requirements/${encodeURIComponent(id)}/evidence/${encodeURIComponent(verificationId)}`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/evidence/${encodeURIComponent(verificationId)}`),
+    ),
+  getHandoff: (id: string) =>
+    requestJson<{ markdown: string; detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/handoff`),
     ),
   updateSpec: (
     id: string,
     input: { title?: string; specMarkdown?: string; criteria?: CriterionInput[]; expectedRevision?: number },
   ) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/spec`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/spec`), {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+  updateDesign: (id: string, input: { designMarkdown: string; expectedRevision?: number }) =>
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/design`), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  addDiscussion: (
+    id: string,
+    input: { mode: "ask" | "refine"; anchor?: string; message: string; resolved?: boolean },
+  ) =>
+    requestJson<{ detail: RequirementDetail; entry: DiscussionEntry }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/discussions`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  resolveDiscussions: (id: string, input: { ids?: string[]; resolved?: boolean }) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/discussions/resolve`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  startAgentRun: (
+    id: string,
+    input: {
+      action: AgentAction;
+      harness?: string;
+      model?: string;
+      reasoningEffort?: ModelTarget["reasoningEffort"];
+      message?: string;
+      anchor?: string;
+      anchorIds?: string[];
+      mode?: "ask" | "refine";
+      useFallback?: boolean;
+    },
+  ) =>
+    requestJson<{ run: AgentRunRecord; detail: RequirementDetail; target: ModelTarget }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/run`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  cancelAgentRun: (id: string, runId: string) =>
+    requestJson<{ cancelled: boolean; runId: string }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/cancel`),
+      { method: "POST" },
+    ),
+  getAgentRunLog: (id: string, runId: string) =>
+    requestJson<{ record: AgentRunRecord; log: string }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`),
+    ),
   approve: (id: string, input: { expectedRevision?: number; dispatchAgent?: boolean; note?: string }) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(
-      `/api/requirements/${encodeURIComponent(id)}/approve`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/approve`),
       { method: "POST", body: JSON.stringify(input) },
     ),
   fastTrack: (id: string, input: { expectedRevision?: number; dispatchAgent?: boolean; note?: string }) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(
-      `/api/requirements/${encodeURIComponent(id)}/fast-track`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/fast-track`),
       { method: "POST", body: JSON.stringify(input) },
     ),
   requestChanges: (id: string, input: { feedback: string; expectedRevision?: number; dispatchAgent?: boolean }) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(
-      `/api/requirements/${encodeURIComponent(id)}/request-changes`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/request-changes`),
       { method: "POST", body: JSON.stringify(input) },
     ),
   verify: (
@@ -99,37 +233,37 @@ export const api = {
     input: { command?: string; criterionIds?: string[]; all?: boolean; timeoutMs?: number },
   ) =>
     requestJson<{ detail: RequirementDetail; runs: VerificationRecord[] }>(
-      `/api/requirements/${encodeURIComponent(id)}/verify`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/verify`),
       { method: "POST", body: JSON.stringify(input) },
     ),
   accept: (id: string, input: { expectedRevision?: number; note?: string }) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/accept`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   block: (id: string, input: { reason: string; expectedRevision?: number }) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/block`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/block`), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   unblock: (id: string, input: { expectedRevision?: number }) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/unblock`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/unblock`), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   cancel: (id: string, input: { reason: string; expectedRevision?: number }) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/cancel`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/cancel`), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   reopen: (id: string, input: { reason: string; expectedRevision?: number }) =>
-    requestJson<{ detail: RequirementDetail }>(`/api/requirements/${encodeURIComponent(id)}/reopen`, {
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/reopen`), {
       method: "POST",
       body: JSON.stringify(input),
     }),
   dispatch: (id: string, input: { action: DispatchAction; mode?: "send" | "prefill" }) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome }>(
-      `/api/requirements/${encodeURIComponent(id)}/dispatch`,
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/dispatch`),
       { method: "POST", body: JSON.stringify(input) },
     ),
 };

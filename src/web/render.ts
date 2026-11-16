@@ -35,10 +35,23 @@ function renderInline(raw: string): string {
   return text.replace(/\u0000CODE(\d+)\u0000/g, (_m, idx: string) => codeTokens[Number(idx)] ?? "");
 }
 
+export interface MarkdownRenderOptions {
+  annotatable?: boolean;
+  docLabel?: string;
+}
+
 /** Renders GitHub-Flavored Markdown safely to HTML without external runtime libraries. */
-export function renderMarkdown(markdown: string): string {
+export function renderMarkdown(markdown: string, options: MarkdownRenderOptions = {}): string {
   const normalized = markdown.replace(/\r\n/g, "\n").trim();
   if (!normalized) return `<p class="muted">（暂无内容）</p>`;
+  const annotatable = options.annotatable === true;
+  const docLabel = options.docLabel ?? "doc";
+  const wrapHeading = (level: number, rawHeading: string) => {
+    const inner = renderInline(rawHeading);
+    if (!annotatable) return `<h${level}>${inner}</h${level}>`;
+    const anchor = `${docLabel}#${rawHeading.trim().slice(0, 60)}`;
+    return `<div class="md-annot-row"><h${level}>${inner}</h${level}><button class="btn ghost xs md-annot-btn" type="button" data-action="annotate-anchor" data-anchor="${escapeHtml(anchor)}" title="对此段提问或批注">💬 批注</button></div>`;
+  };
 
   const lines = normalized.split("\n");
   const out: string[] = [];
@@ -79,7 +92,7 @@ export function renderMarkdown(markdown: string): string {
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       const level = heading[1]!.length;
-      out.push(`<h${level}>${renderInline(heading[2]!)}</h${level}>`);
+      out.push(wrapHeading(level, heading[2]!));
       i += 1;
       continue;
     }

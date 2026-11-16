@@ -8,6 +8,7 @@ import type {
   CriterionCoverageItem,
   EvaluatedVerification,
   RequirementState,
+  ReviewValidity,
   ValidityReport,
 } from "./types.ts";
 
@@ -332,17 +333,36 @@ export function deriveActionBanner(
   }
 }
 
+export function evaluateReviewReport(
+  state: RequirementState,
+  currentCodeSnapshotHash: string | null,
+): ReviewValidity {
+  const report = state.reviewReport;
+  if (!report) {
+    return { effectiveState: "missing", reason: null };
+  }
+  if (report.reviewedSpecHash !== state.specHash) {
+    return { effectiveState: "stale", reason: "需求规范或验收条件已修改，建议复审" };
+  }
+  if (!currentCodeSnapshotHash || report.reviewedCodeSnapshotHash !== currentCodeSnapshotHash) {
+    return { effectiveState: "stale", reason: "审查后工作区代码已有新改动，建议复审" };
+  }
+  return { effectiveState: "current", reason: null };
+}
+
 export function evaluateRequirement(state: RequirementState, currentCodeSnapshotHash: string | null): ValidityReport {
   const approval = evaluateApproval(state);
   const verifications = evaluateVerifications(state, currentCodeSnapshotHash);
   const coverage = evaluateCriteriaCoverage(state, verifications);
   const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
+  const reviewValidity = evaluateReviewReport(state, currentCodeSnapshotHash);
   const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
   return {
     approval,
     verifications,
     coverage,
     acceptanceGate,
+    reviewValidity,
     banner,
     needsDecision,
     decisionReason,

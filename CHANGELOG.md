@@ -1,5 +1,16 @@
 # 变更记录
 
+## 5.0.0 — 2026-11-16（Workbench Hub 多项目中心 + 多 Harness 路由 + 三栏式 Web UI）
+
+- **常驻后台守护进程与多项目注册中心（`WB-08`）**：
+  - 全局挂载 `wb` CLI（`bun link`），新增 `wb start`、`wb stop`、`wb restart`、`wb status`、`wb open`、`wb review` 子命令；状态与注册表存储于 `~/.workbench-hub/`（`daemon.json`、`hub.log`、`hub.json`），支持多项目安全目录浏览（`/api/fs/browse`）与跨仓库隔离切换。
+- **多 Harness 自动探测与分阶段算力路由（`WB-09`）**：
+  - 新增 `src/hub/discovery.ts` 与 `src/hub/routing.ts`，自动探测本机 `codex`、`qodercn`、`opencode`、`gemini`、`omp` 及模型目录，内置 `balanced`（推荐）、`sota_first`、`quota_saver` 三套分阶段路由预设（`design` / `implement` / `fix` / `review`）、备援链、自定义模型追加及限流/额度不足检测。
+- **主动式调度器、双层上下文交接与跨模型审查（`WB-10`）**：
+  - 新增 `src/hub/executor.ts` 与 `src/hub/handoff.ts`：注入 `wb` CLI 路径后台拉起多种 CLI Harness 并绑定独立进程组支持随时强杀（PGID）；实现同构 `--resume` 原生续接 + 异构 5 合 1 `handoff.md` 交接包自动合成；新增 `ask`（只读探讨）、`refine`（批注修订）、人类直接编辑 `design.md` 及绑定 `specHash` + `codeSnapshotHash` 的跨模型审查结论 `reviewReport`。
+- **三栏式指挥舱 Web UI（`WB-11` / `WB-12`）**：
+  - 模块化重构 `src/web/` 为左栏多项目与算力侧边栏 + 中栏阶段步进器、模型选择行动横幅、段落悬停批注、直接方案编辑与版本对比 + 右栏双视图协同舱（`💬 研讨与批注` + `>_ 实时执行终端`）。
+
 ## 4.0.0 — 2026-11-16（Option B 架构重构与 SDD+VDD 落地）
 
 - **架构彻底解耦为纯 TypeScript / Bun 单一技术栈**：

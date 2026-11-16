@@ -84,6 +84,16 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
         },
         design: { type: "string", description: "Proposed technical design.md Markdown." },
         summary: { type: "string", description: "Short timeline summary of this proposal." },
+        handoffNote: {
+          type: "object",
+          additionalProperties: false,
+          description: "Optional concise context handoff memo for downstream agents.",
+          properties: {
+            keyDecisions: { type: "array", items: { type: "string" } },
+            deadEnds: { type: "array", items: { type: "string" } },
+            nextSteps: { type: "array", items: { type: "string" } },
+          },
+        },
         expectedRevision: { type: "integer", minimum: 1, description: "Optional optimistic lock revision." },
       },
     },
@@ -118,6 +128,16 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
           description: "Set true after all required criteria pass verification to move stage to awaiting_acceptance.",
         },
         note: { type: "string", description: "Short summary of progress or delivery." },
+        handoffNote: {
+          type: "object",
+          additionalProperties: false,
+          description: "Optional concise handoff memo (key decisions, dead ends to avoid, next steps).",
+          properties: {
+            keyDecisions: { type: "array", items: { type: "string" } },
+            deadEnds: { type: "array", items: { type: "string" } },
+            nextSteps: { type: "array", items: { type: "string" } },
+          },
+        },
         expectedRevision: { type: "integer", minimum: 1 },
       },
     },
@@ -211,6 +231,10 @@ export async function executeWorkbenchTool(
         designVersion: detail.state.designVersion,
         specMarkdown: detail.specMarkdown,
         designMarkdown: detail.designMarkdown,
+        handoffMarkdown: detail.handoffMarkdown,
+        handoffNote: detail.state.handoffNote ?? null,
+        discussions: (detail.state.discussions ?? []).slice(-20),
+        reviewReport: detail.state.reviewReport ?? null,
         lastFeedback: detail.state.lastFeedback,
         blockedReason: detail.state.blockedReason,
         approval: detail.validity.approval,
@@ -248,7 +272,7 @@ export async function executeWorkbenchTool(
     }
 
     case "wb_propose": {
-      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "summary", "expectedRevision"], name);
+      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "summary", "handoffNote", "expectedRevision"], name);
       if (typeof args.id !== "string") {
         throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
       }
@@ -271,6 +295,9 @@ export async function executeWorkbenchTool(
         criteria: args.criteria as CriterionInput[] | undefined,
         designMarkdown: typeof args.design === "string" ? args.design : undefined,
         summary: typeof args.summary === "string" ? args.summary : undefined,
+        handoffNote: isRecord(args.handoffNote)
+          ? (args.handoffNote as { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] })
+          : undefined,
         expectedRevision: args.expectedRevision as number | undefined,
         actor: "agent",
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
@@ -288,7 +315,7 @@ export async function executeWorkbenchTool(
     }
 
     case "wb_update_tasks": {
-      assertAllowedKeys(args, ["id", "tasks", "readyForAcceptance", "note", "expectedRevision"], name);
+      assertAllowedKeys(args, ["id", "tasks", "readyForAcceptance", "note", "handoffNote", "expectedRevision"], name);
       if (typeof args.id !== "string") {
         throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
       }
@@ -309,6 +336,9 @@ export async function executeWorkbenchTool(
         tasks: args.tasks as TaskInput[] | undefined,
         readyForAcceptance: args.readyForAcceptance === true,
         note: typeof args.note === "string" ? args.note : undefined,
+        handoffNote: isRecord(args.handoffNote)
+          ? (args.handoffNote as { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] })
+          : undefined,
         expectedRevision: args.expectedRevision as number | undefined,
         actor: "agent",
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
