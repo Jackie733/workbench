@@ -1,4 +1,5 @@
 import type { AgentAction } from "../core/types.ts";
+import { isModelCoolingDown } from "./telemetry.ts";
 import {
   HARNESS_IDS,
   REASONING_EFFORTS,
@@ -222,19 +223,34 @@ export function resolveRouteCandidates(
     unique.push(item);
   }
 
-  if (!installedSet || installedSet.size === 0) {
-    return unique;
+  // Prefer targets whose harness is actually installed, while keeping override first if requested.
+  let ordered = unique;
+  if (installedSet && installedSet.size > 0) {
+    const installedFirst = unique.filter((t, idx) => (idx === 0 && Boolean(override?.harness)) || installedSet.has(t.harness));
+    if (installedFirst.length > 0) ordered = installedFirst;
   }
 
-  // Prefer targets whose harness is actually installed, while keeping override first if requested.
-  const installedFirst = unique.filter((t, idx) => (idx === 0 && Boolean(override?.harness)) || installedSet.has(t.harness));
-  return installedFirst.length > 0 ? installedFirst : unique;
+  // Demote cooling-down models after healthy candidates unless explicitly forced via override.
+  const explicitOverride = Boolean(override?.harness && override?.model);
+  const healthy: ModelTarget[] = [];
+  const cooling: ModelTarget[] = [];
+  ordered.forEach((t, idx) => {
+    if (idx === 0 && explicitOverride) {
+      healthy.push(t);
+    } else if (isModelCoolingDown(t.harness, t.model)) {
+      cooling.push(t);
+    } else {
+      healthy.push(t);
+    }
+  });
+  return healthy.length > 0 ? [...healthy, ...cooling] : ordered;
 }
 
 const RATE_LIMIT_RE =
-  /(rate[_\s-]?limit|too many requests|\b429\b|quota[_\s-]?(exceeded|exhausted|limit)|insufficient[_\s_]?quota|usage limit|credit balance|额度|限流|配额已用完)/i;
+  /(rate[_\s-]?limit|too many requests|\b429\b|quota[_\s-]?(exceeded|exhausted|limit)|insufficient[_\s_]?quota|usage limit|credit balance|额度不足|配额已用完|触发限流|已限流)/i;
 
 export function detectRateLimitOrQuotaError(output: string, exitCode: number | null): boolean {
   if (exitCode === 0) return false;
-  return RATE_LIMIT_RE.test(output);
+  const tail = output.length > 4096 ? output.slice(-4096) : output;
+  return RATE_LIMIT_RE.test(tail);
 }

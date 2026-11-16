@@ -1,4 +1,4 @@
-import { ArrowLeft, Menu, MessageSquare, Moon, RefreshCw, Settings, Sun } from "lucide-react";
+import { ArrowLeft, Menu, MessageSquare, Moon, RefreshCw, Settings, Sun, Zap } from "lucide-react";
 import { backHome, invalidateAllWorkbenchQueries, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { bridgeStatusLabel } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
@@ -59,6 +59,26 @@ export function Topbar() {
         </span>
       </div>
       <div className="topbar-right">
+        <button
+          className="btn ghost xs"
+          type="button"
+          data-action="open-quick-report"
+          data-testid="open-quick-report-btn"
+          title="随手报修 / 自进化建议 (Alt+R)"
+          aria-label="随手报修 / 自进化建议"
+          onClick={() =>
+            setModal({
+              kind: "quick_report",
+              title: "",
+              detail: "",
+              category: "ui_anomaly",
+              domSelector: "",
+              autoPromote: false,
+            })
+          }
+        >
+          <Icon icon={Zap} size={14} /> 报修
+        </button>
         <button
           className="btn ghost xs"
           type="button"

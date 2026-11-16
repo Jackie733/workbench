@@ -20,11 +20,29 @@ export const queryClient = new QueryClient({
 
 export const queryKeys = {
   hubState: ["hub", "state"] as const,
+  evolution: ["hub", "evolution"] as const,
+  playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
   diff: (projectId: string | null, id: string | null) => ["diff", projectId, id] as const,
 };
+
+export function useEvolutionQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.evolution,
+    queryFn: () => api.getEvolution(),
+    enabled,
+  });
+}
+
+export function usePlaybookQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.playbook(activeProjectId),
+    queryFn: () => api.getPlaybook(),
+    enabled,
+  });
+}
 
 export function useHubStateQuery() {
   return useQuery({
@@ -144,6 +162,17 @@ export function useWorkbenchWsSync(): void {
         void queryClient.invalidateQueries({ queryKey: ["requirements"] });
         void queryClient.invalidateQueries({ queryKey: ["diff"] });
         void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+        return;
+      }
+
+      if (type === "workbench.reload_ui") {
+        const tag = document.activeElement?.tagName;
+        if (tag === "TEXTAREA" || tag === "INPUT") {
+          useUiStore.getState().showToast("工作台前端已热编译更新，完成输入后刷新页面即可生效");
+        } else {
+          useUiStore.getState().showToast("工作台前端已更新，正在热刷新…");
+          setTimeout(() => window.location.reload(), 180);
+        }
         return;
       }
 

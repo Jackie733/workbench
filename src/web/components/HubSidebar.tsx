@@ -1,4 +1,4 @@
-import { Plus, Settings, X } from "lucide-react";
+import { Plus, Settings, Sparkles, X } from "lucide-react";
 import { openAddProjectModal, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
@@ -137,6 +137,36 @@ export function HubSidebar() {
             </div>
           ))}
         </div>
+      </div>
+
+      <div className="sb-section" style={{ marginTop: "auto", paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+        <button
+          className="btn xs"
+          type="button"
+          style={{ width: "100%", justifyContent: "space-between" }}
+          data-action="open-evolution"
+          data-testid="open-evolution-btn"
+          onClick={() => {
+            setSidebarOpen(false);
+            setModal({ kind: "evolution", tab: "inbox", playbookDraft: null });
+          }}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Icon icon={Sparkles} size={14} /> 自进化中心
+          </span>
+          <span style={{ display: "inline-flex", gap: 4 }}>
+            {(hub?.evolutionOpenCount ?? 0) > 0 && (
+              <span className="sb-badge warn" title="待处理痛点">
+                {hub?.evolutionOpenCount}
+              </span>
+            )}
+            {(hub?.cooldownCount ?? 0) > 0 && (
+              <span className="sb-badge" title="冷却中模型">
+                {hub?.cooldownCount}
+              </span>
+            )}
+          </span>
+        </button>
       </div>
     </aside>
   );

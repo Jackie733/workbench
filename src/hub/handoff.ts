@@ -1,5 +1,7 @@
 import { getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
+import { readPlaybook } from "../core/playbook.ts";
+import { resolveCodeRoot } from "../core/sandbox.ts";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 
@@ -22,7 +24,8 @@ export async function synthesizeHandoffPacket(
   id: string,
   options: HandoffSynthesisOptions,
 ): Promise<{ markdown: string; detail: RequirementDetail }> {
-  const gitChanges = await observeGitChanges(root, { maxDiffBytes: 4096 });
+  const codeRoot = resolveCodeRoot(root, id);
+  const gitChanges = await observeGitChanges(codeRoot, { maxDiffBytes: 4096 });
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
   const { state, specMarkdown, designMarkdown, validity } = detail;
 
@@ -30,6 +33,9 @@ export async function synthesizeHandoffPacket(
   lines.push(`# ${state.id} · ${state.title} — 上下文交接简报`);
   lines.push("");
   lines.push(`- **当前阶段**：\`${state.stage}\` | **轨道**：\`${state.track}\` | **拟执行动作**：\`${options.action}\``);
+  if (codeRoot !== root) {
+    lines.push(`- **隔离沙箱目录**：\`${codeRoot}\`（请在当前沙箱目录修改代码并运行验证；数据仍绑定主仓库）`);
+  }
 
   if (options.previousRun) {
     lines.push(
@@ -37,6 +43,19 @@ export async function synthesizeHandoffPacket(
     );
   }
   lines.push("");
+
+  const playbook = readPlaybook(root);
+  if (playbook.rules.length > 0) {
+    lines.push("## 0. 项目持久避坑与偏好法则（Playbook）");
+    let used = 0;
+    for (const rule of playbook.rules.slice(-12)) {
+      const bullet = `- ${rule}`;
+      if (used + bullet.length > 1200) break;
+      lines.push(bullet);
+      used += bullet.length + 1;
+    }
+    lines.push("");
+  }
 
   // 1. Contract summary
   lines.push("## 1. 权威目标、方案与验收条件");

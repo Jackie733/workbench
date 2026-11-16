@@ -28,11 +28,27 @@ import {
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
+import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
+import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
 import { AGENT_ACTIONS, WORKBENCH_DIR, type AgentAction, type CriterionInput, type PrivacyMode, type Stage, type Track } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
+import {
+  applySandboxToMain,
+  dismissPainPoint,
+  PAIN_POINT_CATEGORIES,
+  PAIN_POINT_SOURCES,
+  promotePainPoint,
+  readPainPoints,
+  reportPainPoint,
+  resolveWorkbenchRepoRoot,
+  type PainPointCategory,
+  type PainPointContext,
+  type PainPointSource,
+} from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
+import { clearModelCooldown, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
   addCustomModel,
   applyHubRoutingPreset,
@@ -216,6 +232,14 @@ export async function startWorkbenchServer(options: {
     }
   };
 
+  const reloadWebBundle = async (): Promise<{ reloaded: boolean }> => {
+    const rebuilt = await buildWebBundle(webDir);
+    if (!rebuilt) return { reloaded: false };
+    cachedWeb = rebuilt;
+    broadcastUi({ type: "workbench.reload_ui", at: Date.now() });
+    return { reloaded: true };
+  };
+
   const unsubExecutor = executor.subscribe((ev) => {
     broadcastUi(ev as unknown as Record<string, unknown>);
   });
@@ -363,6 +387,8 @@ export async function startWorkbenchServer(options: {
     // --- Hub & Global Discovery/Routing Routes ---
     if (method === "GET" && pathname === "/api/hub/state") {
       const [{ cfg, projects }, harnesses] = await Promise.all([buildHubProjectsSnapshot(), executor.getHarnesses(false, !hubMode)]);
+      const evolutionOpenCount = readPainPoints().filter((p) => p.status === "open").length;
+      const telemetry = summarizeTelemetry();
       return jsonResponse({
         hubMode,
         activeProjectId: hubMode ? (cfg.activeProjectId ?? projects[0]?.id ?? null) : null,
@@ -371,6 +397,8 @@ export async function startWorkbenchServer(options: {
         routing: cfg.routing,
         customModels: cfg.customModels,
         activeRuns: executor.getActiveRuns(),
+        evolutionOpenCount,
+        cooldownCount: telemetry.activeCooldowns.length,
       });
     }
 
@@ -455,6 +483,95 @@ export async function startWorkbenchServer(options: {
       return jsonResponse({ customModels: cfg.customModels, harnesses });
     }
 
+    if (method === "GET" && pathname === "/api/hub/evolution") {
+      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
+      const activePid = readHubConfig().activeProjectId;
+      const activeProj = readHubConfig().projects.find((p) => p.id === activePid);
+      const currentPlaybookRoot = activeProj?.root ?? defaultRoot;
+      return jsonResponse({
+        painPoints: readPainPoints(),
+        telemetry: summarizeTelemetry(),
+        sandboxes: Object.values(readSandboxes()),
+        workbenchRoot: wbRoot,
+        playbook: readPlaybook(currentPlaybookRoot),
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/hub/evolution/report") {
+      const body = await readBody(req);
+      const title = typeof body.title === "string" ? body.title : "";
+      const detail = typeof body.detail === "string" ? body.detail : undefined;
+      const source: PainPointSource =
+        typeof body.source === "string" && (PAIN_POINT_SOURCES as readonly string[]).includes(body.source)
+          ? (body.source as PainPointSource)
+          : "ui_quick_report";
+      const category: PainPointCategory =
+        typeof body.category === "string" && (PAIN_POINT_CATEGORIES as readonly string[]).includes(body.category)
+          ? (body.category as PainPointCategory)
+          : "ui_anomaly";
+      const context = isRecord(body.context) ? (body.context as PainPointContext) : {};
+      const painPoint = reportPainPoint({ source, category, title, detail, context });
+      broadcastUi({ type: "hub.updated", reason: "evolution.reported", at: Date.now() });
+      return jsonResponse({ painPoint }, 201);
+    }
+
+    const evoPromoteMatch = /^\/api\/hub\/evolution\/([^/]+)\/promote$/.exec(pathname);
+    if (method === "POST" && evoPromoteMatch) {
+      const painId = decodeURIComponent(evoPromoteMatch[1]!);
+      const body = await readBody(req);
+      const result = await promotePainPoint(painId, {
+        workbenchRoot: defaultRoot,
+        createSandbox: body.createSandbox !== false,
+      });
+      ensureWatcherFor(result.workbenchRoot);
+      broadcastUi({ type: "hub.updated", reason: "evolution.promoted", painId, at: Date.now() });
+      broadcastUi({
+        type: "workbench.updated",
+        reason: "requirement.created",
+        root: result.workbenchRoot,
+        id: result.requirement.state.id,
+        at: Date.now(),
+      });
+      return jsonResponse(result, 201);
+    }
+
+    const evoDismissMatch = /^\/api\/hub\/evolution\/([^/]+)\/dismiss$/.exec(pathname);
+    if (method === "POST" && evoDismissMatch) {
+      const painId = decodeURIComponent(evoDismissMatch[1]!);
+      const painPoint = dismissPainPoint(painId);
+      broadcastUi({ type: "hub.updated", reason: "evolution.dismissed", painId, at: Date.now() });
+      return jsonResponse({ painPoint });
+    }
+
+    const evoApplyMatch = /^\/api\/hub\/evolution\/apply\/(REQ-\d{3,})$/.exec(pathname);
+    if (method === "POST" && evoApplyMatch) {
+      const reqId = evoApplyMatch[1]!;
+      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
+      const applied = await applySandboxToMain(wbRoot, reqId);
+      const reloadRes = applied.touchesWeb ? await reloadWebBundle() : { reloaded: false };
+      broadcastUi({ type: "hub.updated", reason: "evolution.applied", reqId, at: Date.now() });
+      broadcastUi({ type: "workbench.updated", reason: "sandbox.applied", root: wbRoot, id: reqId, at: Date.now() });
+      return jsonResponse({
+        ...applied,
+        webReloaded: reloadRes.reloaded,
+        restartRecommended: applied.touchesBackend,
+      });
+    }
+
+    if (method === "POST" && pathname === "/api/hub/telemetry/clear-cooldown") {
+      const body = await readBody(req);
+      const harness = typeof body.harness === "string" ? body.harness : undefined;
+      const model = typeof body.model === "string" ? body.model : undefined;
+      clearModelCooldown(harness, model);
+      broadcastUi({ type: "hub.updated", reason: "telemetry.cleared", at: Date.now() });
+      return jsonResponse({ telemetry: summarizeTelemetry() });
+    }
+
+    if (method === "POST" && pathname === "/api/hub/reload-web") {
+      const res = await reloadWebBundle();
+      return jsonResponse({ ok: true, ...res });
+    }
+
     // --- Project-Scoped Routes (?project=<id> or default) ---
     const base = resolveRequestRoot(req, url);
 
@@ -467,6 +584,39 @@ export async function startWorkbenchServer(options: {
         bridge: bridgeStatus,
         git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
       });
+    }
+
+    if (method === "GET" && pathname === "/api/project/playbook") {
+      return jsonResponse(readPlaybook(base));
+    }
+
+    if (method === "PUT" && pathname === "/api/project/playbook") {
+      const body = await readBody(req);
+      const markdown = typeof body.markdown === "string" ? body.markdown : "";
+      const saved = await writePlaybook(base, markdown);
+      broadcastUi({ type: "workbench.updated", reason: "playbook.updated", root: base, at: Date.now() });
+      return jsonResponse({ exists: true, ...saved });
+    }
+
+    if (method === "POST" && pathname === "/api/project/playbook/distill") {
+      const body = await readBody(req);
+      const reqId = typeof body.requirementId === "string" ? body.requirementId : null;
+      const snapshot = await observeGitSnapshot(base);
+      let addedTotal = 0;
+      if (reqId) {
+        const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const out = await distillRequirementToPlaybook(base, detail);
+        addedTotal += out.added;
+      } else {
+        const summaries = listRequirements(base, { scope: "all", currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        for (const item of summaries) {
+          const detail = getRequirement(base, item.id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+          const out = await distillRequirementToPlaybook(base, detail);
+          addedTotal += out.added;
+        }
+      }
+      broadcastUi({ type: "workbench.updated", reason: "playbook.distilled", root: base, at: Date.now() });
+      return jsonResponse({ added: addedTotal, ...readPlaybook(base) });
     }
 
     if (method === "POST" && pathname === "/api/project/init") {
@@ -530,14 +680,22 @@ export async function startWorkbenchServer(options: {
       const sub = reqMatch[2] ?? "";
 
       if (method === "GET" && sub === "") {
-        const snapshot = await observeGitSnapshot(base);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        return jsonResponse({ detail, bridge: bridgeStatus, codeSnapshotHash: snapshot?.fingerprint ?? null });
+        const sandbox = getSandboxForRequirement(base, id);
+        return jsonResponse({
+          detail,
+          bridge: bridgeStatus,
+          codeSnapshotHash: snapshot?.fingerprint ?? null,
+          sandbox,
+        });
       }
 
       if (method === "GET" && sub === "diff") {
         const detail = getRequirement(base, id);
-        const changes = await observeGitChanges(base, { sinceHead: detail.state.baseline?.head ?? null });
+        const codeRoot = resolveCodeRoot(base, id);
+        const changes = await observeGitChanges(codeRoot, { sinceHead: detail.state.baseline?.head ?? null });
         return jsonResponse({ changes });
       }
 
@@ -556,7 +714,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "PATCH" && sub === "spec") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await updateSpec(base, id, {
           title: typeof body.title === "string" ? body.title : undefined,
           specMarkdown: typeof body.specMarkdown === "string" ? body.specMarkdown : undefined,
@@ -570,7 +728,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "PATCH" && sub === "design") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await updateDesign(base, id, {
           designMarkdown: typeof body.designMarkdown === "string" ? body.designMarkdown : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
@@ -588,7 +746,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "discussions") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const res = await addDiscussion(base, id, {
           actor: "human",
           mode: body.mode === "refine" ? "refine" : "ask",
@@ -604,7 +762,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "discussions/resolve") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await resolveDiscussions(base, id, {
           ids: Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === "string") : undefined,
           resolved: typeof body.resolved === "boolean" ? body.resolved : true,
@@ -659,7 +817,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "approve") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await approveDesign(base, id, {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           baseline: snapshot,
@@ -677,7 +835,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "fast-track") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await authorizeFastTrack(base, id, {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           baseline: snapshot,
@@ -695,12 +853,15 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "request-changes") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await requestChanges(base, id, {
           feedback: typeof body.feedback === "string" ? body.feedback : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
+        await distillRequirementToPlaybook(base, detail, {
+          feedback: typeof body.feedback === "string" ? body.feedback : undefined,
+        }).catch(() => {});
         let dispatch: DispatchOutcome | null = null;
         if (body.dispatchAgent === true) {
           const action: DispatchAction = detail.state.stage === "designing" ? "design" : "fix";
@@ -737,19 +898,20 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "accept") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await acceptRequirement(base, id, {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           note: typeof body.note === "string" ? body.note : undefined,
         });
+        await distillRequirementToPlaybook(base, detail).catch(() => {});
         broadcastUi({ type: "workbench.updated", reason: "accepted", id, at: Date.now() });
         return jsonResponse({ detail });
       }
 
       if (method === "POST" && sub === "block") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await blockRequirement(base, id, {
           reason: typeof body.reason === "string" ? body.reason : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
@@ -761,7 +923,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "unblock") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await unblockRequirement(base, id, {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
@@ -772,7 +934,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "cancel") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await cancelRequirement(base, id, {
           reason: typeof body.reason === "string" ? body.reason : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
@@ -784,7 +946,7 @@ export async function startWorkbenchServer(options: {
 
       if (method === "POST" && sub === "reopen") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await reopenRequirement(base, id, {
           reason: typeof body.reason === "string" ? body.reason : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
@@ -798,7 +960,7 @@ export async function startWorkbenchServer(options: {
         const body = await readBody(req);
         const action = (body.action === "implement" || body.action === "fix" ? body.action : "design") as DispatchAction;
         const mode = body.mode === "prefill" ? "prefill" : "send";
-        const snapshot = await observeGitSnapshot(base);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
 
         if (action === "design" && detail.state.stage === "draft") {

@@ -480,4 +480,76 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 30_000);
+
+  test("Self-Evolving & RSI: quick report modal, evolution center tabs, playbook editor, and sandbox promotion", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-evo-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const wbRepo = initGitRepo();
+    fs.writeFileSync(path.join(wbRepo, "package.json"), JSON.stringify({ name: "workbench", version: "5.0.0" }, null, 2));
+    execFileSync("git", ["add", "package.json"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add package.json"], { cwd: wbRepo, stdio: "ignore" });
+    await initProject(wbRepo, { name: "workbench", privacyMode: "local" });
+
+    const server = await startWorkbenchServer({ root: wbRepo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 5000 });
+
+      // 1. Open quick report from Topbar and submit an issue
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      await page.type('[data-testid="quick-report-title"]', "窄屏下工具栏按钮间距略紧");
+      await page.type('[data-testid="quick-report-detail"]', "在 390px 宽度下建议增加 gap");
+      await clickReady(page, '[data-testid="submit-quick-report-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
+
+      // 2. Open Evolution Center from HubSidebar -> verify Inbox, Playbook, Telemetry tabs
+      await clickReady(page, '[data-testid="open-evolution-btn"]');
+      await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="evo-pane-inbox"]')?.textContent?.includes("窄屏下工具栏按钮间距略紧")),
+        { timeout: 5000 },
+      );
+
+      // Switch to Playbook tab and save a rule
+      await clickReady(page, '[data-testid="evo-tab-playbook"]');
+      await page.waitForSelector('[data-testid="playbook-editor"]', { timeout: 5000 });
+      await page.type('[data-testid="playbook-editor"]', "- [规范] 所有图标必须使用 Icon 包装器\n");
+      await clickReady(page, '[data-testid="save-playbook-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="evo-tab-playbook"]')?.textContent?.includes("(1)")),
+        { timeout: 5000 },
+      );
+
+      // Switch to Telemetry tab
+      await clickReady(page, '[data-testid="evo-tab-telemetry"]');
+      await page.waitForSelector('[data-testid="evo-pane-telemetry"]', { timeout: 5000 });
+
+      // Switch back to Inbox tab and promote pain point to a sandboxed requirement
+      await clickReady(page, '[data-testid="evo-tab-inbox"]');
+      const promoteBtnSel = await page.evaluate(() => {
+        const btn = document.querySelector('[data-testid^="promote-pain-"]');
+        return btn ? `[data-testid="${btn.getAttribute("data-testid")}"]` : "";
+      });
+      expect(promoteBtnSel).not.toBe("");
+      await clickReady(page, promoteBtnSel);
+
+      // Modal closes, switches to REQ-001 with active sandbox badge
+      await page.waitForSelector('[data-testid="sandbox-active-badge"]', { timeout: 5000 });
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+      expect(overflow).toBe(false);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
 });

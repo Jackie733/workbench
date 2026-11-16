@@ -543,8 +543,19 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   return raw as unknown as RequirementState;
 }
 
-export function validateMarkdownContent(content: string, kind: "spec" | "design" | "handoff", allowEmpty: boolean): string {
-  const maxBytes = kind === "spec" ? MAX_SPEC_BYTES : kind === "design" ? MAX_DESIGN_BYTES : MAX_HANDOFF_BYTES;
+export function validateMarkdownContent(
+  content: string,
+  kind: "spec" | "design" | "handoff" | "playbook",
+  allowEmpty: boolean,
+): string {
+  const maxBytes =
+    kind === "spec"
+      ? MAX_SPEC_BYTES
+      : kind === "design"
+        ? MAX_DESIGN_BYTES
+        : kind === "playbook"
+          ? 16 * 1024
+          : MAX_HANDOFF_BYTES;
   if (!isSafeText(content, maxBytes, allowEmpty)) {
     throw new WorkbenchError("invalid_input", `${kind}.md 内容无效或超出 ${maxBytes} 字节上限`);
   }

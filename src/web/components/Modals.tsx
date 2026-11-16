@@ -1,6 +1,7 @@
 import { useRef } from "react";
-import { ArrowUp, Folder, Lightbulb, Pencil, RefreshCw } from "lucide-react";
+import { ArrowUp, Check, Flame, Folder, Lightbulb, Pencil, RefreshCw, Sparkles, Trash2, Zap } from "lucide-react";
 import type { PrivacyMode } from "../../core/types.ts";
+import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   HARNESS_IDS,
   ROUTING_STAGES,
@@ -12,6 +13,7 @@ import {
 import { api, setApiProjectScope } from "../api.ts";
 import {
   invalidateAllWorkbenchQueries,
+  openRequirement,
   queryClient,
   queryKeys,
   runBusy,
@@ -19,11 +21,13 @@ import {
   submitFeedback,
   submitLifecycle,
   submitNewRequirement,
+  useEvolutionQuery,
   useHubStateQuery,
+  usePlaybookQuery,
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { EFFORT_LABELS, supportedEffortsForModel } from "../state.ts";
+import { EFFORT_LABELS, formatDateTime, supportedEffortsForModel } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
@@ -56,6 +60,8 @@ export function Modals() {
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const { data: evolutionData } = useEvolutionQuery(m?.kind === "evolution");
+  const { data: playbookData } = usePlaybookQuery(activeProjectId, m?.kind === "evolution" && m.tab === "playbook");
 
   const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
   if (!m) return null;
@@ -689,6 +695,442 @@ export function Modals() {
           </button>
           <button className="btn primary" type="button" onClick={() => void copyPrompt()}>
             复制指令
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "quick_report") {
+    const submitQuickReport = async () => {
+      const title = m.title.trim();
+      if (!title) {
+        showToast("请填写问题或改进标题", true);
+        return;
+      }
+      const res = await runBusy(async () => {
+        const rep = await api.reportPainPoint({
+          source: "ui_quick_report",
+          category: m.category,
+          title,
+          detail: m.detail.trim() || undefined,
+          context: {
+            projectRoot: project?.root,
+            requirementId: selectedId ?? undefined,
+            domSelector: m.domSelector.trim() || undefined,
+            viewport: typeof window !== "undefined" ? `${window.innerWidth}x${window.innerHeight}` : undefined,
+            theme: useUiStore.getState().theme,
+            urlPath: typeof window !== "undefined" ? window.location.pathname : undefined,
+          },
+        });
+        let promotedId: string | null = null;
+        if (m.autoPromote && rep.painPoint) {
+          const promoted = await api.promotePainPoint(rep.painPoint.id, { createSandbox: true });
+          promotedId = promoted.requirement.state.id;
+        }
+        return { painPoint: rep.painPoint, promotedId };
+      });
+      if (res) {
+        setModal(null);
+        await invalidateAllWorkbenchQueries();
+        showToast(
+          res.promotedId
+            ? `已建单并创建沙箱需求 ${res.promotedId}`
+            : "已记录到自进化痛点收集箱",
+        );
+      }
+    };
+
+    return (
+      <ModalShell onClose={close} testId="quick-report-modal">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <Icon icon={Zap} size={20} />
+          <h3 style={{ margin: 0 }}>随手报修与自进化反馈</h3>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <select
+            className="select"
+            data-testid="quick-report-category"
+            value={m.category}
+            onChange={(e) =>
+              setModal((prev) =>
+                prev?.kind === "quick_report"
+                  ? { ...prev, category: e.target.value as PainPointCategory }
+                  : prev,
+              )
+            }
+          >
+            <option value="ui_anomaly">UI 异常 / 布局交互问题</option>
+            <option value="cli_ergonomics">CLI / Agent 工具摩擦</option>
+            <option value="harness_bug">Harness / 模型调度异常</option>
+            <option value="feature_gap">工作台新能力建议</option>
+          </select>
+          <input
+            className="input"
+            style={{ flex: 1, minWidth: 180 }}
+            data-testid="quick-report-selector"
+            value={m.domSelector}
+            placeholder="关联区域/元素选择器（可选）"
+            onChange={(e) =>
+              setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, domSelector: e.target.value } : prev))
+            }
+          />
+        </div>
+        <input
+          className="input"
+          data-testid="quick-report-title"
+          autoFocus
+          style={{ marginBottom: 8 }}
+          value={m.title}
+          placeholder="一句话描述痛点或异常（例如：移动端侧边栏按钮遮挡标题）"
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, title: e.target.value } : prev))
+          }
+        />
+        <textarea
+          className="textarea"
+          data-testid="quick-report-detail"
+          value={m.detail}
+          placeholder="补充复现步骤或期望表现（将自动附带当前项目、需求与视口上下文）…"
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, detail: e.target.value } : prev))
+          }
+        />
+        <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            data-testid="quick-report-autopromote"
+            checked={m.autoPromote}
+            onChange={(e) =>
+              setModal((prev) =>
+                prev?.kind === "quick_report" ? { ...prev, autoPromote: e.target.checked } : prev,
+              )
+            }
+          />
+          <span>立即转化为 Workbench 仓库标准需求并创建隔离 Worktree 沙箱</span>
+        </label>
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="submit-quick-report-btn"
+            disabled={busy}
+            onClick={() => void submitQuickReport()}
+          >
+            提交反馈
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "evolution") {
+    const painPoints = evolutionData?.painPoints ?? [];
+    const telemetry = evolutionData?.telemetry ?? { entries: [], activeCooldowns: [] };
+    const sandboxes = evolutionData?.sandboxes ?? [];
+    const currentPlaybook = m.playbookDraft ?? playbookData?.markdown ?? evolutionData?.playbook.markdown ?? "";
+
+    const handlePromote = async (painId: string) => {
+      const out = await runBusy(() => api.promotePainPoint(painId, { createSandbox: true }));
+      if (out) {
+        await invalidateAllWorkbenchQueries();
+        showToast(`已创建自进化需求 ${out.requirement.state.id}${out.sandbox ? "（已启用沙箱隔离）" : ""}`);
+        const wbProj = hub?.projects.find((p) => p.root === out.workbenchRoot);
+        if (wbProj) {
+          setApiProjectScope(wbProj.id);
+          setActiveProjectId(wbProj.id);
+          setModal(null);
+          await openRequirement(out.requirement.state.id);
+        }
+      }
+    };
+
+    const handleDismiss = async (painId: string) => {
+      const out = await runBusy(() => api.dismissPainPoint(painId));
+      if (out) {
+        await invalidateAllWorkbenchQueries();
+        showToast("已忽略该痛点");
+      }
+    };
+
+    const handleApplySandbox = async (reqId: string) => {
+      const out = await runBusy(() => api.applyRsiSandbox(reqId));
+      if (out) {
+        await invalidateAllWorkbenchQueries();
+        showToast(
+          out.webReloaded
+            ? `已应用 ${reqId} 改动并热重载前端`
+            : `已应用 ${reqId} 改动（${out.appliedFiles.length} 个文件）`,
+        );
+      }
+    };
+
+    const handleSavePlaybook = async () => {
+      const out = await runBusy(() => api.savePlaybook(currentPlaybook));
+      if (out) {
+        setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
+        await invalidateAllWorkbenchQueries();
+        showToast(`已保存项目经验法则（${out.rules.length} 条）`);
+      }
+    };
+
+    const handleDistillPlaybook = async () => {
+      const out = await runBusy(() => api.distillPlaybook());
+      if (out) {
+        setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
+        await invalidateAllWorkbenchQueries();
+        showToast(out.added > 0 ? `已从历史需求提炼 ${out.added} 条新经验` : "暂无新的可提炼经验");
+      }
+    };
+
+    return (
+      <ModalShell onClose={close} wide testId="evolution-modal">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Icon icon={Sparkles} size={20} />
+            <h3 style={{ margin: 0 }}>自进化与 RSI 中心</h3>
+          </div>
+          <div className="segmented">
+            <button
+              type="button"
+              className={m.tab === "inbox" ? "active" : ""}
+              data-testid="evo-tab-inbox"
+              onClick={() => setModal({ ...m, tab: "inbox" })}
+            >
+              痛点收集箱 ({painPoints.filter((p) => p.status === "open").length})
+            </button>
+            <button
+              type="button"
+              className={m.tab === "playbook" ? "active" : ""}
+              data-testid="evo-tab-playbook"
+              onClick={() => setModal({ ...m, tab: "playbook", playbookDraft: null })}
+            >
+              项目经验库 ({playbookData?.rules.length ?? evolutionData?.playbook.rules.length ?? 0})
+            </button>
+            <button
+              type="button"
+              className={m.tab === "telemetry" ? "active" : ""}
+              data-testid="evo-tab-telemetry"
+              onClick={() => setModal({ ...m, tab: "telemetry" })}
+            >
+              模型遥测 ({telemetry.entries.length})
+            </button>
+          </div>
+        </div>
+
+        {m.tab === "inbox" && (
+          <div data-testid="evo-pane-inbox">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+              <span className="xs muted">
+                自动嗅探运行死胡同、CLI 参数摩擦与前端异常；也可通过右上角「报修」或 CLI <code>wb issue</code> 上报。
+              </span>
+              <button
+                className="btn xs"
+                type="button"
+                onClick={() =>
+                  setModal({
+                    kind: "quick_report",
+                    title: "",
+                    detail: "",
+                    category: "ui_anomaly",
+                    domSelector: "",
+                    autoPromote: false,
+                  })
+                }
+              >
+                <Icon icon={Zap} size={14} /> 新增痛点
+              </button>
+            </div>
+            {painPoints.length === 0 ? (
+              <div className="empty-card xs muted" style={{ textAlign: "center" }}>
+                暂无记录的工作台痛点。
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: "52vh", overflowY: "auto" }}>
+                {painPoints.map((p) => {
+                  const hasSandbox = p.promotedReqId && sandboxes.some((s) => s.requirementId === p.promotedReqId);
+                  return (
+                    <div key={p.id} className="callout" data-testid={`pain-item-${p.id}`}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+                            <span className={`badge ${p.status === "open" ? "warning" : p.status === "promoted" ? "info" : "neutral"}`}>
+                              {p.status === "open" ? "待处理" : p.status === "promoted" ? `已转 ${p.promotedReqId}` : "已忽略"}
+                            </span>
+                            <span className="badge">{p.category}</span>
+                            {p.occurrences > 1 && <span className="badge info">发生 {p.occurrences} 次</span>}
+                            <span className="xs muted">{formatDateTime(p.updatedAt)}</span>
+                          </div>
+                          <div style={{ fontWeight: 600 }}>{p.title}</div>
+                          {p.detail && p.detail !== p.title && (
+                            <div className="xs muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>
+                              {p.detail.slice(0, 260)}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                          {p.status === "open" && (
+                            <>
+                              <button
+                                className="btn primary xs"
+                                type="button"
+                                data-testid={`promote-pain-${p.id}`}
+                                disabled={busy}
+                                onClick={() => void handlePromote(p.id)}
+                              >
+                                <Icon icon={Flame} size={14} /> 转为需求并建沙箱
+                              </button>
+                              <button
+                                className="btn ghost xs"
+                                type="button"
+                                data-testid={`dismiss-pain-${p.id}`}
+                                disabled={busy}
+                                onClick={() => void handleDismiss(p.id)}
+                              >
+                                <Icon icon={Trash2} size={14} /> 忽略
+                              </button>
+                            </>
+                          )}
+                          {hasSandbox && p.promotedReqId && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void handleApplySandbox(p.promotedReqId!)}
+                            >
+                              <Icon icon={Check} size={14} /> 应用沙箱改动
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {m.tab === "playbook" && (
+          <div data-testid="evo-pane-playbook">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
+              <span className="xs muted">
+                保存于当前项目 <code>.workbench/playbook.md</code>，每次执行 Agent 时自动注入交接简报。
+              </span>
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="distill-playbook-btn"
+                disabled={busy}
+                onClick={() => void handleDistillPlaybook()}
+              >
+                <Icon icon={RefreshCw} size={14} /> 从历史需求提炼
+              </button>
+            </div>
+            <textarea
+              className="textarea"
+              data-testid="playbook-editor"
+              style={{ minHeight: 240, fontFamily: "var(--mono)", fontSize: 12.5 }}
+              value={currentPlaybook}
+              placeholder="- [避坑] 在此记录项目级工程规范与踩坑经验…"
+              onChange={(e) =>
+                setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: e.target.value } : prev))
+              }
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+              <button
+                className="btn primary xs"
+                type="button"
+                data-testid="save-playbook-btn"
+                disabled={busy}
+                onClick={() => void handleSavePlaybook()}
+              >
+                保存经验法则
+              </button>
+            </div>
+          </div>
+        )}
+
+        {m.tab === "telemetry" && (
+          <div data-testid="evo-pane-telemetry">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+              <span className="xs muted">
+                自动追踪各模型在不同阶段的胜率与平均耗时；触发真实限流将进入 15 分钟自动冷却并跳过。
+              </span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {telemetry.activeCooldowns.length > 0 && (
+                  <button
+                    className="btn xs"
+                    type="button"
+                    data-testid="clear-cooldown-btn"
+                    disabled={busy}
+                    onClick={async () => {
+                      const out = await runBusy(() => api.clearModelCooldown());
+                      if (out) {
+                        await invalidateAllWorkbenchQueries();
+                        showToast("已清除所有模型限流冷却");
+                      }
+                    }}
+                  >
+                    清除冷却 ({telemetry.activeCooldowns.length})
+                  </button>
+                )}
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="reload-web-btn"
+                  disabled={busy}
+                  onClick={async () => {
+                    const out = await runBusy(() => api.reloadWebBundle());
+                    if (out?.reloaded) showToast("前端 Bundle 已重新编译并推送热刷新");
+                  }}
+                >
+                  <Icon icon={RefreshCw} size={14} /> 热重建前端
+                </button>
+              </div>
+            </div>
+            {telemetry.entries.length === 0 ? (
+              <div className="empty-card xs muted" style={{ textAlign: "center" }}>
+                暂无模型执行遥测记录。
+              </div>
+            ) : (
+              <div style={{ maxHeight: "48vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+                {telemetry.entries.map((e) => {
+                  const rate = e.totalRuns > 0 ? Math.round((e.succeededRuns / e.totalRuns) * 100) : 0;
+                  const cooling = telemetry.activeCooldowns.some((c) => c.harness === e.harness && c.model === e.model);
+                  return (
+                    <div
+                      key={`${e.harness}::${e.model}::${e.action}`}
+                      className="routing-row"
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>
+                          {e.harness} · {e.model} <span className="badge">{e.action}</span>{" "}
+                          {cooling && <span className="badge warning">冷却中</span>}
+                        </div>
+                        <div className="xs muted">
+                          总执行 {e.totalRuns} 次 · 平均耗时 {(e.avgDurationMs / 1000).toFixed(1)}s
+                          {e.timedOutRuns > 0 ? ` · 超时 ${e.timedOutRuns}` : ""}
+                          {e.rateLimitedRuns > 0 ? ` · 限流 ${e.rateLimitedRuns}` : ""}
+                        </div>
+                      </div>
+                      <span className={`badge ${rate >= 70 ? "success" : rate >= 40 ? "warning" : "danger"}`}>
+                        成功率 {rate}%
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn" type="button" data-action="close-modal" onClick={close}>
+            关闭
           </button>
         </div>
       </ModalShell>

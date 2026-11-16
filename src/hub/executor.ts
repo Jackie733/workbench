@@ -14,12 +14,15 @@ import {
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
+import { resolveCodeRoot } from "../core/sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
+import { inspectFinishedRunForPainPoints } from "./evolution.ts";
 import { synthesizeHandoffPacket } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
+import { recordModelRunOutcome } from "./telemetry.ts";
 import type { HarnessInfo, ModelTarget } from "./types.ts";
 
 export interface BuiltCommand {
@@ -69,6 +72,7 @@ interface ActiveJob {
   child: ChildProcess;
   startedAt: number;
   cancelled: boolean;
+  timedOut: boolean;
   killTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -505,7 +509,8 @@ export class HubExecutor {
 
     const cfg = readHubConfig();
     const harnesses = await this.getHarnesses(false);
-    const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(base))?.fingerprint ?? null });
+    const codeRoot = resolveCodeRoot(base, id);
+    const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
     const prevRun = (currentDetail.state.agentRuns ?? []).slice(-1)[0] ?? null;
 
     const override: Partial<ModelTarget> | null =
@@ -559,7 +564,7 @@ export class HubExecutor {
     const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input);
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
-          root: base,
+          root: codeRoot,
           requirementId: id,
           action: input.action,
           prompt,
@@ -567,7 +572,7 @@ export class HubExecutor {
           harnesses,
         })
       : buildHarnessCommand(target, {
-          root: base,
+          root: codeRoot,
           action: input.action,
           prompt,
           nativeSessionId: canResumeSameHarness ? prevRun!.nativeSessionId : undefined,
@@ -590,7 +595,7 @@ export class HubExecutor {
       logPath: `runs/run-${runId}.log`,
     };
 
-    const snapshotBefore = await observeGitSnapshot(base);
+    const snapshotBefore = await observeGitSnapshot(codeRoot);
     const detail = await startAgentRun(base, id, record, snapshotBefore?.fingerprint ?? null);
 
     const shimBin = ensureWbShim(this.cliEntryPath);
@@ -599,11 +604,12 @@ export class HubExecutor {
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
       WORKBENCH_ROOT: base,
       WORKBENCH_REQ_ID: id,
+      ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
     };
 
     this.runLogs.set(runId, `$ ${built.displayCommand}\n`);
     const child = spawn(built.command, built.args, {
-      cwd: base,
+      cwd: codeRoot,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       env: childEnv,
@@ -618,6 +624,7 @@ export class HubExecutor {
       child,
       startedAt,
       cancelled: false,
+      timedOut: false,
     };
     this.activeJobs.set(runId, job);
 
@@ -635,6 +642,7 @@ export class HubExecutor {
 
     const timeoutMs = input.timeoutMs ?? 600_000;
     const timeoutTimer = setTimeout(() => {
+      job.timedOut = true;
       this.killProcessGroup(job);
     }, timeoutMs);
 
@@ -704,24 +712,50 @@ export class HubExecutor {
       const endedAt = Date.now();
       const durationMs = Math.max(0, endedAt - startedAt);
       const rawLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
-      const rateLimited = !job.cancelled && detectRateLimitOrQuotaError(rawLog, exitCode);
+      const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
       const status: AgentRunRecord["status"] = job.cancelled
         ? "cancelled"
-        : exitCode === 0 && !spawnErr
+        : exitCode === 0 && !spawnErr && !job.timedOut
           ? "succeeded"
           : "failed";
 
-      const sessMatch = /session[_ -]?id[:=]\s*([A-Za-z0-9._-]{6,64})/i.exec(rawLog);
-      const nativeSessionId = capturedSessionId ?? sessMatch?.[1];
+      const invalidSessionTokens = new Set(["string", "number", "boolean", "undefined", "null", "object", "unknown", "default"]);
+      const sessMatches = Array.from(rawLog.matchAll(/session[_ -]?id[:=]\s*["']?([A-Za-z0-9._-]{6,64})["']?/gi));
+      let matchedSessionId: string | undefined;
+      for (let i = sessMatches.length - 1; i >= 0; i--) {
+        const cand = sessMatches[i]![1]!;
+        if (!invalidSessionTokens.has(cand.toLowerCase())) {
+          matchedSessionId = cand;
+          break;
+        }
+      }
+      const nativeSessionId = capturedSessionId ?? matchedSessionId;
       const errorSummary =
         status === "failed"
-          ? rateLimited
-            ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-            : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+          ? job.timedOut
+            ? `执行超时（>${Math.round(timeoutMs / 1000)}s），建议拆解任务或切换高速模型重试`
+            : rateLimited
+              ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+              : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
 
       try {
-        const snap = await observeGitSnapshot(base);
+        recordModelRunOutcome({
+          harness: target.harness,
+          model: target.model,
+          action: input.action,
+          status,
+          durationMs,
+          rateLimited,
+          timedOut: job.timedOut,
+          now: endedAt,
+        });
+      } catch {
+        // Telemetry write failure must not abort run finalization.
+      }
+
+      try {
+        const snap = await observeGitSnapshot(codeRoot);
         const latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
 
         // Post-run side effects by action
@@ -778,11 +812,20 @@ export class HubExecutor {
         );
 
         const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
-        await synthesizeHandoffPacket(base, id, {
+        const postHandoff = await synthesizeHandoffPacket(base, id, {
           action: input.action,
           previousRun: lastRunObj,
           previousLogTail: rawLog.slice(-1500),
         });
+        if (lastRunObj) {
+          inspectFinishedRunForPainPoints({
+            root: base,
+            requirementId: id,
+            run: lastRunObj,
+            detail: postHandoff.detail,
+            rawLog,
+          });
+        }
       } catch {
         // Keep daemon alive even if workspace disappeared during run.
       }

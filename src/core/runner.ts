@@ -4,6 +4,7 @@ import { getRequirement, recordVerification } from "./engine.ts";
 import { WorkbenchError } from "./errors.ts";
 import { canonicalRoot } from "./fs.ts";
 import { observeGitSnapshot } from "./git.ts";
+import { resolveCodeRoot } from "./sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
 import { isSafeText, sanitizeOutput } from "./validate.ts";
 
@@ -135,7 +136,8 @@ export async function runVerification(
     }
   }
 
-  const preSnapshot = await observeGitSnapshot(base);
+  const codeRoot = resolveCodeRoot(base, id);
+  const preSnapshot = await observeGitSnapshot(codeRoot);
   if (!preSnapshot) {
     throw new WorkbenchError("execution_failed", "项目目录不是 Git 仓库，无法绑定代码快照指纹");
   }
@@ -148,8 +150,8 @@ export async function runVerification(
     );
   }
 
-  const execResult = await executeShellCommand(base, command, Math.floor(rawTimeout));
-  const postSnapshot = await observeGitSnapshot(base);
+  const execResult = await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
+  const postSnapshot = await observeGitSnapshot(codeRoot);
   if (!postSnapshot) {
     throw new WorkbenchError("execution_failed", "命令执行后无法读取 Git 代码快照");
   }

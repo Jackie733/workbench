@@ -9,6 +9,7 @@ import type {
   Stage,
   TaskStatus,
 } from "../core/types.ts";
+import type { PainPointCategory } from "../hub/evolution.ts";
 import { REASONING_EFFORTS, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
 import type { BrowseResponse } from "./api.ts";
@@ -41,6 +42,15 @@ export type ModalState =
   | { kind: "routing"; draft: RoutingConfig | null; customHarness: HarnessId; customModel: string }
   | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
   | { kind: "handoff_preview"; markdown: string }
+  | {
+      kind: "quick_report";
+      title: string;
+      detail: string;
+      category: PainPointCategory;
+      domSelector: string;
+      autoPromote: boolean;
+    }
+  | { kind: "evolution"; tab: "inbox" | "playbook" | "telemetry"; playbookDraft: string | null }
   | { kind: "debug_info"; text: string };
 
 export const STAGE_META: Record<Stage, { label: string; tone: string }> = {

@@ -10,6 +10,14 @@ import type {
   VerificationRecord,
 } from "../core/types.ts";
 import type { GitObservation } from "../core/git.ts";
+import type { SandboxRecord } from "../core/sandbox.ts";
+import type {
+  EvolutionPainPoint,
+  PainPointCategory,
+  PainPointContext,
+  PainPointSource,
+} from "../hub/evolution.ts";
+import type { ModelStageStats } from "../hub/telemetry.ts";
 import type {
   BrowseEntry,
   HarnessInfo,
@@ -45,6 +53,26 @@ export interface HubStateResponse {
   routing: RoutingConfig;
   customModels: Record<string, string[]>;
   activeRuns: Array<AgentRunRecord & { requirementId: string }>;
+  evolutionOpenCount?: number;
+  cooldownCount?: number;
+}
+
+export interface PlaybookResponse {
+  exists: boolean;
+  markdown: string;
+  rules: string[];
+  updatedAt: number | null;
+}
+
+export interface EvolutionStateResponse {
+  painPoints: EvolutionPainPoint[];
+  telemetry: {
+    entries: ModelStageStats[];
+    activeCooldowns: Array<{ harness: string; model: string; until: number }>;
+  };
+  sandboxes: SandboxRecord[];
+  workbenchRoot: string;
+  playbook: PlaybookResponse;
 }
 
 export interface BrowseResponse {
@@ -126,6 +154,60 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ harness, model }),
     }),
+  getEvolution: () => requestJson<EvolutionStateResponse>("/api/hub/evolution"),
+  reportPainPoint: (input: {
+    source?: PainPointSource;
+    category: PainPointCategory;
+    title: string;
+    detail?: string;
+    context?: PainPointContext;
+  }) =>
+    requestJson<{ painPoint: EvolutionPainPoint | null }>("/api/hub/evolution/report", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  promotePainPoint: (id: string, input?: { createSandbox?: boolean }) =>
+    requestJson<{
+      painPoint: EvolutionPainPoint;
+      requirement: RequirementDetail;
+      workbenchRoot: string;
+      sandbox: SandboxRecord | null;
+    }>(`/api/hub/evolution/${encodeURIComponent(id)}/promote`, {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
+    }),
+  dismissPainPoint: (id: string) =>
+    requestJson<{ painPoint: EvolutionPainPoint }>(`/api/hub/evolution/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+    }),
+  applyRsiSandbox: (reqId: string) =>
+    requestJson<{
+      appliedFiles: string[];
+      deletedFiles: string[];
+      touchesWeb: boolean;
+      touchesBackend: boolean;
+      webReloaded: boolean;
+      restartRecommended: boolean;
+    }>(`/api/hub/evolution/apply/${encodeURIComponent(reqId)}`, {
+      method: "POST",
+    }),
+  clearModelCooldown: (harness?: string, model?: string) =>
+    requestJson<{ telemetry: EvolutionStateResponse["telemetry"] }>("/api/hub/telemetry/clear-cooldown", {
+      method: "POST",
+      body: JSON.stringify({ harness, model }),
+    }),
+  reloadWebBundle: () => requestJson<{ ok: boolean; reloaded: boolean }>("/api/hub/reload-web", { method: "POST" }),
+  getPlaybook: () => requestJson<PlaybookResponse>(withProjectParam("/api/project/playbook")),
+  savePlaybook: (markdown: string) =>
+    requestJson<PlaybookResponse>(withProjectParam("/api/project/playbook"), {
+      method: "PUT",
+      body: JSON.stringify({ markdown }),
+    }),
+  distillPlaybook: (requirementId?: string) =>
+    requestJson<PlaybookResponse & { added: number }>(withProjectParam("/api/project/playbook/distill"), {
+      method: "POST",
+      body: JSON.stringify({ requirementId }),
+    }),
 
   getProject: () => requestJson<ProjectInfoResponse>(withProjectParam("/api/project")),
   initProject: (input: { name?: string; privacyMode: PrivacyMode }) =>
@@ -143,7 +225,7 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getRequirement: (id: string) =>
-    requestJson<{ detail: RequirementDetail; bridge: BridgeStatus; codeSnapshotHash: string | null }>(
+    requestJson<{ detail: RequirementDetail; bridge: BridgeStatus; codeSnapshotHash: string | null; sandbox?: SandboxRecord | null }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}`),
     ),
   getDiff: (id: string) =>

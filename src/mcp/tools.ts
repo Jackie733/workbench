@@ -3,6 +3,7 @@ import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
 import { runVerification } from "../core/runner.ts";
+import { resolveCodeRoot } from "../core/sandbox.ts";
 import { STAGES, TASK_STATUSES, type CriterionInput, type Stage, type TaskInput } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
 
@@ -218,7 +219,8 @@ export async function executeWorkbenchTool(
         throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
       }
       const includeDiff = args.includeDiff === true;
-      const snapshot = await observeGitSnapshot(base);
+      const codeRoot = resolveCodeRoot(base, args.id);
+      const snapshot = await observeGitSnapshot(codeRoot);
       const detail = getRequirement(base, args.id, {
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
@@ -256,7 +258,7 @@ export async function executeWorkbenchTool(
         nextHeadline: detail.validity.banner.headline,
       };
       if (includeDiff) {
-        const changes = await observeGitChanges(base, {
+        const changes = await observeGitChanges(codeRoot, {
           sinceHead: detail.state.baseline?.head ?? null,
           maxDiffBytes: 24 * 1024,
         });
@@ -288,7 +290,7 @@ export async function executeWorkbenchTool(
       if (args.expectedRevision !== undefined && !Number.isSafeInteger(args.expectedRevision)) {
         throw new WorkbenchError("invalid_input", "expectedRevision 必须是正整数");
       }
-      const snapshot = await observeGitSnapshot(base);
+      const snapshot = await observeGitSnapshot(resolveCodeRoot(base, args.id));
       const detail = await propose(base, args.id, {
         title: typeof args.title === "string" ? args.title : undefined,
         specMarkdown: typeof args.spec === "string" ? args.spec : undefined,
@@ -331,7 +333,7 @@ export async function executeWorkbenchTool(
       if (args.expectedRevision !== undefined && !Number.isSafeInteger(args.expectedRevision)) {
         throw new WorkbenchError("invalid_input", "expectedRevision 必须是正整数");
       }
-      const snapshot = await observeGitSnapshot(base);
+      const snapshot = await observeGitSnapshot(resolveCodeRoot(base, args.id));
       const detail = await updateTasks(base, args.id, {
         tasks: args.tasks as TaskInput[] | undefined,
         readyForAcceptance: args.readyForAcceptance === true,

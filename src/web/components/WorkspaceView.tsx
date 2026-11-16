@@ -894,6 +894,7 @@ export function WorkspaceView() {
   const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
   const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
   const setModal = useUiStore((s) => s.setModal);
+  const showToast = useUiStore((s) => s.showToast);
 
   const startEditSpec = useDraftStore((s) => s.startEditSpec);
   const startEditDesign = useDraftStore((s) => s.startEditDesign);
@@ -931,6 +932,11 @@ export function WorkspaceView() {
           {s.id}
         </span>
         <h1 className="ws-title">{s.title}</h1>
+        {reqData?.sandbox && (
+          <span className="badge info" data-testid="sandbox-active-badge" title={`沙箱分支: ${reqData.sandbox.branch}`}>
+            沙箱隔离中
+          </span>
+        )}
         <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
           {stageMeta.label}
         </span>
@@ -1114,6 +1120,29 @@ export function WorkspaceView() {
               {sec.label}
             </button>
           ))}
+          {reqData?.sandbox && (s.stage === "awaiting_acceptance" || s.stage === "done") && (
+            <button
+              className="btn"
+              type="button"
+              data-testid="apply-sandbox-btn"
+              disabled={busy}
+              onClick={async () => {
+                const res = await runBusy(() => api.applyRsiSandbox(s.id));
+                if (res) {
+                  await invalidateAllWorkbenchQueries();
+                  showToast(
+                    res.webReloaded
+                      ? `已应用沙箱改动（${res.appliedFiles.length} 个文件）并热刷新前端`
+                      : res.restartRecommended
+                        ? `已应用沙箱改动（${res.appliedFiles.length} 个文件），后端变动建议执行 wb restart 生效`
+                        : `已应用沙箱改动（${res.appliedFiles.length} 个文件）`,
+                  );
+                }
+              }}
+            >
+              应用沙箱改动
+            </button>
+          )}
         </div>
       </section>
 
