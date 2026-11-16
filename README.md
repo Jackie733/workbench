@@ -1,52 +1,88 @@
-# Tern 需求交付工作台
+# Workbench — 轻规范与验证驱动的 Agent 需求交付工作台
 
-一个现有 omp＋一个原位工作台。讨论、设计、实施和审查复用同一会话；工作台读取真实状态、工具和结构化计划，不另开 omp，不修改模型配置。
+本地优先、Agent 无关的 **Spec & Verification Workbench**（基于 **Lightweight SDD + VDD**：轻规范锚定与验证驱动开发）。它帮助开发者在同一个工作台内统筹多个需求：由人类用一句话定义目标并在关键节点拍板，由 AI Coding Agent 负责整理规范、撰写方案、拆分执行与运行验证。
 
 仓库：[Jackie733/workbench](https://github.com/Jackie733/workbench)。本机源码：`/home/jackie/code/workbench`。
 
-## 当前状态与文档
+---
 
-现有实现包含需求存储、资料交接、方案批准、实施计划、Git 差异、验证证据、审查、人工验收和审计。Agent-first 重构已完成 AF-01 契约盘点，AF-02 隔离能力探针和 AF-03 读模型修正正在进行；新界面与 Agent 业务工具尚未完成，局部测试不代表完整发布验收通过。
+## 核心特性与设计理念
 
-| 文档 | 用途 |
-| --- | --- |
-| [设计文档](docs/DESIGN.md) | 当前产品、信息架构、交互、UI/色彩与 Agent 工具设计 |
-| [任务清单](docs/TASKS.md) | 唯一实施进度入口；AF-01–AF-16 的依赖、交付物和验收标准 |
-| [领域约束](docs/DOMAIN_CONTRACT.md) | 身份、授权、证据、状态、存储与版本兼容边界 |
-| [历史归档](docs/archive/README.md) | 旧方案、阶段记录与真实验证限制，仅供追溯 |
+1. **三层解耦的统一技术栈（TypeScript / Bun）**
+   - **Workbench Core (`src/core/`)**：直接运行于本地环境，管理 `.workbench/` 混合存储（人类可读 `spec.md` / `design.md` + 轻量 `state.json`）、Git 变更观察与真实测试执行。
+   - **通用工具接口（`src/mcp/` + `src/cli/`）**：暴露 `wb_list`、`wb_get`、`wb_propose`、`wb_update_tasks`、`wb_verify` 五个正交工具，支持 `omp`、Claude Code、Codex CLI、Cursor、OpenCode 等任意 AI Coding Agent。
+   - **本地极简 Web UI (`src/server/` + `src/web/`)**：提供响应式全局首页与三页签工作区，原生支持 Markdown 渲染、代码 Diff 审阅、终端日志展开、亮/暗色主题与 WebSocket 实时更新。
+2. **双轨自适应工作流（Plan-First vs Fast-Track）**
+   - **标准模式（Plan-First）**：`draft` → `designing` → `awaiting_approval`（人审方案）→ `implementing` → `awaiting_acceptance`（人看验证证据与 Diff 验收）→ `done`。
+   - **快速通道（Fast-Track）**：针对明确小需求，人可授权直接跳过方案审批进入 `implementing`，但仍必须通过**真实测试证据 + 人工验收**闭环。
+3. **验证驱动与人工主权边界**
+   - Agent 不能口头宣布任务完成，也不能自行批准方案或验收通过；验证结论必须来自工作台真实运行测试命令的退出码、日志与当前 Git 代码快照指纹绑定。代码一旦在测试后继续改动，旧证据自动标为过期（`stale`）。
+4. **`omp` 原位会话桥接 (`omp/index.ts`)**
+   - 在 `omp` 终端中直接注册 5 个 `wb_*` 原生工具与 `/wb` 命令：`/wb` 自动启动/复用本地工作台服务并打开 Web UI，同时将用户在工作台点击按钮生成的指令安全投递至当前 `omp` 会话（忙碌或已有草稿时安全拒绝，绝不覆盖输入）。
 
-旧文档已退出当前实施入口，不删除历史证据，也不据此清除尚未完成的验收事项。开始开发先读设计与领域约束，再按任务清单的实际状态和依赖继续；AF-02/03 未验收前不跳入新 UI 重构。
+---
 
-## 在当前 omp 使用
+## 快速上手
 
-本机已添加 `~/.omp/agent/extensions/workbench.ts`，仅重导出仓库扩展；没有自动重载日常会话。方便时在现有 omp 执行 `/reload-plugins`，然后 `/wb`。它只打开右侧工作台，不启动另一个 omp。
-
-下次启动开发／调试会话可使用 `omp --model openai-codex/gpt-6-luna`；不改变全局默认模型。其他机器可显式加载 `omp --extension /absolute/path/to/workbench/omp/index.ts`。不要同时配置两个相同扩展入口；无需安装 skill、Provider 或新后台服务。
-
-当前插件版本 3.7.1。历史实现与验证详见归档；当前仍需关注真实收发时序、活动运行中的生命周期、批处理停止/重载、完整升级恢复，以及原生焦点、撤销与辅助技术支持。新任务清单承接这些边界，不将归档等同于关闭问题。
-
-更新时须同步宿主和 omp 扩展。已记录版本包含需求等实体 schema 2、plan schema 2、reviews schema 3；精确矩阵见领域约束，旧条目不补造身份。新写入后不保证旧二进制可写或降级，请勿手改 schema 数字。旧 KV 与旧任务/方案仍不迁移、不读取、不删除。
-
-
-## 运行边界
-
-- `/wb` 关联实际调用会话。身份缺失、来源不唯一或 session 已改变时拒绝误投，不猜测第一个窗口或同目录空闲会话。
-- 当前状态、工具、计划和候选交付均为观测。没有可靠需求归属时明确标注，不自动推进生命周期。
-- 资料预填不触发推理；已有草稿不覆盖，忙碌时不默认 steer，不自动重试不确定请求。
-- 关闭／重载面板不关闭 omp，不自动重发请求；断连明确显示过期状态。
-- 运行 IPC 留在当前用户私有临时目录；项目需求仅在明确初始化后写入 `.omp/workbench/`，不自动迁移旧业务数据。初始化提供本仓库私有排除或遵循现有 Git 规则的选择。
-- 工作台不是工具权限沙箱，本地日志也不是防篡改审计系统。
-
-## Tern 本地链接
-
-在 Windows Tern 可访问该 WSL 仓库的环境中：
+### 1. 环境准备
 
 ```sh
-tern plugin link '\\wsl.localhost\Ubuntu\home\jackie\code\workbench'
-tern plugin reload multi-model-workbench --json
-tern plugin list --json
+bun install
 ```
 
-插件 ID 保持 `multi-model-workbench`，避免目录改名导致安装和数据身份变化。链接源码更新可能触发重载；显式 reload 会影响插件面板，不应在用户未完成输入时随意执行。
+### 2. 启动工作台 Web UI
 
-本项目不安装 Provider、skill，不保存认证信息，不更改默认模型或 fallback，不自动提交、推送、合并或发布。
+```sh
+# 在当前 Git 项目根目录初始化并启动 Web 服务（也可以在浏览器首页完成初始化）
+bun run src/cli/index.ts init --local
+bun run src/cli/index.ts serve --port 4318
+```
+
+随后在浏览器访问输出的地址（如 `http://127.0.0.1:4318`）。
+
+### 3. 在 `omp` 中使用
+
+本机 `~/.omp/agent/extensions/workbench.ts` 已重导出 [omp/index.ts](omp/index.ts)（或使用 `omp --extension /home/jackie/code/workbench/omp/index.ts` 启动）。进入项目会话后直接输入 `/wb` 即可打开工作台并建立实时会话桥接。
+
+### 4. 在其他 AI Coding Agent 中挂载 MCP Server
+
+任何支持标准 stdio MCP 的 Agent（Claude Code、Cursor、Codex CLI、OpenCode 等）均可添加如下配置：
+
+```json
+{
+  "mcpServers": {
+    "workbench": {
+      "command": "bun",
+      "args": ["run", "/home/jackie/code/workbench/src/cli/index.ts", "mcp"]
+    }
+  }
+}
+```
+
+也可以直接允许 Agent 调用 CLI：`bun run /home/jackie/code/workbench/src/cli/index.ts --json <list|get|create|propose|tasks|verify>`。
+
+### 5. 运行测试与类型检查
+
+```sh
+bun test
+bun run typecheck
+```
+
+---
+
+## 权威文档
+
+| 文档 | 用途 |
+| :--- | :--- |
+| [设计规范](docs/DESIGN.md) | 产品定位、SDD+VDD 工作流、三层解耦架构、零废话 Web UI 与通用 Agent 工具接口 |
+| [领域契约](docs/DOMAIN_CONTRACT.md) | `.workbench/` 混合存储结构、原子持久化与 CAS、双轨规则、验证证据绑定与人工主权不变量 |
+| [实施任务](docs/TASKS.md) | `WB-01`–`WB-07` 的依赖、交付物、验收标准与实测执行记录 |
+| [历史归档](docs/archive/README.md) | 旧版 Tern-Luau 方案、2026-11-16 归档文档（`AF-01–AF-16`）与早期阶段记录，仅供追溯 |
+
+---
+
+## 运行与安全边界
+
+- **本地数据策略**：新架构需求资料存放在项目 `.workbench/` 下，初始化时可由用户显式选择「仅本机排除（写入 `.git/info/exclude`）」或「随项目 Git 跟踪」；有意不读取或自动迁移旧版 `.omp/workbench/` 数据。
+- **单向拍板控制**：MCP Server 与 `wb` CLI 绝不向 Agent 暴露 `approve`（批准方案）或 `accept`（最终验收）接口；零必需验收条件禁止直接验收通过。
+- **诚实边界**：工作台门禁是面向交付流程的工程护栏，而非操作系统级沙箱；不擅自修改模型配置，不自动执行 `git commit`、`git push` 或分支合并。

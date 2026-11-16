@@ -1,0 +1,187 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  acceptRequirement,
+  authorizeFastTrack,
+  createRequirement,
+  getRequirement,
+  getVerificationEvidence,
+  initProject,
+  updateTasks,
+} from "../../src/core/engine.ts";
+import { observeGitChanges, observeGitSnapshot } from "../../src/core/git.ts";
+import { runAllVerifications, runVerification } from "../../src/core/runner.ts";
+
+const tempDirs: string[] = [];
+
+function makeTempDir(prefix = "wb-git-test-"): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function initGitRepo(withCommit = true): string {
+  const dir = makeTempDir();
+  git(dir, "init");
+  git(dir, "config", "user.name", "Workbench Test");
+  git(dir, "config", "user.email", "test@example.com");
+  fs.writeFileSync(path.join(dir, "app.ts"), "export const sum = (a: number, b: number) => a + b;\n");
+  if (withCommit) {
+    git(dir, "add", "app.ts");
+    git(dir, "commit", "-m", "initial commit");
+  }
+  return dir;
+}
+
+afterEach(() => {
+  while (tempDirs.length > 0) {
+    fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
+});
+
+describe("WB-02 git observer and verification runner", () => {
+  test("returns non-git gracefully when directory is not a git repo", async () => {
+    const dir = makeTempDir("wb-nongit-");
+    await initProject(dir);
+    await createRequirement(dir, {
+      goal: "测试非 Git 目录",
+      criteria: [{ id: "AC-1", description: "运行命令", required: true }],
+    });
+
+    const snap = await observeGitSnapshot(dir);
+    expect(snap).toBeNull();
+    const obs = await observeGitChanges(dir);
+    expect(obs.isGitRepo).toBe(false);
+    expect(obs.fingerprint).toBeNull();
+
+    await expect(
+      runVerification(dir, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] }),
+    ).rejects.toMatchObject({ code: "execution_failed" });
+  });
+
+  test("excludes .workbench metadata from snapshots and detects tracked/untracked edits and commits", async () => {
+    const repo = initGitRepo(true);
+    await initProject(repo, { privacyMode: "tracked" });
+    const baseSnap = (await observeGitSnapshot(repo))!;
+    expect(baseSnap.dirty).toBe(false);
+    expect(baseSnap.head).toMatch(/^[a-f0-9]{40}$/);
+
+    // Creating workbench items does NOT change workspace codeSnapshotHash or diff
+    await createRequirement(repo, { goal: "测试排除工作台元数据" });
+    const afterMetaSnap = (await observeGitSnapshot(repo))!;
+    expect(afterMetaSnap.fingerprint).toBe(baseSnap.fingerprint);
+    expect(afterMetaSnap.dirty).toBe(false);
+
+    // Modifying a tracked file changes fingerprint deterministically
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const sum = (a: number, b: number) => a + b + 1;\n");
+    const dirtySnap1 = (await observeGitSnapshot(repo))!;
+    expect(dirtySnap1.dirty).toBe(true);
+    expect(dirtySnap1.fingerprint).not.toBe(baseSnap.fingerprint);
+
+    // Adding an untracked file changes fingerprint again and appears in unified diff
+    fs.writeFileSync(path.join(repo, "helper.ts"), "export const ok = true;\n");
+    const dirtySnap2 = (await observeGitSnapshot(repo))!;
+    expect(dirtySnap2.fingerprint).not.toBe(dirtySnap1.fingerprint);
+
+    const changes = await observeGitChanges(repo);
+    expect(changes.files.map((f) => f.path)).toEqual(["app.ts", "helper.ts"]);
+    expect(changes.diff).toContain("a + b + 1");
+    expect(changes.diff).toContain("export const ok = true;");
+    expect(changes.diff).not.toContain(".workbench");
+
+    // Committing and comparing against baseSnap.head includes commit log & diff since baseline
+    git(repo, "add", "app.ts", "helper.ts");
+    git(repo, "commit", "-m", "feat: add helper");
+    const sinceBase = await observeGitChanges(repo, { sinceHead: baseSnap.head });
+    expect(sinceBase.commits).toHaveLength(1);
+    expect(sinceBase.commits[0]?.subject).toBe("feat: add helper");
+    expect(sinceBase.diff).toContain("export const ok = true;");
+  });
+
+  test("handles unborn git repo without commits", async () => {
+    const repo = initGitRepo(false);
+    await initProject(repo);
+    const snap = await observeGitSnapshot(repo);
+    expect(snap).not.toBeNull();
+    expect(snap!.head).toBe("");
+    expect(snap!.dirty).toBe(true);
+    const obs = await observeGitChanges(repo);
+    expect(obs.diff).toContain("export const sum");
+  });
+
+  test("executes real verification commands, records redacted evidence, handles timeouts, and marks stale after code edits", async () => {
+    const repo = initGitRepo(true);
+    await initProject(repo);
+    await createRequirement(repo, {
+      goal: "验证真实执行器闭环",
+      criteria: [
+        { id: "AC-1", description: "功能断言通过", required: true, command: "bun -e 'console.log(\"Bearer secret-abc\")'" },
+        { id: "AC-2", description: "辅助检查通过", required: true, command: "bun -e 'console.log(\"Bearer secret-abc\")'" },
+      ],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    // 1. Failing command
+    const failRun = await runVerification(repo, "REQ-001", {
+      command: "echo fail-out >&2; exit 2",
+      criterionIds: ["AC-1"],
+    });
+    expect(failRun.record.passed).toBe(false);
+    expect(failRun.record.exitCode).toBe(2);
+    expect(failRun.detail.validity.coverage.requiredPassed).toBe(0);
+
+    // 2. Timeout command
+    const timeoutRun = await runVerification(repo, "REQ-001", {
+      command: "sleep 5",
+      criterionIds: ["AC-1"],
+      timeoutMs: 500,
+    });
+    expect(timeoutRun.record.timedOut).toBe(true);
+    expect(timeoutRun.record.passed).toBe(false);
+    expect(timeoutRun.record.exitCode).toBeNull();
+
+    // 3. runAllVerifications groups shared command once and redacts Bearer token
+    const allRes = await runAllVerifications(repo, "REQ-001");
+    expect(allRes.runs).toHaveLength(1);
+    expect(allRes.runs[0]!.record.criterionIds).toEqual(["AC-1", "AC-2"]);
+    expect(allRes.runs[0]!.record.passed).toBe(true);
+    expect(allRes.runs[0]!.log).not.toContain("secret-abc");
+    expect(allRes.runs[0]!.log).toContain("Bearer [REDACTED]");
+    expect(allRes.detail.validity.acceptanceGate.ok).toBe(true);
+
+    const stored = getVerificationEvidence(repo, "REQ-001", allRes.runs[0]!.record.id);
+    expect(stored.log).toContain("Bearer [REDACTED]");
+
+    // 4. Editing code after passing immediately makes evidence stale and blocks acceptance
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const sum = (a: number, b: number) => a - b;\n");
+    const postEditSnap = (await observeGitSnapshot(repo))!;
+    const staleDetail = getRequirement(repo, "REQ-001", { currentCodeSnapshotHash: postEditSnap.fingerprint });
+    expect(staleDetail.validity.coverage.requiredPassed).toBe(0);
+    expect(staleDetail.validity.coverage.items.every((i) => i.state === "stale")).toBe(true);
+    expect(staleDetail.validity.acceptanceGate.ok).toBe(false);
+    await expect(
+      acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: postEditSnap.fingerprint }),
+    ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
+
+    // 5. Re-running on new code snapshot enables acceptance
+    await runAllVerifications(repo, "REQ-001");
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "修复并验证", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: postEditSnap.fingerprint,
+    });
+    const done = await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: postEditSnap.fingerprint });
+    expect(done.state.stage).toBe("done");
+  });
+});

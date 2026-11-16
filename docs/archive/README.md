@@ -6,6 +6,7 @@
 
 ## 归档规则
 
+- 2026-11-16 归档旧版 Tern-Luau 单体架构与 Agent-first 重构文档（`DESIGN.md`、`DOMAIN_CONTRACT.md`、`TASKS.md`），对应 AF-01–AF-16 阶段记录；已被新一代解耦架构（Option B：Bun/TS Core + 通用 MCP/CLI + 本地 Web UI）替代。
 - 2026-11-13 归档旧根计划与原 docs 的 22 份材料，共 23 份；保留原来的相对目录结构，避免历史引用失联。
 - 旧根计划、旧提案、旧任务和旧领域契约标明已被替代；阶段记录保留原文与真实限制。
 - 截图仍在原 target 目录，可能是本机忽略产物，不复制、不伪造，也不保证其他机器存在。
@@ -16,6 +17,7 @@
 
 | 类别 | 记录 |
 | --- | --- |
+| 2026-11-16 Tern-Luau 基线 | [旧版设计](2026-11-16/DESIGN.md)、[旧版领域约束](2026-11-16/DOMAIN_CONTRACT.md)、[旧版 AF 任务清单](2026-11-16/TASKS.md)（已被解耦新架构替代） |
 | 旧产品计划 | [产品与实施计划](2026-11-13/DESIGN_AND_IMPLEMENTATION_PLAN.md) |
 | 初始模型 | [阶段 0 领域契约](2026-11-13/docs/DOMAIN_CONTRACT.md) |
 | 桥接与存储 | [阶段 0/1](2026-11-13/docs/PHASE_0_1.md)、[阶段 2 存储](2026-11-13/docs/PHASE_2_STORAGE.md)、[阶段 2 UI](2026-11-13/docs/PHASE_2_UI.md) |
@@ -27,6 +29,6 @@
 | 资源、内容身份、候选 | [R4a](2026-11-13/docs/REDESIGN_R4A.md)、[R4b](2026-11-13/docs/REDESIGN_R4B_DESIGN.md)、[R5](2026-11-13/docs/REDESIGN_R5.md) |
 | 能力与桌面证据 | [探针](2026-11-13/docs/REDESIGN_PROBES.md)、[桌面与 IME](2026-11-13/docs/REDESIGN_DESKTOP.md) |
 
-## 必须承接的未完成项
+## 历史遗留边界说明
 
-新 TASKS 的 AF-14/AF-15 承接真实收发乱序/未知结果、活动运行中的生命周期、批处理停止与重载、完整升级恢复、焦点/撤销与辅助技术限制。旧记录中的部分成功不关闭这些场景。选择性证据失效与增量审查不因归档进入新范围。
+`2026-11-16` 及 `2026-11-13` 归档中的 AF/R0–R5 未完成验收与限制（包括 Tern 原生组件限制、PowerShell 跨端存储边界等）属于旧版 Tern-Luau 架构范围；新一代解耦架构的任务与验收基准以当前 [TASKS.md](../TASKS.md) 为准。

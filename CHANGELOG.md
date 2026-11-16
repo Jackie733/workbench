@@ -1,5 +1,14 @@
 # 变更记录
 
+## 4.0.0 — 2026-11-16（Option B 架构重构与 SDD+VDD 落地）
+
+- **架构彻底解耦为纯 TypeScript / Bun 单一技术栈**：
+  - 核心引擎 `src/core/`：落地 `.workbench/` 混合存储（`spec.md`、`design.md`、`state.json`、`history/`、`evidence/`）、原子写入与进程锁 + CAS 乐观锁、双轨自适应工作流（`Plan-First` / `Fast-Track`）、Git 快照采集（排除 `.workbench/` 元数据）与真实验证命令执行器（自动过期检测与凭据脱敏）。
+  - 通用工具接口 `src/mcp/` 与 `src/cli/`：提供 `wb` CLI（`init`/`list`/`get`/`create`/`propose`/`tasks`/`verify`/`mcp`/`serve`）与标准 stdio MCP Server（5 个正交工具 `wb_list`/`wb_get`/`wb_propose`/`wb_update_tasks`/`wb_verify`），严禁暴露 `approve`/`accept` 与伪造 `passed` 参数。
+  - 本地 HTTP/WS 服务与会话桥接 `src/server/` + `omp/index.ts`：提供完整 REST API、`.workbench/` 文件监听与 WebSocket 实时广播；精简重写 `omp/index.ts`（162 行），注册原生工具、`/wb` 后台服务唤起与安全提示词投递（空闲/忙碌/草稿冲突保护）。
+  - 极简零废话 Web UI `src/web/`：实现全局首页（紧凑顶栏、置顶「待你拍板」、搜索/范围/列表/四列只读看板、一句话极简新建与初始化引导、亮/暗主题、滚动位置恢复）与需求工作区（动态唯一主操作横幅 + `规范与方案`/`变更与验证`/`时间线` 三平行页签、GFM Markdown 渲染、方案版本差异对比、可展开验证日志与文件树 Git Diff）。
+- **清理旧版包袱**：归档 `AF-01–AF-16` 阶段文档至 `docs/archive/2026-11-16/`，移除根目录与 `lib/`、`omp/`、`tests/` 下旧版 Tern-Luau、内嵌 PowerShell 及冗余桥梁代码。
+
 ## 未发布 — AF-05 首页重做与 AF-11 协商原语
 
 - 工作首页取消全局目的地 tabs：项目上下文一行、工作标题＋单一新建按钮、搜索/筛选/视图；活动记录、刷新、连接诊断和只读启用编辑进入项目菜单。筛选默认收起，范围默认“活跃”，已完成/已取消显式切换；列表只保留标题、编号、状态与更新时间。

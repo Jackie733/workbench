@@ -1,0 +1,20 @@
+{
+  "name": "workbench",
+  "version": "4.0.0",
+  "description": "Lightweight SDD + VDD Spec & Verification Workbench for AI Coding Agents",
+  "type": "module",
+  "bin": {
+    "wb": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "wb": "bun run src/cli/index.ts",
+    "serve": "bun run src/cli/index.ts serve",
+    "mcp": "bun run src/cli/index.ts mcp",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}
