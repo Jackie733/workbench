@@ -176,7 +176,11 @@ export function useWorkbenchWsSync(): void {
           const model = typeof ev.model === "string" ? ev.model : "";
           const ui = useUiStore.getState();
           if (status === "succeeded") {
-            ui.showToast(`${reqId} 执行完成 (${model})`);
+            const fallbackNote =
+              ev.modelFallback === true
+                ? `；请求模型未生效，实际由 ${String(ev.effectiveModel ?? "auto")} 执行`
+                : "";
+            ui.showToast(`${reqId} 执行完成 (${model})${fallbackNote}`);
           } else if (status === "cancelled") {
             ui.showToast(`${reqId} 已终止执行`);
           } else if (ev.rateLimited) {

@@ -33,7 +33,7 @@ export interface DiscoveredModel {
   label?: string;
   provider?: string;
   tier: "sota" | "balanced" | "fast" | "review";
-  source: "detected";
+  source: "detected" | "builtin";
   supportedEfforts?: ReasoningEffort[];
   defaultEffort?: ReasoningEffort;
 }

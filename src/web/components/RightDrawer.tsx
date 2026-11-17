@@ -440,7 +440,8 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       >
                         {runs.map((r) => (
                           <option key={r.id} value={r.id}>
-                            {r.action} · {r.harness}/{r.model} ({r.status})
+                            {r.action} · {r.harness}/{r.model}
+                            {r.modelFallback && r.effectiveModel ? ` → 实际 ${r.effectiveModel}` : ""} ({r.status})
                           </option>
                         ))}
                       </select>
@@ -471,6 +472,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <span className="xs" style={{ marginLeft: 6 }}>
                             <strong>{currentRun.harness}</strong> · {currentRun.model}
                           </span>
+                          {currentRun.modelFallback && currentRun.effectiveModel && (
+                            <span className="badge warning xs" style={{ marginLeft: 6 }}>
+                              降级·实际 {currentRun.effectiveModel}
+                            </span>
+                          )}
                         </div>
                         <div style={{ display: "flex", gap: 6 }}>
                           {currentRun.status === "running" ? (

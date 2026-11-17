@@ -364,6 +364,10 @@ export interface AgentRunRecord {
   action: AgentAction;
   harness: string;
   model: string;
+  /** Model the CLI reported for the session, when it differs from the requested model. */
+  effectiveModel?: string;
+  /** True when the CLI silently downgraded the requested model (e.g. requested model -> auto). */
+  modelFallback?: boolean;
   reasoningEffort?: string;
   nativeSessionId?: string;
   status: "running" | "succeeded" | "failed" | "cancelled";

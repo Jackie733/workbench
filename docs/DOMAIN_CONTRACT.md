@@ -71,12 +71,12 @@
 | `items/REQ-xxx/handoff.md`（v5） | 跨模型交接简报（控制在 1.5k–3k Tokens 预算内），整合契约摘要、输出语言策略、关键结论/死胡同、客观 Git 改动、失败证据末尾及未解决讨论。 |
 | `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `delivery`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, **`github?`**（关联 Issue 与 PR 状态）, `createdAt`, `updatedAt`。 |
 | `items/REQ-xxx/evidence/verify-<id>.json` & `.log` | 不可变验证证据：包含 `id`, `command`, `cwd`, `criterionIds`, `specHash`, `codeSnapshotHash`, `exitCode`, `timedOut`, `durationMs`, `startedAt`, `endedAt`, `passed`, `outputPath`, `outputPreview`, `truncated`。 |
-| `items/REQ-xxx/runs/run-<id>.json` & `.log`（v5） | 主动调度运行记录：`id`, `action` (`ask` \| `design` \| `implement` \| `fix` \| `review`), `harness`, `model`, `reasoningEffort?`, `nativeSessionId?`, `status` (`running` \| `succeeded` \| `failed` \| `cancelled`), `startedAt`, `endedAt`, `exitCode`, `durationMs`, `rateLimited?`, `errorSummary?`, `logPath`。 |
+| `items/REQ-xxx/runs/run-<id>.json` & `.log`（v5） | 主动调度运行记录：`id`, `action` (`ask` \| `design` \| `implement` \| `fix` \| `review`), `harness`, `model`, `effectiveModel?`, `modelFallback?`, `reasoningEffort?`, `nativeSessionId?`, `status` (`running` \| `succeeded` \| `failed` \| `cancelled`), `startedAt`, `endedAt`, `exitCode`, `durationMs`, `rateLimited?`, `errorSummary?`, `logPath`。其中 `model` 是请求目标，`effectiveModel` 是 CLI 回报的实际模型，`modelFallback` 表示 CLI 已将请求模型降级。 |
 
 v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认 `[]` / `null`）：
 - `handoffNote`（或 `null`）：结构化交接备忘 `{ updatedAt, keyDecisions: string[], deadEnds: string[], nextSteps: string[] }`，允许 Agent 在 `wb_propose` / `wb_update_tasks` 时沉淀高价值定位与踩坑警示。
 - `discussions[]`：需求内段落批注与问答讨论流 `{ id, at, actor: "human" | "agent", mode: "ask" | "refine", anchor?: string, harness?: string, model?: string, message: string, resolved?: boolean }`。
-- `agentRuns[]`：记录最近运行摘要 `{ id, action, harness, model, nativeSessionId?, status, startedAt, endedAt, exitCode, durationMs, errorSummary? }`，便于前端重连与同构续接。
+- `agentRuns[]`：记录最近运行摘要 `{ id, action, harness, model, effectiveModel?, modelFallback?, nativeSessionId?, status, startedAt, endedAt, exitCode, durationMs, errorSummary? }`，便于前端重连与同构续接。
 - `reviewReport`（或 `null`）：最新一次跨模型审查结果 `{ id, reviewerHarness, reviewerModel, verdict: "pass" | "concern" | "block", summary, markdown, reviewedSpecHash, reviewedCodeSnapshotHash, reviewedAt }`；当 `specHash` 或当前代码快照发生变化时，展示层标记该审查报告已过期（`stale`）提示按需复审。
 
 ---

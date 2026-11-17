@@ -22,6 +22,7 @@ import {
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
+import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
 import { inspectFinishedRunForPainPoints, syncRequirementMirrorToSandbox } from "./evolution.ts";
 import { synthesizeHandoffPacket } from "./handoff.ts";
@@ -44,6 +45,8 @@ export interface RunExecutorEvent {
   action?: AgentAction;
   harness?: string;
   model?: string;
+  effectiveModel?: string;
+  modelFallback?: boolean;
   chunk?: string;
   status?: AgentRunRecord["status"];
   rateLimited?: boolean;
@@ -77,6 +80,8 @@ interface ActiveJob {
   requirementId: string;
   action: AgentAction;
   target: ModelTarget;
+  effectiveModel?: string;
+  modelFallback?: boolean;
   child: ChildProcess;
   startedAt: number;
   cancelled: boolean;
@@ -358,15 +363,20 @@ export function buildExecutionPrompt(
 
   const modeVerb =
     input.action === "design"
-      ? `请梳理或修订 ${reqId} 的规范、结构化验收条件与技术方案，并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。`
+      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案，并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
       : input.action === "fix"
         ? `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
         : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
 
+  const boundaryGuard =
+    input.action === "design"
+      ? "注意：你无权也无需执行批准或最终验收操作；本轮只产出方案，提交后立即停止，不要继续实施。"
+      : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。";
+
   return [
     `请接力执行工作台需求 ${reqId}（可用命令行 \`wb\` 工具操作，WORKBENCH_ROOT 已自动指向当前仓库）。`,
     modeVerb,
-    "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。",
+    boundaryGuard,
     "",
     buildOutputLanguageDirective(lang, "plan"),
     "",
@@ -374,8 +384,11 @@ export function buildExecutionPrompt(
   ].join("\n");
 }
 
-function parseReviewOutput(rawOutput: string): { verdict: ReviewVerdict; summary: string; markdown: string } {
-  const clean = sanitizeOutput(rawOutput, 48 * 1024).text.trim();
+function parseReviewOutput(
+  rawOutput: string,
+): { verdict: ReviewVerdict; summary: string; markdown: string } | null {
+  const clean = sanitizeOutput(rawOutput, 256 * 1024).text.trim();
+  if (!clean) return null;
   const jsonBlocks = Array.from(clean.matchAll(/```json\s*([\s\S]*?)```/gi));
   for (let i = jsonBlocks.length - 1; i >= 0; i--) {
     try {
@@ -388,17 +401,27 @@ function parseReviewOutput(rawOutput: string): { verdict: ReviewVerdict; summary
         };
       }
     } catch {
-      // Try earlier block or fallback heuristic.
+      // Try an earlier block.
     }
   }
-  const lower = clean.toLowerCase();
-  const verdict: ReviewVerdict = /\bblock\b|阻塞|严重缺陷|不通过/.test(lower)
-    ? "block"
-    : /\bconcern\b|风险|建议修改|注意/.test(lower)
-      ? "concern"
-      : "pass";
-  const firstLine = clean.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim().slice(0, 180) ?? "已完成代码审查";
-  return { verdict, summary: firstLine, markdown: clean || "（空审查输出）" };
+  // Accept a bare JSON verdict object at the tail; never guess from prose or tool chatter.
+  const bareMatches = Array.from(
+    clean.slice(-8192).matchAll(/\{[^{}]*"verdict"\s*:\s*"(pass|concern|block)"[^{}]*\}/g),
+  );
+  const bare = bareMatches.pop();
+  if (bare) {
+    try {
+      const parsed = JSON.parse(bare[0]) as { verdict: ReviewVerdict; summary?: string };
+      return {
+        verdict: parsed.verdict,
+        summary: parsed.summary?.trim() || `审查结论：${parsed.verdict}`,
+        markdown: clean,
+      };
+    } catch {
+      // Malformed bare object.
+    }
+  }
+  return null;
 }
 
 const CLI_NOISE_RE = /^Model ".*" is not available right now; using ".*" instead\.?(?: Use \/model to choose another model\.?)?$/i;
@@ -430,6 +453,8 @@ interface ParsedStreamLine {
   displayText: string;
   replyText: string | null;
   sessionId?: string;
+  effectiveModel?: string;
+  modelFallback?: boolean;
 }
 
 function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorReply: boolean): ParsedStreamLine {
@@ -467,15 +492,20 @@ function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorRe
       if (evt.type === "system") {
         if (evt.subtype === "init") {
           const requested = fallbackModel && fallbackModel !== "default" ? fallbackModel : "";
-          const actual = evt.model || fallbackModel;
-          const fallbackNote =
-            requested && requested.toLowerCase() !== "auto" && actual.toLowerCase() === "auto"
-              ? ` ⚠️ 请求模型 ${requested} 不可用，已自动回退为 auto`
-              : "";
+          const reported = typeof evt.model === "string" ? evt.model.trim() : "";
+          const actual = reported || fallbackModel;
+          const modelFallback = Boolean(
+            requested && requested.toLowerCase() !== "auto" && actual.toLowerCase() === "auto",
+          );
+          const fallbackNote = modelFallback
+            ? ` ⚠️ 请求模型 ${requested} 不可用，已自动回退为 auto`
+            : "";
           return {
             displayText: `⚡ Qoder 引擎已就绪 (model: ${actual}${fallbackNote})\n`,
             replyText: null,
             sessionId,
+            ...(reported ? { effectiveModel: actual } : {}),
+            ...(modelFallback ? { modelFallback: true } : {}),
           };
         }
         return { displayText: "", replyText: null, sessionId };
@@ -588,6 +618,8 @@ export class HubExecutor {
         action: job.action,
         harness: job.target.harness,
         model: job.target.model,
+        ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
+        ...(job.modelFallback ? { modelFallback: true } : {}),
         ...(job.target.reasoningEffort ? { reasoningEffort: job.target.reasoningEffort } : {}),
         status: "running",
         startedAt: job.startedAt,
@@ -618,6 +650,22 @@ export class HubExecutor {
     const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
     const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
+    if (input.action === "implement" || input.action === "fix") {
+      const stage = currentDetail.state.stage;
+      if (stage !== "implementing" && stage !== "awaiting_acceptance") {
+        throw new WorkbenchError(
+          "approval_required",
+          `${id} 当前阶段（${stage}）不能执行 ${input.action}；必须先由人类批准方案并进入实施阶段`,
+        );
+      }
+      const approval = evaluateApproval(currentDetail.state);
+      if (!approval.valid) {
+        throw new WorkbenchError(
+          "approval_required",
+          `${id} 尚未获得有效方案批准：${approval.reason ?? "请先由人类批准方案"}`,
+        );
+      }
+    }
     const prevRun = (currentDetail.state.agentRuns ?? []).slice(-1)[0] ?? null;
 
     const override: Partial<ModelTarget> | null =
@@ -808,8 +856,15 @@ export class HubExecutor {
     }
 
     const cleanReplyParts: string[] = [];
+    let stdoutReplyTail = "";
     let stdoutLineBuf = "";
     let capturedSessionId: string | undefined;
+
+    const appendStdoutReply = (text: string) => {
+      if (!text) return;
+      const next = stdoutReplyTail + text;
+      stdoutReplyTail = next.length > 64 * 1024 ? next.slice(next.length - 64 * 1024) : next;
+    };
 
     const emitCleanChunk = (rawChunk: string) => {
       const text = sanitizeOutput(rawChunk, 32 * 1024).text;
@@ -830,6 +885,8 @@ export class HubExecutor {
     const handleQoderLine = (line: string) => {
       const parsed = parseQoderStreamLine(line, target.model, cleanReplyParts.length > 0);
       if (parsed.sessionId) capturedSessionId = parsed.sessionId;
+      if (parsed.effectiveModel) job.effectiveModel = parsed.effectiveModel;
+      if (parsed.modelFallback) job.modelFallback = true;
       if (parsed.replyText) cleanReplyParts.push(parsed.replyText);
       if (parsed.displayText) emitCleanChunk(parsed.displayText);
     };
@@ -839,7 +896,10 @@ export class HubExecutor {
       const chunk = buf.toString("utf8");
       if (target.harness !== "qodercn") {
         const cleaned = stripCliNoise(chunk);
-        if (cleaned) emitCleanChunk(cleaned);
+        if (cleaned) {
+          appendStdoutReply(cleaned);
+          emitCleanChunk(cleaned);
+        }
         return;
       }
       stdoutLineBuf += chunk;
@@ -877,11 +937,19 @@ export class HubExecutor {
       const durationMs = Math.max(0, endedAt - startedAt);
       const rawLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
       const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
-      const status: AgentRunRecord["status"] = job.cancelled
+      let status: AgentRunRecord["status"] = job.cancelled
         ? "cancelled"
         : exitCode === 0 && !spawnErr && !job.timedOut
           ? "succeeded"
           : "failed";
+      const replySource =
+        cleanReplyParts.join("\n\n").trim() ||
+        stdoutReplyTail.trim() ||
+        stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
+      const parsedReview =
+        status === "succeeded" && input.action === "review" ? parseReviewOutput(replySource) : null;
+      const reviewParseFailed = status === "succeeded" && input.action === "review" && parsedReview === null;
+      if (reviewParseFailed) status = "failed";
 
       const invalidSessionTokens = new Set(["string", "number", "boolean", "undefined", "null", "object", "unknown", "default"]);
       const sessMatches = Array.from(rawLog.matchAll(/session[_ -]?id[:=]\s*["']?([A-Za-z0-9._-]{6,64})["']?/gi));
@@ -896,13 +964,15 @@ export class HubExecutor {
       const nativeSessionId = capturedSessionId ?? matchedSessionId;
       const errorSummary =
         status === "failed"
-          ? job.timedOut
-            ? job.timeoutReason === "max_duration"
-              ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
-              : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-            : rateLimited
-              ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-              : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+          ? reviewParseFailed
+            ? "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
+            : job.timedOut
+              ? job.timeoutReason === "max_duration"
+                ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+                : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
+              : rateLimited
+                ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
 
       try {
@@ -914,6 +984,7 @@ export class HubExecutor {
           durationMs,
           rateLimited,
           timedOut: job.timedOut,
+          modelFallback: job.modelFallback === true,
           now: endedAt,
         });
       } catch {
@@ -928,8 +999,8 @@ export class HubExecutor {
         if (status === "succeeded" && input.action === "ask") {
           const cleanAnswer =
             cleanReplyParts.join("\n\n").trim() ||
-            stripCliNoise(rawLog.replace(/^\$ .*\n/, ""))
-              .trim();
+            stdoutReplyTail.trim() ||
+            stripCliNoise(rawLog.replace(/^\$ .*\n/, "")).trim();
           const answerText = cleanAnswer.slice(0, 24 * 1024);
           if (answerText) {
             await addDiscussion(base, id, {
@@ -941,16 +1012,13 @@ export class HubExecutor {
               message: answerText,
             });
           }
-        } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint) {
-          const reviewSource =
-            cleanReplyParts.join("\n\n").trim() || stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
-          const parsed = parseReviewOutput(reviewSource);
+        } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview) {
           await recordReviewReport(base, id, {
             reviewerHarness: target.harness,
             reviewerModel: target.model,
-            verdict: parsed.verdict,
-            summary: parsed.summary,
-            markdown: parsed.markdown,
+            verdict: parsedReview.verdict,
+            summary: parsedReview.summary,
+            markdown: parsedReview.markdown,
             reviewedSpecHash: latestReq.state.specHash,
             reviewedCodeSnapshotHash: snap.fingerprint,
           });
@@ -971,6 +1039,8 @@ export class HubExecutor {
             durationMs,
             nativeSessionId,
             rateLimited,
+            ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
+            ...(job.modelFallback ? { modelFallback: true } : {}),
             errorSummary,
           },
           rawLog,
@@ -1010,6 +1080,8 @@ export class HubExecutor {
         action: input.action,
         harness: target.harness,
         model: target.model,
+        ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
+        ...(job.modelFallback ? { modelFallback: true } : {}),
         status,
         rateLimited,
         errorSummary,

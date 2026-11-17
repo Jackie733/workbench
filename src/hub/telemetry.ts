@@ -16,6 +16,7 @@ export interface ModelStageStats {
   failedRuns: number;
   timedOutRuns: number;
   rateLimitedRuns: number;
+  degradedRuns: number;
   totalDurationMs: number;
   avgDurationMs: number;
   lastRunAt: number;
@@ -99,6 +100,7 @@ export function recordModelRunOutcome(input: {
   durationMs: number;
   rateLimited?: boolean;
   timedOut?: boolean;
+  modelFallback?: boolean;
   cooldownMs?: number;
   now?: number;
 }): ModelTelemetrySnapshot {
@@ -117,16 +119,18 @@ export function recordModelRunOutcome(input: {
       failedRuns: 0,
       timedOutRuns: 0,
       rateLimitedRuns: 0,
+      degradedRuns: 0,
       totalDurationMs: 0,
       avgDurationMs: 0,
       lastRunAt: now,
     };
 
     const totalRuns = prev.totalRuns + 1;
-    const succeededRuns = prev.succeededRuns + (input.status === "succeeded" ? 1 : 0);
+    const succeededRuns = prev.succeededRuns + (input.status === "succeeded" && !input.modelFallback ? 1 : 0);
     const failedRuns = prev.failedRuns + (input.status === "failed" ? 1 : 0);
     const timedOutRuns = prev.timedOutRuns + (input.timedOut ? 1 : 0);
     const rateLimitedRuns = prev.rateLimitedRuns + (input.rateLimited ? 1 : 0);
+    const degradedRuns = (prev.degradedRuns ?? 0) + (input.modelFallback ? 1 : 0);
     const totalDurationMs = prev.totalDurationMs + Math.max(0, Math.round(input.durationMs));
     const avgDurationMs = Math.round(totalDurationMs / totalRuns);
 
@@ -137,13 +141,14 @@ export function recordModelRunOutcome(input: {
       failedRuns,
       timedOutRuns,
       rateLimitedRuns,
+      degradedRuns,
       totalDurationMs,
       avgDurationMs,
       lastRunAt: now,
       ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
     };
 
-    if (input.rateLimited) {
+    if (input.rateLimited || input.modelFallback) {
       snap.cooldowns[modelKey] = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
     } else if (input.status === "succeeded") {
       delete snap.cooldowns[modelKey];

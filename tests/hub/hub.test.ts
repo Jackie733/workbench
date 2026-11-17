@@ -862,6 +862,8 @@ printf 'done\\n'
       goal: "在原生续接时保持所选模型与推理强度",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
     });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design" });
+    await approveDesign(repo, "REQ-001");
     return repo;
   }
 
@@ -1200,10 +1202,15 @@ printf 'done\\n'
     const lastDispatch = () => seen[seen.length - 1]!;
     const sessionOf = (requirementId: string, runId: string) =>
       getRequirement(repo, requirementId).state.agentRuns?.find((r) => r.id === runId)?.nativeSessionId ?? null;
+    const approveForImplementation = async (requirementId: string) => {
+      await propose(repo, requirementId, { designMarkdown: "# Design" });
+      await approveDesign(repo, requirementId);
+    };
 
     // 1. A resume-eligible continuation reuses the previous native session; a review run never does.
     const eligible = nextId();
     await createRequirement(repo, { goal: "续接资格" });
+    await approveForImplementation(eligible);
     const seed = await executor.startRun({
       root: repo,
       requirementId: eligible,
@@ -1290,6 +1297,7 @@ printf 'done\\n'
     // 4. Cross-harness continuation and a deliberate fallback request both start a fresh session.
     const crossReq = nextId();
     await createRequirement(repo, { goal: "跨 Harness 隔离" });
+    await approveForImplementation(crossReq);
     const crossSeed = await executor.startRun({
       root: repo,
       requirementId: crossReq,
@@ -1312,6 +1320,7 @@ printf 'done\\n'
 
     const fbReq = nextId();
     await createRequirement(repo, { goal: "备援后隔离" });
+    await approveForImplementation(fbReq);
     const fbSeed = await executor.startRun({
       root: repo,
       requirementId: fbReq,

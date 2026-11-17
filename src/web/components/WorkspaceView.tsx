@@ -120,6 +120,9 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
           <span className="badge info">
             {run.harness}/{run.model}
           </span>
+          {run.modelFallback && run.effectiveModel && (
+            <span className="badge warning">降级·实际 {run.effectiveModel}</span>
+          )}
         </div>
         <div className="live-agent-controls">
           <LiveTimer startedAt={run.startedAt} />
@@ -978,6 +981,11 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
                 <strong style={{ fontSize: 13, marginLeft: 6 }}>
                   {r.harness} / {r.model}
                 </strong>
+                {r.modelFallback && r.effectiveModel && (
+                  <span className="badge warning xs" style={{ marginLeft: 6 }}>
+                    实际 {r.effectiveModel}
+                  </span>
+                )}
                 <span className="muted xs" style={{ marginLeft: 6 }}>
                   {r.durationMs}ms
                 </span>

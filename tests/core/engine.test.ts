@@ -224,6 +224,56 @@ describe("WB-01 core store and domain engine", () => {
     expect(bootstrapped.validity.approval.valid).toBe(true);
   });
 
+  test("blocks verification and task completion before human approval", async () => {
+    const root = makeTempProject();
+    await initProject(root);
+    await createRequirement(root, {
+      goal: "门禁测试",
+      criteria: [{ id: "AC-1", description: "测试通过", required: true, command: "bun test" }],
+    });
+    const snap = sha("guard-snapshot");
+
+    // Task planning is allowed during design, but claiming completion is not.
+    const planned = await updateTasks(root, "REQ-001", {
+      tasks: [{ title: "起草方案", status: "pending" }],
+    });
+    expect(planned.state.tasks).toHaveLength(1);
+    await expect(
+      updateTasks(root, "REQ-001", {
+        tasks: [{ id: "T-1", title: "实施", status: "done" }],
+      }),
+    ).rejects.toMatchObject({ code: "approval_required" });
+    await expect(
+      recordVerification(root, "REQ-001", {
+        record: makeVerification("V-guard-1", planned.state.specHash, snap, ["AC-1"], true),
+        rawLog: "ok",
+        currentCodeSnapshotHash: snap,
+      }),
+    ).rejects.toMatchObject({ code: "approval_required" });
+
+    await markDesigning(root, "REQ-001");
+    const proposed = await propose(root, "REQ-001", { designMarkdown: "# Design" });
+    await expect(
+      recordVerification(root, "REQ-001", {
+        record: makeVerification("V-guard-2", proposed.state.specHash, snap, ["AC-1"], true),
+        rawLog: "ok",
+        currentCodeSnapshotHash: snap,
+      }),
+    ).rejects.toMatchObject({ code: "approval_required" });
+
+    const approved = await approveDesign(root, "REQ-001");
+    const recorded = await recordVerification(root, "REQ-001", {
+      record: makeVerification("V-guard-3", approved.state.specHash, snap, ["AC-1"], true),
+      rawLog: "ok",
+      currentCodeSnapshotHash: snap,
+    });
+    expect(recorded.state.verifications).toHaveLength(1);
+    const completed = await updateTasks(root, "REQ-001", {
+      tasks: [{ id: "T-1", title: "实施", status: "done" }],
+    });
+    expect(completed.state.tasks[0]?.status).toBe("done");
+  });
+
   test("enforces verification truthfulness, stale detection, zero-criteria rejection, and acceptance gate", async () => {
     const root = makeTempProject();
     await initProject(root);

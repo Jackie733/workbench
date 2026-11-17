@@ -704,6 +704,8 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
       "action",
       "harness",
       "model",
+      "effectiveModel",
+      "modelFallback",
       "reasoningEffort",
       "nativeSessionId",
       "status",
@@ -723,6 +725,8 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     !AGENT_ACTIONS.includes(raw.action as AgentAction) ||
     !isSafeText(raw.harness, 64) ||
     !isSafeText(raw.model, 200) ||
+    (raw.effectiveModel !== undefined && !isSafeText(raw.effectiveModel, 200)) ||
+    (raw.modelFallback !== undefined && typeof raw.modelFallback !== "boolean") ||
     !["running", "succeeded", "failed", "cancelled"].includes(String(raw.status)) ||
     !isSafeInt(raw.startedAt, 0) ||
     (raw.endedAt !== null && !isSafeInt(raw.endedAt, 0)) ||

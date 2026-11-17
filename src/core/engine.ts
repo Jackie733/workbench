@@ -97,6 +97,7 @@ import {
   WORKTREE_SCOPE_NOTE,
   computeDesignHash,
   computeSpecHash,
+  evaluateApproval,
   evaluateRequirement,
 } from "./validity.ts";
 
@@ -813,6 +814,15 @@ export async function updateTasks(
     }
 
     const nextTasks = input.tasks !== undefined ? normalizeTasks(input.tasks, state.tasks, now) : state.tasks;
+    if (
+      (state.stage === "draft" || state.stage === "designing" || state.stage === "awaiting_approval") &&
+      nextTasks.some((t) => t.status === "done")
+    ) {
+      throw new WorkbenchError(
+        "approval_required",
+        "方案尚未获得人类批准，不能把实施任务标记为完成；请先提交方案并等待批准",
+      );
+    }
     const note = input.note?.trim() ? normalizeReason(input.note, "进度说明") : undefined;
     const actor = input.actor ?? "agent";
 
@@ -880,6 +890,12 @@ export async function recordVerification(
     const { state } = current;
     if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能记录新的验证结果`);
+    }
+    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+      throw new WorkbenchError(
+        "approval_required",
+        `当前阶段（${state.stage}）不能记录验证证据；必须先获得人类方案批准并进入实施阶段`,
+      );
     }
     const validIds = new Set(state.criteria.map((c) => c.id));
     for (const criterionId of record.criterionIds) {
@@ -1936,6 +1952,8 @@ export async function finishAgentRun(
     durationMs: number;
     nativeSessionId?: string;
     rateLimited?: boolean;
+    effectiveModel?: string;
+    modelFallback?: boolean;
     errorSummary?: string;
   },
   rawLog: string,
@@ -1956,6 +1974,8 @@ export async function finishAgentRun(
       durationMs: patch.durationMs,
       ...(patch.nativeSessionId ? { nativeSessionId: patch.nativeSessionId } : {}),
       ...(patch.rateLimited !== undefined ? { rateLimited: patch.rateLimited } : {}),
+      ...(patch.effectiveModel ? { effectiveModel: patch.effectiveModel } : {}),
+      ...(patch.modelFallback !== undefined ? { modelFallback: patch.modelFallback } : {}),
       ...(patch.errorSummary ? { errorSummary: patch.errorSummary.slice(0, 600) } : {}),
     });
     const nextRuns = prevRuns.map((r) => (r.id === runId ? updated : r)).slice(-MAX_AGENT_RUNS);

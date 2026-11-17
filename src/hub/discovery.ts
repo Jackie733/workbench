@@ -86,7 +86,10 @@ interface RawModelSpec {
   defaultEffort?: ReasoningEffort;
 }
 
-function mergeModels(detected: Array<string | RawModelSpec>): DiscoveredModel[] {
+function mergeModels(
+  detected: Array<string | RawModelSpec>,
+  source: DiscoveredModel["source"] = "detected",
+): DiscoveredModel[] {
   const seen = new Set<string>();
   const out: DiscoveredModel[] = [];
 
@@ -100,7 +103,7 @@ function mergeModels(detected: Array<string | RawModelSpec>): DiscoveredModel[] 
       ...(spec.label ? { label: spec.label } : {}),
       ...(spec.provider ? { provider: spec.provider } : {}),
       tier: classifyTier(clean),
-      source: "detected",
+      source,
       ...(spec.supportedEfforts && spec.supportedEfforts.length > 0 ? { supportedEfforts: spec.supportedEfforts } : {}),
       ...(spec.defaultEffort ? { defaultEffort: spec.defaultEffort } : {}),
     });
@@ -113,6 +116,7 @@ const QODER_DEFAULT_MODELS = [
   "Auto",
   "Fast",
   "Qwen4-Max",
+  "Qwen4-Max-Preview",
   "Qwen3.8-Max",
   "Qwen3.8-Flash",
   "DeepSeek-V4-Pro",
@@ -450,9 +454,10 @@ export function discoverHarnessesQuick(
       subscription: "QoderCN 订阅",
       installed: Boolean(qoderBin),
       executable: qoderBin,
-      models: mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS)),
+      models: mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), "builtin"),
       defaultModel: "Qwen4-Max",
       detectedAt: now,
+      note: "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
     {
       id: "opencode",
@@ -460,9 +465,10 @@ export function discoverHarnessesQuick(
       subscription: "OpenCode Go / Free",
       installed: Boolean(opencodeBin),
       executable: opencodeBin,
-      models: mergeModels(opencodeList),
+      models: mergeModels(opencodeList, "builtin"),
       defaultModel: OPENCODE_DEFAULT_MODELS[0] ?? null,
       detectedAt: now,
+      note: "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
     {
       id: "agy",
@@ -470,9 +476,10 @@ export function discoverHarnessesQuick(
       subscription: "Google AI Pro / AGY",
       installed: Boolean(agyBin),
       executable: agyBin,
-      models: mergeModels(agyModels),
+      models: mergeModels(agyModels, "builtin"),
       defaultModel: agyModels.find((m) => m.id === "gemini-4-argon-medium")?.id ?? agyModels[0]?.id ?? null,
       detectedAt: now,
+      note: "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
     {
       id: "omp",
@@ -515,7 +522,8 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
           .map((l) => l.trim())
           .filter((l) => l.length > 0 && l.toUpperCase() !== "MODEL")
       : QODER_DEFAULT_MODELS;
-  const qoderModels = qoderSpecsFromIds(qoderIds.length > 0 ? qoderIds : QODER_DEFAULT_MODELS);
+  const qoderFromCli = qoderRes.code === 0 && qoderIds.length > 0;
+  const qoderModels = qoderSpecsFromIds(qoderFromCli ? qoderIds : QODER_DEFAULT_MODELS);
 
   const opencodeCliModels =
     opencodeRes.code === 0
@@ -524,8 +532,9 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
           .map((l) => l.trim())
           .filter((l) => l.includes("/") && !l.startsWith("ERROR"))
       : OPENCODE_DEFAULT_MODELS;
+  const opencodeFromCli = opencodeRes.code === 0 && opencodeCliModels.length > 0;
   const opencodeCombined: Array<string | RawModelSpec> = [
-    ...(opencodeCliModels.length > 0 ? opencodeCliModels : OPENCODE_DEFAULT_MODELS),
+    ...(opencodeFromCli ? opencodeCliModels : OPENCODE_DEFAULT_MODELS),
     ...sqliteCatalog.opencodeGoModels,
   ];
 
@@ -534,6 +543,8 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
     ...agyCliParsed,
     ...(sqliteCatalog.antigravityModels.length > 0 ? sqliteCatalog.antigravityModels : AGY_DEFAULT_MODELS),
   ];
+  const agySource: DiscoveredModel["source"] =
+    agyCliParsed.length > 0 || sqliteCatalog.antigravityModels.length > 0 ? "detected" : "builtin";
 
   const ompDefault = parseOmpDefaultModel(homeDir) ?? "openai-codex/gpt-6.1-sol";
   const ompCombined: RawModelSpec[] = [
@@ -558,9 +569,10 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "QoderCN 订阅",
       installed: Boolean(qoderBin),
       executable: qoderBin,
-      models: mergeModels(qoderModels),
+      models: mergeModels(qoderModels, qoderFromCli ? "detected" : "builtin"),
       defaultModel: qoderIds.includes("Qwen4-Max") ? "Qwen4-Max" : (qoderIds[0] ?? null),
       detectedAt: now,
+      ...(qoderFromCli ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
     },
     {
       id: "opencode",
@@ -568,9 +580,10 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "OpenCode Go / Free",
       installed: Boolean(opencodeBin),
       executable: opencodeBin,
-      models: mergeModels(opencodeCombined),
+      models: mergeModels(opencodeCombined, opencodeFromCli ? "detected" : "builtin"),
       defaultModel: opencodeCliModels[0] ?? OPENCODE_DEFAULT_MODELS[0] ?? null,
       detectedAt: now,
+      ...(opencodeFromCli ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
     },
     {
       id: "agy",
@@ -578,10 +591,11 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "Google AI Pro / AGY",
       installed: Boolean(agyBin),
       executable: agyBin,
-      models: mergeModels(agyCombined),
+      models: mergeModels(agyCombined, agySource),
       defaultModel:
         agyCombined.find((m) => m.id === "gemini-4-argon-medium")?.id ?? agyCombined[0]?.id ?? null,
       detectedAt: now,
+      ...(agySource === "detected" ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
     },
     {
       id: "omp",

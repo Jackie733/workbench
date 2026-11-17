@@ -48,12 +48,23 @@ export async function synthesizeHandoffPacket(
       : "- **输出语言规范**：`简体中文 (zh-CN)` — 所有提交的标题、规范、方案、验收条件描述、任务、审查意见与交接备忘必须严格使用简体中文（代码符号与命令原文除外）。",
   );
   if (codeRoot !== root) {
-    lines.push(`- **隔离沙箱目录**：\`${codeRoot}\`（请在当前沙箱目录修改代码并运行验证；数据仍绑定主仓库）`);
+    const sandboxHint =
+      options.action === "implement" || options.action === "fix"
+        ? "请在当前沙箱目录修改代码并运行验证；数据仍绑定主仓库"
+        : options.action === "design"
+          ? "设计阶段只读调研，禁止修改业务代码或运行验证；数据仍绑定主仓库"
+          : "只读调研，请勿修改代码；数据仍绑定主仓库";
+    lines.push(`- **隔离沙箱目录**：\`${codeRoot}\`（${sandboxHint}）`);
   }
 
   if (options.previousRun) {
+    const prev = options.previousRun;
+    const fallbackNote =
+      prev.modelFallback && prev.effectiveModel
+        ? `（请求 ${prev.model} 未生效，实际由 ${prev.effectiveModel} 执行）`
+        : "";
     lines.push(
-      `- **前序执行**：\`${options.previousRun.harness}/${options.previousRun.model}\` · 状态 \`${options.previousRun.status}\`${options.previousRun.rateLimited ? "（疑似额度/限流中断）" : ""}`,
+      `- **前序执行**：\`${prev.harness}/${prev.model}\` · 状态 \`${prev.status}\`${prev.rateLimited ? "（疑似额度/限流中断）" : ""}${fallbackNote}`,
     );
   }
   lines.push("");

@@ -619,6 +619,7 @@ export function Modals() {
                                 return (
                                   <option key={val} value={val}>
                                     {h.id} · {mod.id}
+                                    {mod.source === "builtin" ? " · 未验证" : ""}
                                   </option>
                                 );
                               })}
@@ -1535,6 +1536,7 @@ export function Modals() {
                           总执行 {e.totalRuns} 次 · 平均耗时 {(e.avgDurationMs / 1000).toFixed(1)}s
                           {e.timedOutRuns > 0 ? ` · 超时 ${e.timedOutRuns}` : ""}
                           {e.rateLimitedRuns > 0 ? ` · 限流 ${e.rateLimitedRuns}` : ""}
+                          {e.degradedRuns > 0 ? ` · 降级 ${e.degradedRuns}` : ""}
                         </div>
                       </div>
                       <span className={`badge ${rate >= 70 ? "success" : rate >= 40 ? "warning" : "danger"}`}>
