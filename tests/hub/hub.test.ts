@@ -569,4 +569,52 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(detail.state.agentRuns?.[0]?.nativeSessionId).toBe("q-sess-999");
     expect(detail.state.discussions?.slice(-1)[0]?.message).toBe("建议使用原子锁避免并发写入。");
   });
+
+  test("passes the Hub process environment, including proxy variables, to agent CLI children", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("env-repo");
+    await initProject(repo, { name: "EnvRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "测试代理环境透传",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    const proxy = "http://127.0.0.1:20890";
+    // Bun's process.env does not enumerate keys added at runtime, so replace it as a process
+    // startup would. This mirrors a Hub launched by systemd/launchd with proxy variables set.
+    const originalEnv = process.env;
+    process.env = { ...process.env, HTTPS_PROXY: proxy };
+    try {
+      const executor = new HubExecutor({
+        initialHarnesses: [
+          { id: "codex", label: "Codex", subscription: "Plus", installed: true, executable: "codex", models: [], defaultModel: "gpt-6-astra", detectedAt: Date.now() },
+        ],
+        commandBuilder: () => ({
+          command: "bash",
+          args: ["-c", 'printf %s "$HTTPS_PROXY"'],
+          displayCommand: "proxy-env-echo",
+        }),
+      });
+      let finishRun!: () => void;
+      const finished = new Promise<void>((resolve) => { finishRun = resolve; });
+      const seenChunks: string[] = [];
+      executor.subscribe((ev) => {
+        if (ev.type === "agent.run.output") seenChunks.push(ev.chunk ?? "");
+        if (ev.type === "agent.run.finished") finishRun();
+      });
+      const started = await executor.startRun({
+        root: repo,
+        requirementId: "REQ-001",
+        action: "ask",
+        harness: "codex",
+        model: "gpt-6-astra",
+        message: "当前代理是什么？",
+      });
+      await finished;
+      expect(seenChunks.join("")).toBe(proxy);
+      expect(executor.getLiveLog(started.run.id)).toContain(proxy);
+      expect(getRequirement(repo, "REQ-001").state.discussions?.slice(-1)[0]?.message).toBe(proxy);
+    } finally {
+      process.env = originalEnv;
+    }
+  }, { timeout: 15000 });
 });

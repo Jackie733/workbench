@@ -350,6 +350,126 @@ describe("native user service ownership and lifecycle", () => {
       expect(f.manager.readServiceInstallation()).toBeNull();
     } finally { server.stop(true); }
   });
+
+  test("captures and renders proxy variables without persisting unrelated environment keys", async () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      const f = fixture(platform);
+      Object.assign(f.env, {
+        http_proxy: "http://127.0.0.1:20890",
+        HTTPS_PROXY: "http://user:pass@127.0.0.1:20890",
+        all_proxy: "socks5://127.0.0.1:20890",
+        NO_PROXY: "localhost,127.0.0.1",
+      });
+      const installation = await failedInstall(f);
+      const expected = {
+        HTTPS_PROXY: "http://user:pass@127.0.0.1:20890",
+        NO_PROXY: "localhost,127.0.0.1",
+        http_proxy: "http://127.0.0.1:20890",
+        all_proxy: "socks5://127.0.0.1:20890",
+      };
+      expect(installation.proxyEnv).toEqual(expected);
+      const record = JSON.parse(fs.readFileSync(path.join(f.hubDir, "service.json"), "utf8")) as { proxyEnv: unknown; API_KEY?: string };
+      expect(record.proxyEnv).toEqual(expected);
+      expect(record.API_KEY).toBeUndefined();
+      const text = fs.readFileSync(installation.definitionPath, "utf8");
+      expect(text).not.toContain("API_KEY");
+      expect(text).not.toContain("must-not-be-persisted");
+      if (platform === "linux") {
+        expect(text).toContain('Environment="http_proxy=http://127.0.0.1:20890"');
+        expect(text).toContain('Environment="HTTPS_PROXY=http://user:pass@127.0.0.1:20890"');
+        expect(text).toContain('Environment="all_proxy=socks5://127.0.0.1:20890"');
+        expect(text).toContain('Environment="NO_PROXY=localhost,127.0.0.1"');
+      } else {
+        expect(text).toContain("<key>http_proxy</key><string>http://127.0.0.1:20890</string>");
+        expect(text).toContain("<key>HTTPS_PROXY</key><string>http://user:pass@127.0.0.1:20890</string>");
+        expect(text).toContain("<key>all_proxy</key><string>socks5://127.0.0.1:20890</string>");
+        expect(text).toContain("<key>NO_PROXY</key><string>localhost,127.0.0.1</string>");
+      }
+      expect(fs.statSync(installation.definitionPath).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test("round-trips proxy records and keeps legacy records without proxyEnv readable", async () => {
+    const f = fixture("linux");
+    const legacy = await failedInstall(f);
+    const config = path.join(f.hubDir, "service.json");
+    const legacyConfig = fs.readFileSync(config);
+    const legacyDefinition = fs.readFileSync(legacy.definitionPath);
+    expect(legacy.proxyEnv).toBeUndefined();
+
+    f.env.HTTPS_PROXY = "http://127.0.0.1:20890";
+    const proxied = await failedInstall(f);
+    expect(f.manager.readServiceInstallation()!.proxyEnv).toEqual({ HTTPS_PROXY: "http://127.0.0.1:20890" });
+    expect(fs.readFileSync(proxied.definitionPath, "utf8")).toContain('Environment="HTTPS_PROXY=http://127.0.0.1:20890"');
+
+    fs.writeFileSync(config, legacyConfig);
+    fs.writeFileSync(legacy.definitionPath, legacyDefinition);
+    const restored = f.manager.readServiceInstallation()!;
+    expect(restored.proxyEnv).toBeUndefined();
+    expect(fs.readFileSync(restored.definitionPath, "utf8")).toBe(legacyDefinition.toString("utf8"));
+  });
+
+  test("rejects control characters in proxy values and malformed proxy records", async () => {
+    const badValue = fixture("linux");
+    badValue.env.http_proxy = "http://proxy\nEnd";
+    await expect(badValue.manager.installUserService({ port: await unusedPort() })).rejects.toThrow("NUL、CR 或 LF");
+    expect(badValue.manager.readServiceInstallation()).toBeNull();
+
+    const f = fixture("linux");
+    const installation = await failedInstall(f);
+    const config = path.join(f.hubDir, "service.json");
+    fs.writeFileSync(config, JSON.stringify({ ...installation, proxyEnv: { API_KEY: "secret" } }));
+    expect(() => f.manager.readServiceInstallation()).toThrow("proxyEnv.API_KEY");
+    fs.writeFileSync(config, JSON.stringify({ ...installation, proxyEnv: { HTTPS_PROXY: "" } }));
+    expect(() => f.manager.readServiceInstallation()).toThrow("proxyEnv.HTTPS_PROXY");
+    fs.writeFileSync(config, JSON.stringify({ ...installation, proxyEnv: ["http://127.0.0.1:20890"] }));
+    expect(() => f.manager.readServiceInstallation()).toThrow("proxyEnv");
+  });
+
+  test("adding a proxy to a healthy installation stops and rewrites the service", async () => {
+    const f = fixture("linux");
+    f.setFailure(null);
+    const port = await unusedPort();
+    const first = await f.manager.installUserService({ port });
+    expect(first.healthy).toBe(true);
+    expect(f.manager.readServiceInstallation()!.proxyEnv).toBeUndefined();
+    expect(fs.readFileSync(first.definitionPath!, "utf8")).not.toContain("https_proxy");
+
+    f.env.https_proxy = "http://127.0.0.1:20890";
+    const before = f.calls.length;
+    const next = await f.manager.installUserService({ port });
+    expect(next.healthy).toBe(true);
+    const actions = f.calls.slice(before).map((call) => call.args[1]);
+    expect(actions).toContain("stop");
+    expect(actions).toContain("enable");
+    expect(actions.indexOf("stop")).toBeLessThan(actions.indexOf("enable"));
+    expect(f.manager.readServiceInstallation()!.proxyEnv).toEqual({ https_proxy: "http://127.0.0.1:20890" });
+    expect(fs.readFileSync(first.definitionPath!, "utf8")).toContain('Environment="https_proxy=http://127.0.0.1:20890"');
+  });
+
+  test("installations without proxy configuration keep the legacy definition and record shape", async () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      const f = fixture(platform);
+      const installation = await failedInstall(f);
+      const record = JSON.parse(fs.readFileSync(path.join(f.hubDir, "service.json"), "utf8")) as Record<string, unknown>;
+      expect("proxyEnv" in record).toBe(false);
+      const text = fs.readFileSync(installation.definitionPath, "utf8");
+      if (platform === "linux") {
+        const environmentLines = text.split("\n").filter((line) => line.startsWith("Environment="));
+        expect(environmentLines).toHaveLength(3);
+        expect(environmentLines[0]!.startsWith('Environment="PATH=')).toBe(true);
+        expect(environmentLines[1]!.startsWith(`Environment="HOME=`)).toBe(true);
+        expect(environmentLines[2]!.startsWith('Environment="WORKBENCH_HUB_DIR=')).toBe(true);
+        expect(environmentLines.join("\n")).not.toContain("PROXY");
+      } else {
+        const block = text.match(/<key>EnvironmentVariables<\/key><dict>(.*?)<\/dict>/)![1]!;
+        expect([...block.matchAll(/<key>/g)]).toHaveLength(3);
+        expect(block.indexOf("<key>PATH</key>")).toBeLessThan(block.indexOf("<key>HOME</key>"));
+        expect(block.indexOf("<key>HOME</key>")).toBeLessThan(block.indexOf("<key>WORKBENCH_HUB_DIR</key>"));
+        expect(block).not.toContain("PROXY");
+      }
+    }
+  });
 });
 
 describe("service-aware CLI routing in isolated child environments", () => {

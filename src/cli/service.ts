@@ -24,6 +24,7 @@ export interface ServiceInstallation {
   hubDir: string;
   port: number;
   path: string;
+  proxyEnv?: Record<string, string>;
 }
 export interface ServiceStatus {
   installed: boolean;
@@ -52,6 +53,10 @@ export interface UserServiceOptions {
 }
 const NOT_INSTALLED: ServiceStatus = { installed: false, manager: null, id: null, active: false, healthy: false, url: null, definitionPath: null };
 const MARKER = "Workbench managed user Hub; schemaVersion=1";
+// Managed services do not inherit the installing shell's environment. Persist only the standard
+// proxy variables (both casings are used by different agent CLIs) so model traffic can reach the
+// network through the user's system proxy.
+const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"] as const;
 
 function fail(message: string): never { throw new WorkbenchError("execution_failed", message); }
 function validateText(value: string): string {
@@ -79,8 +84,19 @@ function unit(value: string, executableArgument = false): string {
 function serviceArgs(s: ServiceInstallation): string[] {
   return [s.bunPath, "run", s.cliPath, "serve", "--hub", "--host", "127.0.0.1", "--port", String(s.port), "--root", s.workingDirectory];
 }
+function collectProxyEnv(env: NodeJS.ProcessEnv): Record<string, string> | undefined {
+  const proxyEnv: Record<string, string> = {};
+  for (const key of PROXY_ENV_KEYS) {
+    const value = env[key];
+    if (typeof value === "string" && value) proxyEnv[key] = validateText(value);
+  }
+  // Omit the field entirely when no proxy is configured so old and new installations serialize
+  // identically; otherwise an upgrade would trigger a needless stop/reinstall on first run.
+  return Object.keys(proxyEnv).length > 0 ? proxyEnv : undefined;
+}
 function definition(s: ServiceInstallation): string {
-  const environment = { PATH: s.path, HOME: s.workingDirectory, WORKBENCH_HUB_DIR: s.hubDir };
+  // Fixed keys come last so a tampered record can never override PATH/HOME.
+  const environment = { ...(s.proxyEnv ?? {}), PATH: s.path, HOME: s.workingDirectory, WORKBENCH_HUB_DIR: s.hubDir };
   if (s.manager === "launchd") {
     const log = path.join(s.hubDir, "service.log");
     return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<!-- ${MARKER} -->\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(s.id)}</string>\n<key>ProgramArguments</key><array>${serviceArgs(s).map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>WorkingDirectory</key><string>${xml(s.workingDirectory)}</string>\n<key>EnvironmentVariables</key><dict>${Object.entries(environment).map(([key, value]) => `<key>${key}</key><string>${xml(value)}</string>`).join("")}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ThrottleInterval</key><integer>5</integer>\n<key>StandardOutPath</key><string>${xml(log)}</string>\n<key>StandardErrorPath</key><string>${xml(log)}</string>\n</dict></plist>\n`;
@@ -140,6 +156,14 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       validateText(s[key]);
     }
     validPort(s.port);
+    if (s.proxyEnv !== undefined) {
+      if (!s.proxyEnv || typeof s.proxyEnv !== "object" || Array.isArray(s.proxyEnv)) fail(`服务安装记录字段无效: proxyEnv`);
+      for (const [key, value] of Object.entries(s.proxyEnv)) {
+        if (!(PROXY_ENV_KEYS as readonly string[]).includes(key)) fail(`服务安装记录字段无效: proxyEnv.${key}`);
+        if (typeof value !== "string" || !value) fail(`服务安装记录字段无效: proxyEnv.${key}`);
+        validateText(value);
+      }
+    }
     const expected = identity(s.manager);
     if (s.id !== expected.id || s.definitionPath !== expected.definitionPath || s.hubDir !== hubDir || s.workingDirectory !== home || !path.isAbsolute(s.bunPath) || !path.isAbsolute(s.cliPath) || s.path.split(path.delimiter).some((part) => !path.isAbsolute(part))) fail(`服务安装记录与当前用户/Hub 不匹配: ${configPath}`);
     if (!fs.existsSync(s.definitionPath)) fail(`服务定义缺失: ${s.definitionPath}；请恢复定义后卸载或重新安装`);
@@ -254,7 +278,8 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
     if (git.exitCode !== 0) fail(`Git 不可用: ${git.stderr || git.stdout}`);
     await ensureManager(kind);
     const searchPath = [...new Set([...(env.PATH ?? "").split(path.delimiter).filter((part) => part && path.isAbsolute(part)), path.dirname(bunPath)])].join(path.delimiter);
-    const next: ServiceInstallation = { schemaVersion: 1, manager: kind, ...id, bunPath, cliPath, workingDirectory: home, hubDir, port, path: validateText(searchPath) };
+    const proxyEnv = collectProxyEnv(env);
+    const next: ServiceInstallation = { schemaVersion: 1, manager: kind, ...id, bunPath, cliPath, workingDirectory: home, hubDir, port, path: validateText(searchPath), ...(proxyEnv ? { proxyEnv } : {}) };
     // Render before stopping anything so invalid manager syntax cannot interrupt a working Hub.
     const contents = definition(next);
     if (!existing) {
@@ -286,7 +311,9 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       }
     }
     fs.mkdirSync(hubDir, { recursive: true, mode: 0o700 });
-    atomicWriteFile(next.definitionPath, contents);
+    // Proxy URLs may embed credentials. systemd --user and launchd gui load the file as the same
+    // user, so a private mode does not affect service startup.
+    atomicWriteFile(next.definitionPath, contents, next.proxyEnv ? 0o600 : undefined);
     atomicWriteJson(configPath, next);
     fs.chmodSync(configPath, 0o600);
     if (kind === "systemd") {
@@ -319,7 +346,7 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       } catch (error) {
         // Keep an owned, stopped installation diagnosable and uninstallable on retry.
         // Exclusive creation never overwrites a file another actor created meanwhile.
-        try { fs.writeFileSync(s.definitionPath, definition(s), { flag: "wx", mode: 0o644 }); }
+        try { fs.writeFileSync(s.definitionPath, definition(s), { flag: "wx", mode: s.proxyEnv ? 0o600 : 0o644 }); }
         catch (restoreError) { fail(`${error instanceof Error ? error.message : String(error)}\n恢复已停用的服务定义失败: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`); }
         throw error;
       }

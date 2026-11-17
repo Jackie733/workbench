@@ -8,7 +8,8 @@ macOS 已用 Bun 1.4.4 完成隔离部署验收：生产依赖冻结安装、完
 
 - 安装 Git 和建议的当前稳定版 Bun，确认 `git --version`、`bun --version` 可运行。不在部署脚本中下载 Bun、升级系统或拉取 Git。
 - 将源码放在该用户可读、长期保留的固定绝对路径；不要部署后移动或删除源码、依赖、Bun。服务启动仍会构建 Web 资源，不能只保留静态页面。
-- 在同一用户下安装并登录所需 Agent CLI，先在终端确认能使用。安装不会修改外部 CLI 登录状态。服务不继承交互 shell 的临时环境、API key 或 shell 初始化文件；持久环境只有 HOME、安装时的 PATH、WORKBENCH_HUB_DIR。PATH 只保留绝对目录并包含 Bun 所在目录。
+- 在同一用户下安装并登录所需 Agent CLI，先在终端确认能使用。安装不会修改外部 CLI 登录状态。服务不继承交互 shell 的临时环境、API key 或 shell 初始化文件；持久环境只有 HOME、安装时的 PATH、WORKBENCH_HUB_DIR，以及在安装时捕获的标准代理变量（见下）。PATH 只保留绝对目录并包含 Bun 所在目录。
+- `wb service install` 会从执行安装的当前 shell 捕获 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及对应小写形式共 8 个标准代理变量，写入 systemd/launchd 服务定义，使 Hub 及其启动的 Agent CLI 子进程走系统代理。其余变量（包括 API key）仍绝不落盘。含代理变量的定义文件权限为 `0600`（代理 URL 可能内嵌凭据）；未设置任何代理变量时，服务定义与旧版本逐字节一致，不会触发无意义的重装。
 - 确认端口空闲；冲突会报错，不会自动换端口。若已有未托管 Hub，先用 `wb stop` 停止；不要自动终止仍在执行任务的进程。
 - 实测 Bun 1.4.4 通过 `bun install --production --frozen-lockfile` 及上述运行时检查；旧系统 Bun 1.0.0 的冻结安装失败。1.4.4 是本次测试版本，不是最低兼容版本声明，建议使用当前稳定版。实际部署和验收请记录所用版本；若 `--frozen-lockfile` 报锁文件格式不支持，升级 Bun，不要删除锁文件绕过检查。临时下载运行时仅用于此次隔离验证，不是部署脚本的行为。
 
@@ -115,7 +116,18 @@ wb service status
 bun run deploy:check --root /absolute/path/to/project
 ```
 
-同配置重复安装在已健康时不重启，已停止时启动。端口、Bun 路径、源码路径或 PATH 改变会停止并重写托管配置再启动，可能中断任务。新增 CLI 路径、移动 Bun/源码或修改 PATH 后，需在正确环境重新部署，不能指望服务读取新的 shell 环境。加载失败会保留可诊断的安装记录；先看状态和日志，不要手工删除记录再启动另一个 Hub。
+同配置重复安装在已健康时不重启，已停止时启动。端口、Bun 路径、源码路径、PATH 或代理变量改变会停止并重写托管配置再启动，可能中断任务。新增 CLI 路径、移动 Bun/源码、修改 PATH 或更换代理后，需在正确环境重新部署，不能指望服务读取新的 shell 环境。加载失败会保留可诊断的安装记录；先看状态和日志，不要手工删除记录再启动另一个 Hub。
+
+代理变量是安装时快照：先在安装 shell 中导出新的代理（大小写按所用 Agent CLI 的习惯），再重新运行安装：
+
+```sh
+export https_proxy=http://127.0.0.1:20890 http_proxy=http://127.0.0.1:20890
+export all_proxy=socks5://127.0.0.1:20890 no_proxy=localhost,127.0.0.1
+wb service install --port 4318
+wb service status
+```
+
+若使用 `~/.zshrc` 中的 `proxy_on` 等函数，请先进入交互式 shell 启用代理，再在该 shell 内执行安装；`sudo`、`systemctl --user set-environment` 或修改全局服务环境不是本工具的部署方式。
 
 ```sh
 wb service install --port 14318
