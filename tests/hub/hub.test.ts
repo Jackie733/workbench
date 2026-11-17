@@ -14,6 +14,7 @@ import {
   addCustomModel,
   applyHubRoutingPreset,
   browseDirectory,
+  isAutoRegistrableProjectRoot,
   readHubConfig,
   registerHubProject,
   removeHubProject,
@@ -115,6 +116,64 @@ describe("WB-08 multi-project hub registry and daemon", () => {
     expect(stopped.stopped).toBe(true);
     const afterStop = await getDaemonStatus();
     expect(afterStop.running).toBe(false);
+  });
+
+  test("does not expose defaultRoot or user home directory in hub state unless manually added", async () => {
+    makeTempHub();
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fake-home-"));
+    tempDirs.push(fakeHome);
+    // Even if HOME happens to contain .git, Hub startup must not auto-register it.
+    execFileSync("git", ["init"], { cwd: fakeHome, stdio: "ignore" });
+    const origHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      expect(isAutoRegistrableProjectRoot(fakeHome)).toBe(false);
+      const server = await startWorkbenchServer({ root: fakeHome, port: 0, writeDiscovery: false, hubMode: true });
+      servers.push(server);
+
+      const state1 = (await (await fetch(`${server.url}/api/hub/state`)).json()) as {
+        hubMode: boolean;
+        activeProjectId: string | null;
+        projects: Array<{ id: string; root: string }>;
+      };
+      expect(state1.hubMode).toBe(true);
+      expect(state1.activeProjectId).toBeNull();
+      expect(state1.projects).toEqual([]);
+
+      const projResp = await fetch(`${server.url}/api/project`);
+      expect(projResp.status).toBe(404);
+
+      // Manually adding HOME via API IS allowed and displays it in projects.
+      const addResp = await fetch(`${server.url}/api/hub/projects`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root: fakeHome }),
+      });
+      expect(addResp.status).toBe(201);
+      const added = (await addResp.json()) as {
+        project: { id: string; root: string };
+        activeProjectId: string | null;
+        projects: Array<{ id: string; root: string }>;
+      };
+      expect(added.projects.length).toBe(1);
+      expect(added.projects[0]?.root).toBe(fs.realpathSync(fakeHome));
+      expect(added.activeProjectId).toBe(added.project.id);
+
+      // Removing the last project returns empty projects instead of falling back to defaultRoot.
+      const delResp = await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(added.project.id)}`, {
+        method: "DELETE",
+      });
+      expect(delResp.status).toBe(200);
+      const afterDel = (await delResp.json()) as {
+        activeProjectId: string | null;
+        projects: Array<{ id: string; root: string }>;
+      };
+      expect(afterDel.activeProjectId).toBeNull();
+      expect(afterDel.projects).toEqual([]);
+    } finally {
+      if (origHome === undefined) delete process.env.HOME;
+      else process.env.HOME = origHome;
+    }
   });
 });
 

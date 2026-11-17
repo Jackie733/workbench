@@ -4,13 +4,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequirement, getRequirement, initProject, recordReviewReport } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { canonicalRoot } from "../core/fs.ts";
+import { canonicalRoot, readBoundedText } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
 import { runAllVerifications } from "../core/runner.ts";
-import { resolveCodeRoot } from "../core/sandbox.ts";
+import { resolveCodeRoot, resolveWorkbenchRootFromCwd } from "../core/sandbox.ts";
 import { REVIEW_VERDICTS, WORKBENCH_DIR, type CriterionInput, type PrivacyMode, type ReviewVerdict, type TaskInput } from "../core/types.ts";
 import { PAIN_POINT_CATEGORIES, reportPainPoint, type PainPointCategory } from "../hub/evolution.ts";
-import { registerHubProject } from "../hub/registry.ts";
+import { isAutoRegistrableProjectRoot, registerHubProject } from "../hub/registry.ts";
 import { startMcpServer } from "../mcp/server.ts";
 import { executeWorkbenchTool } from "../mcp/tools.ts";
 import { startWorkbenchServer } from "../server/index.ts";
@@ -64,6 +64,10 @@ function resolveDefaultRoot(): string {
     return canonicalRoot(process.env.WORKBENCH_ROOT);
   }
   const cwd = process.cwd();
+  const sandboxMain = resolveWorkbenchRootFromCwd(cwd);
+  if (sandboxMain) {
+    return sandboxMain;
+  }
   try {
     const gitTop = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
       encoding: "utf8",
@@ -79,10 +83,7 @@ function resolveDefaultRoot(): string {
 function readValueOrFile(raw: string): string {
   if (!raw.startsWith("@") || raw.length === 1) return raw;
   const target = path.resolve(process.cwd(), raw.slice(1));
-  if (!fs.existsSync(target)) {
-    throw new WorkbenchError("not_found", `读取参数文件失败，文件不存在: ${raw.slice(1)}`);
-  }
-  return fs.readFileSync(target, "utf8");
+  return readBoundedText(target, 512 * 1024);
 }
 
 function parseJsonValue<T>(raw: string, label: string): T {
@@ -161,7 +162,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
           throw new WorkbenchError("invalid_input", "用法: wb service install [--port <1..65535>] | start | stop | restart | status | uninstall");
         }
         for (const flag of parsed.flags.keys()) {
-          if (flag !== "json" && !(action === "install" && flag === "port")) throw new WorkbenchError("invalid_input", `未知服务参数: --${flag}`);
+          if (flag !== "json" && flag !== "root" && !(action === "install" && flag === "port")) throw new WorkbenchError("invalid_input", `未知服务参数: --${flag}`);
         }
         const portFlag = parsed.flags.get("port");
         if (portFlag !== undefined && (typeof portFlag !== "string" || !/^\d+$/.test(portFlag) || Number(portFlag) < 1 || Number(portFlag) > 65535)) {
@@ -186,7 +187,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (installation && (port !== installation.port || hostname !== "127.0.0.1" || hostFlag === true)) {
           throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
         }
-        const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
+        const maybeGitOrWb = isAutoRegistrableProjectRoot(root);
         if (maybeGitOrWb) {
           registerHubProject(root, { activate: true });
         }
@@ -255,7 +256,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
             throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
           }
         }
-        const maybeGitOrWb = fs.existsSync(path.join(root, ".git")) || fs.existsSync(path.join(root, WORKBENCH_DIR, "project.json"));
+        const maybeGitOrWb = isAutoRegistrableProjectRoot(root);
         if (maybeGitOrWb) {
           registerHubProject(root, { activate: true });
         }
@@ -530,10 +531,17 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const detailFlag = parsed.flags.get("detail");
         const categoryFlag = parsed.flags.get("category");
         const reqFlag = parsed.flags.get("req");
+        if (
+          categoryFlag !== undefined &&
+          (typeof categoryFlag !== "string" || !(PAIN_POINT_CATEGORIES as readonly string[]).includes(categoryFlag))
+        ) {
+          throw new WorkbenchError(
+            "invalid_input",
+            `无效的痛点分类: ${String(categoryFlag)}（可选: ${PAIN_POINT_CATEGORIES.join(", ")}）`,
+          );
+        }
         const category: PainPointCategory =
-          typeof categoryFlag === "string" && (PAIN_POINT_CATEGORIES as readonly string[]).includes(categoryFlag)
-            ? (categoryFlag as PainPointCategory)
-            : "cli_ergonomics";
+          typeof categoryFlag === "string" ? (categoryFlag as PainPointCategory) : "cli_ergonomics";
         const recorded = reportPainPoint({
           source: "cli_issue",
           category,

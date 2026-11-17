@@ -286,7 +286,7 @@ describe("native user service ownership and lifecycle", () => {
     const text = fs.readFileSync(installation.definitionPath, "utf8");
     const encoded = specialCli.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$");
     expect(text).toContain(`ExecStart="${fs.realpathSync(process.execPath)}" "run" "${encoded}" "serve" "--hub"`);
-    expect(text).toContain(`WorkingDirectory="${f.home}"`);
+    expect(text).toContain(`WorkingDirectory=${f.home}`);
     expect(text).toContain("Restart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nKillMode=control-group");
     expect(f.calls.some((call) => call.command === "sh" || call.command === "bash")).toBe(false);
   });
@@ -322,6 +322,23 @@ describe("native user service ownership and lifecycle", () => {
     try { await expect(f.manager.installUserService({ port: occupied.port! })).rejects.toThrow("不会自动换端口"); }
     finally { occupied.stop(true); }
     expect(f.manager.readServiceInstallation()).toBeNull();
+  });
+
+  test("port changes verify new port availability before stopping the active service", async () => {
+    const f = fixture("linux");
+    f.setFailure(null);
+    const firstPort = await unusedPort();
+    const first = await f.manager.installUserService({ port: firstPort });
+    expect(first.healthy).toBe(true);
+    const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+    const beforeCalls = f.calls.length;
+    try {
+      await expect(f.manager.installUserService({ port: occupied.port! })).rejects.toThrow("不会自动换端口");
+      expect(f.calls.slice(beforeCalls).some((call) => call.args.includes("stop"))).toBe(false);
+      expect((await f.manager.controlUserService("status")).healthy).toBe(true);
+    } finally {
+      occupied.stop(true);
+    }
   });
 
   test("unmanaged healthy Hubs require an explicit stop before install", async () => {
@@ -395,6 +412,8 @@ describe("service-aware CLI routing in isolated child environments", () => {
     expect(result.results).toEqual([0, 0, 0, 0, 0, 0, 0]);
     expect(result.stdout).toContain('"installed": false');
     expect(result.calls.filter((call) => call[1] === "bootstrap")).toHaveLength(2);
+    const withRoot = await child([["service", "status", "--root", "/tmp"]]);
+    expect(withRoot.results).toEqual([0]);
   });
 
   test("managed lifecycle rejects conflicting explicit host/port instead of silently reverting defaults", async () => {

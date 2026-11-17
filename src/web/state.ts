@@ -48,6 +48,7 @@ export type ModalState =
       detail: string;
       category: PainPointCategory;
       domSelector: string;
+      pickingElement: boolean;
       autoPromote: boolean;
     }
   | { kind: "evolution"; tab: "inbox" | "playbook" | "telemetry"; playbookDraft: string | null }

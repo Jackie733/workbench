@@ -79,8 +79,8 @@ export async function deploy(args: string[]): Promise<void> {
     throw new Error("Source checkout does not contain the expected Workbench package and CLI entry point.");
   }
 
-  console.log("\nInstalling locked dependencies. If this Bun cannot read the frozen lockfile format, upgrade Bun; do not delete the lockfile.");
-  await runBun(bunPath, ["install", "--frozen-lockfile"]);
+  console.log("\nInstalling locked production dependencies. If this Bun cannot read the frozen lockfile format, upgrade Bun; do not delete the lockfile.");
+  await runBun(bunPath, ["install", "--production", "--frozen-lockfile"]);
   await runBun(bunPath, ["link"]);
   console.log("\nInstalling/starting the user service (the service manager must be available in this user's login session)...");
   const status = await installUserService({ port });

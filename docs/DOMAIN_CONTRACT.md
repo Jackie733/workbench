@@ -15,6 +15,7 @@
 ```text
 .workbench/
 ├── project.json                  # 项目级元数据 (schemaVersion, projectId, name, nextNumber, privacyMode, createdAt)
+├── playbook.md                   # （v5.1 自进化新增）项目持久避坑与偏好法则（最大 16KB），由验收/打回/批注自动沉淀并在交接时注入
 └── items/
     └── REQ-001/
         ├── spec.md               # 需求目标 (Goal) 与范围 (Scope) 的 Markdown 正文
@@ -38,8 +39,14 @@
 ```text
 ~/.workbench-hub/
 ├── daemon.json                   # 守护进程元数据 (pid, port, url, startedAt, version)
+├── service.json                  # 用户级原生服务安装记录 (LaunchAgent / systemd --user，权限 0600)
 ├── hub.log                       # 守护进程运行日志（按大小自动轮转截断）
-└── hub.json                      # 多项目注册表 + 分阶段模型路由配置 + 自定义模型目录
+├── hub.json                      # 多项目注册表 + 分阶段模型路由配置 + 自定义模型目录
+└── evolution/                    # 自进化与 RSI 隔离存储
+    ├── inbox.jsonl               # SHA-256 指纹去重的痛点与缺陷收集箱（上限 300 条）
+    ├── model-stats.json          # 各 Harness/Model 分阶段胜率、耗时与限流冷却账本
+    ├── sandboxes.json            # 活跃 RSI Git Worktree 沙箱登记表（记录分支与分叉基准 HEAD）
+    └── worktrees/<REQ-ID>/       # 针对 workbench 自身演进需求的隔离 Git Worktree 沙箱目录
 ```
 
 `hub.json` 核心字段约束：
@@ -102,6 +109,11 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 ### 3.5 跨 Harness 上下文交接与方案共创不变量（Context Continuity & Co-Design，v5 新增）
 - **仅提问探讨（`ask`）只读无副作用**：`ask` 模式下调用的 Agent 只能向 `discussions[]` 写入问答答复，**严禁改变需求 `stage`、不得覆盖 `spec.md`/`design.md`、也不得使既有 `approval` 失效**。
 - **跨模型切换自动现场同步**：每当切换 Harness 或在上一轮 `failed` / `cancelled` / `rateLimited` 后接力重试时，引擎必须基于磁盘权威状态（`spec.md`、`design.md`、`handoffNote`、最新 `observeGitChanges` 真实代码改动、失败 `evidence/` 摘要与未解决 `discussions[]`）重新生成有界 `handoff.md`，确保即使前一模型崩溃未总结也能精准接续，而不转储原始探索噪音。
+
+### 3.6 自进化与 RSI 递归防熔断不变量（Self-Evolution & Anti-Recursion，v5.1 新增）
+- **沙箱隔离与合并门禁**：针对 Workbench 自身的痛点转化需求可在 `~/.workbench-hub/evolution/worktrees/<REQ-ID>` 创建独立 Git Worktree 沙箱执行编码与验证；列表/详情/验证必须绑定沙箱工作树快照以防误报过期。**只有完成人类最终验收（`stage === "done"` 且 `acceptance` 快照仍匹配当前沙箱状态）后**，方可执行 `applySandboxToMain` 将改动原子同步回主工作树，并在变更涉及主仓库相同文件时显式报冲突拒绝盲覆写，且严禁路径穿越与符号链接越界。
+- **单层递归熔断（`WORKBENCH_RSI_DEPTH=1`）**：在 RSI 沙箱内运行 Subprocess 时强制注入 `WORKBENCH_RSI_DEPTH=1`，且 Hub 后置嗅探器对沙箱需求自动关闭运行异常转工单，杜绝无限自指递归。
+- **日志脱敏与有界落盘**：Playbook 经验规则（`deadEnds`、人类 `refine`/已解决批注、打回意见，上限 16KB）及 `inbox.jsonl`（SHA-256 `(category, title, component)` 去重，2MB 上限）均须执行 ANSI 剥离、凭据脱敏与跨进程文件锁原子更新；CLI `wb issue` 与 `wb service` 同样遵循无旁路契约。
 
 ---
 

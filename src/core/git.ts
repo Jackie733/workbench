@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
+import { listProjectSandboxes } from "./sandbox.ts";
 import type { BaselineSnapshot } from "./types.ts";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -306,4 +307,27 @@ export async function observeGitChanges(
     diffTruncated: boundedDiff.truncated,
     commits,
   };
+}
+
+/**
+ * Resolves the repository base snapshot plus per-requirement snapshots for active RSI sandboxes.
+ * Avoids extra git spawns when no active sandbox exists for the project.
+ */
+export async function resolveProjectRequirementSnapshots(root: string): Promise<{
+  baseSnapshot: BaselineSnapshot | null;
+  byReqId: Map<string, string | null>;
+}> {
+  const base = canonicalRoot(root);
+  const baseSnapshot = await observeGitSnapshot(base);
+  const sandboxes = listProjectSandboxes(base);
+  const byReqId = new Map<string, string | null>();
+  if (sandboxes.length > 0) {
+    await Promise.all(
+      sandboxes.map(async (sb) => {
+        const snap = await observeGitSnapshot(sb.worktreePath);
+        byReqId.set(sb.requirementId, snap?.fingerprint ?? null);
+      }),
+    );
+  }
+  return { baseSnapshot, byReqId };
 }

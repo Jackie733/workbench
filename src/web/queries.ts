@@ -51,9 +51,15 @@ export function useHubStateQuery() {
       const hub = await api.getHubState();
       useStreamStore.getState().syncActiveRuns(hub.activeRuns);
       const ui = useUiStore.getState();
-      if (hub.hubMode && !ui.activeProjectId && hub.activeProjectId) {
-        setApiProjectScope(hub.activeProjectId);
-        ui.setActiveProjectId(hub.activeProjectId);
+      if (hub.hubMode) {
+        const currentValid = Boolean(ui.activeProjectId && hub.projects.some((p) => p.id === ui.activeProjectId));
+        if (!currentValid) {
+          const nextId = hub.activeProjectId ?? hub.projects[0]?.id ?? null;
+          if (ui.activeProjectId !== nextId) {
+            setApiProjectScope(nextId);
+            ui.setActiveProjectId(nextId);
+          }
+        }
       }
       return hub;
     },
@@ -61,6 +67,8 @@ export function useHubStateQuery() {
 }
 
 export function useProjectQuery(activeProjectId: string | null) {
+  const { data: hub } = useHubStateQuery();
+  const enabled = hub !== undefined && (!hub.hubMode || hub.projects.length > 0);
   return useQuery({
     queryKey: queryKeys.project(activeProjectId),
     queryFn: async () => {
@@ -71,6 +79,7 @@ export function useProjectQuery(activeProjectId: string | null) {
       }
       return proj;
     },
+    enabled,
   });
 }
 

@@ -12,13 +12,13 @@ import {
   startAgentRun,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { canonicalRoot } from "../core/fs.ts";
+import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
-import { inspectFinishedRunForPainPoints } from "./evolution.ts";
+import { inspectFinishedRunForPainPoints, syncRequirementMirrorToSandbox } from "./evolution.ts";
 import { synthesizeHandoffPacket } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
@@ -94,7 +94,7 @@ function ensureWbShim(cliEntryPath: string): string {
   const shimPath = path.join(binDir, "wb");
   const content = `#!/usr/bin/env bash\nexec bun run ${JSON.stringify(cliEntryPath)} "$@"\n`;
   if (!fs.existsSync(shimPath) || fs.readFileSync(shimPath, "utf8") !== content) {
-    fs.writeFileSync(shimPath, content, { mode: 0o755 });
+    atomicWriteFile(shimPath, content, 0o755);
   }
   return binDir;
 }
@@ -597,6 +597,9 @@ export class HubExecutor {
 
     const snapshotBefore = await observeGitSnapshot(codeRoot);
     const detail = await startAgentRun(base, id, record, snapshotBefore?.fingerprint ?? null);
+    if (codeRoot !== base) {
+      syncRequirementMirrorToSandbox(base, id, codeRoot);
+    }
 
     const shimBin = ensureWbShim(this.cliEntryPath);
     const childEnv: NodeJS.ProcessEnv = {
@@ -824,7 +827,12 @@ export class HubExecutor {
             run: lastRunObj,
             detail: postHandoff.detail,
             rawLog,
+            timedOut: job.timedOut,
+            isRsiSandbox: codeRoot !== base,
           });
+        }
+        if (codeRoot !== base) {
+          syncRequirementMirrorToSandbox(base, id, codeRoot);
         }
       } catch {
         // Keep daemon alive even if workspace disappeared during run.

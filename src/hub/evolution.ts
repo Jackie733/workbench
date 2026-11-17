@@ -2,20 +2,22 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createRequirement, initProject, propose } from "../core/engine.ts";
+import { createRequirement, getRequirement, initProject } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
+import { atomicWriteBuffer, atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withFileLockSync } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
 import {
   getSandboxForRequirement,
   readSandboxes,
   sandboxKey,
+  withSandboxLockSync,
   writeSandboxes,
   type SandboxRecord,
 } from "../core/sandbox.ts";
 import { isProjectInitialized } from "../core/store.ts";
-import type { AgentRunRecord, RequirementDetail } from "../core/types.ts";
-import { readHubConfig, resolveHubDir } from "./registry.ts";
+import { WORKBENCH_DIR, type AgentRunRecord, type CriterionInput, type RequirementDetail } from "../core/types.ts";
+import { assertRequirementId, sanitizeOutput } from "../core/validate.ts";
+import { readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
 
 export const PAIN_POINT_SOURCES = [
   "ui_quick_report",
@@ -38,6 +40,7 @@ export interface PainPointContext {
   projectRoot?: string;
   requirementId?: string;
   runId?: string;
+  component?: string;
   domSelector?: string;
   viewport?: string;
   theme?: string;
@@ -60,24 +63,65 @@ export interface EvolutionPainPoint {
 }
 
 const MAX_INBOX_ENTRIES = 300;
+const MAX_INBOX_BYTES = 2 * 1024 * 1024;
 
 export function inboxFilePath(): string {
   return path.join(resolveHubDir(), "evolution", "inbox.jsonl");
+}
+
+function inboxLockPath(): string {
+  return path.join(resolveHubDir(), "evolution", ".inbox.lock");
 }
 
 function worktreesBaseDir(): string {
   return path.join(resolveHubDir(), "evolution", "worktrees");
 }
 
-function computePainFingerprint(category: string, title: string): string {
+function normalizeComponentKey(context?: PainPointContext): string {
+  const raw = context?.component ?? context?.domSelector ?? "";
+  return raw.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+}
+
+function computePainFingerprint(category: string, title: string, component: string): string {
   const norm = title.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 140);
-  return createHash("sha256").update(`${category}::${norm}`, "utf8").digest("hex").slice(0, 24);
+  return createHash("sha256").update(`${category}::${norm}::${component}`, "utf8").digest("hex").slice(0, 24);
+}
+
+function sanitizeContext(ctx?: PainPointContext): PainPointContext {
+  if (!ctx) return {};
+  const cleanStr = (v: unknown, max: number) =>
+    typeof v === "string" && v.trim() ? sanitizeOutput(v.trim(), max).text.trim() : undefined;
+  const out: PainPointContext = {};
+  const projectRoot = cleanStr(ctx.projectRoot, 512);
+  const requirementId = cleanStr(ctx.requirementId, 32);
+  const runId = cleanStr(ctx.runId, 64);
+  const component = cleanStr(ctx.component, 160);
+  const domSelector = cleanStr(ctx.domSelector, 240);
+  const viewport = cleanStr(ctx.viewport, 64);
+  const theme = cleanStr(ctx.theme, 32);
+  const urlPath = cleanStr(ctx.urlPath, 240);
+  if (projectRoot) out.projectRoot = projectRoot;
+  if (requirementId) out.requirementId = requirementId;
+  if (runId) out.runId = runId;
+  if (component) out.component = component;
+  if (domSelector) out.domSelector = domSelector;
+  if (viewport) out.viewport = viewport;
+  if (theme) out.theme = theme;
+  if (urlPath) out.urlPath = urlPath;
+  return out;
 }
 
 export function readPainPoints(): EvolutionPainPoint[] {
   const filePath = inboxFilePath();
-  if (!fs.existsSync(filePath)) return [];
-  const raw = fs.readFileSync(filePath, "utf8");
+  let raw: string;
+  try {
+    raw = readBoundedText(filePath, MAX_INBOX_BYTES);
+  } catch (error) {
+    if (error instanceof WorkbenchError && error.code === "not_found") {
+      return [];
+    }
+    throw error;
+  }
   const list: EvolutionPainPoint[] = [];
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -117,62 +161,69 @@ export function reportPainPoint(input: {
     return null;
   }
 
-  const title = input.title.trim().replace(/\s+/g, " ").slice(0, 160);
+  const title = sanitizeOutput(input.title, 512).text.trim().replace(/\s+/g, " ").slice(0, 160);
   if (!title) {
     throw new WorkbenchError("invalid_input", "痛点标题不能为空");
   }
-  const detail = (input.detail ?? "").trim().slice(0, 4000);
-  const fingerprint = computePainFingerprint(input.category, title);
-  const now = Date.now();
-  const list = readPainPoints();
+  const detail = sanitizeOutput((input.detail ?? "").trim(), 4000).text.trim();
+  const context = sanitizeContext(input.context);
+  const componentKey = normalizeComponentKey(context);
+  const fingerprint = computePainFingerprint(input.category, title, componentKey);
 
-  const existingIdx = list.findIndex((p) => p.fingerprint === fingerprint && p.status === "open");
-  if (existingIdx >= 0) {
-    const prev = list[existingIdx]!;
-    const mergedDetail =
-      detail && !prev.detail.includes(detail.slice(0, 80))
-        ? `${prev.detail}${prev.detail ? "\n\n---\n" : ""}${detail}`.slice(0, 4000)
-        : prev.detail;
-    const updated: EvolutionPainPoint = {
-      ...prev,
-      occurrences: prev.occurrences + 1,
-      detail: mergedDetail,
-      context: { ...prev.context, ...(input.context ?? {}) },
+  return withFileLockSync(inboxLockPath(), () => {
+    const now = Date.now();
+    const list = readPainPoints();
+
+    const existingIdx = list.findIndex((p) => p.fingerprint === fingerprint && p.status === "open");
+    if (existingIdx >= 0) {
+      const prev = list[existingIdx]!;
+      const mergedDetail =
+        detail && !prev.detail.includes(detail.slice(0, 80))
+          ? `${prev.detail}${prev.detail ? "\n\n---\n" : ""}${detail}`.slice(0, 4000)
+          : prev.detail;
+      const updated: EvolutionPainPoint = {
+        ...prev,
+        occurrences: prev.occurrences + 1,
+        detail: mergedDetail,
+        context: { ...prev.context, ...context },
+        updatedAt: now,
+      };
+      list[existingIdx] = updated;
+      writePainPoints(list);
+      return updated;
+    }
+
+    const created: EvolutionPainPoint = {
+      id: `EVO-${now}-${randomUUID().slice(0, 6)}`,
+      fingerprint,
+      source: input.source,
+      category: input.category,
+      title,
+      detail: detail || title,
+      context,
+      occurrences: 1,
+      status: "open",
+      createdAt: now,
       updatedAt: now,
     };
-    list[existingIdx] = updated;
+    list.unshift(created);
     writePainPoints(list);
-    return updated;
-  }
-
-  const created: EvolutionPainPoint = {
-    id: `EVO-${now}-${randomUUID().slice(0, 6)}`,
-    fingerprint,
-    source: input.source,
-    category: input.category,
-    title,
-    detail: detail || title,
-    context: input.context ?? {},
-    occurrences: 1,
-    status: "open",
-    createdAt: now,
-    updatedAt: now,
-  };
-  list.unshift(created);
-  writePainPoints(list);
-  return created;
+    return created;
+  });
 }
 
 export function dismissPainPoint(id: string): EvolutionPainPoint {
-  const list = readPainPoints();
-  const idx = list.findIndex((p) => p.id === id);
-  if (idx === -1) {
-    throw new WorkbenchError("not_found", `未找到痛点记录: ${id}`);
-  }
-  const updated: EvolutionPainPoint = { ...list[idx]!, status: "dismissed", updatedAt: Date.now() };
-  list[idx] = updated;
-  writePainPoints(list);
-  return updated;
+  return withFileLockSync(inboxLockPath(), () => {
+    const list = readPainPoints();
+    const idx = list.findIndex((p) => p.id === id);
+    if (idx === -1) {
+      throw new WorkbenchError("not_found", `未找到痛点记录: ${id}`);
+    }
+    const updated: EvolutionPainPoint = { ...list[idx]!, status: "dismissed", updatedAt: Date.now() };
+    list[idx] = updated;
+    writePainPoints(list);
+    return updated;
+  });
 }
 
 export function resolveWorkbenchRepoRoot(fallbackRoot?: string): string {
@@ -188,12 +239,12 @@ export function resolveWorkbenchRepoRoot(fallbackRoot?: string): string {
     }
   };
 
+  if (fallbackRoot && isWorkbenchDir(fallbackRoot)) return canonicalRoot(fallbackRoot);
   const cfg = readHubConfig();
   for (const proj of cfg.projects) {
     if (isWorkbenchDir(proj.root)) return canonicalRoot(proj.root);
   }
   if (isWorkbenchDir(packageRoot)) return canonicalRoot(packageRoot);
-  if (fallbackRoot && isWorkbenchDir(fallbackRoot)) return canonicalRoot(fallbackRoot);
   return canonicalRoot(fallbackRoot ?? packageRoot);
 }
 
@@ -203,8 +254,10 @@ export function inspectFinishedRunForPainPoints(input: {
   run: AgentRunRecord;
   detail: RequirementDetail;
   rawLog: string;
+  timedOut?: boolean;
+  isRsiSandbox?: boolean;
 }): EvolutionPainPoint[] {
-  if (process.env.WORKBENCH_RSI_DEPTH === "1") return [];
+  if (process.env.WORKBENCH_RSI_DEPTH === "1" || input.isRsiSandbox) return [];
   const recorded: EvolutionPainPoint[] = [];
 
   // 1. Sniff workbench/CLI/MCP deadEnds logged by the agent
@@ -219,25 +272,70 @@ export function inspectFinishedRunForPainPoints(input: {
           projectRoot: input.root,
           requirementId: input.requirementId,
           runId: input.run.id,
+          component: "cli/mcp",
         },
       });
       if (item) recorded.push(item);
     }
   }
 
-  // 2. Sniff repeated wb CLI invalid_input friction
-  const cliErrors = input.rawLog.match(/错误 \[(?:invalid_input|invalid_transition)\]:[^\n]+/g) ?? [];
-  if (cliErrors.length >= 2) {
-    const uniqueErrors = Array.from(new Set(cliErrors)).slice(0, 5);
+  // 2. Sniff repeated wb CLI invalid_input/invalid_transition friction (human stderr + --json stderr)
+  const humanErrors = input.rawLog.match(/错误 \[(?:invalid_input|invalid_transition)\]:[^\n]+/g) ?? [];
+  const jsonErrors = input.rawLog.match(/"code":\s*"(?:invalid_input|invalid_transition)"/g) ?? [];
+  const totalCliErrors = humanErrors.length + jsonErrors.length;
+  if (totalCliErrors >= 2) {
+    const uniqueErrors = Array.from(new Set(humanErrors.length > 0 ? humanErrors : jsonErrors)).slice(0, 5);
     const item = reportPainPoint({
       source: "agent_friction",
       category: "cli_ergonomics",
       title: `Agent 多次触发 wb CLI 参数错误 (${uniqueErrors[0]!.slice(0, 60)})`,
-      detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n命中报错:\n${uniqueErrors.map((e) => `- ${e}`).join("\n")}`,
+      detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n命中报错 (${totalCliErrors} 次):\n${uniqueErrors.map((e) => `- ${e}`).join("\n")}`,
       context: {
         projectRoot: input.root,
         requirementId: input.requirementId,
         runId: input.run.id,
+        component: "wb-cli",
+      },
+    });
+    if (item) recorded.push(item);
+  }
+
+  // 3. Sniff timeouts & abnormal process crashes
+  const isTimedOut = Boolean(input.timedOut);
+  const tail = input.rawLog.slice(-4096);
+  const isCrash =
+    input.run.status === "failed" &&
+    !isTimedOut &&
+    !input.run.rateLimited &&
+    (input.run.exitCode === null ||
+      input.run.exitCode >= 128 ||
+      /\[spawn error\]|segmentation fault|\bsigsegv\b|\bsigabrt\b|\bpanic:|unhandled/i.test(tail));
+
+  if (isTimedOut) {
+    const item = reportPainPoint({
+      source: "agent_friction",
+      category: "harness_bug",
+      title: `Harness 执行超时: ${input.run.harness}/${input.run.model} (${input.run.action})`,
+      detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n耗时: ${input.run.durationMs}ms\n尾部日志:\n${tail.slice(-1000)}`,
+      context: {
+        projectRoot: input.root,
+        requirementId: input.requirementId,
+        runId: input.run.id,
+        component: `${input.run.harness}/${input.run.action}`,
+      },
+    });
+    if (item) recorded.push(item);
+  } else if (isCrash) {
+    const item = reportPainPoint({
+      source: "agent_friction",
+      category: "harness_bug",
+      title: `Harness 异常崩溃: ${input.run.harness}/${input.run.model} (exit ${input.run.exitCode ?? "signal"})`,
+      detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n退出码: ${input.run.exitCode ?? "signal"}\n尾部日志:\n${tail.slice(-1200)}`,
+      context: {
+        projectRoot: input.root,
+        requirementId: input.requirementId,
+        runId: input.run.id,
+        component: `${input.run.harness}/${input.run.action}`,
       },
     });
     if (item) recorded.push(item);
@@ -246,13 +344,50 @@ export function inspectFinishedRunForPainPoints(input: {
   return recorded;
 }
 
+/**
+ * Mirrors .workbench/items/<REQ-ID> metadata files & playbook.md as regular files into the worktree
+ * so tools inspecting cwd relative paths see fresh context without duplicating project.json.
+ */
+export function syncRequirementMirrorToSandbox(
+  wbRoot: string,
+  reqId: string,
+  worktreePath?: string,
+): void {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  if (!isProjectInitialized(base)) return;
+  const wtRaw = worktreePath ?? getSandboxForRequirement(base, reqId)?.worktreePath;
+  if (!wtRaw || !fs.existsSync(wtRaw)) return;
+  const wt = canonicalRoot(wtRaw);
+
+  const srcItemDir = resolveSafePath(base, `${WORKBENCH_DIR}/items/${reqId}`);
+  const dstItemDir = resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}`);
+  fs.mkdirSync(dstItemDir, { recursive: true });
+
+  for (const name of ["spec.md", "design.md", "handoff.md", "state.json"]) {
+    const srcFile = path.join(srcItemDir, name);
+    if (fs.existsSync(srcFile)) {
+      const content = readBoundedText(srcFile, 512 * 1024);
+      atomicWriteFile(resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}/${name}`), content);
+    }
+  }
+  const srcPlaybook = resolveSafePath(base, `${WORKBENCH_DIR}/playbook.md`);
+  if (fs.existsSync(srcPlaybook)) {
+    atomicWriteFile(resolveSafePath(wt, `${WORKBENCH_DIR}/playbook.md`), readBoundedText(srcPlaybook, 16 * 1024));
+  }
+}
+
 export async function createOrReuseWorktree(
   wbRoot: string,
   reqId: string,
 ): Promise<SandboxRecord> {
+  assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
   const existing = getSandboxForRequirement(base, reqId);
-  if (existing) return existing;
+  if (existing) {
+    syncRequirementMirrorToSandbox(base, reqId, existing.worktreePath);
+    return existing;
+  }
 
   const snap = await observeGitSnapshot(base);
   if (!snap || !snap.head) {
@@ -280,17 +415,26 @@ export async function createOrReuseWorktree(
     fs.symlinkSync(mainNodeModules, wtNodeModules, "dir");
   }
 
+  syncRequirementMirrorToSandbox(base, reqId, worktreePath);
+
   const record: SandboxRecord = {
     projectRoot: base,
     requirementId: reqId,
     worktreePath,
     branch,
+    baseHead: snap.head,
     createdAt: Date.now(),
   };
-  const all = readSandboxes();
-  all[sandboxKey(base, reqId)] = record;
-  writeSandboxes(all);
+  withSandboxLockSync(() => {
+    const all = readSandboxes();
+    all[sandboxKey(base, reqId)] = record;
+    writeSandboxes(all);
+  });
   return record;
+}
+
+function splitNullStrings(buf: Buffer): string[] {
+  return buf.toString("utf8").split("\0").filter(Boolean);
 }
 
 export async function applySandboxToMain(
@@ -302,58 +446,131 @@ export async function applySandboxToMain(
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
+  assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
   const sandbox = getSandboxForRequirement(base, reqId);
   if (!sandbox) {
     throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
   }
 
-  const wt = sandbox.worktreePath;
-  const mainSnap = await observeGitSnapshot(base);
-  const baseRef = mainSnap?.head || "HEAD";
+  const wt = canonicalRoot(sandbox.worktreePath);
+  const wtSnap = await observeGitSnapshot(wt);
+  const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+  if (detail.state.stage !== "done" || !detail.state.acceptance) {
+    throw new WorkbenchError(
+      "acceptance_gate_failed",
+      `需求 ${reqId} 尚未完成人工最终验收（当前阶段：${detail.state.stage}），禁止应用沙箱改动`,
+    );
+  }
+  if (!wtSnap || detail.state.acceptance.codeSnapshotHash !== wtSnap.fingerprint) {
+    throw new WorkbenchError(
+      "acceptance_gate_failed",
+      `需求 ${reqId} 的沙箱代码在验收后发生了变更，请重新打开需求验证并验收后再应用`,
+    );
+  }
 
-  // Collect modified/added tracked files (both committed on branch and uncommitted)
-  const diffTracked = execFileSync(
-    "git",
-    ["-C", wt, "diff", "--name-only", "--diff-filter=ACMRT", baseRef, "--", ".", ":(exclude).workbench"],
-    { encoding: "utf8" },
-  )
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const untracked = execFileSync(
-    "git",
-    ["-C", wt, "ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude).workbench"],
-    { encoding: "utf8" },
-  )
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => Boolean(s) && s !== "node_modules" && !s.startsWith("node_modules/"));
-
-  const deleted = execFileSync(
-    "git",
-    ["-C", wt, "diff", "--name-only", "--diff-filter=D", baseRef, "--", ".", ":(exclude).workbench"],
-    { encoding: "utf8" },
-  )
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const appliedFiles = Array.from(new Set([...diffTracked, ...untracked]));
-  for (const rel of appliedFiles) {
-    const src = path.join(wt, rel);
-    const dest = path.join(base, rel);
-    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.copyFileSync(src, dest);
+  // Determine the fork commit (never diff blindly against moved main HEAD)
+  let baseRef = sandbox.baseHead;
+  if (!baseRef || !/^[0-9a-f]{7,64}$/i.test(baseRef)) {
+    try {
+      baseRef = execFileSync("git", ["-C", base, "merge-base", "HEAD", sandbox.branch], { encoding: "utf8" }).trim();
+    } catch {
+      baseRef = "";
     }
   }
-  for (const rel of deleted) {
-    const dest = path.join(base, rel);
-    if (fs.existsSync(dest)) {
-      fs.rmSync(dest, { force: true });
+  if (!baseRef) {
+    const mainSnap = await observeGitSnapshot(base);
+    if (!mainSnap?.head) {
+      throw new WorkbenchError("execution_failed", "无法确定主仓库与沙箱的分叉基准提交");
     }
+    baseRef = mainSnap.head;
+  }
+
+  // Collect modified/added/untracked/deleted files inside sandbox relative to baseRef (--no-renames + -z)
+  const diffTracked = splitNullStrings(
+    execFileSync("git", [
+      "-C", wt, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMT", baseRef,
+      "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+    ]),
+  );
+
+  const untracked = splitNullStrings(
+    execFileSync("git", [
+      "-C", wt, "ls-files", "--others", "-z", "--exclude-standard",
+      "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+    ]),
+  ).filter((s) => s !== "node_modules" && !s.startsWith("node_modules/"));
+
+  const deleted = splitNullStrings(
+    execFileSync("git", [
+      "-C", wt, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", baseRef,
+      "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+    ]),
+  );
+
+  const appliedFiles = Array.from(new Set([...diffTracked, ...untracked]));
+
+  // Validate all source and destination paths against path traversal and symlinks BEFORE writing
+  const copyPlan: Array<{ rel: string; dest: string; bytes: Buffer; mode: number }> = [];
+  for (const rel of appliedFiles) {
+    const safeSrc = resolveSafePath(wt, rel);
+    const srcStat = fs.lstatSync(safeSrc);
+    if (srcStat.isSymbolicLink()) {
+      throw new WorkbenchError("symlink_not_allowed", `禁止通过沙箱应用符号链接文件: ${rel}`);
+    }
+    if (!srcStat.isFile()) continue;
+    const safeDest = resolveSafePath(base, rel);
+    copyPlan.push({
+      rel,
+      dest: safeDest,
+      bytes: fs.readFileSync(safeSrc),
+      mode: srcStat.mode & 0o777,
+    });
+  }
+
+  const deletePlan: Array<{ rel: string; dest: string }> = [];
+  for (const rel of deleted) {
+    const safeDest = resolveSafePath(base, rel);
+    if (fs.existsSync(safeDest)) {
+      const destStat = fs.lstatSync(safeDest);
+      if (destStat.isSymbolicLink()) {
+        throw new WorkbenchError("symlink_not_allowed", `拒绝删除主仓库中的符号链接: ${rel}`);
+      }
+      if (destStat.isFile()) {
+        deletePlan.push({ rel, dest: safeDest });
+      }
+    }
+  }
+
+  // Guard against silently clobbering files modified concurrently on main since baseRef
+  const mainTouched = new Set<string>();
+  const mainDiff = splitNullStrings(
+    execFileSync("git", [
+      "-C", base, "diff", "--name-only", "-z", "--no-renames", baseRef,
+      "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+    ]),
+  );
+  for (const f of mainDiff) mainTouched.add(f);
+  const mainUntracked = splitNullStrings(
+    execFileSync("git", [
+      "-C", base, "ls-files", "--others", "-z", "--exclude-standard",
+      "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+    ]),
+  );
+  for (const f of mainUntracked) mainTouched.add(f);
+  const conflicts = [...appliedFiles, ...deleted].filter((f) => mainTouched.has(f));
+  if (conflicts.length > 0) {
+    throw new WorkbenchError(
+      "revision_conflict",
+      `主仓库在沙箱分叉后也修改了相同文件，请手工处理冲突: ${conflicts.slice(0, 10).join(", ")}`,
+    );
+  }
+
+  for (const item of copyPlan) {
+    atomicWriteBuffer(item.dest, item.bytes, item.mode);
+  }
+  for (const item of deletePlan) {
+    fs.rmSync(item.dest, { force: true });
   }
 
   // Cleanup worktree and sandbox registry
@@ -368,9 +585,11 @@ export async function applySandboxToMain(
     // Ignore branch cleanup errors.
   }
 
-  const all = readSandboxes();
-  delete all[sandboxKey(base, reqId)];
-  writeSandboxes(all);
+  withSandboxLockSync(() => {
+    const all = readSandboxes();
+    delete all[sandboxKey(base, reqId)];
+    writeSandboxes(all);
+  });
 
   const allTouched = [...appliedFiles, ...deleted];
   const touchesWeb = allTouched.some((f) => f.startsWith("src/web/"));
@@ -390,19 +609,25 @@ export async function promotePainPoint(
   painPoint: EvolutionPainPoint;
   requirement: RequirementDetail;
   workbenchRoot: string;
+  workbenchProjectId: string;
   sandbox: SandboxRecord | null;
 }> {
-  const list = readPainPoints();
-  const idx = list.findIndex((p) => p.id === painId);
-  if (idx === -1) {
+  const initialList = readPainPoints();
+  const initialIdx = initialList.findIndex((p) => p.id === painId);
+  if (initialIdx === -1) {
     throw new WorkbenchError("not_found", `未找到痛点记录: ${painId}`);
   }
-  const pain = list[idx]!;
+  const pain = initialList[initialIdx]!;
+  if (pain.status === "promoted") {
+    throw new WorkbenchError("invalid_transition", `痛点 ${painId} 已转化为需求 ${pain.promotedReqId ?? ""}`);
+  }
+
   const wbRoot = resolveWorkbenchRepoRoot(options.workbenchRoot);
 
   if (!isProjectInitialized(wbRoot)) {
     await initProject(wbRoot, { name: path.basename(wbRoot) || "workbench", privacyMode: "local" });
   }
+  const { project: registered } = registerHubProject(wbRoot, { activate: false });
 
   const ctxLines = [
     `- 来源分类：\`${pain.source}\` / \`${pain.category}\`（累计发生 ${pain.occurrences} 次）`,
@@ -425,49 +650,59 @@ export async function promotePainPoint(
     "修复上述工作台问题，补充针对性回归测试，并确保类型检查与全量测试通过。",
   ].join("\n");
 
+  const criteria: CriterionInput[] =
+    pain.category === "ui_anomaly"
+      ? [
+          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
+          {
+            id: "AC-2",
+            description: "Web UI 浏览器 E2E 与图标契约测试通过",
+            required: true,
+            command: "bun test tests/web/icons.test.tsx tests/web/e2e_browser.test.ts",
+          },
+          { id: "AC-3", description: "全量测试回归通过", required: true, command: "bun test" },
+        ]
+      : [
+          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
+          { id: "AC-2", description: "全量测试回归通过", required: true, command: "bun test" },
+        ];
+
   const snap = await observeGitSnapshot(wbRoot);
-  let detail = await createRequirement(wbRoot, {
+  const detail = await createRequirement(wbRoot, {
     title: `[RSI] ${pain.title}`.slice(0, 115),
     goal: specGoal,
-    criteria: [
-      { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
-      { id: "AC-2", description: "全量测试回归通过", required: true, command: "bun test" },
-    ],
+    criteria,
     track: "plan_first",
     currentCodeSnapshotHash: snap?.fingerprint ?? null,
   });
-
-  if (pain.category === "ui_anomaly") {
-    detail = await propose(wbRoot, detail.state.id, {
-      criteria: [
-        { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
-        {
-          id: "AC-2",
-          description: "Web UI 浏览器 E2E 与图标契约测试通过",
-          required: true,
-          command: "bun test tests/web/icons.test.tsx tests/web/e2e_browser.test.ts",
-        },
-        { id: "AC-3", description: "全量测试回归通过", required: true, command: "bun test" },
-      ],
-      actor: "human",
-      summary: "预设 UI 自进化验证标准",
-      currentCodeSnapshotHash: snap?.fingerprint ?? null,
-    });
-  }
 
   let sandbox: SandboxRecord | null = null;
   if (options.createSandbox !== false && snap?.head) {
     sandbox = await createOrReuseWorktree(wbRoot, detail.state.id);
   }
 
-  const updated: EvolutionPainPoint = {
-    ...pain,
-    status: "promoted",
-    promotedReqId: detail.state.id,
-    updatedAt: Date.now(),
-  };
-  list[idx] = updated;
-  writePainPoints(list);
+  const updated = withFileLockSync(inboxLockPath(), () => {
+    const currentList = readPainPoints();
+    const curIdx = currentList.findIndex((p) => p.id === painId);
+    if (curIdx === -1) {
+      throw new WorkbenchError("not_found", `未找到痛点记录: ${painId}`);
+    }
+    const nextItem: EvolutionPainPoint = {
+      ...currentList[curIdx]!,
+      status: "promoted",
+      promotedReqId: detail.state.id,
+      updatedAt: Date.now(),
+    };
+    currentList[curIdx] = nextItem;
+    writePainPoints(currentList);
+    return nextItem;
+  });
 
-  return { painPoint: updated, requirement: detail, workbenchRoot: wbRoot, sandbox };
+  return {
+    painPoint: updated,
+    requirement: detail,
+    workbenchRoot: wbRoot,
+    workbenchProjectId: registered.id,
+    sandbox,
+  };
 }

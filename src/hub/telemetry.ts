@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { WorkbenchError } from "../core/errors.ts";
 import type { AgentAction, AgentRunRecord } from "../core/types.ts";
-import { atomicWriteJson, readJsonStrict } from "../core/fs.ts";
+import { atomicWriteJson, readJsonStrict, withFileLockSync } from "../core/fs.ts";
 import { resolveHubDir } from "./registry.ts";
 
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
@@ -32,6 +33,10 @@ export function telemetryFilePath(): string {
   return path.join(resolveHubDir(), "evolution", "model-stats.json");
 }
 
+function telemetryLockPath(): string {
+  return path.join(path.dirname(telemetryFilePath()), ".telemetry.lock");
+}
+
 function emptySnapshot(): ModelTelemetrySnapshot {
   return {
     schemaVersion: 1,
@@ -43,7 +48,6 @@ function emptySnapshot(): ModelTelemetrySnapshot {
 
 export function readModelTelemetry(): ModelTelemetrySnapshot {
   const filePath = telemetryFilePath();
-  if (!fs.existsSync(filePath)) return emptySnapshot();
   try {
     const raw = readJsonStrict<Partial<ModelTelemetrySnapshot>>(filePath, 512 * 1024);
     if (!raw || typeof raw !== "object") return emptySnapshot();
@@ -69,7 +73,13 @@ export function readModelTelemetry(): ModelTelemetrySnapshot {
       entries,
       cooldowns,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof WorkbenchError && error.code === "not_found") {
+      return emptySnapshot();
+    }
+    if (error instanceof WorkbenchError && error.code === "symlink_not_allowed") {
+      throw error;
+    }
     return emptySnapshot();
   }
 }
@@ -92,54 +102,56 @@ export function recordModelRunOutcome(input: {
   cooldownMs?: number;
   now?: number;
 }): ModelTelemetrySnapshot {
-  const now = input.now ?? Date.now();
-  const snap = readModelTelemetry();
-  const entryKey = `${input.harness}::${input.model}::${input.action}`;
-  const modelKey = `${input.harness}::${input.model}`;
+  return withFileLockSync(telemetryLockPath(), () => {
+    const now = input.now ?? Date.now();
+    const snap = readModelTelemetry();
+    const entryKey = `${input.harness}::${input.model}::${input.action}`;
+    const modelKey = `${input.harness}::${input.model}`;
 
-  const prev = snap.entries[entryKey] ?? {
-    harness: input.harness,
-    model: input.model,
-    action: input.action,
-    totalRuns: 0,
-    succeededRuns: 0,
-    failedRuns: 0,
-    timedOutRuns: 0,
-    rateLimitedRuns: 0,
-    totalDurationMs: 0,
-    avgDurationMs: 0,
-    lastRunAt: now,
-  };
+    const prev = snap.entries[entryKey] ?? {
+      harness: input.harness,
+      model: input.model,
+      action: input.action,
+      totalRuns: 0,
+      succeededRuns: 0,
+      failedRuns: 0,
+      timedOutRuns: 0,
+      rateLimitedRuns: 0,
+      totalDurationMs: 0,
+      avgDurationMs: 0,
+      lastRunAt: now,
+    };
 
-  const totalRuns = prev.totalRuns + 1;
-  const succeededRuns = prev.succeededRuns + (input.status === "succeeded" ? 1 : 0);
-  const failedRuns = prev.failedRuns + (input.status === "failed" ? 1 : 0);
-  const timedOutRuns = prev.timedOutRuns + (input.timedOut ? 1 : 0);
-  const rateLimitedRuns = prev.rateLimitedRuns + (input.rateLimited ? 1 : 0);
-  const totalDurationMs = prev.totalDurationMs + Math.max(0, Math.round(input.durationMs));
-  const avgDurationMs = Math.round(totalDurationMs / totalRuns);
+    const totalRuns = prev.totalRuns + 1;
+    const succeededRuns = prev.succeededRuns + (input.status === "succeeded" ? 1 : 0);
+    const failedRuns = prev.failedRuns + (input.status === "failed" ? 1 : 0);
+    const timedOutRuns = prev.timedOutRuns + (input.timedOut ? 1 : 0);
+    const rateLimitedRuns = prev.rateLimitedRuns + (input.rateLimited ? 1 : 0);
+    const totalDurationMs = prev.totalDurationMs + Math.max(0, Math.round(input.durationMs));
+    const avgDurationMs = Math.round(totalDurationMs / totalRuns);
 
-  snap.entries[entryKey] = {
-    ...prev,
-    totalRuns,
-    succeededRuns,
-    failedRuns,
-    timedOutRuns,
-    rateLimitedRuns,
-    totalDurationMs,
-    avgDurationMs,
-    lastRunAt: now,
-    ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
-  };
+    snap.entries[entryKey] = {
+      ...prev,
+      totalRuns,
+      succeededRuns,
+      failedRuns,
+      timedOutRuns,
+      rateLimitedRuns,
+      totalDurationMs,
+      avgDurationMs,
+      lastRunAt: now,
+      ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
+    };
 
-  if (input.rateLimited) {
-    snap.cooldowns[modelKey] = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
-  } else if (input.status === "succeeded") {
-    delete snap.cooldowns[modelKey];
-  }
+    if (input.rateLimited) {
+      snap.cooldowns[modelKey] = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
+    } else if (input.status === "succeeded") {
+      delete snap.cooldowns[modelKey];
+    }
 
-  snap.updatedAt = now;
-  return writeModelTelemetry(snap);
+    snap.updatedAt = now;
+    return writeModelTelemetry(snap);
+  });
 }
 
 export function getModelCooldownUntil(harness: string, model: string, now = Date.now()): number | null {
@@ -156,14 +168,16 @@ export function isModelCoolingDown(harness: string, model: string, now = Date.no
 }
 
 export function clearModelCooldown(harness?: string, model?: string): ModelTelemetrySnapshot {
-  const snap = readModelTelemetry();
-  if (harness && model) {
-    delete snap.cooldowns[`${harness}::${model}`];
-  } else {
-    snap.cooldowns = {};
-  }
-  snap.updatedAt = Date.now();
-  return writeModelTelemetry(snap);
+  return withFileLockSync(telemetryLockPath(), () => {
+    const snap = readModelTelemetry();
+    if (harness && model) {
+      delete snap.cooldowns[`${harness}::${model}`];
+    } else {
+      snap.cooldowns = {};
+    }
+    snap.updatedAt = Date.now();
+    return writeModelTelemetry(snap);
+  });
 }
 
 export function summarizeTelemetry(now = Date.now()): {

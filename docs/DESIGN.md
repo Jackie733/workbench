@@ -105,35 +105,35 @@ flowchart TD
 | **`codex`** | **ChatGPT Plus** | 读取 `~/.codex/models_cache.json` & `~/.codex/config.toml`：<br>• **高推理/旗舰**：`gpt-6.1-sol`、`gpt-6-astra`、`gpt-6.1-terra`、`gpt-6-sol`、`gpt-6-luna`、`codex-auto-review`<br>• **轻量**：`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` | 实施/设计：`codex exec -C <root> --full-auto -c model="<model>" -c model_reasoning_effort="<effort>" "<prompt>"`<br>审查：`codex exec review`（或带 Diff 提示词的 `codex exec`） |
 | **`qodercn`** | **QoderCN 订阅** | 执行 `qodercn --list-models`（及 `~/.qoder-cn/settings.json`）：<br>• **旗舰/强推理**：`DeepSeek-V4-Pro`、`Qwen4-Max`、`Kimi-K3.1-Pro`、`GLM-5.3`、`Qwen3.8-Max`、`Kimi-K2.8-Preview`、`Step-5-Preview`、`Auto`<br>• **高性价比/高速**：`Qwen3.8-Flash`、`DeepSeek-Flash`、`GLM-5.3-Flash`、`MiniMax-M3.1-Flash`、`Fast` | `qodercn -p -w <root> --permission-mode auto -m <model> [--reasoning-effort <level>] "<prompt>"` |
 | **`opencode`** | **OpenCode Go / Free & 已认证 Provider** | 执行 `opencode models` 及 `~/.local/share/opencode/auth.json`：<br>• **免费/高吞吐开源模型**：`opencode/deepseek-v4.1-flash-free`、`opencode/glm-5.3-flash-free`、`opencode/minimax-m3.1-flash-free`、`opencode/mimo-v2.6-flash-free`、`opencode/longcat-2.5-free`、`opencode/nemotron-3.5-lightning-free`、`opencode/nemotron-3.5-super-vl-free`、`opencode/flint-40b-free`、`opencode/big-pickle`<br>• **自定义**：支持补充绑定 `OpenCode Go` 付费主力模型 | `opencode run --model <model> --auto "<prompt>"`（在 `<root>` 目录执行） |
-| **`gemini`** | **Google AI Pro** | 通过 `mise x node@24.4.1 -- gemini`（或直接 `gemini` PATH）调用：<br>• 默认 Pro / Flash 路由（或用户指定 `-m gemini-2.5-pro` 等别名） | `gemini -p "<prompt>" --yolo [-m <model>]`（在 `<root>` 目录执行） |
+| **`agy`** | **Antigravity / Gemini CLI** | 通过 `agy models` 与本机状态库自动探测可用 Gemini 模型目录（含 `gemini-4-*`、`gemini-3.8-flash-*` 等）与默认思考强度 | `agy -p "<prompt>" --mode <plan\|auto> [--model <model>] [--effort <level>]`（在 `<root>` 目录执行） |
 | **`omp`** | **oh-my-pi** | 读取 `~/.omp/agent/config.yml`（默认 `openai-codex/gpt-6.1-sol`），同时支持终端 `/wb` Live TUI Bridge | 后台批处理：`omp -p --cwd=<root> --model=<model> "<prompt>"`<br>或通过现有 `/wb` Live Bridge 投递 |
 
 ---
 
 ### 2.3 分阶段模型路由矩阵与预设策略（Stage Routing Matrix）
 
-Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上逐阶段自定义修改主模型、推理强度与备援链），确保 **“规划与跨模型审查用强推理，高频编码与修 Bug 用大额度高速主力”**：
+Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上逐阶段自定义修改主模型、推理强度与备援链，并结合 L2 模型遥测账本在触发限流/配额耗尽后自动冷却 15 分钟顺延至健康备援），确保 **“规划与跨模型审查用强推理，高频编码与修 Bug 用大额度高速主力”**：
 
 #### A. 默认推荐：`balanced`（性价比均衡型 — 强烈推荐日常默认）
 
 | 执行阶段 | 首选执行器与模型（Primary） | 备援链（Fallback Chain，自动/一键切换） | 额度与工程设计考量 |
 | :--- | :--- | :--- | :--- |
-| **`design`（架构与规范整理）** | `codex` · `gpt-6-astra`（`reasoning_effort: medium`） | 1. `qodercn` · `DeepSeek-V4-Pro`<br>2. `gemini` · 默认 Pro<br>3. `qodercn` · `Qwen4-Max` | **低频高价值**：出方案和拆验收条件一次仅需少数几轮对话，调用强推理模型可大幅减少后续返工 Token。 |
+| **`design`（架构与规范整理）** | `codex` · `gpt-6-astra`（`reasoning_effort: medium`） | 1. `agy` · `gemini-4-argon-high`<br>2. `qodercn` · `DeepSeek-V4-Pro`<br>3. `qodercn` · `Qwen4-Max` | **低频高价值**：出方案和拆验收条件一次仅需少数几轮对话，调用强推理模型可大幅减少后续返工 Token。 |
 | **`implement`（编码与自测）** | `qodercn` · `Qwen4-Max`（或 `Auto`） | 1. `opencode` · `opencode/deepseek-v4.1-flash-free`<br>2. `opencode` · `opencode/glm-5.3-flash-free`<br>3. `codex` · `gpt-6-luna` | **高频大吞吐**：编码阶段反复读写文件和跑测试，优先使用 QoderCN 与 OpenCode Go/Free 模型保护 ChatGPT Plus SOTA 额度。 |
-| **`fix`（测试失败修复）** | `opencode` · `opencode/deepseek-v4.1-flash-free` | 1. `qodercn` · `Qwen3.8-Flash`<br>2. `qodercn` · `DeepSeek-V4-Pro`<br>3. `codex` · `gpt-6-astra` | **聚焦报错快速收敛**：有清晰测试失败日志时，Fast/Flash 模型响应快、成本极低；连续失败可无缝升级至强模型。 |
-| **`review`（跨模型交付审查）** | `codex` · `codex-auto-review`（或 `gpt-6.1-sol`） | 1. `gemini` · 默认 Pro<br>2. `qodercn` · `DeepSeek-V4-Pro` | **异构交叉验收**：强制避免“同一模型自己写自己审”，由 ChatGPT Plus / Google AI Pro / DeepSeek-V4-Pro 独立审阅 Git Diff 与 Spec 一致性。 |
+| **`fix`（测试失败修复）** | `opencode` · `opencode/deepseek-v4.1-flash-free` | 1. `qodercn` · `DeepSeek-Flash`<br>2. `qodercn` · `Qwen3.8-Flash`<br>3. `codex` · `gpt-6-astra` | **聚焦报错快速收敛**：有清晰测试失败日志时，Fast/Flash 模型响应快、成本极低；连续失败可无缝升级至强模型。 |
+| **`review`（跨模型交付审查）** | `codex` · `codex-auto-review`（或 `gpt-6.1-sol`） | 1. `qodercn` · `DeepSeek-Flash`<br>2. `agy` · `gemini-4-argon-medium`<br>3. `qodercn` · `DeepSeek-V4-Pro` | **异构交叉验收**：强制避免“同一模型自己写自己审”，由 ChatGPT Plus / QoderCN / Antigravity 独立审阅 Git Diff 与 Spec 一致性。 |
 
 #### B. 高上限攻坚：`sota_first`（复杂架构与关键核心改动）
-- **`design`**：`codex` · `gpt-6.1-sol`（`high`）→ 备援 `qodercn` · `DeepSeek-V4-Pro`
+- **`design`**：`codex` · `gpt-6.1-sol`（`high`）→ 备援 `agy` · `gemini-4-hydrogen-high` → `qodercn` · `DeepSeek-V4-Pro`
 - **`implement`**：`codex` · `gpt-6-astra` → 备援 `qodercn` · `DeepSeek-V4-Pro` / `Qwen4-Max`
 - **`fix`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `codex` · `gpt-6.1-sol`
-- **`review`**：`gemini`（独立审查视角，避开与 Codex 同源）→ 备援 `qodercn` · `Qwen4-Max`
+- **`review`**：`agy` · `gemini-4-argon-high`（独立审查视角，避开与 Codex 同源）→ 备援 `qodercn` · `Qwen4-Max` / `codex` · `codex-auto-review`
 
 #### C. 极致省流：`quota_saver`（最大程度保留 SOTA 订阅额度）
-- **`design`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `gemini`（Pro）→ `qodercn` · `Kimi-K3.1-Pro`
-- **`implement`**：`opencode` · `opencode/deepseek-v4.1-flash-free` → 备援 `opencode/glm-5.3-flash-free` → `qodercn` · `Qwen3.8-Flash`
-- **`fix`**：`opencode` · `opencode/glm-5.3-flash-free` → 备援 `qodercn` · `DeepSeek-Flash`
-- **`review`**：`qodercn` · `Qwen4-Max` → 备援 `gemini`
+- **`design`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `agy` · `gemini-3.8-flash-medium` → `qodercn` · `Kimi-K3.1-Pro`
+- **`implement`**：`opencode` · `opencode/deepseek-v4.1-flash-free` → 备援 `opencode/glm-5.3-flash-free` → `qodercn` · `DeepSeek-Flash`
+- **`fix`**：`opencode` · `opencode/glm-5.3-flash-free` → 备援 `qodercn` · `DeepSeek-Flash` / `Qwen3.8-Flash`
+- **`review`**：`qodercn` · `Qwen4-Max` → 备援 `qodercn` · `DeepSeek-Flash` / `agy` · `gemini-3.8-flash-medium`
 
 ---
 
@@ -228,3 +228,4 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 | **模型与额度管理** | 单一默认模型，无阶段区分 | **自动探测目录 + 三套路由预设 + 分阶段主/备援链**，保护稀缺 SOTA 额度 |
 | **方案打磨与交付把关** | 仅支持整段打回重来，无提问探讨通道 | **段落级 PR 式内联批注 + Ask/Refine 双模式研讨 + 跨模型交叉 Code Review** |
 | **Web UI 形态** | 单页列表/详情跳转 | **三栏式指挥舱布局**：左栏项目与算力、中栏步进器与工作区、右栏研讨/执行终端 |
+| **自进化与 RSI（v5.1）** | 手工排障 | **四层自进化闭环**：L1 项目 Playbook 沉淀、L2 遥测与冷却路由、L3/L4 痛点收集与 Git Worktree 隔离沙箱 + 人工验收后安全应用与热刷新 |

@@ -47,12 +47,19 @@ export async function synthesizeHandoffPacket(
   const playbook = readPlaybook(root);
   if (playbook.rules.length > 0) {
     lines.push("## 0. 项目持久避坑与偏好法则（Playbook）");
-    let used = 0;
+    let usedBytes = 0;
     for (const rule of playbook.rules.slice(-12)) {
-      const bullet = `- ${rule}`;
-      if (used + bullet.length > 1200) break;
+      const cleanRule = sanitizeOutput(rule, 600).text.trim();
+      if (!cleanRule) continue;
+      const bullet = `- ${cleanRule}`;
+      const bulletBytes = Buffer.byteLength(bullet, "utf8") + 1;
+      if (usedBytes > 0 && usedBytes + bulletBytes > 1200) break;
+      if (bulletBytes > 1200) {
+        lines.push(`- ${sanitizeOutput(cleanRule, 1180).text}`);
+        break;
+      }
       lines.push(bullet);
-      used += bullet.length + 1;
+      usedBytes += bulletBytes;
     }
     lines.push("");
   }

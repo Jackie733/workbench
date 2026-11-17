@@ -933,7 +933,11 @@ export function WorkspaceView() {
         </span>
         <h1 className="ws-title">{s.title}</h1>
         {reqData?.sandbox && (
-          <span className="badge info" data-testid="sandbox-active-badge" title={`沙箱分支: ${reqData.sandbox.branch}`}>
+          <span
+            className="badge info"
+            data-testid="sandbox-active-badge"
+            title={`沙箱分支: ${reqData.sandbox.branch}（验收通过后可一键应用改动到主干）`}
+          >
             沙箱隔离中
           </span>
         )}
@@ -1120,7 +1124,7 @@ export function WorkspaceView() {
               {sec.label}
             </button>
           ))}
-          {reqData?.sandbox && (s.stage === "awaiting_acceptance" || s.stage === "done") && (
+          {reqData?.sandbox && s.stage === "done" && (
             <button
               className="btn"
               type="button"

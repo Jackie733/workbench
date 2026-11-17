@@ -20,8 +20,9 @@ export function Topbar() {
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
 
-  const projName = project?.project?.name ?? project?.root.split("/").pop() ?? "Workbench";
-  const bridge = project?.bridge;
+  const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
+  const projName = noHubProject ? "Workbench" : (project?.project?.name ?? project?.root.split("/").pop() ?? "Workbench");
+  const bridge = noHubProject ? undefined : project?.bridge;
   const working = Boolean(bridge?.connected && bridge.state !== "idle");
 
   return (
@@ -73,6 +74,7 @@ export function Topbar() {
               detail: "",
               category: "ui_anomaly",
               domSelector: "",
+              pickingElement: false,
               autoPromote: false,
             })
           }

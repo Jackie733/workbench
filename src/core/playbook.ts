@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
+import { WorkbenchError } from "./errors.ts";
 import { atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withProjectWriteLock } from "./fs.ts";
 import { isProjectInitialized } from "./store.ts";
 import { WORKBENCH_DIR, type RequirementDetail } from "./types.ts";
-import { validateMarkdownContent } from "./validate.ts";
+import { sanitizeOutput, validateMarkdownContent } from "./validate.ts";
 
 export const MAX_PLAYBOOK_BYTES = 16 * 1024;
 const PLAYBOOK_HEADER = "# 项目持久避坑与偏好法则（Playbook）\n\n> 由 Workbench 自进化引擎从历史需求经验与人工反馈中自动沉淀，每次执行任务时自动注入交接简报。";
@@ -60,13 +61,15 @@ export async function writePlaybook(
   markdown: string,
 ): Promise<{ markdown: string; rules: string[]; updatedAt: number }> {
   const base = canonicalRoot(root);
-  const clean = validateMarkdownContent(markdown, "playbook", true);
-  if (Buffer.byteLength(clean, "utf8") > MAX_PLAYBOOK_BYTES) {
-    throw new Error(`playbook.md 超过 ${MAX_PLAYBOOK_BYTES} 字节上限`);
+  const trimmed = markdown.trimEnd();
+  const normalized = trimmed ? `${trimmed}\n` : "";
+  if (Buffer.byteLength(normalized, "utf8") > MAX_PLAYBOOK_BYTES) {
+    throw new WorkbenchError("invalid_input", `playbook.md 超过 ${MAX_PLAYBOOK_BYTES} 字节上限`);
   }
+  const clean = validateMarkdownContent(normalized, "playbook", true);
   return withProjectWriteLock(base, () => {
     const filePath = playbookFilePath(base);
-    atomicWriteFile(filePath, clean ? `${clean.trimEnd()}\n` : "");
+    atomicWriteFile(filePath, clean);
     return {
       markdown: clean,
       rules: extractPlaybookRules(clean),
@@ -88,12 +91,22 @@ export async function distillRequirementToPlaybook(
   const candidates: string[] = [];
   const reqId = detail.state.id;
   for (const deadEnd of detail.state.handoffNote?.deadEnds ?? []) {
-    const clean = deadEnd.trim().replace(/\s+/g, " ");
+    const clean = sanitizeOutput(deadEnd, 512).text.trim().replace(/\s+/g, " ");
     if (clean.length >= 6) {
       candidates.push(`[避坑 · ${reqId}] ${clean.slice(0, 260)}`);
     }
   }
-  const feedback = (extra?.feedback ?? detail.state.lastFeedback)?.trim().replace(/\s+/g, " ");
+  for (const disc of detail.state.discussions ?? []) {
+    if (disc.actor !== "human") continue;
+    if (disc.mode !== "refine" && disc.resolved !== true) continue;
+    const clean = sanitizeOutput(disc.message, 512).text.trim().replace(/\s+/g, " ");
+    if (clean.length >= 6) {
+      const anchor = disc.anchor ? ` · ${sanitizeOutput(disc.anchor, 80).text.trim()}` : "";
+      candidates.push(`[批注经验 · ${reqId}${anchor}] ${clean.slice(0, 260)}`);
+    }
+  }
+  const rawFeedback = extra?.feedback ?? detail.state.lastFeedback;
+  const feedback = rawFeedback ? sanitizeOutput(rawFeedback, 512).text.trim().replace(/\s+/g, " ") : "";
   if (feedback && feedback.length >= 6) {
     candidates.push(`[人工纠偏 · ${reqId}] ${feedback.slice(0, 260)}`);
   }

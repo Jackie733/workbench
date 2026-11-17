@@ -504,9 +504,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 5000 });
 
-      // 1. Open quick report from Topbar and submit an issue
+      // 1. Open quick report from Topbar, test interactive DOM element picker, and submit an issue
       await clickReady(page, '[data-testid="open-quick-report-btn"]');
       await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="pick-element-btn"]');
+      await page.waitForSelector('[data-testid="pick-element-banner"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      const pickedSel = await page.evaluate(
+        () => (document.querySelector('[data-testid="quick-report-selector"]') as HTMLInputElement)?.value ?? "",
+      );
+      expect(pickedSel).toBe('[data-testid="new-req-btn"]');
       await page.type('[data-testid="quick-report-title"]', "窄屏下工具栏按钮间距略紧");
       await page.type('[data-testid="quick-report-detail"]', "在 390px 宽度下建议增加 gap");
       await clickReady(page, '[data-testid="submit-quick-report-btn"]');
@@ -519,6 +527,9 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => Boolean(document.querySelector('[data-testid="evo-pane-inbox"]')?.textContent?.includes("窄屏下工具栏按钮间距略紧")),
         { timeout: 5000 },
       );
+
+      // Verify apply-sandbox-btn is NOT shown on unaccepted pain points
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid^="apply-pain-sandbox-"]')))).toBe(false);
 
       // Switch to Playbook tab and save a rule
       await clickReady(page, '[data-testid="evo-tab-playbook"]');
@@ -543,10 +554,64 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(promoteBtnSel).not.toBe("");
       await clickReady(page, promoteBtnSel);
 
-      // Modal closes, switches to REQ-001 with active sandbox badge
+      // Modal closes, switches to REQ-001 in draft stage with active sandbox badge and no apply button before acceptance
       await page.waitForSelector('[data-testid="sandbox-active-badge"]', { timeout: 5000 });
+      const stageBadge = await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "");
+      expect(stageBadge).toContain("草稿");
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="apply-sandbox-btn"]')))).toBe(false);
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       expect(overflow).toBe(false);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("Hub started on home directory shows empty sidebar and onboarding card until a project is manually added", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-empty-hub-"));
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-home-root-"));
+    tempDirs.push(hubDir, homeDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const repo = initGitRepo();
+    await initProject(repo, { name: "ManualRepo", privacyMode: "local" });
+
+    const server = await startWorkbenchServer({ root: homeDir, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="empty-hub-card"]', { timeout: 5000 });
+
+      const sidebarText = await page.evaluate(() => document.querySelector('[data-testid="hub-sidebar"]')?.textContent ?? "");
+      expect(sidebarText).toContain("本地项目 (0)");
+      expect(sidebarText).toContain("暂无纳管项目");
+      expect(sidebarText).not.toContain(path.basename(homeDir));
+      expect(await page.evaluate(() => document.querySelectorAll('[data-action="switch-project"]').length)).toBe(0);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="init-card"]')))).toBe(false);
+
+      // Manually add a project from the empty-hub CTA
+      await clickReady(page, '[data-testid="empty-hub-add-btn"]');
+      await page.waitForSelector('[data-testid="add-project-modal"]', { timeout: 5000 });
+      await page.evaluate((p: string) => {
+        const input = document.getElementById("add-project-path") as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, p);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, repo);
+      await clickReady(page, '[data-testid="submit-add-project-btn"]');
+      await page.waitForSelector('[data-testid="home-view"]', { timeout: 5000 });
+
+      const sidebarAfter = await page.evaluate(() => document.querySelector('[data-testid="hub-sidebar"]')?.textContent ?? "");
+      expect(sidebarAfter).toContain("本地项目 (1)");
+      expect(sidebarAfter).toContain("ManualRepo");
+      expect(sidebarAfter).not.toContain(path.basename(homeDir));
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();

@@ -155,6 +155,7 @@ export function listRequirements(
     scope?: "active" | "done" | "cancelled" | "all";
     stage?: Stage;
     currentCodeSnapshotHash?: string | null;
+    codeSnapshotsById?: ReadonlyMap<string, string | null>;
   } = {},
 ): RequirementSummary[] {
   const ids = listRequirementIds(root);
@@ -172,7 +173,10 @@ export function listRequirements(
       (scope === "cancelled" && stage === "cancelled");
     if (!scopeOk) continue;
     if (options.stage && stage !== options.stage) continue;
-    summaries.push(toSummary(bundle, snapshot));
+    const effectiveSnapshot = options.codeSnapshotsById?.has(id)
+      ? (options.codeSnapshotsById.get(id) ?? null)
+      : snapshot;
+    summaries.push(toSummary(bundle, effectiveSnapshot));
   }
 
   return summaries.sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id));

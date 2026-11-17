@@ -1,7 +1,7 @@
 import { getRequirement, listRequirements, propose, updateTasks } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
+import { observeGitChanges, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { STAGES, TASK_STATUSES, type CriterionInput, type Stage, type TaskInput } from "../core/types.ts";
@@ -200,11 +200,12 @@ export async function executeWorkbenchTool(
       if (stage !== undefined && !STAGES.includes(stage)) {
         throw new WorkbenchError("invalid_input", `无效的 stage: ${String(stage)}`);
       }
-      const snapshot = await observeGitSnapshot(base);
+      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
       const items = listRequirements(base, {
         scope,
         stage,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        codeSnapshotsById: byReqId,
       });
       return {
         items,

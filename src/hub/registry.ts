@@ -243,6 +243,20 @@ export function removeDaemonInfo(expectedPid = process.pid): void {
   }
 }
 
+/** Returns true when a directory looks like a project repo and is not the default user home directory. */
+export function isAutoRegistrableProjectRoot(root: string): boolean {
+  const canonical = canonicalRoot(root);
+  const homeCandidates = [process.env.HOME?.trim(), os.homedir()].filter((v): v is string => Boolean(v));
+  for (const candidate of homeCandidates) {
+    try {
+      if (canonical === canonicalRoot(candidate)) return false;
+    } catch {
+      // Ignore unresolvable homedir in isolated environments.
+    }
+  }
+  return fs.existsSync(path.join(canonical, ".git")) || fs.existsSync(path.join(canonical, WORKBENCH_DIR, "project.json"));
+}
+
 /** Lists immediate subdirectories safely for the local directory browser modal. */
 export function browseDirectory(targetPath?: string): {
   currentPath: string;

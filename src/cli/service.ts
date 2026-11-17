@@ -85,7 +85,7 @@ function definition(s: ServiceInstallation): string {
     const log = path.join(s.hubDir, "service.log");
     return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<!-- ${MARKER} -->\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(s.id)}</string>\n<key>ProgramArguments</key><array>${serviceArgs(s).map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>WorkingDirectory</key><string>${xml(s.workingDirectory)}</string>\n<key>EnvironmentVariables</key><dict>${Object.entries(environment).map(([key, value]) => `<key>${key}</key><string>${xml(value)}</string>`).join("")}</dict>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ThrottleInterval</key><integer>5</integer>\n<key>StandardOutPath</key><string>${xml(log)}</string>\n<key>StandardErrorPath</key><string>${xml(log)}</string>\n</dict></plist>\n`;
   }
-  return `# ${MARKER}\n[Unit]\nDescription=Workbench user Hub\n\n[Service]\nType=simple\nExecStart=${serviceArgs(s).map((arg) => unit(arg, true)).join(" ")}\nWorkingDirectory=${unit(s.workingDirectory)}\n${Object.entries(environment).map(([key, value]) => `Environment=${unit(`${key}=${value}`)}`).join("\n")}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  return `# ${MARKER}\n[Unit]\nDescription=Workbench user Hub\n\n[Service]\nType=simple\nExecStart=${serviceArgs(s).map((arg) => unit(arg, true)).join(" ")}\nWorkingDirectory=${validateText(s.workingDirectory)}\n${Object.entries(environment).map(([key, value]) => `Environment=${unit(`${key}=${value}`)}`).join("\n")}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
 }
 function execute(command: string, args: string[]): Promise<ServiceCommandResult> {
   const { promise, resolve, reject } = Promise.withResolvers<ServiceCommandResult>();
@@ -261,9 +261,13 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       try { fs.lstatSync(id.definitionPath); fail(`拒绝覆盖未知服务定义: ${id.definitionPath}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const info = daemonInfo();
       if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
+      await assertPortAvailable(port);
     } else if (JSON.stringify(existing) === JSON.stringify(next)) {
       const current = await status(existing);
       if (current.healthy) return current;
+      const info = daemonInfo();
+      if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
+      await assertPortAvailable(port);
       if (kind === "systemd") {
         await checked(kind, ["daemon-reload"]);
         await checked(kind, ["enable", "--now", existing.id]);
@@ -271,10 +275,16 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       }
       return start(existing);
     } else {
+      const prevState = await nativeState(existing);
+      if (existing.port !== port || !prevState.active) {
+        await assertPortAvailable(port);
+      }
       process.stderr.write("Workbench 服务配置变更，正在停止并重新安装；运行中的任务将被中断。\n");
       await stop(existing);
+      if (existing.port === port && prevState.active) {
+        await assertPortAvailable(port);
+      }
     }
-    await assertPortAvailable(port);
     fs.mkdirSync(hubDir, { recursive: true, mode: 0o700 });
     atomicWriteFile(next.definitionPath, contents);
     atomicWriteJson(configPath, next);

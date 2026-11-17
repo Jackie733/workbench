@@ -5,19 +5,23 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   acceptRequirement,
+  addDiscussion,
   approveDesign,
   createRequirement,
   getRequirement,
   initProject,
+  listRequirements,
   propose,
 } from "../../src/core/engine.ts";
-import { distillRequirementToPlaybook, readPlaybook } from "../../src/core/playbook.ts";
+import { resolveProjectRequirementSnapshots } from "../../src/core/git.ts";
+import { distillRequirementToPlaybook, MAX_PLAYBOOK_BYTES, readPlaybook, writePlaybook } from "../../src/core/playbook.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { getSandboxForRequirement } from "../../src/core/sandbox.ts";
+import { getSandboxForRequirement, resolveWorkbenchRootFromCwd } from "../../src/core/sandbox.ts";
 import {
   applySandboxToMain,
   createOrReuseWorktree,
   dismissPainPoint,
+  inspectFinishedRunForPainPoints,
   promotePainPoint,
   readPainPoints,
   reportPainPoint,
@@ -195,25 +199,52 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
 
-    // Accept REQ-001 and distill to Playbook
+    // Accept REQ-001 (with refined human discussion) and distill to Playbook
+    await addDiscussion(repo, "REQ-001", {
+      actor: "human",
+      mode: "refine",
+      anchor: "design.md#安全",
+      message: "所有外部输入路径必须经过 resolveSafePath 校验 (sk-secret1234567890abcdef)",
+      resolved: true,
+    });
     const detail = await acceptRequirement(repo, "REQ-001", {
       currentCodeSnapshotHash: getRequirement(repo, "REQ-001").state.verifications[0]!.codeSnapshotHash,
     });
     const distilled = await distillRequirementToPlaybook(repo, detail, {
       feedback: "Always run bun run typecheck before finishing",
     });
-    expect(distilled.added).toBe(2);
+    expect(distilled.added).toBe(3);
+    expect(distilled.markdown).toContain("resolveSafePath");
+    expect(distilled.markdown).not.toContain("sk-secret1234567890abcdef");
+    expect(distilled.markdown).toContain("[CREDENTIAL REDACTED]");
 
     // Idempotent second distillation should add 0
     const again = await distillRequirementToPlaybook(repo, detail);
     expect(again.added).toBe(0);
-    expect(readPlaybook(repo).rules.length).toBe(2);
+    expect(readPlaybook(repo).rules.length).toBe(3);
+
+    // writePlaybook enforces MAX_PLAYBOOK_BYTES including trailing newline
+    const maxBody = "a".repeat(MAX_PLAYBOOK_BYTES);
+    await expect(writePlaybook(repo, maxBody)).rejects.toThrow("上限");
+    const exactFit = "b".repeat(MAX_PLAYBOOK_BYTES - 1);
+    await writePlaybook(repo, exactFit);
+    expect(Buffer.byteLength(readPlaybook(repo).markdown, "utf8")).toBe(MAX_PLAYBOOK_BYTES);
+
+    // Restore Playbook with long CJK rules and verify handoff.md keeps section within 1200 UTF-8 bytes
+    const cjkRules = Array.from({ length: 12 }, (_, idx) => `- [规则${idx}] ${"中文经验法则避免踩坑".repeat(12)}`).join("\n");
+    await writePlaybook(repo, cjkRules);
 
     // New requirement inherits Playbook in handoff.md
     await createRequirement(repo, { goal: "Next feature" });
     const handoff = await synthesizeHandoffPacket(repo, "REQ-002", { action: "design" });
     expect(handoff.markdown).toContain("项目持久避坑与偏好法则（Playbook）");
-    expect(handoff.markdown).toContain("Do not use react-dom/server");
+    const pbSection = handoff.markdown.split("## 0. 项目持久避坑与偏好法则（Playbook）")[1]?.split("\n## 1.")[0] ?? "";
+    expect(Buffer.byteLength(pbSection, "utf8")).toBeLessThanOrEqual(1260);
+
+    // Restore ASCII rule check too
+    await writePlaybook(repo, "- Do not use react-dom/server inside browser bundle\n");
+    const handoff2 = await synthesizeHandoffPacket(repo, "REQ-002", { action: "design" });
+    expect(handoff2.markdown).toContain("Do not use react-dom/server");
 
     // L2 Telemetry & Cooldown routing
     recordModelRunOutcome({
@@ -258,10 +289,66 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
       source: "ui_quick_report",
       category: "ui_anomaly",
       title: "Topbar button misaligned on narrow viewport",
-      detail: "Confirmed again",
+      detail: "\x1b[31mConfirmed again Bearer secret-token-value\x1b[0m",
     });
     expect(dup?.occurrences).toBe(2);
+    expect(dup?.detail).not.toContain("\x1b[31m");
+    expect(dup?.detail).not.toContain("secret-token-value");
     expect(readPainPoints().length).toBe(1);
+
+    // Distinct component / domSelector creates a distinct pain point fingerprint
+    const diffComp = reportPainPoint({
+      source: "ui_quick_report",
+      category: "ui_anomaly",
+      title: "Topbar button misaligned on narrow viewport",
+      context: { domSelector: ".sidebar-btn" },
+    });
+    expect(diffComp?.id).not.toBe(dup?.id);
+    expect(diffComp?.occurrences).toBe(1);
+
+    // Post-run sniffer detects timeouts, crashes, and --json CLI errors (and skips RSI sandbox)
+    const sampleDetail = getRequirement(wbRepo, (await createRequirement(wbRepo, { goal: "dummy" })).state.id);
+    const sniffed = inspectFinishedRunForPainPoints({
+      root: wbRepo,
+      requirementId: sampleDetail.state.id,
+      run: {
+        id: "RUN-1",
+        action: "implement",
+        harness: "codex",
+        model: "gpt-6",
+        status: "failed",
+        startedAt: 1,
+        endedAt: 2,
+        exitCode: 139,
+        durationMs: 1000,
+        logPath: "runs/RUN-1.log",
+      },
+      detail: sampleDetail,
+      rawLog: '{"code": "invalid_input"}\n{"code": "invalid_input"}\nSegmentation fault',
+      timedOut: true,
+    });
+    expect(sniffed.some((p) => p.category === "cli_ergonomics")).toBe(true);
+    expect(sniffed.some((p) => p.category === "harness_bug" && p.title.includes("超时"))).toBe(true);
+    const suppressedByRsi = inspectFinishedRunForPainPoints({
+      root: wbRepo,
+      requirementId: sampleDetail.state.id,
+      run: {
+        id: "RUN-2",
+        action: "fix",
+        harness: "codex",
+        model: "gpt-6",
+        status: "failed",
+        startedAt: 1,
+        endedAt: 2,
+        exitCode: 139,
+        durationMs: 1000,
+        logPath: "runs/RUN-2.log",
+      },
+      detail: sampleDetail,
+      rawLog: "Segmentation fault",
+      isRsiSandbox: true,
+    });
+    expect(suppressedByRsi).toEqual([]);
 
     // Guard: WORKBENCH_RSI_DEPTH=1 prevents automatic recursion
     process.env.WORKBENCH_RSI_DEPTH = "1";
@@ -273,13 +360,24 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(suppressed).toBeNull();
     delete process.env.WORKBENCH_RSI_DEPTH;
 
-    // 2. Promote pain point -> creates REQ-001 + isolated worktree sandbox
+    // 2. Promote pain point -> creates REQ-002 (stays in draft, never skips design!) + isolated worktree sandbox
     const promoted = await promotePainPoint(dup!.id, { workbenchRoot: wbRepo, createSandbox: true });
-    expect(promoted.requirement.state.id).toBe("REQ-001");
+    const reqId = promoted.requirement.state.id;
+    expect(promoted.requirement.state.stage).toBe("draft");
+    expect(promoted.workbenchProjectId).toBeTruthy();
     expect(promoted.sandbox).not.toBeNull();
+    // Re-promoting already promoted pain point is rejected
+    await expect(promotePainPoint(dup!.id, { workbenchRoot: wbRepo })).rejects.toThrow("已转化");
     const wtPath = promoted.sandbox!.worktreePath;
     expect(fs.existsSync(wtPath)).toBe(true);
-    expect(getSandboxForRequirement(wbRepo, "REQ-001")?.worktreePath).toBe(wtPath);
+    expect(getSandboxForRequirement(wbRepo, reqId)?.worktreePath).toBe(wtPath);
+    expect(resolveWorkbenchRootFromCwd(wtPath)).toBe(fs.realpathSync(wbRepo));
+    expect(fs.existsSync(path.join(wtPath, ".workbench/items", reqId, "spec.md"))).toBe(true);
+
+    // Advance main repo concurrently on a DIFFERENT file -> must not be deleted by sandbox apply!
+    fs.writeFileSync(path.join(wbRepo, "main_only_file.ts"), "export const keepMe = 1;\n");
+    execFileSync("git", ["add", "main_only_file.ts"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main advanced"], { cwd: wbRepo, stdio: "ignore" });
 
     // 3. Edit code inside sandbox ONLY; main repo stays completely untouched
     fs.writeFileSync(path.join(wtPath, "src/web/styles.css"), "body { color: #2563eb; }\n");
@@ -287,7 +385,7 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(fs.readFileSync(path.join(wbRepo, "src/web/styles.css"), "utf8")).toBe("body { color: #111; }");
 
     // 4. Verification runs inside worktree and records evidence in main .workbench
-    await propose(wbRepo, "REQ-001", {
+    await propose(wbRepo, reqId, {
       designMarkdown: "# Fix CSS in sandbox",
       criteria: [
         {
@@ -299,21 +397,44 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
       ],
       actor: "agent",
     });
-    await approveDesign(wbRepo, "REQ-001");
-    const verRes = await runVerification(wbRepo, "REQ-001", {
+    await approveDesign(wbRepo, reqId);
+    const verRes = await runVerification(wbRepo, reqId, {
       command: "grep -q '#2563eb' src/web/styles.css",
       criterionIds: ["AC-1"],
     });
     expect(verRes.record.passed).toBe(true);
 
-    // 5. Server apply endpoint merges sandbox changes to main repo & reloads cachedWeb bundle!
+    // listRequirements with per-requirement snapshots does NOT falsely report sandbox as stale!
+    const { baseSnapshot, byReqId } = await resolveProjectRequirementSnapshots(wbRepo);
+    const listed = listRequirements(wbRepo, {
+      scope: "active",
+      currentCodeSnapshotHash: baseSnapshot?.fingerprint ?? null,
+      codeSnapshotsById: byReqId,
+    });
+    const sandboxSummary = listed.find((i) => i.id === reqId);
+    expect(sandboxSummary?.requiredPassed).toBe(1);
+    expect(sandboxSummary?.requiredTotal).toBe(1);
+
+    // 5. Server apply endpoint enforces human acceptance gate BEFORE merging & reloading cachedWeb!
     const server = await startWorkbenchServer({ root: wbRepo, port: 0, writeDiscovery: false, hubMode: true });
     servers.push(server);
 
     const beforeCss = await (await fetch(`${server.url}/styles.css`)).text();
     expect(beforeCss).toContain("#111");
 
-    const applyResp = await fetch(`${server.url}/api/hub/evolution/apply/REQ-001`, { method: "POST" });
+    // Unaccepted apply MUST fail with 409!
+    const prematureResp = await fetch(`${server.url}/api/hub/evolution/apply/${reqId}`, { method: "POST" });
+    expect(prematureResp.status).toBe(409);
+
+    // Now accept via API (uses sandbox code snapshot)
+    const acceptResp = await fetch(`${server.url}/api/requirements/${reqId}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(acceptResp.status).toBe(200);
+
+    const applyResp = await fetch(`${server.url}/api/hub/evolution/apply/${reqId}`, { method: "POST" });
     expect(applyResp.status).toBe(200);
     const applyJson = (await applyResp.json()) as {
       appliedFiles: string[];
@@ -325,12 +446,29 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(applyJson.appliedFiles).toContain("src/web/styles.css");
     expect(applyJson.appliedFiles).toContain("src/web/new_helper.ts");
 
-    // Main repo updated, sandbox cleaned up, and server serves updated CSS immediately!
+    // Main repo updated, concurrently added main_only_file.ts preserved, sandbox cleaned up, server serves updated CSS!
     expect(fs.readFileSync(path.join(wbRepo, "src/web/styles.css"), "utf8")).toContain("#2563eb");
     expect(fs.existsSync(path.join(wbRepo, "src/web/new_helper.ts"))).toBe(true);
-    expect(getSandboxForRequirement(wbRepo, "REQ-001")).toBeNull();
+    expect(fs.existsSync(path.join(wbRepo, "main_only_file.ts"))).toBe(true);
+    expect(getSandboxForRequirement(wbRepo, reqId)).toBeNull();
     const afterCss = await (await fetch(`${server.url}/styles.css`)).text();
     expect(afterCss).toContain("#2563eb");
+
+    // 6. Security: reject symlink escape inside sandbox during applySandboxToMain
+    const secReq = await createRequirement(wbRepo, {
+      goal: "Test symlink guard",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    const secId = secReq.state.id;
+    const secWt = await createOrReuseWorktree(wbRepo, secId);
+    fs.symlinkSync("/etc/passwd", path.join(secWt.worktreePath, "src/web/evil_symlink"));
+    await propose(wbRepo, secId, { designMarkdown: "# Symlink test", actor: "agent" });
+    await approveDesign(wbRepo, secId);
+    await runVerification(wbRepo, secId, { command: "echo ok", criterionIds: ["AC-1"] });
+    await acceptRequirement(wbRepo, secId, {
+      currentCodeSnapshotHash: getRequirement(wbRepo, secId).state.verifications[0]!.codeSnapshotHash,
+    });
+    await expect(applySandboxToMain(wbRepo, secId)).rejects.toThrow("符号链接");
 
     // Dismissing an extra pain point works cleanly
     const extra = reportPainPoint({ source: "ui_quick_report", category: "feature_gap", title: "Extra idea" });

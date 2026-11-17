@@ -3,6 +3,7 @@ import { ArrowRight, Plus } from "lucide-react";
 import type { RequirementSummary, Stage } from "../../core/types.ts";
 import {
   initProjectSubmit,
+  openAddProjectModal,
   openRequirement,
   useProjectQuery,
   useRequirementsQuery,
@@ -11,6 +12,25 @@ import { filteredItems, relativeTime, STAGE_META } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+
+export function EmptyHubCard() {
+  return (
+    <div className="empty-card" data-testid="empty-hub-card">
+      <h2 style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>尚未添加本地项目</h2>
+      <p className="muted" style={{ margin: "0 0 16px" }}>
+        在左侧栏点击「添加」或下方按钮选择一个本地 Git 仓库或项目目录，即可开始管理需求、技术方案与自动化验证。
+      </p>
+      <button
+        className="btn primary"
+        type="button"
+        data-testid="empty-hub-add-btn"
+        onClick={() => void openAddProjectModal()}
+      >
+        <Icon icon={Plus} size={16} /> 添加本地项目
+      </button>
+    </div>
+  );
+}
 
 export function InitCard() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);

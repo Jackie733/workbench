@@ -7,6 +7,7 @@ import type {
   ProjectMetadata,
   RequirementDetail,
   RequirementSummary,
+  Stage,
   VerificationRecord,
 } from "../core/types.ts";
 import type { GitObservation } from "../core/git.ts";
@@ -64,14 +65,20 @@ export interface PlaybookResponse {
   updatedAt: number | null;
 }
 
+export interface EvolutionSandboxItem extends SandboxRecord {
+  stage?: Stage | null;
+  canApply?: boolean;
+}
+
 export interface EvolutionStateResponse {
   painPoints: EvolutionPainPoint[];
   telemetry: {
     entries: ModelStageStats[];
     activeCooldowns: Array<{ harness: string; model: string; until: number }>;
   };
-  sandboxes: SandboxRecord[];
+  sandboxes: EvolutionSandboxItem[];
   workbenchRoot: string;
+  workbenchProjectId?: string | null;
   playbook: PlaybookResponse;
 }
 
@@ -154,7 +161,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ harness, model }),
     }),
-  getEvolution: () => requestJson<EvolutionStateResponse>("/api/hub/evolution"),
+  getEvolution: () => requestJson<EvolutionStateResponse>(withProjectParam("/api/hub/evolution")),
   reportPainPoint: (input: {
     source?: PainPointSource;
     category: PainPointCategory;
@@ -171,6 +178,7 @@ export const api = {
       painPoint: EvolutionPainPoint;
       requirement: RequirementDetail;
       workbenchRoot: string;
+      workbenchProjectId: string;
       sandbox: SandboxRecord | null;
     }>(`/api/hub/evolution/${encodeURIComponent(id)}/promote`, {
       method: "POST",

@@ -28,7 +28,7 @@ import {
 } from "../core/engine.ts";
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
+import { observeGitChanges, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
@@ -54,6 +54,7 @@ import {
   addCustomModel,
   applyHubRoutingPreset,
   browseDirectory,
+  isAutoRegistrableProjectRoot,
   readHubConfig,
   registerHubProject,
   removeDaemonInfo,
@@ -196,7 +197,7 @@ export async function startWorkbenchServer(options: {
   const isDevWeb = process.env.WORKBENCH_DEV_WEB === "1";
   const executor = options.executor ?? new HubExecutor();
 
-  if (hubMode && (fs.existsSync(path.join(defaultRoot, ".git")) || fs.existsSync(path.join(defaultRoot, WORKBENCH_DIR, "project.json")))) {
+  if (hubMode && isAutoRegistrableProjectRoot(defaultRoot)) {
     registerHubProject(defaultRoot, { activate: false });
   }
 
@@ -268,13 +269,14 @@ export async function startWorkbenchServer(options: {
   };
 
   const syncAllWatchers = () => {
-    ensureWatcherFor(defaultRoot);
     if (hubMode) {
       const cfg = readHubConfig();
       for (const p of cfg.projects) {
         ensureWatcherFor(p.root);
       }
+      return;
     }
+    ensureWatcherFor(defaultRoot);
   };
 
   syncAllWatchers();
@@ -286,41 +288,37 @@ export async function startWorkbenchServer(options: {
       const byId = cfg.projects.find((p) => p.id === param);
       if (byId) return byId.root;
       // Allow single-project root match
-      if (param === "default") return defaultRoot;
+      if (!hubMode && param === "default") return defaultRoot;
       throw new WorkbenchError("not_found", `未找到目标项目: ${param}`);
     }
     if (hubMode) {
       const cfg = readHubConfig();
       const active = cfg.projects.find((p) => p.id === cfg.activeProjectId) ?? cfg.projects[0];
       if (active) return active.root;
+      throw new WorkbenchError("not_found", "当前 Hub 尚未纳管任何项目，请先添加本地项目");
     }
     return defaultRoot;
   };
 
   const buildHubProjectsSnapshot = async () => {
     const cfg = readHubConfig();
-    const rawList =
-      hubMode && cfg.projects.length > 0
-        ? cfg.projects
-        : [
-            {
-              id: "default",
-              name: path.basename(defaultRoot) || "workbench",
-              root: defaultRoot,
-              addedAt: Date.now(),
-              lastOpenedAt: Date.now(),
-            },
-          ];
+    if (!hubMode) {
+      return { cfg, projects: [] };
+    }
     const projects = await Promise.all(
-      rawList.map(async (entry) => {
+      cfg.projects.map(async (entry) => {
         const status = getProjectStatus(entry.root);
         const isGitRepo = fs.existsSync(path.join(entry.root, ".git"));
         let activeCount = 0;
         let decisionCount = 0;
         if (status.initialized) {
           try {
-            const snap = await observeGitSnapshot(entry.root);
-            const items = listRequirements(entry.root, { scope: "active", currentCodeSnapshotHash: snap?.fingerprint ?? null });
+            const { baseSnapshot: snap, byReqId } = await resolveProjectRequirementSnapshots(entry.root);
+            const items = listRequirements(entry.root, {
+              scope: "active",
+              currentCodeSnapshotHash: snap?.fingerprint ?? null,
+              codeSnapshotsById: byReqId,
+            });
             activeCount = items.length;
             decisionCount = items.filter((i) => i.needsDecision).length;
           } catch {
@@ -486,15 +484,37 @@ export async function startWorkbenchServer(options: {
 
     if (method === "GET" && pathname === "/api/hub/evolution") {
       const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
-      const activePid = readHubConfig().activeProjectId;
-      const activeProj = readHubConfig().projects.find((p) => p.id === activePid);
-      const currentPlaybookRoot = activeProj?.root ?? defaultRoot;
+      const cfg = readHubConfig();
+      const paramPid = url.searchParams.get("project");
+      const activeProj =
+        (paramPid ? cfg.projects.find((p) => p.id === paramPid) : undefined) ??
+        cfg.projects.find((p) => p.id === cfg.activeProjectId) ??
+        cfg.projects[0];
+      const currentPlaybookRoot = activeProj?.root ?? (hubMode ? null : defaultRoot);
+      const wbProjectId = cfg.projects.find((p) => p.root === wbRoot)?.id ?? null;
+      const sandboxes = Object.values(readSandboxes()).map((sb) => {
+        let stage: Stage | null = null;
+        let canApply = false;
+        try {
+          if (fs.existsSync(sb.worktreePath)) {
+            const detail = getRequirement(sb.projectRoot, sb.requirementId);
+            stage = detail.state.stage;
+            canApply = detail.state.stage === "done" && detail.state.acceptance !== null;
+          }
+        } catch {
+          // Ignore stale or inaccessible requirement state.
+        }
+        return { ...sb, stage, canApply };
+      });
       return jsonResponse({
         painPoints: readPainPoints(),
         telemetry: summarizeTelemetry(),
-        sandboxes: Object.values(readSandboxes()),
+        sandboxes,
         workbenchRoot: wbRoot,
-        playbook: readPlaybook(currentPlaybookRoot),
+        workbenchProjectId: wbProjectId,
+        playbook: currentPlaybookRoot
+          ? readPlaybook(currentPlaybookRoot)
+          : { exists: false, markdown: "", rules: [], updatedAt: null },
       });
     }
 
@@ -602,16 +622,22 @@ export async function startWorkbenchServer(options: {
     if (method === "POST" && pathname === "/api/project/playbook/distill") {
       const body = await readBody(req);
       const reqId = typeof body.requirementId === "string" ? body.requirementId : null;
-      const snapshot = await observeGitSnapshot(base);
+      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
       let addedTotal = 0;
       if (reqId) {
-        const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const snap = await observeGitSnapshot(resolveCodeRoot(base, reqId));
+        const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
         const out = await distillRequirementToPlaybook(base, detail);
         addedTotal += out.added;
       } else {
-        const summaries = listRequirements(base, { scope: "all", currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const summaries = listRequirements(base, {
+          scope: "all",
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          codeSnapshotsById: byReqId,
+        });
         for (const item of summaries) {
-          const detail = getRequirement(base, item.id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+          const itemHash = byReqId.has(item.id) ? (byReqId.get(item.id) ?? null) : (snapshot?.fingerprint ?? null);
+          const detail = getRequirement(base, item.id, { currentCodeSnapshotHash: itemHash });
           const out = await distillRequirementToPlaybook(base, detail);
           addedTotal += out.added;
         }
@@ -634,11 +660,12 @@ export async function startWorkbenchServer(options: {
     if (method === "GET" && pathname === "/api/requirements") {
       const scope = (url.searchParams.get("scope") ?? "active") as "active" | "done" | "cancelled" | "all";
       const stageParam = url.searchParams.get("stage");
-      const snapshot = await observeGitSnapshot(base);
+      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
       const items = listRequirements(base, {
         scope,
         stage: stageParam ? (stageParam as Stage) : undefined,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        codeSnapshotsById: byReqId,
       });
       return jsonResponse({
         items,

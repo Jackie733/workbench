@@ -128,19 +128,27 @@ function syncDirBestEffort(dir: string): void {
   }
 }
 
-/** Atomically writes UTF-8 text via temp file + fsync + rename. */
-export function atomicWriteFile(filePath: string, content: string): void {
+/** Atomically writes raw bytes via temp file + fsync + rename. */
+export function atomicWriteBuffer(filePath: string, content: Buffer, mode?: number): void {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
   const tempPath = `${filePath}.tmp-${randomUUID()}`;
   const fd = fs.openSync(
     tempPath,
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-    0o644,
+    mode ?? 0o644,
   );
   try {
     try {
-      fs.writeFileSync(fd, content, "utf8");
+      let offset = 0;
+      while (offset < content.length) {
+        const written = fs.writeSync(fd, content, offset, content.length - offset);
+        if (written === 0) break;
+        offset += written;
+      }
+      if (mode !== undefined) {
+        fs.fchmodSync(fd, mode);
+      }
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
@@ -158,8 +166,13 @@ export function atomicWriteFile(filePath: string, content: string): void {
   }
 }
 
-export function atomicWriteJson(filePath: string, value: unknown): void {
-  atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
+/** Atomically writes UTF-8 text via temp file + fsync + rename. */
+export function atomicWriteFile(filePath: string, content: string, mode?: number): void {
+  atomicWriteBuffer(filePath, Buffer.from(content, "utf8"), mode);
+}
+
+export function atomicWriteJson(filePath: string, value: unknown, mode?: number): void {
+  atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, mode);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -172,46 +185,72 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function acquireAdvisoryLock(lockPath: string): Promise<string> {
+function tryBreakStaleLock(lockPath: string): boolean {
+  try {
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
+    const dead = typeof parsed.pid === "number" && !isProcessAlive(parsed.pid);
+    const expired = typeof parsed.createdAt === "number" && Date.now() - parsed.createdAt > LOCK_STALE_MS;
+    if (dead || expired) {
+      fs.rmSync(lockPath, { force: true });
+      return true;
+    }
+  } catch {
+    const stat = fs.lstatSync(lockPath, { throwIfNoEntry: false });
+    if (stat && Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+      fs.rmSync(lockPath, { force: true });
+      return true;
+    }
+  }
+  return false;
+}
+
+function tryCreateLockFile(lockPath: string): string | null {
   const token = randomUUID();
+  try {
+    const fd = fs.openSync(
+      lockPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }), "utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    return token;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+    return null;
+  }
+}
+
+async function acquireAdvisoryLock(lockPath: string): Promise<string> {
   const deadline = Date.now() + LOCK_WAIT_MS;
   while (true) {
-    try {
-      const fd = fs.openSync(
-        lockPath,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-        0o600,
-      );
-      try {
-        fs.writeFileSync(fd, JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }), "utf8");
-      } finally {
-        fs.closeSync(fd);
-      }
-      return token;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
-      }
-      try {
-        const raw = fs.readFileSync(lockPath, "utf8");
-        const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
-        const dead = typeof parsed.pid === "number" && !isProcessAlive(parsed.pid);
-        const expired = typeof parsed.createdAt === "number" && Date.now() - parsed.createdAt > LOCK_STALE_MS;
-        if (dead || expired) {
-          fs.rmSync(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        const stat = fs.lstatSync(lockPath, { throwIfNoEntry: false });
-        if (stat && Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
-          fs.rmSync(lockPath, { force: true });
-          continue;
-        }
-      }
-      if (Date.now() >= deadline) {
-        throw new WorkbenchError("lock_timeout", "项目正在被另一个工作台进程写入，请稍后重试");
-      }
-      await delay(25);
+    const token = tryCreateLockFile(lockPath);
+    if (token) return token;
+    if (tryBreakStaleLock(lockPath)) continue;
+    if (Date.now() >= deadline) {
+      throw new WorkbenchError("lock_timeout", "项目正在被另一个工作台进程写入，请稍后重试");
+    }
+    await delay(25);
+  }
+}
+
+function acquireAdvisoryLockSync(lockPath: string): string {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (true) {
+    const token = tryCreateLockFile(lockPath);
+    if (token) return token;
+    if (tryBreakStaleLock(lockPath)) continue;
+    if (Date.now() >= deadline) {
+      throw new WorkbenchError("lock_timeout", "文件正在被另一个工作台进程写入，请稍后重试");
+    }
+    if (typeof Bun !== "undefined" && typeof Bun.sleepSync === "function") {
+      Bun.sleepSync(15);
     }
   }
 }
@@ -225,6 +264,17 @@ function releaseAdvisoryLock(lockPath: string, token: string): void {
     }
   } catch {
     // Lock already removed or replaced.
+  }
+}
+
+/** Serializes read-modify-write operations on a shared lock file synchronously across processes. */
+export function withFileLockSync<T>(lockPath: string, fn: () => T): T {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+  const token = acquireAdvisoryLockSync(lockPath);
+  try {
+    return fn();
+  } finally {
+    releaseAdvisoryLock(lockPath, token);
   }
 }
 
