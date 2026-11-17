@@ -2,10 +2,13 @@ import type {
   AgentAction,
   AgentRunRecord,
   CriterionInput,
+  DeliveryPreview,
+  DeliveryRecord,
   DiscussionEntry,
   PrivacyMode,
   ProjectMetadata,
   RequirementDetail,
+  RequirementDiffView,
   RequirementSummary,
   Stage,
   VerificationRecord,
@@ -236,8 +239,10 @@ export const api = {
     requestJson<{ detail: RequirementDetail; bridge: BridgeStatus; codeSnapshotHash: string | null; sandbox?: SandboxRecord | null }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}`),
     ),
-  getDiff: (id: string) =>
-    requestJson<{ changes: GitObservation }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/diff`)),
+  getDiff: (id: string, options: { live?: boolean } = {}) =>
+    requestJson<RequirementDiffView & { changes: GitObservation | null }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/diff${options.live ? "?live=1" : ""}`),
+    ),
   getDesignHistory: (id: string, version: number) =>
     requestJson<{ version: number; markdown: string }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/history/${version}`),
@@ -328,6 +333,18 @@ export const api = {
     ),
   accept: (id: string, input: { expectedRevision?: number; note?: string }) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`), {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  getDelivery: (id: string) =>
+    requestJson<DeliveryPreview>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/delivery`)),
+  deliver: (id: string, input: { files: string[]; commitMessage: string; expectedRevision?: number; note?: string }) =>
+    requestJson<{
+      detail: RequirementDetail;
+      delivery: DeliveryRecord;
+      webReloaded: boolean;
+      restartRecommended: boolean;
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/deliver`), {
       method: "POST",
       body: JSON.stringify(input),
     }),

@@ -1,6 +1,9 @@
 import { WorkbenchError } from "./errors.ts";
 import {
+  ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
   AGENT_ACTIONS,
+  MAX_ACCEPTANCE_DIFF_BYTES,
+  MAX_ACCEPTANCE_SNAPSHOT_BYTES,
   MAX_AGENT_RUNS,
   MAX_CRITERIA,
   MAX_DESIGN_BYTES,
@@ -8,6 +11,7 @@ import {
   MAX_HANDOFF_BYTES,
   MAX_REASON_CHARS,
   MAX_SPEC_BYTES,
+  MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TASKS,
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
@@ -16,14 +20,26 @@ import {
   STAGES,
   TASK_STATUSES,
   TRACKS,
+  type AcceptanceGitEvidence,
   type AcceptanceRecord,
+  type AcceptanceSnapshot,
+  type AcceptanceSnapshotReference,
+  type AcceptanceVerificationEvidence,
   type AgentAction,
   type AgentRunRecord,
   type ApprovalRecord,
   type BaselineSnapshot,
+  type ChangedFile,
+  type CommitInfo,
   type Criterion,
+  type CriterionCoverageItem,
+  type CriterionCoverageState,
   type CriterionInput,
+  type DeliveryRecord,
+  type DiffEvidenceStatus,
+  type DiffFilesScope,
   type DiscussionEntry,
+  type EffectiveVerificationState,
   type HandoffNote,
   type ProjectMetadata,
   type RequirementState,
@@ -43,6 +59,12 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 export const REQUIREMENT_ID_RE = /^REQ-\d{3,}$/;
 const TOKEN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const SNAPSHOT_PATH_RE = /^snapshots\/acceptance-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
+const GIT_REF_RE = /^[0-9a-f]{7,64}$/i;
+const DIFF_STATUSES: DiffEvidenceStatus[] = ["captured", "empty", "unavailable"];
+const FILES_SCOPES: DiffFilesScope[] = ["baseline-relative", "worktree", "none"];
+const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "stale", "unknown"];
+const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -244,10 +266,37 @@ function validateApproval(raw: unknown): ApprovalRecord | null {
   return raw as unknown as ApprovalRecord;
 }
 
+function validateAcceptanceSnapshotReference(raw: unknown): AcceptanceSnapshotReference | null | undefined {
+  if (raw === null || raw === undefined) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance.snapshot 引用字段无效");
+  assertAllowedKeys(
+    raw,
+    ["id", "path", "schemaVersion", "capturedAt", "contentDigest", "sizeBytes"],
+    "acceptance.snapshot",
+  );
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    typeof raw.path !== "string" ||
+    !SNAPSHOT_PATH_RE.test(raw.path) ||
+    raw.schemaVersion !== ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION ||
+    !isSafeInt(raw.capturedAt, 0) ||
+    typeof raw.contentDigest !== "string" ||
+    !SHA256_RE.test(raw.contentDigest) ||
+    !isSafeInt(raw.sizeBytes, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "acceptance.snapshot 引用记录损坏");
+  }
+  if (raw.path !== `snapshots/acceptance-${raw.id}.json`) {
+    throw new WorkbenchError("corrupt_record", "acceptance.snapshot 引用路径越出需求存储范围");
+  }
+  return raw as unknown as AcceptanceSnapshotReference;
+}
+
 function validateAcceptance(raw: unknown): AcceptanceRecord | null {
   if (raw === null) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance 字段无效");
-  assertAllowedKeys(raw, ["acceptedAt", "specHash", "codeSnapshotHash", "verificationIds", "note"], "acceptance");
+  assertAllowedKeys(raw, ["acceptedAt", "specHash", "codeSnapshotHash", "verificationIds", "note", "snapshot"], "acceptance");
   if (
     !isSafeInt(raw.acceptedAt, 0) ||
     typeof raw.specHash !== "string" ||
@@ -259,7 +308,35 @@ function validateAcceptance(raw: unknown): AcceptanceRecord | null {
   ) {
     throw new WorkbenchError("corrupt_record", "acceptance 记录损坏");
   }
+  validateAcceptanceSnapshotReference(raw.snapshot);
   return raw as unknown as AcceptanceRecord;
+}
+
+function validateDelivery(raw: unknown): DeliveryRecord | null | undefined {
+  if (raw === undefined || raw === null) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "delivery 字段无效");
+  assertAllowedKeys(
+    raw,
+    ["deliveredAt", "commitHash", "shortHash", "commitMessage", "files", "branch", "note"],
+    "delivery",
+  );
+  if (
+    !isSafeInt(raw.deliveredAt, 0) ||
+    typeof raw.commitHash !== "string" ||
+    !GIT_REF_RE.test(raw.commitHash) ||
+    typeof raw.shortHash !== "string" ||
+    !isSafeText(raw.shortHash, 64) ||
+    !isSafeText(raw.commitMessage, 4000) ||
+    !Array.isArray(raw.files) ||
+    raw.files.length === 0 ||
+    raw.files.length > 5000 ||
+    raw.files.some((f) => typeof f !== "string" || !isSafeText(f, 4096) || f.startsWith("/") || f.split("/").includes("..")) ||
+    (raw.branch !== null && !isSafeText(raw.branch, 256)) ||
+    (raw.note !== undefined && !isSafeText(raw.note, MAX_REASON_CHARS, true))
+  ) {
+    throw new WorkbenchError("corrupt_record", "delivery 记录损坏");
+  }
+  return raw as unknown as DeliveryRecord;
 }
 
 function validateBaseline(raw: unknown): BaselineSnapshot | null {
@@ -327,8 +404,206 @@ export function validateVerificationRecord(raw: unknown): VerificationRecord {
   return raw as unknown as VerificationRecord;
 }
 
+function validateCriterionEntry(raw: unknown, label: string): Criterion {
+  if (!isRecord(raw) || typeof raw.id !== "string" || !TOKEN_ID_RE.test(raw.id) || !isSafeText(raw.description, 1000) || typeof raw.required !== "boolean") {
+    throw new WorkbenchError("corrupt_record", `${label} 中的验收条件损坏`);
+  }
+  const command = raw.command;
+  if (command !== undefined && (typeof command !== "string" || !isSafeText(command, 512))) {
+    throw new WorkbenchError("corrupt_record", `${label} 中的验收条件命令损坏`);
+  }
+  return raw as unknown as Criterion;
+}
+
+function validateChangedFileEntry(raw: unknown, label: string): ChangedFile {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 的文件记录无效`);
+  assertAllowedKeys(raw, ["path", "status", "staged", "unstaged"], `${label}.files`);
+  if (
+    !isSafeText(raw.path, 4096) ||
+    raw.path.startsWith("/") ||
+    raw.path.split("/").includes("..") ||
+    !isSafeText(raw.status, 8) ||
+    typeof raw.staged !== "boolean" ||
+    typeof raw.unstaged !== "boolean"
+  ) {
+    throw new WorkbenchError("corrupt_record", `${label} 的文件记录损坏`);
+  }
+  return raw as unknown as ChangedFile;
+}
+
+function validateCommitInfoEntry(raw: unknown, label: string): CommitInfo {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 的提交记录无效`);
+  assertAllowedKeys(raw, ["hash", "shortHash", "author", "at", "subject"], `${label}.commits`);
+  if (
+    typeof raw.hash !== "string" ||
+    !GIT_REF_RE.test(raw.hash) ||
+    typeof raw.shortHash !== "string" ||
+    !isSafeText(raw.author, 400, true) ||
+    !isSafeInt(raw.at, 0) ||
+    !isSafeText(raw.subject, 2000, true)
+  ) {
+    throw new WorkbenchError("corrupt_record", `${label} 的提交记录损坏`);
+  }
+  return raw as unknown as CommitInfo;
+}
+
+export function validateAcceptanceGitEvidence(raw: unknown): AcceptanceGitEvidence {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance git 证据必须是对象");
+  assertAllowedKeys(
+    raw,
+    [
+      "diffStatus",
+      "reason",
+      "isGitRepo",
+      "baselineRequested",
+      "baselineHead",
+      "baselineAvailable",
+      "observedHead",
+      "fingerprint",
+      "dirty",
+      "files",
+      "filesScope",
+      "commits",
+      "diff",
+      "diffBytes",
+      "diffTruncated",
+      "maxDiffBytes",
+      "binaryFiles",
+      "omittedFiles",
+      "capturedAt",
+    ],
+    "acceptance.git",
+  );
+  if (
+    !DIFF_STATUSES.includes(raw.diffStatus as DiffEvidenceStatus) ||
+    (raw.reason !== null && !isSafeText(raw.reason, 2000)) ||
+    typeof raw.isGitRepo !== "boolean" ||
+    (raw.baselineRequested !== null && (typeof raw.baselineRequested !== "string" || !GIT_REF_RE.test(raw.baselineRequested))) ||
+    (raw.baselineHead !== null && (typeof raw.baselineHead !== "string" || !GIT_REF_RE.test(raw.baselineHead))) ||
+    typeof raw.baselineAvailable !== "boolean" ||
+    typeof raw.observedHead !== "string" ||
+    (raw.fingerprint !== null && (typeof raw.fingerprint !== "string" || !SHA256_RE.test(raw.fingerprint))) ||
+    typeof raw.dirty !== "boolean" ||
+    !FILES_SCOPES.includes(raw.filesScope as DiffFilesScope) ||
+    !Array.isArray(raw.files) ||
+    raw.files.length > 5000 ||
+    !Array.isArray(raw.commits) ||
+    raw.commits.length > 100 ||
+    !isSafeText(raw.diff, MAX_ACCEPTANCE_DIFF_BYTES, true) ||
+    !isSafeInt(raw.diffBytes, 0) ||
+    typeof raw.diffTruncated !== "boolean" ||
+    !isSafeInt(raw.maxDiffBytes, 1) ||
+    !Array.isArray(raw.binaryFiles) ||
+    !Array.isArray(raw.omittedFiles) ||
+    raw.binaryFiles.some((p) => typeof p !== "string" || !isSafeText(p, 4096)) ||
+    raw.omittedFiles.some((p) => typeof p !== "string" || !isSafeText(p, 4096)) ||
+    !isSafeInt(raw.capturedAt, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "acceptance git 证据损坏");
+  }
+  for (const file of raw.files) validateChangedFileEntry(file, "acceptance.git");
+  for (const commit of raw.commits) validateCommitInfoEntry(commit, "acceptance.git");
+  if (raw.diffStatus === "captured" && raw.diffBytes !== Buffer.byteLength(String(raw.diff), "utf8")) {
+    throw new WorkbenchError("corrupt_record", "acceptance git 证据的 diff 字节数与内容不一致");
+  }
+  return raw as unknown as AcceptanceGitEvidence;
+}
+
+export function validateAcceptanceVerificationEvidence(raw: unknown): AcceptanceVerificationEvidence {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance 验证证据必须是对象");
+  assertAllowedKeys(raw, ["record", "effectiveState", "staleReason", "selectedForAcceptance"], "acceptance.verification");
+  if (
+    !EFFECTIVE_STATES.includes(raw.effectiveState as EffectiveVerificationState) ||
+    (raw.staleReason !== null && !isSafeText(raw.staleReason, 2000)) ||
+    typeof raw.selectedForAcceptance !== "boolean"
+  ) {
+    throw new WorkbenchError("corrupt_record", "acceptance 验证证据损坏");
+  }
+  return {
+    record: validateVerificationRecord(raw.record),
+    effectiveState: raw.effectiveState as EffectiveVerificationState,
+    staleReason: (raw.staleReason ?? null) as string | null,
+    selectedForAcceptance: raw.selectedForAcceptance,
+  };
+}
+
+/** Validates one frozen acceptance artifact; guarantees the stored bytes can be trusted as history. */
+export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?: string): AcceptanceSnapshot {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "验收快照必须是对象");
+  assertAllowedKeys(
+    raw,
+    [
+      "schemaVersion",
+      "id",
+      "requirementId",
+      "capturedAt",
+      "acceptedAt",
+      "specHash",
+      "designHash",
+      "codeSnapshotHash",
+      "codeRootKind",
+      "criteria",
+      "coverage",
+      "requiredTotal",
+      "requiredPassed",
+      "verifications",
+      "omittedVerificationCount",
+      "git",
+      "contentDigest",
+    ],
+    "验收快照",
+  );
+  if (
+    raw.schemaVersion !== ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION ||
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    typeof raw.requirementId !== "string" ||
+    !REQUIREMENT_ID_RE.test(raw.requirementId) ||
+    (expectedRequirementId && raw.requirementId !== expectedRequirementId) ||
+    !isSafeInt(raw.capturedAt, 0) ||
+    !isSafeInt(raw.acceptedAt, 0) ||
+    typeof raw.specHash !== "string" ||
+    !SHA256_RE.test(raw.specHash) ||
+    (raw.designHash !== "" && (typeof raw.designHash !== "string" || !SHA256_RE.test(raw.designHash))) ||
+    typeof raw.codeSnapshotHash !== "string" ||
+    !SHA256_RE.test(raw.codeSnapshotHash) ||
+    (raw.codeRootKind !== "project" && raw.codeRootKind !== "sandbox") ||
+    !Array.isArray(raw.criteria) ||
+    raw.criteria.length > MAX_CRITERIA ||
+    !Array.isArray(raw.coverage) ||
+    !isSafeInt(raw.requiredTotal, 0) ||
+    !isSafeInt(raw.requiredPassed, 0) ||
+    !Array.isArray(raw.verifications) ||
+    raw.verifications.length > MAX_SNAPSHOT_VERIFICATIONS ||
+    !isSafeInt(raw.omittedVerificationCount, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "验收快照字段损坏");
+  }
+  for (const criterion of raw.criteria) validateCriterionEntry(criterion, "验收快照");
+  for (const item of raw.coverage) {
+    if (!isRecord(item)) throw new WorkbenchError("corrupt_record", "验收快照覆盖记录损坏");
+    assertAllowedKeys(item, ["criterion", "state", "verificationIds", "reason"], "验收快照.coverage");
+    if (
+      !COVERAGE_STATES.includes(item.state as CriterionCoverageState) ||
+      (item.reason !== null && !isSafeText(item.reason, 2000)) ||
+      !Array.isArray(item.verificationIds) ||
+      item.verificationIds.some((id) => typeof id !== "string" || !TOKEN_ID_RE.test(id))
+    ) {
+      throw new WorkbenchError("corrupt_record", "验收快照覆盖记录损坏");
+    }
+    validateCriterionEntry(item.criterion, "验收快照.coverage");
+  }
+  for (const verification of raw.verifications) validateAcceptanceVerificationEvidence(verification);
+  validateAcceptanceGitEvidence(raw.git);
+  if (typeof raw.contentDigest !== "string" || !SHA256_RE.test(raw.contentDigest)) {
+    throw new WorkbenchError("corrupt_record", "验收快照缺少有效内容摘要");
+  }
+  return raw as unknown as AcceptanceSnapshot;
+}
+
 function validateHandoffNote(raw: unknown): HandoffNote | null {
   if (raw === null || raw === undefined) return null;
+
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "handoffNote 字段无效");
   assertAllowedKeys(raw, ["updatedAt", "keyDecisions", "deadEnds", "nextSteps"], "handoffNote");
   const isStrList = (v: unknown) =>
@@ -456,6 +731,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       "criteria",
       "approval",
       "acceptance",
+      "delivery",
       "tasks",
       "baseline",
       "verifications",
@@ -525,6 +801,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   }
   validateApproval(raw.approval);
   validateAcceptance(raw.acceptance);
+  validateDelivery(raw.delivery);
   validateBaseline(raw.baseline);
   validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);

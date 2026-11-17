@@ -25,7 +25,8 @@ export const queryKeys = {
   project: (projectId: string | null) => ["project", projectId] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
-  diff: (projectId: string | null, id: string | null) => ["diff", projectId, id] as const,
+  diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
+  delivery: (projectId: string | null, id: string | null) => ["delivery", projectId, id] as const,
 };
 
 export function useEvolutionQuery(enabled: boolean) {
@@ -99,10 +100,18 @@ export function useRequirementQuery(activeProjectId: string | null, id: string |
   });
 }
 
-export function useDiffQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
+export function useDiffQuery(activeProjectId: string | null, id: string | null, enabled: boolean, live = false) {
   return useQuery({
-    queryKey: queryKeys.diff(activeProjectId, id),
-    queryFn: () => api.getDiff(id!),
+    queryKey: queryKeys.diff(activeProjectId, id, live),
+    queryFn: () => api.getDiff(id!, { live }),
+    enabled: Boolean(id && enabled),
+  });
+}
+
+export function useDeliveryQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.delivery(activeProjectId, id),
+    queryFn: () => api.getDelivery(id!),
     enabled: Boolean(id && enabled),
   });
 }

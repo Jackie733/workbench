@@ -11,10 +11,13 @@ import {
   blockRequirement,
   cancelRequirement,
   createRequirement,
+  deliverRequirement,
   getAgentRunDetail,
   getDesignHistoryVersion,
   getProjectStatus,
   getRequirement,
+  getRequirementDeliveryPreview,
+  getRequirementDiff,
   getVerificationEvidence,
   initProject,
   listRequirements,
@@ -28,7 +31,7 @@ import {
 } from "../core/engine.ts";
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { observeGitChanges, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
@@ -721,10 +724,9 @@ export async function startWorkbenchServer(options: {
       }
 
       if (method === "GET" && sub === "diff") {
-        const detail = getRequirement(base, id);
-        const codeRoot = resolveCodeRoot(base, id);
-        const changes = await observeGitChanges(codeRoot, { sinceHead: detail.state.baseline?.head ?? null });
-        return jsonResponse({ changes });
+        const live = url.searchParams.get("live") === "1";
+        const diffView = await getRequirementDiff(base, id, { live });
+        return jsonResponse({ ...diffView, changes: diffView.observation });
       }
 
       const histMatch = /^history\/(\d+)$/.exec(sub);
@@ -936,6 +938,31 @@ export async function startWorkbenchServer(options: {
         await distillRequirementToPlaybook(base, detail).catch(() => {});
         broadcastUi({ type: "workbench.updated", reason: "accepted", id, at: Date.now() });
         return jsonResponse({ detail });
+      }
+
+      if (method === "GET" && sub === "delivery") {
+        const preview = await getRequirementDeliveryPreview(base, id);
+        return jsonResponse(preview);
+      }
+
+      if (method === "POST" && sub === "deliver") {
+        const body = await readBody(req);
+        const files = Array.isArray(body.files) ? body.files.filter((f): f is string => typeof f === "string") : [];
+        const commitMessage = typeof body.commitMessage === "string" ? body.commitMessage : "";
+        const res = await deliverRequirement(base, id, {
+          files,
+          commitMessage,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          note: typeof body.note === "string" ? body.note : undefined,
+        });
+        const reloadRes = res.touchesWeb ? await reloadWebBundle() : { reloaded: false };
+        broadcastUi({ type: "workbench.updated", reason: "delivered", root: base, id, at: Date.now() });
+        return jsonResponse({
+          detail: res.detail,
+          delivery: res.delivery,
+          webReloaded: reloadRes.reloaded,
+          restartRecommended: res.touchesBackend,
+        });
       }
 
       if (method === "POST" && sub === "block") {

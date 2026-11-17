@@ -14,6 +14,7 @@ import {
   runBusy,
   toggleVerificationLog,
   triggerActiveRun,
+  useDeliveryQuery,
   useDiffQuery,
   useHubStateQuery,
   useProjectQuery,
@@ -24,6 +25,7 @@ import {
   collectModelOptions,
   COVERAGE_META,
   defaultActionForRequirement,
+  describeEvidenceContext,
   EVIDENCE_META,
   formatDateTime,
   STAGE_META,
@@ -38,12 +40,14 @@ import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
   const stage = d.state.stage;
+  const delivered = Boolean(d.state.delivery);
   const steps = [
     { key: "draft", label: "1. 需求草稿" },
     { key: "designing", label: "2. 方案设计" },
     { key: "awaiting_approval", label: "3. 人工审阅" },
     { key: "implementing", label: "4. 编码与验证" },
     { key: "done", label: "5. 验收完成" },
+    { key: "delivered", label: "6. 交付收尾" },
   ];
   const order: Record<Stage, number> = {
     draft: 0,
@@ -51,7 +55,7 @@ function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }
     awaiting_approval: 2,
     implementing: 3,
     awaiting_acceptance: 3,
-    done: 4,
+    done: delivered ? 5 : 5,
     blocked: 3,
     cancelled: 0,
   };
@@ -60,13 +64,16 @@ function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }
   return (
     <div className="stepper" data-testid="stage-stepper">
       {steps.map((st, i) => {
-        const isActive = stage !== "done" && i === idx;
         const cls =
           stage === "done"
-            ? "done"
+            ? delivered
+              ? "done"
+              : i < 5
+                ? "done"
+                : "active"
             : i < idx
               ? "done"
-              : isActive
+              : i === idx
                 ? running
                   ? "active step-running"
                   : "active"
@@ -434,7 +441,34 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
           <h3>
             验收条件（必需 {validity.coverage.requiredPassed}/{validity.coverage.requiredTotal}）
           </h3>
+          {validity.evidenceContext !== "live" && (
+            <span
+              className={`badge ${validity.evidenceContext === "accepted" ? "success" : "warning"}`}
+              data-testid="coverage-context-badge"
+            >
+              {validity.evidenceContext === "accepted" ? "已固化验收快照" : "历史覆盖恢复（无完整快照）"}
+            </span>
+          )}
         </div>
+        {validity.evidenceContext !== "live" && (() => {
+          const evInfo = describeEvidenceContext(validity);
+          return (
+            <div
+              className={`callout ${evInfo.tone}`}
+              data-testid="evidence-provenance-banner"
+              style={{ marginBottom: 10, fontSize: 12.5 }}
+            >
+              <strong>{evInfo.title}</strong>
+              {evInfo.acceptedAtText ? ` · 验收时间 ${evInfo.acceptedAtText}` : ""}
+              <div className="muted" style={{ marginTop: 2 }}>
+                {evInfo.provenanceText}
+              </div>
+              {evInfo.unavailableReason && (
+                <div style={{ marginTop: 4 }}>{evInfo.unavailableReason}</div>
+              )}
+            </div>
+          );
+        })()}
         {validity.coverage.items.length === 0 ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             尚未定义验收条件。可让 Agent 在方案中自动补全，或手动编辑添加。
@@ -600,10 +634,16 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
 
   const [manualCmd, setManualCmd] = useState("");
   const [manualCriteria, setManualCriteria] = useState("");
+  const [showLiveComparison, setShowLiveComparison] = useState(false);
 
   const { state: s, validity } = d;
-  const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true);
-  const diffObs = diffRes?.changes ?? null;
+  const isDone = s.stage === "done";
+  const isTerminal = isDone || s.stage === "cancelled";
+  const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true, false);
+  const { data: liveDiffRes } = useDiffQuery(activeProjectId, s.id, isDone && showLiveComparison, true);
+  const diffObs = diffRes?.observation ?? diffRes?.changes ?? null;
+  const liveDiffObs = liveDiffRes?.observation ?? liveDiffRes?.changes ?? null;
+  const evidenceSummary = describeEvidenceContext(validity, diffRes ?? null);
 
   const tasksDone = s.tasks.filter((t) => t.status === "done").length;
 
@@ -615,6 +655,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
 
   const parsedFiles = diffObs ? parseUnifiedDiff(diffObs.diff) : [];
   const activeDiffFile = parsedFiles.find((f) => f.path === selectedDiffFile) ?? parsedFiles[0] ?? null;
+  const liveParsedFiles = liveDiffObs ? parseUnifiedDiff(liveDiffObs.diff) : [];
 
   const runManualVerify = async () => {
     const command = manualCmd.trim();
@@ -707,18 +748,20 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                     >
                       {log !== undefined ? "收起日志" : "查看输出"}
                     </button>
-                    <button
-                      className="btn xs"
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
-                          if (res) showToast(res.runs[0]?.passed ? "验证通过" : "验证失败", !res.runs[0]?.passed);
-                        })
-                      }
-                    >
-                      重跑
-                    </button>
+                    {!isTerminal && (
+                      <button
+                        className="btn xs"
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
+                            if (res) showToast(res.runs[0]?.passed ? "验证通过" : "验证失败", !res.runs[0]?.passed);
+                          })
+                        }
+                      >
+                        重跑
+                      </button>
+                    )}
                   </div>
                 </div>
                 {latest.staleReason && (
@@ -732,59 +775,100 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
           })
         )}
 
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <input
-            className="input"
-            id="manual-verify-cmd"
-            placeholder="手动运行命令，如 bun test"
-            style={{ flex: 2, minWidth: 180 }}
-            value={manualCmd}
-            onChange={(e) => setManualCmd(e.target.value)}
-          />
-          <input
-            className="input"
-            id="manual-verify-criteria"
-            placeholder="关联条件 ID，如 AC-1"
-            style={{ flex: 1, minWidth: 120 }}
-            value={manualCriteria}
-            onChange={(e) => setManualCriteria(e.target.value)}
-          />
-          <button
-            className="btn"
-            type="button"
-            disabled={busy}
-            onClick={() => void runManualVerify()}
-          >
-            执行验证
-          </button>
-        </div>
+        {!isTerminal && (
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <input
+              className="input"
+              id="manual-verify-cmd"
+              placeholder="手动运行命令，如 bun test"
+              style={{ flex: 2, minWidth: 180 }}
+              value={manualCmd}
+              onChange={(e) => setManualCmd(e.target.value)}
+            />
+            <input
+              className="input"
+              id="manual-verify-criteria"
+              placeholder="关联条件 ID，如 AC-1"
+              style={{ flex: 1, minWidth: 120 }}
+              value={manualCriteria}
+              onChange={(e) => setManualCriteria(e.target.value)}
+            />
+            <button
+              className="btn"
+              type="button"
+              disabled={busy}
+              onClick={() => void runManualVerify()}
+            >
+              执行验证
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="card">
         <div className="card-head">
-          <h3>代码改动（Git Diff）</h3>
-          <button
-            className="btn xs"
-            type="button"
-            onClick={() => {
-              void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id) });
-              showToast("已刷新工作区 Git Diff");
-            }}
-          >
-            刷新 Diff
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <h3>{isDone ? "验收代码改动快照（Git Diff）" : "代码改动（Git Diff）"}</h3>
+            {isDone && (
+              <span
+                className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}
+                data-testid="diff-context-badge"
+              >
+                {evidenceSummary.title}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {isDone ? (
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="toggle-live-diff-btn"
+                onClick={() => setShowLiveComparison((prev) => !prev)}
+              >
+                {showLiveComparison ? "收起当前工作区对比" : "对比当前工作区"}
+              </button>
+            ) : (
+              <button
+                className="btn xs"
+                type="button"
+                onClick={() => {
+                  void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, false) });
+                  showToast("已刷新工作区 Git Diff");
+                }}
+              >
+                刷新 Diff
+              </button>
+            )}
+          </div>
         </div>
-        {!diffObs ? (
+        {isDone && (
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }} data-testid="diff-provenance-meta">
+            {evidenceSummary.acceptedAtText && <span>验收时间：{evidenceSummary.acceptedAtText} · </span>}
+            <span>{evidenceSummary.provenanceText}</span>
+            {evidenceSummary.scopeNote && <div>{evidenceSummary.scopeNote}</div>}
+          </div>
+        )}
+        {evidenceSummary.truncationFlags.length > 0 && (
+          <div className="callout warning" data-testid="diff-truncation-notice" style={{ marginBottom: 10, fontSize: 12.5 }}>
+            {evidenceSummary.truncationFlags.join("；")}
+          </div>
+        )}
+        {!diffRes ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             正在加载代码变更…
           </p>
+        ) : diffRes.status === "unavailable" || !diffObs ? (
+          <div className="callout warning" data-testid="diff-unavailable-notice" style={{ fontSize: 13, margin: 0 }}>
+            <strong>历史代码差异不可用</strong>：{diffRes.reason ?? evidenceSummary.unavailableReason ?? "无法获取快照"}
+          </div>
         ) : !diffObs.isGitRepo ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             当前目录不是 Git 仓库。
           </p>
-        ) : diffObs.files.length === 0 ? (
+        ) : diffRes.status === "empty" || diffObs.files.length === 0 ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            自基线以来工作区暂无代码变更。
+            {isDone ? "本次验收记录无代码变更（空 Diff）。" : "自基线以来工作区暂无代码变更。"}
           </p>
         ) : (
           <div className="diff-split">
@@ -814,6 +898,51 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
           </div>
         )}
       </div>
+
+      {isDone && showLiveComparison && (
+        <div className="card" data-testid="live-diff-comparison-card">
+          <div className="card-head">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <h3>当前工作区实时对比</h3>
+              <span className="badge info">实时工作区（非验收快照）</span>
+            </div>
+            <button
+              className="btn xs"
+              type="button"
+              onClick={() => {
+                void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, true) });
+                showToast("已刷新当前工作区对比");
+              }}
+            >
+              刷新对比
+            </button>
+          </div>
+          {!liveDiffRes ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              正在读取当前工作区对比…
+            </p>
+          ) : liveDiffRes.status === "unavailable" || !liveDiffObs ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              当前工作区对比不可用：{liveDiffRes.reason ?? "无法读取"}
+            </p>
+          ) : liveDiffObs.files.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              当前工作区相对基线暂无变更。
+            </p>
+          ) : (
+            <div className="muted" style={{ fontSize: 12.5 }}>
+              当前工作区变更文件 {liveDiffObs.files.length} 个（解析补丁 {liveParsedFiles.length} 个），与已固化的验收快照独立展示。
+              <div
+                className="diff-code"
+                style={{ marginTop: 8, maxHeight: 320, overflow: "auto" }}
+                dangerouslySetInnerHTML={{
+                  __html: renderDiffLinesHtml(liveDiffObs.diff.split("\n")),
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
 }
@@ -903,6 +1032,8 @@ export function WorkspaceView() {
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const isDoneStage = reqData?.detail?.state.stage === "done";
+  const { data: deliveryPreview } = useDeliveryQuery(activeProjectId, selectedId, Boolean(isDoneStage));
 
   const d = reqData?.detail ?? null;
   if (!d) return <p className="muted">正在加载需求详情…</p>;
@@ -911,6 +1042,18 @@ export function WorkspaceView() {
   const stageMeta = STAGE_META[s.stage];
   const { banner } = validity;
   const bridgeConnected = Boolean(project?.bridge.connected);
+
+  const openDeliverModal = () => {
+    const candidates = deliveryPreview?.candidates ?? [];
+    const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
+    const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
+    setModal({
+      kind: "deliver",
+      commitMessage: deliveryPreview?.suggestedMessage ?? `feat(${s.id.toLowerCase()}): ${s.title}`,
+      selectedFiles: defaultSelected,
+      note: "",
+    });
+  };
 
   const harnesses = hub?.harnesses ?? [];
   const modelOptions = collectModelOptions(harnesses);
@@ -1069,6 +1212,28 @@ export function WorkspaceView() {
       <section className={`banner ${banner.tone}`} data-testid="action-banner">
         <div>
           <div className="banner-text">{banner.headline}</div>
+          {s.stage === "awaiting_approval" && project?.git?.isGitRepo && project.git.dirty && (
+            <div className="muted xs" style={{ marginTop: 4 }} data-testid="dirty-baseline-hint">
+              提示：当前主工作区存在未提交变更，批准后将以当前脏工作区作为基线。
+            </div>
+          )}
+          {s.stage === "done" && s.delivery && (
+            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-summary-line">
+              已交付提交 <code>{s.delivery.shortHash}</code>
+              {s.delivery.branch ? ` · 分支 ${s.delivery.branch}` : ""} · {s.delivery.files.length} 个文件 ·{" "}
+              {formatDateTime(s.delivery.deliveredAt)}
+            </div>
+          )}
+          {s.stage === "done" && !s.delivery && deliveryPreview?.canCommit && (
+            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-pending-hint">
+              工作区尚有 {deliveryPreview.candidates.length} 个未提交变更，建议完成 Git 交付提交以保持下一条需求基线干净。
+            </div>
+          )}
+          {s.stage === "done" && !s.delivery && deliveryPreview?.sandboxActive && (
+            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-sandbox-hint">
+              改动仍在隔离沙箱中，请先点击「应用沙箱改动」合并到主干后再执行 Git 交付提交。
+            </div>
+          )}
           {canRunModel && (
             <div className="banner-runner-row">
               <span className="xs muted">模型调度：</span>
@@ -1124,6 +1289,17 @@ export function WorkspaceView() {
               {sec.label}
             </button>
           ))}
+          {s.stage === "done" && deliveryPreview?.canCommit && (
+            <button
+              className={s.delivery ? "btn" : "btn primary"}
+              type="button"
+              data-testid="open-deliver-btn"
+              disabled={busy}
+              onClick={openDeliverModal}
+            >
+              {s.delivery ? "补充交付提交…" : "提交代码交付…"}
+            </button>
+          )}
           {reqData?.sandbox && s.stage === "done" && (
             <button
               className="btn"

@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import { WorkbenchError } from "./errors.ts";
+import { canonicalRoot } from "./fs.ts";
+import {
+  commitFilesInGit,
+  detectOmittedDiffContent,
+  inspectWorkingTreeForDelivery,
+  observeGitChanges,
+  observeGitSnapshot,
+} from "./git.ts";
+import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
   createRequirementFiles,
   isProjectInitialized,
@@ -14,19 +24,29 @@ import {
   type RequirementBundle,
 } from "./store.ts";
 import {
+  ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
+  MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_AGENT_RUNS,
   MAX_DISCUSSIONS,
+  MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TIMELINE,
   REVIEW_VERDICTS,
   SCHEMA_VERSION,
+  type AcceptanceSnapshot,
+  type AcceptanceVerificationEvidence,
   type AgentRunRecord,
   type BaselineSnapshot,
   type CriterionInput,
+  type DeliveryCandidateFile,
+  type DeliveryPreview,
+  type DeliveryRecord,
   type DiscussionEntry,
+  type GitObservation,
   type HandoffNote,
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementDetail,
+  type RequirementDiffView,
   type RequirementState,
   type RequirementSummary,
   type ReviewReport,
@@ -45,11 +65,18 @@ import {
   normalizeReason,
   normalizeTasks,
   normalizeTitle,
+  sanitizeOutput,
   validateAgentRunRecord,
   validateMarkdownContent,
   validateVerificationRecord,
 } from "./validate.ts";
-import { computeDesignHash, computeSpecHash, evaluateRequirement } from "./validity.ts";
+import {
+  BASELINE_SCOPE_NOTE,
+  WORKTREE_SCOPE_NOTE,
+  computeDesignHash,
+  computeSpecHash,
+  evaluateRequirement,
+} from "./validity.ts";
 
 function makeEvent(
   at: number,
@@ -80,7 +107,11 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
     designMarkdown: bundle.designMarkdown,
     handoffMarkdown: bundle.handoffMarkdown,
     designHistoryVersions: bundle.designHistoryVersions,
-    validity: evaluateRequirement(bundle.state, currentCodeSnapshotHash),
+    validity: evaluateRequirement(bundle.state, currentCodeSnapshotHash, {
+      acceptanceSnapshot: bundle.acceptanceSnapshot,
+      acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
+      acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+    }),
   };
 }
 
@@ -113,7 +144,11 @@ function buildProgressText(state: RequirementState, requiredTotal: number, requi
 
 function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | null): RequirementSummary {
   const { state } = bundle;
-  const validity = evaluateRequirement(state, currentCodeSnapshotHash);
+  const validity = evaluateRequirement(state, currentCodeSnapshotHash, {
+    acceptanceSnapshot: bundle.acceptanceSnapshot,
+    acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
+    acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+  });
   return {
     id: state.id,
     title: state.title,
@@ -782,6 +817,115 @@ export async function recordVerification(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? record.codeSnapshotHash);
 }
 
+function selectSnapshotVerifications(
+  evaluated: ReturnType<typeof evaluateRequirement>["verifications"],
+  selectedIds: Set<string>,
+): { items: AcceptanceVerificationEvidence[]; omittedCount: number } {
+  const mapped: AcceptanceVerificationEvidence[] = evaluated.map((ev) => ({
+    record: ev.record,
+    effectiveState: ev.effectiveState,
+    staleReason: ev.staleReason,
+    selectedForAcceptance: selectedIds.has(ev.record.id),
+  }));
+  if (mapped.length <= MAX_SNAPSHOT_VERIFICATIONS) {
+    return { items: mapped, omittedCount: 0 };
+  }
+  // Always keep every selected evidence record, filling remaining slots with the most recent runs.
+  const keptIndices = new Set<number>();
+  for (let i = 0; i < mapped.length; i++) {
+    if (mapped[i]!.selectedForAcceptance && keptIndices.size < MAX_SNAPSHOT_VERIFICATIONS) {
+      keptIndices.add(i);
+    }
+  }
+  for (let i = mapped.length - 1; i >= 0 && keptIndices.size < MAX_SNAPSHOT_VERIFICATIONS; i--) {
+    keptIndices.add(i);
+  }
+  const items = mapped.filter((_, idx) => keptIndices.has(idx));
+  return { items, omittedCount: mapped.length - items.length };
+}
+
+function buildSnapshotGitObservation(snap: AcceptanceSnapshot): GitObservation {
+  return {
+    isGitRepo: snap.git.isGitRepo,
+    head: snap.git.observedHead,
+    fingerprint: snap.git.fingerprint,
+    dirty: snap.git.dirty,
+    files: snap.git.files,
+    filesScope: snap.git.filesScope,
+    diff: snap.git.diff,
+    diffBytes: snap.git.diffBytes,
+    diffTruncated: snap.git.diffTruncated,
+    diffStatus: snap.git.diffStatus,
+    diffReason: snap.git.reason,
+    binaryFiles: snap.git.binaryFiles,
+    omittedFiles: snap.git.omittedFiles,
+    baselineRequested: snap.git.baselineRequested,
+    baselineHead: snap.git.baselineHead,
+    baselineAvailable: snap.git.baselineAvailable,
+    commits: snap.git.commits,
+    capturedAt: snap.git.capturedAt,
+  };
+}
+
+/**
+ * Returns diff evidence for a requirement. Done requirements default to their frozen acceptance
+ * artifact (or explicit legacy-unavailable) without reading live Git unless `live: true` is passed.
+ */
+export async function getRequirementDiff(
+  root: string,
+  id: string,
+  options: { live?: boolean; maxDiffBytes?: number } = {},
+): Promise<RequirementDiffView> {
+  const base = canonicalRoot(root);
+  const bundle = readRequirementBundle(base, id);
+  const { state } = bundle;
+
+  if (state.stage === "done" && !options.live) {
+    if (bundle.acceptanceSnapshotStatus === "available" && bundle.acceptanceSnapshot) {
+      const snap = bundle.acceptanceSnapshot;
+      const obs = buildSnapshotGitObservation(snap);
+      return {
+        context: "accepted",
+        status: snap.git.diffStatus,
+        reason: snap.git.reason,
+        acceptedAt: state.acceptance?.acceptedAt ?? snap.acceptedAt,
+        snapshotId: snap.id,
+        snapshotCapturedAt: snap.capturedAt,
+        scopeNote: snap.git.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : WORKTREE_SCOPE_NOTE,
+        observation: obs,
+      };
+    }
+    return {
+      context: "legacy-unavailable",
+      status: "unavailable",
+      reason:
+        bundle.acceptanceSnapshotReason ??
+        "历史验收记录未固化代码差异快照，无法从当前工作区回溯",
+      acceptedAt: state.acceptance?.acceptedAt ?? null,
+      snapshotId: state.acceptance?.snapshot?.id ?? null,
+      snapshotCapturedAt: state.acceptance?.snapshot?.capturedAt ?? null,
+      scopeNote: null,
+      observation: null,
+    };
+  }
+
+  const codeRoot = resolveCodeRoot(base, id);
+  const changes = await observeGitChanges(codeRoot, {
+    sinceHead: state.baseline?.head ?? null,
+    maxDiffBytes: options.maxDiffBytes ?? MAX_ACCEPTANCE_DIFF_BYTES,
+  });
+  return {
+    context: "live",
+    status: changes.diffStatus,
+    reason: changes.diffReason,
+    acceptedAt: null,
+    snapshotId: null,
+    snapshotCapturedAt: null,
+    scopeNote: changes.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : changes.filesScope === "worktree" ? WORKTREE_SCOPE_NOTE : null,
+    observation: changes,
+  };
+}
+
 export async function acceptRequirement(
   root: string,
   id: string,
@@ -794,12 +938,79 @@ export async function acceptRequirement(
   if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
     throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收");
   }
+  const base = canonicalRoot(root);
   const snapshotHash = input.currentCodeSnapshotHash;
-  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+  const codeRoot = resolveCodeRoot(base, id);
+  const codeRootKind = codeRoot !== base ? "sandbox" : "project";
+  if (!fs.existsSync(codeRoot)) {
+    throw new WorkbenchError("acceptance_gate_failed", "代码根目录不存在，无法捕获验收快照");
+  }
+
+  // Pre-flight gate & baseline-relative change capture outside the lock to keep lock hold minimal.
+  const preBundle = readRequirementBundle(base, id);
+  if (input.expectedRevision !== undefined && preBundle.state.revision !== input.expectedRevision) {
+    throw new WorkbenchError(
+      "revision_conflict",
+      `版本冲突：期望 revision=${input.expectedRevision}，实际 revision=${preBundle.state.revision}`,
+      { expectedRevision: input.expectedRevision, actualRevision: preBundle.state.revision },
+    );
+  }
+  if (preBundle.state.stage !== "implementing" && preBundle.state.stage !== "awaiting_acceptance") {
+    throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`);
+  }
+  const preValidity = evaluateRequirement(preBundle.state, snapshotHash);
+  if (!preValidity.acceptanceGate.ok) {
+    throw new WorkbenchError(
+      "acceptance_gate_failed",
+      `验收门禁未通过：${preValidity.acceptanceGate.blockers.join("；")}`,
+      { blockers: preValidity.acceptanceGate.blockers },
+    );
+  }
+
+  const baselineHead = preBundle.state.baseline?.head ?? null;
+  const gitObs = await observeGitChanges(codeRoot, {
+    sinceHead: baselineHead,
+    maxDiffBytes: MAX_ACCEPTANCE_DIFF_BYTES,
+  });
+
+  if (gitObs.isGitRepo) {
+    if (baselineHead && !gitObs.baselineAvailable) {
+      throw new WorkbenchError(
+        "acceptance_gate_failed",
+        gitObs.diffReason ?? "验收基线在当前仓库中不可用，无法捕获可信的基线相对 Diff",
+      );
+    }
+    if (gitObs.diffStatus === "unavailable") {
+      throw new WorkbenchError(
+        "acceptance_gate_failed",
+        gitObs.diffReason ?? "无法捕获验收代码差异快照",
+      );
+    }
+    if (gitObs.fingerprint !== snapshotHash) {
+      throw new WorkbenchError(
+        "revision_conflict",
+        "代码工作区在验收采集期间发生变化，请刷新状态与 Diff 后重试",
+      );
+    }
+  } else if (baselineHead) {
+    throw new WorkbenchError("acceptance_gate_failed", "目标目录已不再是 Git 仓库，无法捕获验收快照");
+  }
+
+  const sanitized = sanitizeOutput(gitObs.diff, MAX_ACCEPTANCE_DIFF_BYTES);
+  const frozenDiff = gitObs.diffStatus === "captured" ? sanitized.text : "";
+  const frozenDiffTruncated = gitObs.diffStatus === "captured" ? gitObs.diffTruncated || sanitized.truncated : false;
+  const frozenOmitted =
+    gitObs.diffStatus === "captured" ? detectOmittedDiffContent(frozenDiff) : { binaryFiles: [], omittedFiles: [] };
+
+  const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
     const { state } = current;
     if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`);
     }
+    if ((state.baseline?.head ?? null) !== baselineHead) {
+      throw new WorkbenchError("revision_conflict", "需求基线在验收期间发生变化，请刷新后重试");
+    }
+
     const validity = evaluateRequirement(state, snapshotHash);
     if (!validity.acceptanceGate.ok) {
       throw new WorkbenchError(
@@ -809,12 +1020,74 @@ export async function acceptRequirement(
       );
     }
 
+    if (gitObs.isGitRepo) {
+      const postSnap = await observeGitSnapshot(codeRoot);
+      if (!postSnap || postSnap.fingerprint !== snapshotHash) {
+        throw new WorkbenchError(
+          "revision_conflict",
+          "代码工作区在验收提交期间发生变化，已拒绝落盘，请刷新后重试",
+        );
+      }
+    }
+
     const passingIds = validity.verifications
       .filter((v) => v.effectiveState === "passed")
       .map((v) => v.record.id);
+    const passingSet = new Set(passingIds);
     const note = input.note?.trim() ? normalizeReason(input.note, "验收备注") : undefined;
+    const { items: frozenVerifications, omittedCount } = selectSnapshotVerifications(
+      validity.verifications,
+      passingSet,
+    );
+
+    const snapshotId = `ACC-${now}-${randomUUID().slice(0, 6)}`;
+    const snapshot: AcceptanceSnapshot = {
+      schemaVersion: ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
+      id: snapshotId,
+      requirementId: state.id,
+      capturedAt: gitObs.capturedAt,
+      acceptedAt: now,
+      specHash: state.specHash,
+      designHash: state.designHash,
+      codeSnapshotHash: snapshotHash,
+      codeRootKind,
+      criteria: state.criteria.map((c) => ({ ...c })),
+      coverage: validity.coverage.items.map((item) => ({
+        criterion: { ...item.criterion },
+        state: item.state,
+        verificationIds: [...item.verificationIds],
+        reason: item.reason,
+      })),
+      requiredTotal: validity.coverage.requiredTotal,
+      requiredPassed: validity.coverage.requiredPassed,
+      verifications: frozenVerifications,
+      omittedVerificationCount: omittedCount,
+      git: {
+        diffStatus: gitObs.diffStatus,
+        reason: gitObs.diffReason,
+        isGitRepo: gitObs.isGitRepo,
+        baselineRequested: gitObs.baselineRequested,
+        baselineHead: gitObs.baselineHead,
+        baselineAvailable: gitObs.baselineAvailable,
+        observedHead: gitObs.head,
+        fingerprint: gitObs.fingerprint,
+        dirty: gitObs.dirty,
+        files: gitObs.files,
+        filesScope: gitObs.filesScope,
+        commits: gitObs.commits,
+        diff: frozenDiff,
+        diffBytes: Buffer.byteLength(frozenDiff, "utf8"),
+        diffTruncated: frozenDiffTruncated,
+        maxDiffBytes: MAX_ACCEPTANCE_DIFF_BYTES,
+        binaryFiles: frozenOmitted.binaryFiles,
+        omittedFiles: frozenOmitted.omittedFiles,
+        capturedAt: gitObs.capturedAt,
+      },
+      contentDigest: "0".repeat(64),
+    };
 
     return {
+      acceptanceSnapshotWrite: { snapshot },
       state: {
         ...state,
         stage: "done",
@@ -841,6 +1114,186 @@ export async function acceptRequirement(
   });
 
   return toDetail(bundle, snapshotHash);
+}
+
+function buildSuggestedCommitMessage(id: string, title: string): string {
+  const cleanTitle = title.replace(/[\r\n]+/g, " ").trim().slice(0, 72) || "complete requirement";
+  return `feat(${id.toLowerCase()}): ${cleanTitle}`;
+}
+
+function normalizeDeliveryFiles(files: string[]): string[] {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件");
+  }
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of files) {
+    if (typeof raw !== "string") {
+      throw new WorkbenchError("invalid_input", "交付文件路径必须是字符串");
+    }
+    const trimmed = raw.trim();
+    if (
+      !trimmed ||
+      !isSafeText(trimmed, 4096) ||
+      trimmed.startsWith("/") ||
+      trimmed.split("/").includes("..") ||
+      trimmed === ".workbench" ||
+      trimmed.startsWith(".workbench/") ||
+      trimmed === ".omp/workbench" ||
+      trimmed.startsWith(".omp/workbench/")
+    ) {
+      throw new WorkbenchError("invalid_input", `非法或不予提交的路径: ${raw}`);
+    }
+    if (!seen.has(trimmed)) {
+      seen.add(trimmed);
+      unique.push(trimmed);
+    }
+  }
+  return unique;
+}
+
+/** Previews uncommitted workspace changes for post-acceptance Git delivery wrap-up. */
+export async function getRequirementDeliveryPreview(root: string, id: string): Promise<DeliveryPreview> {
+  const base = canonicalRoot(root);
+  const bundle = readRequirementBundle(base, id);
+  const { state } = bundle;
+  const sandboxActive = Boolean(getSandboxForRequirement(base, id));
+  const tree = await inspectWorkingTreeForDelivery(base);
+  const acceptedSet = new Set((bundle.acceptanceSnapshot?.git.files ?? []).map((f) => f.path));
+
+  const candidates: DeliveryCandidateFile[] = tree.files.map((f) => ({
+    path: f.path,
+    status: f.status,
+    staged: f.staged,
+    unstaged: f.unstaged,
+    inAcceptedSnapshot: acceptedSet.has(f.path),
+  }));
+
+  let reason: string | null = null;
+  let canCommit = false;
+  if (state.stage !== "done") {
+    reason = "仅已验收完成（done）的需求可执行交付提交";
+  } else if (sandboxActive) {
+    reason = "改动仍在隔离沙箱中，请先点击「应用沙箱改动」合并到主干";
+  } else if (!tree.isGitRepo) {
+    reason = "当前目录不是 Git 仓库，无法创建交付提交";
+  } else if (candidates.length === 0) {
+    reason = "当前工作区干净，暂无未提交改动";
+  } else {
+    canCommit = true;
+  }
+
+  return {
+    requirementId: state.id,
+    stage: state.stage,
+    isGitRepo: tree.isGitRepo,
+    branch: tree.branch,
+    head: tree.head,
+    dirty: tree.dirty,
+    sandboxActive,
+    canCommit,
+    reason,
+    suggestedMessage: buildSuggestedCommitMessage(state.id, state.title),
+    candidates,
+    acceptedSnapshotFileCount: acceptedSet.size,
+    delivered: state.delivery ?? null,
+  };
+}
+
+/** Commits selected requirement files to Git and records durable delivery metadata without altering acceptance. */
+export async function deliverRequirement(
+  root: string,
+  id: string,
+  input: {
+    files: string[];
+    commitMessage: string;
+    expectedRevision?: number;
+    note?: string;
+  },
+): Promise<{
+  detail: RequirementDetail;
+  delivery: DeliveryRecord;
+  touchesWeb: boolean;
+  touchesBackend: boolean;
+}> {
+  const base = canonicalRoot(root);
+  const files = normalizeDeliveryFiles(input.files);
+  const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
+  if (!commitMessage || !isSafeText(commitMessage, 4000)) {
+    throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
+  }
+  const note = input.note?.trim() ? normalizeReason(input.note, "交付备注") : undefined;
+
+  let recordedDelivery: DeliveryRecord | null = null;
+  const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
+    const { state } = current;
+    if (state.stage !== "done") {
+      throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能执行交付提交（当前：${state.stage}）`);
+    }
+    if (getSandboxForRequirement(base, id)) {
+      throw new WorkbenchError("invalid_transition", "请先将隔离沙箱改动应用到主干，再执行交付提交");
+    }
+    const tree = await inspectWorkingTreeForDelivery(base);
+    if (!tree.isGitRepo) {
+      throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法创建交付提交");
+    }
+    const dirtySet = new Set(tree.files.map((f) => f.path));
+    const missing = files.filter((f) => !dirtySet.has(f));
+    if (missing.length > 0) {
+      throw new WorkbenchError(
+        "invalid_input",
+        `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
+      );
+    }
+
+    const committed = await commitFilesInGit(base, files, commitMessage);
+    const delivery: DeliveryRecord = {
+      deliveredAt: now,
+      commitHash: committed.commitHash,
+      shortHash: committed.shortHash,
+      commitMessage,
+      files,
+      branch: committed.branch,
+      ...(note ? { note } : {}),
+    };
+    recordedDelivery = delivery;
+
+    const firstLine = commitMessage.split(/\r?\n/, 1)[0] ?? commitMessage;
+    return {
+      state: {
+        ...state,
+        delivery,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "delivered",
+            "human",
+            `已提交代码交付（${committed.shortHash} · ${files.length} 个文件）：${firstLine.slice(0, 140)}`,
+            note,
+          ),
+        ),
+      },
+    };
+  });
+
+  const postSnap = await observeGitSnapshot(base);
+  const touchesWeb = files.some((f) => f.startsWith("src/web/"));
+  const touchesBackend = files.some(
+    (f) =>
+      f.startsWith("src/server/") ||
+      f.startsWith("src/hub/") ||
+      f.startsWith("src/core/") ||
+      f.startsWith("src/cli/") ||
+      f.startsWith("src/mcp/"),
+  );
+
+  return {
+    detail: toDetail(bundle, postSnap?.fingerprint ?? null),
+    delivery: recordedDelivery!,
+    touchesWeb,
+    touchesBackend,
+  };
 }
 
 export async function blockRequirement(
@@ -938,6 +1391,7 @@ export async function reopenRequirement(
         stage: "draft",
         approval: null,
         acceptance: null,
+        delivery: null,
         blockedFrom: null,
         blockedReason: null,
         timeline: appendTimeline(

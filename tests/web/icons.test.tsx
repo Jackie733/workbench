@@ -101,7 +101,7 @@ describe("exhaustive status icon maps", () => {
   });
 
   test("covers every coverage state with a real Lucide component", () => {
-    expect([...Object.keys(COVERAGE_ICONS)].sort()).toEqual(["failed", "passed", "stale", "unverified"]);
+    expect([...Object.keys(COVERAGE_ICONS)].sort()).toEqual(["failed", "passed", "stale", "unavailable", "unverified"]);
     for (const [state, glyph] of Object.entries(COVERAGE_ICONS)) {
       const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
       expect(html).toContain("<svg");
@@ -112,7 +112,7 @@ describe("exhaustive status icon maps", () => {
   test("status metadata carries text labels and no legacy symbols", () => {
     const stateSource = read("src/web/state.ts");
     expect(stateSource).not.toContain("symbol:");
-    for (const label of ["待开始", "进行中", "已完成", "受阻", "通过", "失败", "需重跑", "未验证"]) {
+    for (const label of ["待开始", "进行中", "已完成", "受阻", "通过", "失败", "需重跑", "未验证", "证据不可用"]) {
       expect(stateSource).toContain(label);
     }
   });

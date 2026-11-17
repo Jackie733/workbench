@@ -1,7 +1,7 @@
-import { getRequirement, listRequirements, propose, updateTasks } from "../core/engine.ts";
+import { getRequirement, getRequirementDiff, listRequirements, propose, updateTasks } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { observeGitChanges, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { STAGES, TASK_STATUSES, type CriterionInput, type Stage, type TaskInput } from "../core/types.ts";
@@ -255,21 +255,50 @@ export async function executeWorkbenchTool(
           endedAt: ev.record.endedAt,
           outputPreview: sanitizeOutput(ev.record.outputPreview, 2048).text,
         })),
+        acceptance: detail.state.acceptance,
+        evidenceContext: detail.validity.evidenceContext,
+        provenance: detail.validity.provenance,
         acceptanceGate: detail.validity.acceptanceGate,
         nextHeadline: detail.validity.banner.headline,
       };
       if (includeDiff) {
-        const changes = await observeGitChanges(codeRoot, {
-          sinceHead: detail.state.baseline?.head ?? null,
-          maxDiffBytes: 24 * 1024,
-        });
-        response.gitChanges = {
-          head: changes.head,
-          dirty: changes.dirty,
-          files: changes.files,
-          diff: sanitizeOutput(changes.diff, 24 * 1024).text,
-          diffTruncated: changes.diffTruncated,
-        };
+        const diffView = await getRequirementDiff(base, args.id, { maxDiffBytes: 24 * 1024 });
+        const obs = diffView.observation;
+        response.gitChanges = obs
+          ? {
+              context: diffView.context,
+              status: diffView.status,
+              reason: diffView.reason,
+              acceptedAt: diffView.acceptedAt,
+              snapshotId: diffView.snapshotId,
+              scopeNote: diffView.scopeNote,
+              head: obs.head,
+              dirty: obs.dirty,
+              files: obs.files,
+              filesScope: obs.filesScope,
+              commits: obs.commits,
+              diff: sanitizeOutput(obs.diff, 24 * 1024).text,
+              diffTruncated: obs.diffTruncated,
+              binaryFiles: obs.binaryFiles,
+              omittedFiles: obs.omittedFiles,
+            }
+          : {
+              context: diffView.context,
+              status: diffView.status,
+              reason: diffView.reason,
+              acceptedAt: diffView.acceptedAt,
+              snapshotId: diffView.snapshotId,
+              scopeNote: diffView.scopeNote,
+              head: null,
+              dirty: false,
+              files: [],
+              filesScope: "none",
+              commits: [],
+              diff: "",
+              diffTruncated: false,
+              binaryFiles: [],
+              omittedFiles: [],
+            };
       }
       return response;
     }

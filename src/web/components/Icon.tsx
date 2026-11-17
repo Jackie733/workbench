@@ -36,4 +36,5 @@ export const COVERAGE_ICONS = {
   failed: X,
   stale: RefreshCw,
   unverified: Circle,
+  unavailable: CircleAlert,
 } satisfies Record<CriterionCoverageState, LucideIcon>;

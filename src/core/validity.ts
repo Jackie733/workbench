@@ -1,16 +1,29 @@
 import { createHash } from "node:crypto";
 import type {
+  AcceptanceArtifactStatus,
   AcceptanceGate,
+  AcceptanceSnapshot,
   ActionBanner,
   ApprovalStatus,
   CriteriaCoverage,
   Criterion,
   CriterionCoverageItem,
   EvaluatedVerification,
+  EvidenceContext,
+  EvidenceProvenance,
   RequirementState,
   ReviewValidity,
   ValidityReport,
 } from "./types.ts";
+
+export const BASELINE_SCOPE_NOTE = "基于验收基线采集的全部改动（不证明本需求独占所有文件）";
+export const WORKTREE_SCOPE_NOTE = "基于工作区采集的改动（不证明本需求独占所有文件）";
+
+export interface EvaluateRequirementOptions {
+  acceptanceSnapshot?: AcceptanceSnapshot | null;
+  acceptanceSnapshotStatus?: AcceptanceArtifactStatus;
+  acceptanceSnapshotReason?: string | null;
+}
 
 /** Computes deterministic SHA-256 of spec.md content and normalized acceptance criteria. */
 export function computeSpecHash(specMarkdown: string, criteria: Criterion[]): string {
@@ -312,7 +325,9 @@ export function deriveActionBanner(
         needsDecision: false,
         decisionReason: null,
         banner: {
-          headline: "已验收完成",
+          headline: state.delivery
+            ? `已验收并完成交付（提交 ${state.delivery.shortHash} · ${state.delivery.files.length} 个文件）`
+            : "已验收完成",
           tone: "success",
           primaryAction: null,
           secondaryActions: [{ id: "reopen", label: "重新打开" }],
@@ -350,13 +365,259 @@ export function evaluateReviewReport(
   return { effectiveState: "current", reason: null };
 }
 
-export function evaluateRequirement(state: RequirementState, currentCodeSnapshotHash: string | null): ValidityReport {
+function buildLiveProvenance(
+  state: RequirementState,
+  currentCodeSnapshotHash: string | null,
+): EvidenceProvenance {
+  return {
+    context: "live",
+    coverageSource: "live",
+    artifactStatus: "none",
+    reason: null,
+    acceptedAt: null,
+    snapshotId: null,
+    snapshotPath: null,
+    snapshotCapturedAt: null,
+    specHash: state.specHash,
+    codeSnapshotHash: currentCodeSnapshotHash,
+    verificationIds: [],
+    diffStatus: null,
+    diffBytes: 0,
+    diffTruncated: false,
+    fileCount: 0,
+    commitCount: 0,
+    baselineHead: state.baseline?.head ?? null,
+    observedHead: null,
+    scopeNote: null,
+  };
+}
+
+function evaluateLegacyDoneVerifications(state: RequirementState): EvaluatedVerification[] {
+  const acc = state.acceptance!;
+  const acceptedSet = new Set(acc.verificationIds);
+  return state.verifications.map((record) => {
+    if (record.specHash !== acc.specHash) {
+      return { record, effectiveState: "stale", staleReason: "规范与验收记录不一致" };
+    }
+    if (record.codeSnapshotHash !== acc.codeSnapshotHash) {
+      return { record, effectiveState: "stale", staleReason: "非验收代码快照下的验证记录" };
+    }
+    if (record.timedOut) {
+      return { record, effectiveState: "failed", staleReason: "命令执行超时" };
+    }
+    if (!record.passed) {
+      return { record, effectiveState: "failed", staleReason: `退出码 ${record.exitCode ?? "未知"}` };
+    }
+    if (!acceptedSet.has(record.id)) {
+      return { record, effectiveState: "stale", staleReason: "未被纳入该次验收的历史通过记录" };
+    }
+    return { record, effectiveState: "passed", staleReason: null };
+  });
+}
+
+function evaluateLegacyDoneCoverage(
+  state: RequirementState,
+  evaluated: EvaluatedVerification[],
+): { coverage: CriteriaCoverage; coverageSource: "acceptance-hashes" | "unavailable"; coverageReason: string | null } {
+  const acc = state.acceptance!;
+  if (state.specHash !== acc.specHash) {
+    const items: CriterionCoverageItem[] = state.criteria.map((criterion) => ({
+      criterion,
+      state: "unavailable",
+      verificationIds: [],
+      reason: "验收后规范或验收条件定义已变化，历史覆盖不可用",
+    }));
+    return {
+      coverageSource: "unavailable",
+      coverageReason: "验收后规范或验收条件定义已变化，历史覆盖不可用",
+      coverage: {
+        items,
+        requiredTotal: items.filter((i) => i.criterion.required).length,
+        requiredPassed: 0,
+        optionalTotal: items.filter((i) => !i.criterion.required).length,
+        optionalPassed: 0,
+      },
+    };
+  }
+
+  const byId = new Map(evaluated.map((ev) => [ev.record.id, ev]));
+  const missingAcceptedIds = acc.verificationIds.filter((vid) => {
+    const ev = byId.get(vid);
+    return !ev || ev.effectiveState !== "passed";
+  });
+
+  const items: CriterionCoverageItem[] = [];
+  let requiredTotal = 0;
+  let requiredPassed = 0;
+  let optionalTotal = 0;
+  let optionalPassed = 0;
+
+  for (const criterion of state.criteria) {
+    const matching = evaluated.filter((ev) => ev.record.criterionIds.includes(criterion.id));
+    const verificationIds = matching.map((ev) => ev.record.id);
+    const acceptedPass = matching.find((ev) => ev.effectiveState === "passed");
+    const latest = matching.length > 0 ? matching[matching.length - 1]! : null;
+
+    let coverageState: CriterionCoverageItem["state"] = "unverified";
+    let reason: string | null = "历史验收未包含该条件的验证记录";
+
+    if (acceptedPass) {
+      coverageState = "passed";
+      reason = null;
+    } else if (missingAcceptedIds.length > 0) {
+      coverageState = "unavailable";
+      reason = "部分验收证据记录缺失或与验收哈希不一致，无法确认历史覆盖";
+    } else if (latest) {
+      if (latest.effectiveState === "failed") {
+        coverageState = "failed";
+        reason = latest.staleReason;
+      } else {
+        coverageState = "stale";
+        reason = latest.staleReason;
+      }
+    }
+
+    if (criterion.required) {
+      requiredTotal += 1;
+      if (coverageState === "passed") requiredPassed += 1;
+    } else {
+      optionalTotal += 1;
+      if (coverageState === "passed") optionalPassed += 1;
+    }
+    items.push({ criterion, state: coverageState, verificationIds, reason });
+  }
+
+  return {
+    coverageSource: missingAcceptedIds.length > 0 && requiredPassed === 0 ? "unavailable" : "acceptance-hashes",
+    coverageReason:
+      missingAcceptedIds.length > 0 ? "部分历史验收证据记录缺失或不一致，仅对已证实的记录恢复覆盖" : null,
+    coverage: { items, requiredTotal, requiredPassed, optionalTotal, optionalPassed },
+  };
+}
+
+export function evaluateRequirement(
+  state: RequirementState,
+  currentCodeSnapshotHash: string | null,
+  options: EvaluateRequirementOptions = {},
+): ValidityReport {
   const approval = evaluateApproval(state);
+  const reviewValidity = evaluateReviewReport(state, currentCodeSnapshotHash);
+
+  if (state.stage === "done" && state.acceptance) {
+    const acc = state.acceptance;
+    const snap = options.acceptanceSnapshot ?? null;
+    const snapStatus: AcceptanceArtifactStatus =
+      options.acceptanceSnapshotStatus ?? (snap ? "available" : acc.snapshot ? "missing" : "none");
+    const snapMatches =
+      snap !== null &&
+      snapStatus === "available" &&
+      snap.requirementId === state.id &&
+      snap.specHash === acc.specHash &&
+      snap.codeSnapshotHash === acc.codeSnapshotHash &&
+      snap.acceptedAt === acc.acceptedAt;
+
+    if (snapMatches) {
+      const verifications: EvaluatedVerification[] = snap.verifications.map((ev) => ({
+        record: ev.record,
+        effectiveState: ev.effectiveState,
+        staleReason: ev.staleReason,
+      }));
+      const coverage: CriteriaCoverage = {
+        items: snap.coverage,
+        requiredTotal: snap.requiredTotal,
+        requiredPassed: snap.requiredPassed,
+        optionalTotal: snap.coverage.filter((i) => !i.criterion.required).length,
+        optionalPassed: snap.coverage.filter((i) => !i.criterion.required && i.state === "passed").length,
+      };
+      const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
+      const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+      const provenance: EvidenceProvenance = {
+        context: "accepted",
+        coverageSource: "snapshot",
+        artifactStatus: "available",
+        reason: snap.git.reason,
+        acceptedAt: acc.acceptedAt,
+        snapshotId: snap.id,
+        snapshotPath: acc.snapshot?.path ?? null,
+        snapshotCapturedAt: snap.capturedAt,
+        specHash: snap.specHash,
+        codeSnapshotHash: snap.codeSnapshotHash,
+        verificationIds: [...acc.verificationIds],
+        diffStatus: snap.git.diffStatus,
+        diffBytes: snap.git.diffBytes,
+        diffTruncated: snap.git.diffTruncated,
+        fileCount: snap.git.files.length,
+        commitCount: snap.git.commits.length,
+        baselineHead: snap.git.baselineHead,
+        observedHead: snap.git.observedHead || null,
+        scopeNote: snap.git.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : WORKTREE_SCOPE_NOTE,
+      };
+      return {
+        approval,
+        verifications,
+        coverage,
+        acceptanceGate,
+        reviewValidity,
+        banner,
+        needsDecision,
+        decisionReason,
+        evidenceContext: "accepted",
+        provenance,
+      };
+    }
+
+    // Legacy done record or missing/corrupt artifact: never backfill historical diff from current HEAD.
+    const verifications = evaluateLegacyDoneVerifications(state);
+    const { coverage, coverageSource, coverageReason } = evaluateLegacyDoneCoverage(state, verifications);
+    const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
+    const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+    const diffReason =
+      options.acceptanceSnapshotReason ??
+      (snapStatus === "available"
+        ? "验收证据快照与验收记录不一致，历史 Diff 不可用"
+        : acc.snapshot
+          ? "验收证据文件缺失或损坏，历史 Diff 不可用"
+          : "历史验收记录未固化代码差异快照，无法从当前工作区回溯");
+    const provenance: EvidenceProvenance = {
+      context: "legacy-unavailable",
+      coverageSource,
+      artifactStatus: snapStatus === "available" ? "corrupt" : snapStatus,
+      reason: coverageReason ? `${diffReason}；${coverageReason}` : diffReason,
+      acceptedAt: acc.acceptedAt,
+      snapshotId: acc.snapshot?.id ?? null,
+      snapshotPath: acc.snapshot?.path ?? null,
+      snapshotCapturedAt: acc.snapshot?.capturedAt ?? null,
+      specHash: acc.specHash,
+      codeSnapshotHash: acc.codeSnapshotHash,
+      verificationIds: [...acc.verificationIds],
+      diffStatus: "unavailable",
+      diffBytes: 0,
+      diffTruncated: false,
+      fileCount: 0,
+      commitCount: 0,
+      baselineHead: state.baseline?.head ?? null,
+      observedHead: null,
+      scopeNote: null,
+    };
+    return {
+      approval,
+      verifications,
+      coverage,
+      acceptanceGate,
+      reviewValidity,
+      banner,
+      needsDecision,
+      decisionReason,
+      evidenceContext: "legacy-unavailable",
+      provenance,
+    };
+  }
+
   const verifications = evaluateVerifications(state, currentCodeSnapshotHash);
   const coverage = evaluateCriteriaCoverage(state, verifications);
   const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
-  const reviewValidity = evaluateReviewReport(state, currentCodeSnapshotHash);
   const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+  const evidenceContext: EvidenceContext = "live";
   return {
     approval,
     verifications,
@@ -366,5 +627,7 @@ export function evaluateRequirement(state: RequirementState, currentCodeSnapshot
     banner,
     needsDecision,
     decisionReason,
+    evidenceContext,
+    provenance: buildLiveProvenance(state, currentCodeSnapshotHash),
   };
 }

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { WorkbenchError } from "./errors.ts";
 import {
   atomicWriteFile,
@@ -16,10 +16,14 @@ import {
   MAX_DESIGN_BYTES,
   MAX_EVIDENCE_BYTES,
   MAX_HANDOFF_BYTES,
+  MAX_ACCEPTANCE_SNAPSHOT_BYTES,
   MAX_SPEC_BYTES,
   MAX_STATE_BYTES,
   SCHEMA_VERSION,
   WORKBENCH_DIR,
+  type AcceptanceArtifactStatus,
+  type AcceptanceSnapshot,
+  type AcceptanceSnapshotReference,
   type AgentRunRecord,
   type PrivacyMode,
   type ProjectMetadata,
@@ -31,6 +35,7 @@ import {
   isSafeText,
   REQUIREMENT_ID_RE,
   validateAgentRunRecord,
+  validateAcceptanceSnapshot,
   validateMarkdownContent,
   validateProjectMetadata,
   validateRequirementState,
@@ -43,6 +48,10 @@ export interface RequirementBundle {
   designMarkdown: string;
   handoffMarkdown: string;
   designHistoryVersions: number[];
+  /** Frozen acceptance artifact; null for active requirements and legacy records without an artifact. */
+  acceptanceSnapshot: AcceptanceSnapshot | null;
+  acceptanceSnapshotStatus: AcceptanceArtifactStatus;
+  acceptanceSnapshotReason: string | null;
 }
 
 export function formatRequirementId(num: number): string {
@@ -145,6 +154,65 @@ function listDesignHistoryVersions(base: string, id: string): number[] {
   return versions.sort((a, b) => a - b);
 }
 
+export function acceptanceSnapshotPath(id: string, snapshotId: string): string {
+  assertRequirementId(id);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(snapshotId)) {
+    throw new WorkbenchError("invalid_input", `无效的验收快照 ID: ${snapshotId}`);
+  }
+  return `${WORKBENCH_DIR}/items/${id}/snapshots/acceptance-${snapshotId}.json`;
+}
+
+function snapshotRelPath(snapshotId: string): string {
+  return `snapshots/acceptance-${snapshotId}.json`;
+}
+
+/** Content digest over the snapshot without its own digest field; binds the artifact to its exact bytes. */
+export function computeAcceptanceSnapshotDigest(snapshot: AcceptanceSnapshot): string {
+  const { contentDigest: _omitted, ...rest } = snapshot;
+  return createHash("sha256").update(JSON.stringify(rest), "utf8").digest("hex");
+}
+
+export function sealAcceptanceSnapshot(snapshot: AcceptanceSnapshot): AcceptanceSnapshot {
+  const unsigned: AcceptanceSnapshot = { ...snapshot, contentDigest: "0".repeat(64) };
+  const digest = computeAcceptanceSnapshotDigest(unsigned);
+  return { ...snapshot, contentDigest: digest };
+}
+
+interface LoadedAcceptanceSnapshot {
+  snapshot: AcceptanceSnapshot | null;
+  status: "none" | "available" | "missing" | "corrupt";
+  reason: string | null;
+}
+
+function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAcceptanceSnapshot {
+  const ref = state.acceptance?.snapshot;
+  if (!ref) return { snapshot: null, status: "none", reason: null };
+  if (ref.path !== snapshotRelPath(ref.id)) {
+    // References must stay inside this requirement's storage; never resolve caller-controlled paths.
+    return { snapshot: null, status: "corrupt", reason: "验收快照引用路径无效" };
+  }
+  const filePath = resolveSafePath(base, acceptanceSnapshotPath(state.id, ref.id));
+  if (!fs.existsSync(filePath)) {
+    return { snapshot: null, status: "missing", reason: "验收证据文件不存在，历史 Diff 不可用" };
+  }
+  try {
+    const parsed = validateAcceptanceSnapshot(
+      readJsonStrict<unknown>(filePath, MAX_ACCEPTANCE_SNAPSHOT_BYTES),
+      state.id,
+    );
+    if (parsed.contentDigest !== computeAcceptanceSnapshotDigest(parsed)) {
+      return { snapshot: null, status: "corrupt", reason: "验收证据内容摘要校验失败" };
+    }
+    if (parsed.capturedAt !== ref.capturedAt || parsed.contentDigest !== ref.contentDigest) {
+      return { snapshot: null, status: "corrupt", reason: "验收证据与验收引用记录不一致" };
+    }
+    return { snapshot: parsed, status: "available", reason: null };
+  } catch (error) {
+    const message = error instanceof WorkbenchError ? error.message : "验收证据文件无法解析";
+    return { snapshot: null, status: "corrupt", reason: message };
+  }
+}
+
 export function readRequirementBundle(root: string, id: string): RequirementBundle {
   const base = canonicalRoot(root);
   assertRequirementId(id);
@@ -169,8 +237,18 @@ export function readRequirementBundle(root: string, id: string): RequirementBund
     ? validateMarkdownContent(readBoundedText(handoffPath, MAX_HANDOFF_BYTES), "handoff", true)
     : "";
   const designHistoryVersions = listDesignHistoryVersions(base, id);
+  const loaded = loadAcceptanceSnapshot(base, state);
 
-  return { state, specMarkdown, designMarkdown, handoffMarkdown, designHistoryVersions };
+  return {
+    state,
+    specMarkdown,
+    designMarkdown,
+    handoffMarkdown,
+    designHistoryVersions,
+    acceptanceSnapshot: loaded.snapshot,
+    acceptanceSnapshotStatus: loaded.status,
+    acceptanceSnapshotReason: loaded.reason,
+  };
 }
 
 export function readDesignHistory(root: string, id: string, version: number): string {
@@ -256,7 +334,16 @@ export async function createRequirementFiles(
     };
     atomicWriteJson(projectPath, updatedProject);
 
-    return { state, specMarkdown, designMarkdown, handoffMarkdown: "", designHistoryVersions: [] };
+    return {
+      state,
+      specMarkdown,
+      designMarkdown,
+      handoffMarkdown: "",
+      designHistoryVersions: [],
+      acceptanceSnapshot: null,
+      acceptanceSnapshotStatus: "none",
+      acceptanceSnapshotReason: null,
+    };
   });
 }
 
@@ -269,17 +356,19 @@ export interface RequirementMutationResult {
   snapshotSpecRevision?: number;
   evidenceWrite?: { record: VerificationRecord; rawLog: string };
   runWrite?: { record: AgentRunRecord; rawLog?: string };
+  /** Immutable acceptance artifact; written before the new state is published. */
+  acceptanceSnapshotWrite?: { snapshot: AcceptanceSnapshot };
 }
 
 export async function mutateRequirement(
   root: string,
   id: string,
   expectedRevision: number | undefined,
-  mutator: (bundle: RequirementBundle, now: number) => RequirementMutationResult,
+  mutator: (bundle: RequirementBundle, now: number) => RequirementMutationResult | Promise<RequirementMutationResult>,
 ): Promise<RequirementBundle> {
   const base = canonicalRoot(root);
   assertRequirementId(id);
-  return withProjectWriteLock(base, () => {
+  return withProjectWriteLock(base, async () => {
     const bundle = readRequirementBundle(base, id);
     if (expectedRevision !== undefined && bundle.state.revision !== expectedRevision) {
       throw new WorkbenchError(
@@ -294,7 +383,7 @@ export async function mutateRequirement(
     }
 
     const now = Date.now();
-    const result = mutator(bundle, now);
+    const result = await mutator(bundle, now);
     const nextState: RequirementState = {
       ...result.state,
       revision: bundle.state.revision + 1,
@@ -350,14 +439,59 @@ export async function mutateRequirement(
       }
     }
 
-    atomicWriteJson(resolveSafePath(base, `${itemRel}/state.json`), nextState);
+    let publishedState = nextState;
+    let sealedSnapshot: AcceptanceSnapshot | null = null;
+    if (result.acceptanceSnapshotWrite) {
+      const snapshot = sealAcceptanceSnapshot(result.acceptanceSnapshotWrite.snapshot);
+      validateAcceptanceSnapshot(snapshot, id);
+      const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+      const bytes = Buffer.byteLength(serialized, "utf8");
+      if (bytes > MAX_ACCEPTANCE_SNAPSHOT_BYTES) {
+        throw new WorkbenchError("invalid_input", "验收证据快照超出存储上限，无法安全固化");
+      }
+      if (!nextState.acceptance) {
+        throw new WorkbenchError("invalid_input", "只有人类验收操作可以固化验收证据快照");
+      }
+      const artifactPath = resolveSafePath(base, acceptanceSnapshotPath(id, snapshot.id));
+      if (fs.existsSync(artifactPath)) {
+        throw new WorkbenchError("invalid_input", `验收证据快照 ID 已存在: ${snapshot.id}`);
+      }
+      const reference: AcceptanceSnapshotReference = {
+        id: snapshot.id,
+        path: snapshotRelPath(snapshot.id),
+        schemaVersion: snapshot.schemaVersion,
+        capturedAt: snapshot.capturedAt,
+        contentDigest: snapshot.contentDigest,
+        sizeBytes: bytes,
+      };
+      publishedState = {
+        ...nextState,
+        acceptance: { ...nextState.acceptance, snapshot: reference },
+      };
+      validateRequirementState(publishedState, id);
+      atomicWriteFile(artifactPath, serialized);
+      sealedSnapshot = snapshot;
+    }
+
+    atomicWriteJson(resolveSafePath(base, `${itemRel}/state.json`), publishedState);
 
     return {
-      state: nextState,
+      state: publishedState,
       specMarkdown: nextSpec,
       designMarkdown: nextDesign,
       handoffMarkdown: nextHandoff,
       designHistoryVersions: listDesignHistoryVersions(base, id),
+      acceptanceSnapshot: publishedState.acceptance ? (sealedSnapshot ?? bundle.acceptanceSnapshot) : null,
+      acceptanceSnapshotStatus: publishedState.acceptance
+        ? sealedSnapshot
+          ? "available"
+          : bundle.acceptanceSnapshotStatus
+        : "none",
+      acceptanceSnapshotReason: publishedState.acceptance
+        ? sealedSnapshot
+          ? null
+          : bundle.acceptanceSnapshotReason
+        : null,
     };
   });
 }

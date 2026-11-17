@@ -21,6 +21,7 @@ import {
   submitFeedback,
   submitLifecycle,
   submitNewRequirement,
+  useDeliveryQuery,
   useEvolutionQuery,
   useHubStateQuery,
   usePlaybookQuery,
@@ -65,6 +66,11 @@ export function Modals() {
   const { data: playbookData } = usePlaybookQuery(
     activeProjectId,
     m?.kind === "evolution" && m.tab === "playbook" && !noHubProject,
+  );
+  const { data: deliveryPreview } = useDeliveryQuery(
+    activeProjectId,
+    selectedId,
+    Boolean(selectedId && m?.kind === "deliver"),
   );
 
   const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1205,6 +1211,167 @@ export function Modals() {
         <div className="modal-actions">
           <button className="btn" type="button" data-action="close-modal" onClick={close}>
             关闭
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "deliver") {
+    if (!detail) return null;
+    const candidates = deliveryPreview?.candidates ?? [];
+    const selectedSet = new Set(m.selectedFiles);
+    const toggleFile = (filePath: string) => {
+      setModal((prev) => {
+        if (prev?.kind !== "deliver") return prev;
+        const next = new Set(prev.selectedFiles);
+        if (next.has(filePath)) next.delete(filePath);
+        else next.add(filePath);
+        return { ...prev, selectedFiles: [...next] };
+      });
+    };
+    const selectPreset = (mode: "accepted" | "all" | "none") => {
+      const files =
+        mode === "none"
+          ? []
+          : mode === "accepted"
+            ? candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path)
+            : candidates.map((c) => c.path);
+      setModal((prev) => (prev?.kind === "deliver" ? { ...prev, selectedFiles: files } : prev));
+    };
+    const submitDeliver = async () => {
+      const files = m.selectedFiles.filter((f) => candidates.some((c) => c.path === f));
+      if (files.length === 0) {
+        showToast("请至少选择 1 个要纳入提交的文件", true);
+        return;
+      }
+      const msg = m.commitMessage.trim();
+      if (!msg) {
+        showToast("请填写 Git 提交说明", true);
+        return;
+      }
+      const res = await runBusy(() =>
+        api.deliver(detail.state.id, {
+          files,
+          commitMessage: msg,
+          expectedRevision: detail.state.revision,
+          note: m.note.trim() || undefined,
+        }),
+      );
+      if (res) {
+        setModal(null);
+        await invalidateAllWorkbenchQueries();
+        showToast(
+          res.restartRecommended
+            ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）；检测到服务端变更，建议执行 wb restart 重启生效`
+            : res.webReloaded
+              ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）并热刷新前端`
+              : `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）`,
+        );
+      }
+    };
+
+    return (
+      <ModalShell onClose={close} testId="deliver-modal">
+        <h3 style={{ marginTop: 0 }}>交付收尾 · 提交代码到 Git</h3>
+        <div className="muted xs" style={{ marginBottom: 10 }}>
+          目标需求：<strong>{detail.state.id}</strong> · 当前分支：
+          <code>{deliveryPreview?.branch ?? "HEAD"}</code> · 仅提交你勾选的文件，不会自动推送远程或覆盖其他暂存改动。
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8, flexWrap: "wrap" }}>
+          <strong style={{ fontSize: 13 }}>
+            选择纳入本次提交的文件（已选 {m.selectedFiles.length}/{candidates.length}）
+          </strong>
+          <div style={{ display: "flex", gap: 6 }}>
+            {candidates.some((c) => c.inAcceptedSnapshot) && (
+              <button className="btn xs" type="button" onClick={() => selectPreset("accepted")}>
+                仅选本次验收文件
+              </button>
+            )}
+            <button className="btn xs" type="button" onClick={() => selectPreset("all")}>
+              全选
+            </button>
+            <button className="btn xs" type="button" onClick={() => selectPreset("none")}>
+              清空
+            </button>
+          </div>
+        </div>
+        <div
+          style={{
+            maxHeight: 210,
+            overflowY: "auto",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            padding: 8,
+            marginBottom: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          {candidates.length === 0 ? (
+            <div className="muted xs">当前工作区无待提交文件。</div>
+          ) : (
+            candidates.map((c) => (
+              <label
+                key={c.path}
+                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}
+              >
+                <input
+                  type="checkbox"
+                  data-testid={`deliver-file-${c.path}`}
+                  checked={selectedSet.has(c.path)}
+                  onChange={() => toggleFile(c.path)}
+                />
+                <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {c.path}
+                </code>
+                <span className="badge neutral">{c.status}</span>
+                {deliveryPreview && deliveryPreview.acceptedSnapshotFileCount > 0 && (
+                  <span className={`badge ${c.inAcceptedSnapshot ? "success" : "warning"}`}>
+                    {c.inAcceptedSnapshot ? "本次验收" : "工作区其他"}
+                  </span>
+                )}
+              </label>
+            ))
+          )}
+        </div>
+        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+          Git 提交说明（Commit Message）
+        </label>
+        <input
+          className="input"
+          data-testid="deliver-commit-message"
+          style={{ marginBottom: 8 }}
+          value={m.commitMessage}
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "deliver" ? { ...prev, commitMessage: e.target.value } : prev))
+          }
+        />
+        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+          交付备注（可选，记录到需求时间线）
+        </label>
+        <input
+          className="input"
+          data-testid="deliver-note"
+          value={m.note}
+          placeholder="例如：合并至 main，准备开启下一条需求…"
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "deliver" ? { ...prev, note: e.target.value } : prev))
+          }
+        />
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="submit-deliver-btn"
+            disabled={busy || m.selectedFiles.length === 0}
+            onClick={() => void submitDeliver()}
+          >
+            确认提交 Git
           </button>
         </div>
       </ModalShell>

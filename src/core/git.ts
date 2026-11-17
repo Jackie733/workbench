@@ -3,40 +3,24 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
+import { WorkbenchError } from "./errors.ts";
 import { listProjectSandboxes } from "./sandbox.ts";
-import type { BaselineSnapshot } from "./types.ts";
+import {
+  MAX_ACCEPTANCE_DIFF_BYTES,
+  type BaselineSnapshot,
+  type ChangedFile,
+  type CommitInfo,
+  type DiffEvidenceStatus,
+  type GitObservation,
+} from "./types.ts";
+
+export type { BaselineSnapshot, ChangedFile, CommitInfo, GitObservation } from "./types.ts";
 
 const GIT_TIMEOUT_MS = 10_000;
-const DEFAULT_MAX_DIFF_BYTES = 128 * 1024;
+const DEFAULT_MAX_DIFF_BYTES = MAX_ACCEPTANCE_DIFF_BYTES;
 const MAX_HASHED_FILES = 2000;
 const MAX_SINGLE_FILE_HASH_BYTES = 2 * 1024 * 1024;
 const EXCLUDE_PATHSPECS = [":(exclude).workbench", ":(exclude).omp/workbench"];
-
-export interface ChangedFile {
-  path: string;
-  status: string;
-  staged: boolean;
-  unstaged: boolean;
-}
-
-export interface CommitInfo {
-  hash: string;
-  shortHash: string;
-  author: string;
-  at: number;
-  subject: string;
-}
-
-export interface GitObservation {
-  isGitRepo: boolean;
-  head: string;
-  fingerprint: string | null;
-  dirty: boolean;
-  files: ChangedFile[];
-  diff: string;
-  diffTruncated: boolean;
-  commits: CommitInfo[];
-}
 
 interface ExecResult {
   code: number;
@@ -44,14 +28,14 @@ interface ExecResult {
   stderr: Buffer;
 }
 
-function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<ExecResult> {
+function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS, stdinText?: string): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(cwd)) {
       reject(Object.assign(new Error(`cwd no longer exists: ${cwd}`), { code: "ENOENT" }));
       return;
     }
     try {
-      execFile(
+      const child = execFile(
         "git",
         args,
         {
@@ -76,6 +60,9 @@ function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promi
           });
         },
       );
+      if (stdinText !== undefined) {
+        child.stdin?.end(stdinText, "utf8");
+      }
     } catch (err) {
       reject(err);
     }
@@ -134,6 +121,52 @@ function truncateUtf8(text: string, maxBytes: number): { text: string; truncated
   let end = maxBytes;
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
   return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
+}
+
+/** Files whose patch body the existing renderer deliberately omits (binary payloads, oversized untracked files). */
+export function detectOmittedDiffContent(diff: string): { binaryFiles: string[]; omittedFiles: string[] } {
+  const binary = new Set<string>();
+  const omitted = new Set<string>();
+  let currentFile = "";
+  for (const line of diff.split("\n")) {
+    const gitHeader = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
+    if (gitHeader) {
+      currentFile = gitHeader[2]!;
+      continue;
+    }
+    if (/^\+\[untracked file \d+ bytes omitted\]$/.test(line) && currentFile) {
+      omitted.add(currentFile);
+      continue;
+    }
+    const binaryHeader = /^Binary files (?:\/dev\/null|a\/(\S+)) and (?:\/dev\/null|b\/(\S+)) differ$/.exec(line);
+    if (binaryHeader) {
+      binary.add(binaryHeader[1] ?? binaryHeader[2] ?? currentFile);
+    }
+  }
+  return { binaryFiles: [...binary].filter(Boolean).sort(), omittedFiles: [...omitted].sort() };
+}
+
+/** Parses `git diff --name-status -z` output: status, then one (or two for R/C) NUL-terminated paths. */
+function parseNameStatusZ(buf: Buffer): Array<{ status: string; path: string }> {
+  const tokens = buf.toString("utf8").split("\0");
+  const out: Array<{ status: string; path: string }> = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const status = tokens[i] ?? "";
+    i += 1;
+    if (!status) continue;
+    const code = status[0]!;
+    if (code === "R" || code === "C") {
+      const newPath = tokens[i + 1] ?? "";
+      i += 2;
+      if (newPath) out.push({ status: code, path: newPath });
+      continue;
+    }
+    const filePath = tokens[i] ?? "";
+    i += 1;
+    if (filePath) out.push({ status: code, path: filePath });
+  }
+  return out;
 }
 
 function formatUntrackedDiff(base: string, relPath: string): string {
@@ -208,31 +241,43 @@ export async function observeGitChanges(
   options: { sinceHead?: string | null; maxDiffBytes?: number } = {},
 ): Promise<GitObservation> {
   const base = canonicalRoot(root);
+  const capturedAt = Date.now();
+  const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
+  const empty = (
+    overrides: Partial<GitObservation>,
+  ): GitObservation => ({
+    isGitRepo: true,
+    head: "",
+    fingerprint: null,
+    dirty: false,
+    files: [],
+    filesScope: "none",
+    diff: "",
+    diffBytes: 0,
+    diffTruncated: false,
+    diffStatus: "unavailable",
+    diffReason: null,
+    binaryFiles: [],
+    omittedFiles: [],
+    baselineRequested: options.sinceHead ?? null,
+    baselineHead: null,
+    baselineAvailable: false,
+    commits: [],
+    capturedAt,
+    ...overrides,
+  });
+
   const snapshot = await observeGitSnapshot(base);
   if (!snapshot) {
-    return {
+    return empty({
       isGitRepo: false,
-      head: "",
-      fingerprint: null,
-      dirty: false,
-      files: [],
-      diff: "",
-      diffTruncated: false,
-      commits: [],
-    };
+      diffReason: "代码根目录不是 Git 仓库，无法采集评审 Diff",
+    });
   }
 
-  const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
   const statusRes = await execGit(base, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
   const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
   entries.sort((a, b) => a.path.localeCompare(b.path));
-
-  const files: ChangedFile[] = entries.map((entry) => ({
-    path: entry.path,
-    status: entry.xy === "??" ? "??" : entry.xy.trim() || "M",
-    staged: entry.xy[0] !== " " && entry.xy[0] !== "?",
-    unstaged: entry.xy[1] !== " ",
-  }));
 
   const sinceHead = options.sinceHead && /^[0-9a-f]{7,64}$/i.test(options.sinceHead) ? options.sinceHead : null;
   let validBaseRef: string | null = null;
@@ -241,24 +286,74 @@ export async function observeGitChanges(
     if (verify.code === 0) validBaseRef = verify.stdout.toString("utf8").trim();
   }
 
+  if (sinceHead && !validBaseRef) {
+    return empty({
+      head: snapshot.head,
+      fingerprint: snapshot.fingerprint,
+      dirty: snapshot.dirty,
+      diffReason: `验收基线 ${sinceHead.slice(0, 12)} 在当前仓库中不可用，无法生成基线相对 Diff`,
+    });
+  }
+
+  const files = new Map<string, ChangedFile>();
+  if (validBaseRef) {
+    const nameRes = await execGit(base, [
+      "diff",
+      "--name-status",
+      "-z",
+      validBaseRef,
+      "--",
+      ".",
+      ...EXCLUDE_PATHSPECS,
+    ]);
+    if (nameRes.code === 0) {
+      for (const entry of parseNameStatusZ(nameRes.stdout)) {
+        files.set(entry.path, { path: entry.path, status: entry.status, staged: false, unstaged: false });
+      }
+    }
+  }
+  for (const entry of entries) {
+    const staged = entry.xy[0] !== " " && entry.xy[0] !== "?";
+    const unstaged = entry.xy[1] !== " ";
+    const existing = files.get(entry.path);
+    if (existing) {
+      files.set(entry.path, { ...existing, staged, unstaged });
+    } else {
+      files.set(entry.path, {
+        path: entry.path,
+        status: entry.xy === "??" ? "??" : entry.xy.trim() || "M",
+        staged,
+        unstaged,
+      });
+    }
+  }
+  const fileList = [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
+
   let diffChunks: string[] = [];
+  let diffReason: string | null = null;
   if (validBaseRef) {
     const diffRes = await execGit(base, ["diff", validBaseRef, "--", ".", ...EXCLUDE_PATHSPECS]);
     if (diffRes.code === 0) {
       const text = diffRes.stdout.toString("utf8");
       if (text) diffChunks.push(text);
+    } else {
+      diffReason = "基线相对 diff 生成失败，评审证据不完整";
     }
   } else if (snapshot.head) {
     const diffRes = await execGit(base, ["diff", "HEAD", "--", ".", ...EXCLUDE_PATHSPECS]);
     if (diffRes.code === 0) {
       const text = diffRes.stdout.toString("utf8");
       if (text) diffChunks.push(text);
+    } else {
+      diffReason = "工作区 diff 生成失败，评审证据不完整";
     }
   } else {
     const cachedRes = await execGit(base, ["diff", "--cached", "--", ".", ...EXCLUDE_PATHSPECS]);
     if (cachedRes.code === 0) {
       const text = cachedRes.stdout.toString("utf8");
       if (text) diffChunks.push(text);
+    } else {
+      diffReason = "暂存区 diff 生成失败，评审证据不完整";
     }
   }
 
@@ -271,6 +366,7 @@ export async function observeGitChanges(
 
   const combinedDiff = diffChunks.join(diffChunks.length > 1 ? "\n" : "");
   const boundedDiff = truncateUtf8(combinedDiff, maxDiffBytes);
+  const omitted = detectOmittedDiffContent(boundedDiff.text);
 
   // If sinceHead was provided and differs from HEAD, include commit history since baseline.
   const commits: CommitInfo[] = [];
@@ -297,15 +393,28 @@ export async function observeGitChanges(
     }
   }
 
+  const diffText = diffReason ? "" : boundedDiff.text;
+  const diffStatus: DiffEvidenceStatus = diffReason ? "unavailable" : diffText ? "captured" : "empty";
+
   return {
     isGitRepo: true,
     head: snapshot.head,
     fingerprint: snapshot.fingerprint,
     dirty: snapshot.dirty,
-    files,
-    diff: boundedDiff.text,
-    diffTruncated: boundedDiff.truncated,
+    files: fileList,
+    filesScope: validBaseRef ? "baseline-relative" : "worktree",
+    diff: diffText,
+    diffBytes: Buffer.byteLength(diffText, "utf8"),
+    diffTruncated: diffStatus === "captured" ? boundedDiff.truncated : false,
+    diffStatus,
+    diffReason,
+    binaryFiles: diffStatus === "captured" ? omitted.binaryFiles : [],
+    omittedFiles: diffStatus === "captured" ? omitted.omittedFiles : [],
+    baselineRequested: sinceHead,
+    baselineHead: validBaseRef,
+    baselineAvailable: sinceHead ? validBaseRef !== null : true,
     commits,
+    capturedAt,
   };
 }
 
@@ -330,4 +439,78 @@ export async function resolveProjectRequirementSnapshots(root: string): Promise<
     );
   }
   return { baseSnapshot, byReqId };
+}
+
+/** Reads current branch, HEAD, and uncommitted files (excluding .workbench metadata) for delivery wrap-up. */
+export async function inspectWorkingTreeForDelivery(root: string): Promise<{
+  isGitRepo: boolean;
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+  files: ChangedFile[];
+}> {
+  const base = canonicalRoot(root);
+  const snapshot = await observeGitSnapshot(base);
+  if (!snapshot) {
+    return { isGitRepo: false, branch: null, head: null, dirty: false, files: [] };
+  }
+  let branch: string | null = null;
+  if (snapshot.head) {
+    const branchRes = await execGit(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branchRes.code === 0) {
+      const name = branchRes.stdout.toString("utf8").trim();
+      if (name && name !== "HEAD") branch = name;
+    }
+  }
+  const statusRes = await execGit(base, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
+  const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  const files: ChangedFile[] = entries.map((entry) => ({
+    path: entry.path,
+    status: entry.xy === "??" ? "??" : entry.xy.trim() || "M",
+    staged: entry.xy[0] !== " " && entry.xy[0] !== "?",
+    unstaged: entry.xy[1] !== " ",
+  }));
+  return {
+    isGitRepo: true,
+    branch,
+    head: snapshot.head || null,
+    dirty: files.length > 0,
+    files,
+  };
+}
+
+/** Stages and commits ONLY the specified files using --only so unrelated staged changes are not swept in. */
+export async function commitFilesInGit(
+  root: string,
+  files: string[],
+  commitMessage: string,
+): Promise<{ commitHash: string; shortHash: string; branch: string | null }> {
+  const base = canonicalRoot(root);
+  if (files.length === 0) {
+    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件");
+  }
+  const addRes = await execGit(base, ["add", "--", ...files], 30_000);
+  if (addRes.code !== 0) {
+    const msg = addRes.stderr.toString("utf8").trim() || addRes.stdout.toString("utf8").trim();
+    throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`);
+  }
+
+  const commitRes = await execGit(base, ["commit", "--only", "-F", "-", "--", ...files], 30_000, commitMessage);
+  if (commitRes.code !== 0) {
+    const msg = commitRes.stderr.toString("utf8").trim() || commitRes.stdout.toString("utf8").trim();
+    throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`);
+  }
+
+  const headRes = await execGit(base, ["rev-parse", "HEAD"]);
+  const shortRes = await execGit(base, ["rev-parse", "--short", "HEAD"]);
+  const branchRes = await execGit(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const commitHash = headRes.code === 0 ? headRes.stdout.toString("utf8").trim() : "";
+  const shortHash = shortRes.code === 0 ? shortRes.stdout.toString("utf8").trim() : commitHash.slice(0, 7);
+  const rawBranch = branchRes.code === 0 ? branchRes.stdout.toString("utf8").trim() : "";
+  const branch = rawBranch && rawBranch !== "HEAD" ? rawBranch : null;
+  if (!commitHash) {
+    throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希");
+  }
+  return { commitHash, shortHash, branch };
 }

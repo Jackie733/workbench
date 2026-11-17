@@ -4,10 +4,12 @@ import type {
   EffectiveVerificationState,
   PrivacyMode,
   RequirementDetail,
+  RequirementDiffView,
   RequirementSummary,
   ReviewVerdict,
   Stage,
   TaskStatus,
+  ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
 import { REASONING_EFFORTS, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
@@ -52,6 +54,12 @@ export type ModalState =
       autoPromote: boolean;
     }
   | { kind: "evolution"; tab: "inbox" | "playbook" | "telemetry"; playbookDraft: string | null }
+  | {
+      kind: "deliver";
+      commitMessage: string;
+      selectedFiles: string[];
+      note: string;
+    }
   | { kind: "debug_info"; text: string };
 
 export const STAGE_META: Record<Stage, { label: string; tone: string }> = {
@@ -77,7 +85,75 @@ export const COVERAGE_META: Record<CriterionCoverageState, { label: string; tone
   failed: { label: "失败", tone: "danger" },
   stale: { label: "需重跑", tone: "warning" },
   unverified: { label: "未验证", tone: "neutral" },
+  unavailable: { label: "证据不可用", tone: "warning" },
 };
+
+export interface EvidenceDisplaySummary {
+  isHistorical: boolean;
+  tone: "success" | "warning" | "info";
+  title: string;
+  acceptedAtText: string | null;
+  provenanceText: string;
+  unavailableReason: string | null;
+  truncationFlags: string[];
+  scopeNote: string | null;
+}
+
+/** Formats shared accepted/legacy/live evidence provenance consistently for UI rendering & tests. */
+export function describeEvidenceContext(
+  validity: ValidityReport,
+  diffView?: Pick<RequirementDiffView, "context" | "status" | "reason" | "acceptedAt" | "snapshotId" | "scopeNote" | "observation"> | null,
+): EvidenceDisplaySummary {
+  const p = validity.provenance;
+  const acceptedAt = diffView?.acceptedAt ?? p.acceptedAt;
+  const acceptedAtText = acceptedAt ? formatDateTime(acceptedAt) : null;
+  const obs = diffView?.observation ?? null;
+  const truncationFlags: string[] = [];
+  if (obs?.diffTruncated || p.diffTruncated) truncationFlags.push("Diff 内容已按上限截断");
+  if ((obs?.binaryFiles?.length ?? 0) > 0) truncationFlags.push(`含 ${obs!.binaryFiles.length} 个二进制文件（未内联补丁）`);
+  if ((obs?.omittedFiles?.length ?? 0) > 0) truncationFlags.push(`含 ${obs!.omittedFiles.length} 个超大未跟踪文件（内容已省略）`);
+
+  if (p.context === "accepted") {
+    const shortSpec = p.specHash ? p.specHash.slice(0, 8) : "-";
+    const shortSnap = p.codeSnapshotHash ? p.codeSnapshotHash.slice(0, 8) : "-";
+    return {
+      isHistorical: true,
+      tone: "success",
+      title: "已固化验收快照",
+      acceptedAtText,
+      provenanceText: `快照 ${p.snapshotId ?? "-"} · 规范 ${shortSpec} · 代码指纹 ${shortSnap} · 纳入证据 ${p.verificationIds.length} 条`,
+      unavailableReason: diffView?.status === "unavailable" ? (diffView.reason ?? p.reason) : null,
+      truncationFlags,
+      scopeNote: diffView?.scopeNote ?? p.scopeNote,
+    };
+  }
+
+  if (p.context === "legacy-unavailable") {
+    const shortSpec = p.specHash ? p.specHash.slice(0, 8) : "-";
+    const shortSnap = p.codeSnapshotHash ? p.codeSnapshotHash.slice(0, 8) : "-";
+    return {
+      isHistorical: true,
+      tone: "warning",
+      title: p.artifactStatus === "corrupt" || p.artifactStatus === "missing" ? "验收快照缺失或损坏" : "旧版验收记录（无 Diff 快照）",
+      acceptedAtText,
+      provenanceText: `规范 ${shortSpec} · 代码指纹 ${shortSnap} · 纳入证据 ${p.verificationIds.length} 条 · 覆盖来源 ${p.coverageSource}`,
+      unavailableReason: diffView?.reason ?? p.reason ?? "历史验收记录未固化代码差异快照，无法从当前工作区回溯",
+      truncationFlags,
+      scopeNote: null,
+    };
+  }
+
+  return {
+    isHistorical: false,
+    tone: "info",
+    title: "当前工作区实时证据",
+    acceptedAtText: null,
+    provenanceText: `规范 ${p.specHash?.slice(0, 8) ?? "-"} · 当前代码指纹 ${p.codeSnapshotHash?.slice(0, 8) ?? "未知"}`,
+    unavailableReason: diffView?.status === "unavailable" ? (diffView.reason ?? null) : null,
+    truncationFlags,
+    scopeNote: diffView?.scopeNote ?? null,
+  };
+}
 
 export const EVIDENCE_META: Record<EffectiveVerificationState, { label: string; tone: string }> = {
   passed: { label: "当前有效通过", tone: "success" },

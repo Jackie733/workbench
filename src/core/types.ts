@@ -1,6 +1,13 @@
 export const SCHEMA_VERSION = 4 as const;
 export const WORKBENCH_DIR = ".workbench" as const;
 
+/** Schema of the immutable acceptance artifact written at human acceptance (REQ-003). */
+export const ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION = 1 as const;
+/** Frozen cap for the accepted diff, mirroring the live observer limit. */
+export const MAX_ACCEPTANCE_DIFF_BYTES = 128 * 1024;
+export const MAX_ACCEPTANCE_SNAPSHOT_BYTES = 1024 * 1024;
+export const MAX_SNAPSHOT_VERIFICATIONS = 64;
+
 export const MAX_SPEC_BYTES = 128 * 1024;
 export const MAX_DESIGN_BYTES = 256 * 1024;
 export const MAX_HANDOFF_BYTES = 128 * 1024;
@@ -82,6 +89,8 @@ export interface AcceptanceRecord {
   codeSnapshotHash: string;
   verificationIds: string[];
   note?: string;
+  /** Reference to the immutable evidence artifact captured at acceptance; absent on legacy records. */
+  snapshot?: AcceptanceSnapshotReference | null;
 }
 
 export interface TaskItem {
@@ -106,6 +115,46 @@ export interface BaselineSnapshot {
   capturedAt: number;
 }
 
+export interface ChangedFile {
+  path: string;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+}
+
+export interface CommitInfo {
+  hash: string;
+  shortHash: string;
+  author: string;
+  at: number;
+  subject: string;
+}
+
+export type DiffEvidenceStatus = "captured" | "empty" | "unavailable";
+
+export type DiffFilesScope = "baseline-relative" | "worktree" | "none";
+
+export interface GitObservation {
+  isGitRepo: boolean;
+  head: string;
+  fingerprint: string | null;
+  dirty: boolean;
+  files: ChangedFile[];
+  filesScope: DiffFilesScope;
+  diff: string;
+  diffBytes: number;
+  diffTruncated: boolean;
+  diffStatus: DiffEvidenceStatus;
+  diffReason: string | null;
+  binaryFiles: string[];
+  omittedFiles: string[];
+  baselineRequested: string | null;
+  baselineHead: string | null;
+  baselineAvailable: boolean;
+  commits: CommitInfo[];
+  capturedAt: number;
+}
+
 export interface VerificationRecord {
   id: string;
   command: string;
@@ -124,6 +173,100 @@ export interface VerificationRecord {
   truncated: boolean;
 }
 
+export interface AcceptanceGitEvidence {
+  diffStatus: DiffEvidenceStatus;
+  reason: string | null;
+  isGitRepo: boolean;
+  baselineRequested: string | null;
+  baselineHead: string | null;
+  baselineAvailable: boolean;
+  observedHead: string;
+  fingerprint: string | null;
+  dirty: boolean;
+  files: ChangedFile[];
+  filesScope: DiffFilesScope;
+  commits: CommitInfo[];
+  diff: string;
+  diffBytes: number;
+  diffTruncated: boolean;
+  maxDiffBytes: number;
+  binaryFiles: string[];
+  omittedFiles: string[];
+  capturedAt: number;
+}
+
+export interface AcceptanceVerificationEvidence {
+  record: VerificationRecord;
+  effectiveState: EffectiveVerificationState;
+  staleReason: string | null;
+  selectedForAcceptance: boolean;
+}
+
+/** Immutable record of exactly what a human reviewed at acceptance time. */
+export interface AcceptanceSnapshot {
+  schemaVersion: typeof ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION;
+  id: string;
+  requirementId: string;
+  capturedAt: number;
+  acceptedAt: number;
+  specHash: string;
+  designHash: string;
+  codeSnapshotHash: string;
+  codeRootKind: "project" | "sandbox";
+  criteria: Criterion[];
+  coverage: CriterionCoverageItem[];
+  requiredTotal: number;
+  requiredPassed: number;
+  verifications: AcceptanceVerificationEvidence[];
+  omittedVerificationCount: number;
+  git: AcceptanceGitEvidence;
+  contentDigest: string;
+}
+
+export interface AcceptanceSnapshotReference {
+  id: string;
+  path: string;
+  schemaVersion: typeof ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION;
+  capturedAt: number;
+  contentDigest: string;
+  sizeBytes: number;
+}
+
+/** Git commit record created during the post-acceptance delivery / wrap-up stage. */
+export interface DeliveryRecord {
+  deliveredAt: number;
+  commitHash: string;
+  shortHash: string;
+  commitMessage: string;
+  files: string[];
+  branch: string | null;
+  note?: string;
+}
+
+export interface DeliveryCandidateFile {
+  path: string;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  inAcceptedSnapshot: boolean;
+}
+
+export interface DeliveryPreview {
+  requirementId: string;
+  stage: Stage;
+  isGitRepo: boolean;
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+  sandboxActive: boolean;
+  canCommit: boolean;
+  reason: string | null;
+  suggestedMessage: string;
+  candidates: DeliveryCandidateFile[];
+  acceptedSnapshotFileCount: number;
+  delivered: DeliveryRecord | null;
+}
+
 export type TimelineEventKind =
   | "created"
   | "spec_updated"
@@ -135,6 +278,7 @@ export type TimelineEventKind =
   | "verified"
   | "submitted_for_acceptance"
   | "accepted"
+  | "delivered"
   | "rejected"
   | "blocked"
   | "unblocked"
@@ -213,6 +357,7 @@ export interface RequirementState {
   criteria: Criterion[];
   approval: ApprovalRecord | null;
   acceptance: AcceptanceRecord | null;
+  delivery?: DeliveryRecord | null;
   tasks: TaskItem[];
   baseline: BaselineSnapshot | null;
   verifications: VerificationRecord[];
@@ -236,7 +381,7 @@ export interface EvaluatedVerification {
   staleReason: string | null;
 }
 
-export type CriterionCoverageState = "passed" | "failed" | "stale" | "unverified";
+export type CriterionCoverageState = "passed" | "failed" | "stale" | "unverified" | "unavailable";
 
 export interface CriterionCoverageItem {
   criterion: Criterion;
@@ -261,6 +406,46 @@ export interface ApprovalStatus {
 export interface AcceptanceGate {
   ok: boolean;
   blockers: string[];
+}
+
+export type EvidenceContext = "live" | "accepted" | "legacy-unavailable";
+
+export type AcceptanceArtifactStatus = "none" | "available" | "missing" | "corrupt";
+
+export type CoverageSource = "live" | "snapshot" | "acceptance-hashes" | "unavailable";
+
+/** Where the displayed verification/diff evidence came from, and how it was recovered. */
+export interface EvidenceProvenance {
+  context: EvidenceContext;
+  coverageSource: CoverageSource;
+  artifactStatus: AcceptanceArtifactStatus;
+  reason: string | null;
+  acceptedAt: number | null;
+  snapshotId: string | null;
+  snapshotPath: string | null;
+  snapshotCapturedAt: number | null;
+  specHash: string | null;
+  codeSnapshotHash: string | null;
+  verificationIds: string[];
+  diffStatus: DiffEvidenceStatus | null;
+  diffBytes: number;
+  diffTruncated: boolean;
+  fileCount: number;
+  commitCount: number;
+  baselineHead: string | null;
+  observedHead: string | null;
+  scopeNote: string | null;
+}
+
+export interface RequirementDiffView {
+  context: EvidenceContext;
+  status: DiffEvidenceStatus;
+  reason: string | null;
+  acceptedAt: number | null;
+  snapshotId: string | null;
+  snapshotCapturedAt: number | null;
+  scopeNote: string | null;
+  observation: GitObservation | null;
 }
 
 export type ActionId =
@@ -303,6 +488,8 @@ export interface ValidityReport {
   banner: ActionBanner;
   needsDecision: boolean;
   decisionReason: string | null;
+  evidenceContext: EvidenceContext;
+  provenance: EvidenceProvenance;
 }
 
 export interface RequirementSummary {
