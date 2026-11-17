@@ -3,8 +3,9 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createRequirement, initProject, propose } from "../../src/core/engine.ts";
+import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
+import { applyHubRoutingPreset, readHubConfig } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
@@ -715,6 +716,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("settled")),
         { timeout: 5000 },
       );
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect().width ?? -1) === 0,
+        { timeout: 5000 },
+      );
       const collapsedSidebarW = await page.evaluate(
         () => document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect().width ?? -1,
       );
@@ -777,6 +782,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("settled")),
         { timeout: 5000 },
       );
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? -1) === 0,
+        { timeout: 5000 },
+      );
       const closedDrawerW = await page.evaluate(
         () => document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? -1,
       );
@@ -786,4 +795,229 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 30_000);
+
+  test("REQ-008: the visible model picker, the /run request, the executor target, and the persisted record agree", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-picker-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const repo = initGitRepo();
+    await initProject(repo, { name: "PickerRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "在原生续接时保持所选模型与推理强度",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    // The stage preset deliberately disagrees with the model picked in the picker below.
+    applyHubRoutingPreset("quota_saver");
+    const presetDesign = readHubConfig().routing.stages.design.primary;
+
+    const startedEvents: Array<{ runId: string; harness?: string; model?: string }> = [];
+    const finishedRunIds = new Set<string>();
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex CLI",
+          subscription: "ChatGPT Plus",
+          installed: true,
+          executable: "codex",
+          models: [
+            { id: "gpt-6-astra", tier: "sota", source: "detected" },
+            { id: "gpt-6.1-sol", tier: "sota", source: "detected", supportedEfforts: ["low", "medium", "high", "xhigh"] },
+          ],
+          defaultModel: "gpt-6-astra",
+          detectedAt: Date.now(),
+        },
+        {
+          id: "qodercn",
+          label: "QoderCN",
+          subscription: "QoderCN",
+          installed: true,
+          executable: "qodercn",
+          models: [{ id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" }],
+          defaultModel: "DeepSeek-V4-Pro",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: (target) => ({
+        command: "bash",
+        args: [
+          "-c",
+          `printf 'dispatch harness=%s model=%s effort=%s\\n' '${target.harness}' '${target.model}' '${target.reasoningEffort ?? "none"}'`,
+        ],
+        displayCommand: `picker-mock ${target.harness}/${target.model}`,
+      }),
+    });
+    executor.subscribe((ev) => {
+      if (ev.type === "agent.run.started") startedEvents.push({ runId: ev.runId, harness: ev.harness, model: ev.model });
+      if (ev.type === "agent.run.finished") finishedRunIds.add(ev.runId);
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, executor });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    interface RunCall {
+      body: Record<string, unknown>;
+      target: { harness?: string; model?: string; reasoningEffort?: string } | null;
+    }
+    const runCalls: RunCall[] = [];
+    const readHiddenSelect = () =>
+      page.evaluate(() => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement)?.value ?? null);
+    const readTriggerLabel = () =>
+      page.evaluate(() => document.querySelector('[data-testid="banner-runner-select-trigger"]')?.textContent ?? "");
+    const pickVisibleItem = async (needle: string) => {
+      const found = await page.evaluate((text: string) => {
+        document.querySelectorAll("[data-e2e-pick]").forEach((el) => el.removeAttribute("data-e2e-pick"));
+        const item = Array.from(document.querySelectorAll("[cmdk-item]")).find((el) => (el.textContent ?? "").includes(text));
+        if (!item) return false;
+        item.setAttribute("data-e2e-pick", "1");
+        return true;
+      }, needle);
+      expect(found).toBe(true);
+      await clickReady(page, "[data-e2e-pick]");
+    };
+    const waitRecordSettled = async (index: number) => {
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const record = getRequirement(repo, "REQ-001").state.agentRuns?.[index];
+        if (record && record.status !== "running") return record;
+        if (Date.now() > deadline) throw new Error(`agent run #${index + 1} never settled`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+    const runWithCurrentSelection = async (expectedRuns: number) => {
+      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await page.waitForFunction(
+        (count: unknown) => {
+          const calls = (window as unknown as { __wbRunCalls?: RunCall[] }).__wbRunCalls;
+          return Boolean(calls && calls.length === Number(count) && calls.every((c) => c.target !== null));
+        },
+        { timeout: 8000 },
+        expectedRuns,
+      );
+      const captured = await page.evaluate((count: number) =>
+        (window as unknown as { __wbRunCalls: RunCall[] }).__wbRunCalls.slice(0, count),
+        expectedRuns);
+      runCalls.splice(0, runCalls.length, ...captured);
+      await waitRecordSettled(expectedRuns - 1);
+    };
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="banner-runner-select-trigger"]', { timeout: 5000 });
+
+      // Record every /run request body together with the executor-resolved target in its response.
+      await page.evaluate(() => {
+        const w = window as unknown as { __wbRunCalls: RunCall[] };
+        w.__wbRunCalls = [];
+        const originalFetch = window.fetch.bind(window);
+        const spy = (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+          const entry: RunCall | null =
+            init?.method === "POST" && url.includes("/run")
+              ? { body: JSON.parse(String(init.body)) as Record<string, unknown>, target: null }
+              : null;
+          return originalFetch(input, init).then((response) => {
+            if (entry) {
+              w.__wbRunCalls.push(entry);
+              void response
+                .clone()
+                .json()
+                .then((json: { target?: RunCall["target"] }) => {
+                  entry.target = json?.target ?? null;
+                })
+                .catch(() => undefined);
+            }
+            return response;
+          });
+        };
+        window.fetch = spy as unknown as typeof fetch;
+      });
+
+      // 1. Automatic mode sends no explicit selection and dispatches the stage preset.
+      expect(await readHiddenSelect()).toBe(`${presetDesign.harness}::${presetDesign.model}`);
+      expect(await readTriggerLabel()).toContain(`自动 (${presetDesign.harness}/${presetDesign.model})`);
+      await runWithCurrentSelection(1);
+      expect(runCalls[0]!.body.action).toBe("design");
+      expect(runCalls[0]!.body.harness).toBeUndefined();
+      expect(runCalls[0]!.body.model).toBeUndefined();
+      expect(runCalls[0]!.target).toEqual({ harness: presetDesign.harness, model: presetDesign.model });
+      expect(startedEvents[0]).toEqual({ runId: startedEvents[0]!.runId, harness: presetDesign.harness, model: presetDesign.model });
+      expect(getRequirement(repo, "REQ-001").state.agentRuns?.[0]).toMatchObject({
+        harness: presetDesign.harness,
+        model: presetDesign.model,
+        status: "succeeded",
+      });
+      expect(executor.getLiveLog(startedEvents[0]!.runId)).toContain(
+        `dispatch harness=${presetDesign.harness} model=${presetDesign.model} effort=none`,
+      );
+
+      // 2. Picking a model in the visible popover drives the hidden select, the request, the target, and the record.
+      await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
+      await page.waitForSelector('[cmdk-item]', { timeout: 5000 });
+      await pickVisibleItem("gpt-6.1-sol");
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement)?.value === "codex::gpt-6.1-sol",
+        { timeout: 5000 },
+      );
+      expect(await readTriggerLabel()).toContain("codex/gpt-6.1-sol");
+      // page.select waits with puppeteer's 30s default; bound it so a missing control fails fast.
+      await page.waitForSelector('[data-testid="banner-runner-select-effort"]', { timeout: 5000 });
+      await page.select('[data-testid="banner-runner-select-effort"]', "medium");
+
+      await runWithCurrentSelection(2);
+      expect(runCalls[1]!.body).toMatchObject({ action: "design", harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "medium" });
+      expect(runCalls[1]!.target).toEqual({ harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "medium" });
+      expect(startedEvents[1]).toEqual({ runId: startedEvents[1]!.runId, harness: "codex", model: "gpt-6.1-sol" });
+      expect(getRequirement(repo, "REQ-001").state.agentRuns?.[1]).toMatchObject({
+        harness: "codex",
+        model: "gpt-6.1-sol",
+        reasoningEffort: "medium",
+        status: "succeeded",
+      });
+      expect(executor.getLiveLog(startedEvents[1]!.runId)).toContain("dispatch harness=codex model=gpt-6.1-sol effort=medium");
+
+      // 3. Returning to automatic routing through the same picker drops the override entirely.
+      await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
+      await page.waitForSelector('[cmdk-item]', { timeout: 5000 });
+      await pickVisibleItem("自动路由");
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="banner-runner-select-trigger"]')?.textContent ?? "").includes("自动 ("),
+        { timeout: 5000 },
+      );
+      expect(await readTriggerLabel()).not.toContain("gpt-6.1-sol");
+      expect(await readHiddenSelect()).toBe(`${presetDesign.harness}::${presetDesign.model}`);
+      expect(await page.evaluate(() => (document.querySelector('[data-testid="banner-runner-select-effort"]') as HTMLSelectElement)?.value)).toBe("");
+
+      await runWithCurrentSelection(3);
+      expect(runCalls[2]!.body.harness).toBeUndefined();
+      expect(runCalls[2]!.body.model).toBeUndefined();
+      expect(runCalls[2]!.body.reasoningEffort).toBeUndefined();
+      expect(runCalls[2]!.target).toEqual({ harness: presetDesign.harness, model: presetDesign.model });
+      expect(getRequirement(repo, "REQ-001").state.agentRuns?.[2]).toMatchObject({
+        harness: presetDesign.harness,
+        model: presetDesign.model,
+        status: "succeeded",
+      });
+      expect(executor.getLiveLog(startedEvents[2]!.runId)).toContain(
+        `dispatch harness=${presetDesign.harness} model=${presetDesign.model} effort=none`,
+      );
+      expect(getRequirement(repo, "REQ-001").state.agentRuns?.[2]?.reasoningEffort).toBeUndefined();
+      expect(startedEvents.map((e) => `${e.harness}/${e.model}`)).toEqual([
+        `${presetDesign.harness}/${presetDesign.model}`,
+        "codex/gpt-6.1-sol",
+        `${presetDesign.harness}/${presetDesign.model}`,
+      ]);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 45_000);
 });

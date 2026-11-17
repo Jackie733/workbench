@@ -21,6 +21,9 @@ import {
   setActiveHubProject,
 } from "../../src/hub/registry.ts";
 import { buildPresetRouting, detectRateLimitOrQuotaError, resolveRouteCandidates } from "../../src/hub/routing.ts";
+import { clearModelCooldown, isModelCoolingDown, recordModelRunOutcome } from "../../src/hub/telemetry.ts";
+import type { HarnessInfo, ModelTarget } from "../../src/hub/types.ts";
+import type { AgentAction } from "../../src/core/types.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
 const tempDirs: string[] = [];
@@ -757,4 +760,626 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(afterCe?.status).toBe("failed");
     expect(afterCe?.errorSummary).toContain("安全上限");
   }, { timeout: 15000 });
+});
+
+describe("REQ-008 selected model continuity at the Codex process boundary", () => {
+  const FAKE_SESSION_ID = "01a1e74e-98bb-7503-97dd-e8709f8e5022";
+  const CLI_DEFAULT_MODEL = "gpt-6-astra";
+  const CLI_DEFAULT_EFFORT = "low";
+  const SELECTED_MODEL = "gpt-6.1-sol";
+  const OPTION_LIKE_SENTINEL = "--force-not-a-real-flag=req008";
+  const PROMPT = [
+    "请接力执行工作台需求 REQ-001。",
+    `追加指令：${OPTION_LIKE_SENTINEL} 请视为提示词文本，不要当作 CLI 参数。`,
+    "第二行提示词内容",
+  ].join("\n");
+
+  function fakeCodexHarness(executable: string | null): HarnessInfo {
+    return {
+      id: "codex",
+      label: "Codex CLI",
+      subscription: "Plus",
+      installed: true,
+      executable,
+      models: [
+        { id: SELECTED_MODEL, tier: "sota", source: "detected", supportedEfforts: ["low", "medium", "high", "xhigh"] },
+        { id: CLI_DEFAULT_MODEL, tier: "sota", source: "detected" },
+        { id: "gpt-6-luna", tier: "fast", source: "detected" },
+        { id: "codex-auto-review", tier: "review", source: "detected" },
+      ],
+      defaultModel: CLI_DEFAULT_MODEL,
+      detectedAt: Date.now(),
+    };
+  }
+
+  function qoderHarness(): HarnessInfo {
+    return {
+      id: "qodercn",
+      label: "QoderCN",
+      subscription: "Qoder",
+      installed: true,
+      executable: "qodercn",
+      models: [{ id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" }],
+      defaultModel: "DeepSeek-V4-Pro",
+      detectedAt: Date.now(),
+    };
+  }
+
+  function writeFakeCodexCli(dir: string): string {
+    const scriptPath = path.join(dir, "codex-fake");
+    const script = `#!/usr/bin/env bash
+# Offline Codex CLI stand-in. It performs no provider request: it records the exact argv it
+# received and reports the model/effort it resolved locally from that argv, falling back to the
+# conflicting built-in defaults below when the caller omitted an override.
+set -u
+capture_dir="${dir}"
+mkdir -p "$capture_dir/argv"
+seq=0
+if [ -f "$capture_dir/seq" ]; then seq="$(cat "$capture_dir/seq")"; fi
+seq=$((seq + 1))
+printf '%s' "$seq" > "$capture_dir/seq"
+printf '%s\\0' "$@" > "$capture_dir/argv/run-$seq"
+config_model="${CLI_DEFAULT_MODEL}"
+config_effort="${CLI_DEFAULT_EFFORT}"
+model_token=""
+effort_token=""
+mode="new"
+previous=""
+for arg in "$@"; do
+  case "$previous" in
+    -m) model_token="$arg" ;;
+  esac
+  case "$arg" in
+    resume) mode="resume" ;;
+    model_reasoning_effort=*) effort_token="$arg" ;;
+  esac
+  previous="$arg"
+done
+model="$config_model"
+if [ -n "$model_token" ]; then model="$model_token"; fi
+effort="$config_effort"
+if [ -n "$effort_token" ]; then
+  effort="$(printf '%s' "$effort_token" | sed -e 's/^model_reasoning_effort=//' -e 's/"//g')"
+fi
+printf 'Codex fixture (offline; no provider request performed)\\n'
+printf 'mode: exec %s\\n' "$mode"
+printf 'model: %s\\n' "$model"
+printf 'reasoning effort: %s\\n' "$effort"
+printf 'session_id: ${FAKE_SESSION_ID}\\n'
+if [ "$model" != "$config_model" ]; then
+  printf 'warning: switching away from the recorded model %s\\n' "$config_model"
+fi
+printf 'done\\n'
+`;
+    fs.writeFileSync(scriptPath, script, "utf8");
+    fs.chmodSync(scriptPath, 0o755);
+    return scriptPath;
+  }
+
+  function readCapturedArgv(dir: string, runIndex: number): string[] {
+    const parts = fs.readFileSync(path.join(dir, "argv", `run-${runIndex}`), "utf8").split("\0");
+    parts.pop();
+    return parts;
+  }
+
+  async function createBoundaryRepo(): Promise<string> {
+    const repo = makeGitRepo("codex-boundary");
+    await initProject(repo, { name: "BoundaryRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "在原生续接时保持所选模型与推理强度",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    return repo;
+  }
+
+  function makeTrackedExecutor(executable: string) {
+    const executor = new HubExecutor({ initialHarnesses: [fakeCodexHarness(executable)] });
+    const startedEvents: Array<{ runId: string; harness?: string; model?: string }> = [];
+    const waiters = new Map<string, Array<() => void>>();
+    executor.subscribe((ev) => {
+      if (ev.type === "agent.run.started") {
+        startedEvents.push({ runId: ev.runId, harness: ev.harness, model: ev.model });
+      }
+      if (ev.type === "agent.run.finished") {
+        const pending = waiters.get(ev.runId) ?? [];
+        waiters.delete(ev.runId);
+        for (const resolve of pending) resolve();
+      }
+    });
+    const waitFinished = (runId: string) =>
+      new Promise<void>((resolve) => {
+        waiters.set(runId, [...(waiters.get(runId) ?? []), resolve]);
+      });
+    return { executor, startedEvents, waitFinished };
+  }
+
+  interface BuilderCase {
+    name: string;
+    target: ModelTarget;
+    action: AgentAction;
+    sessionId?: string;
+    expectedArgs: string[];
+    expectedSummary: string;
+  }
+
+  const BUILDER_CASES: BuilderCase[] = [
+    {
+      name: "new-session-with-selection",
+      target: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" },
+      action: "implement",
+      expectedArgs: [
+        "exec", "-C", "/repo", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox", PROMPT,
+      ],
+      expectedSummary: `codex exec -C /repo --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`,
+    },
+    {
+      name: "resume-with-selection",
+      target: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" },
+      action: "implement",
+      sessionId: "sess-codex-1",
+      expectedArgs: [
+        "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox", "sess-codex-1", PROMPT,
+      ],
+      expectedSummary: `codex exec resume sess-codex-1 (model=${SELECTED_MODEL}, effort=medium)`,
+    },
+    {
+      name: "resume-read-only-ask",
+      target: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" },
+      action: "ask",
+      sessionId: "sess-codex-1",
+      expectedArgs: [
+        "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "-c", 'model_reasoning_effort="high"', "-c", 'sandbox_mode="read-only"', "sess-codex-1", PROMPT,
+      ],
+      expectedSummary: `codex exec resume sess-codex-1 (model=${SELECTED_MODEL}, effort=high)`,
+    },
+    {
+      name: "resume-default-model-without-effort",
+      target: { harness: "codex", model: "default" },
+      action: "implement",
+      sessionId: "sess-codex-1",
+      expectedArgs: [
+        "exec", "resume", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "sess-codex-1", PROMPT,
+      ],
+      expectedSummary: "codex exec resume sess-codex-1 (model=default)",
+    },
+    {
+      name: "review-never-resumes",
+      target: { harness: "codex", model: "codex-auto-review" },
+      action: "review",
+      sessionId: "sess-codex-1",
+      expectedArgs: [
+        "exec", "-C", "/repo", "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only", PROMPT,
+      ],
+      expectedSummary: "codex exec -C /repo -s read-only (model=codex-auto-review)",
+    },
+  ];
+
+  function buildCase(c: BuilderCase) {
+    return buildHarnessCommand(c.target, {
+      root: "/repo",
+      action: c.action,
+      prompt: PROMPT,
+      ...(c.sessionId ? { nativeSessionId: c.sessionId } : {}),
+      harnesses: [],
+    });
+  }
+
+  test("builds identical model/effort overrides for new sessions and native resume and summarizes them without the prompt", () => {
+    makeTempHub();
+    const built = BUILDER_CASES.map((c) => buildCase(c));
+
+    expect(built.map((b, i) => [BUILDER_CASES[i]!.name, b.args])).toEqual(
+      BUILDER_CASES.map((c) => [c.name, c.expectedArgs]),
+    );
+    expect(built.map((b, i) => [BUILDER_CASES[i]!.name, b.displayCommand])).toEqual(
+      BUILDER_CASES.map((c) => [c.name, c.expectedSummary]),
+    );
+
+    expect(BUILDER_CASES.filter((c, i) => built[i]!.args.at(-1) !== PROMPT).map((c) => c.name)).toEqual([]);
+    expect(
+      BUILDER_CASES.filter((c, i) => built[i]!.args.filter((a) => a.includes(OPTION_LIKE_SENTINEL)).length !== 1).map((c) => c.name),
+    ).toEqual([]);
+    expect(BUILDER_CASES.filter((c, i) => built[i]!.displayCommand.includes(OPTION_LIKE_SENTINEL)).map((c) => c.name)).toEqual([]);
+    expect(BUILDER_CASES.filter((c, i) => built[i]!.args.includes("--full-auto")).map((c) => c.name)).toEqual([]);
+
+    const defaultCase = built[BUILDER_CASES.findIndex((c) => c.name === "resume-default-model-without-effort")]!;
+    expect(defaultCase.args).not.toContain("-m");
+    expect(defaultCase.args.filter((a) => a.startsWith("model_reasoning_effort="))).toEqual([]);
+    expect(defaultCase.displayCommand).not.toContain("effort=");
+  });
+
+  test("spawns the production Codex command with the selected model and effort across resume, model change, and review", async () => {
+    makeTempHub();
+    applyHubRoutingPreset("sota_first");
+    const repo = await createBoundaryRepo();
+    const codeRoot = fs.realpathSync(repo);
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fake-codex-"));
+    tempDirs.push(fixtureDir);
+    const fake = writeFakeCodexCli(fixtureDir);
+    const { executor, startedEvents, waitFinished } = makeTrackedExecutor(fake);
+
+    // 1. Fresh session with the explicit picker selection.
+    const run1 = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "medium",
+    });
+    await waitFinished(run1.run.id);
+    const argv1 = readCapturedArgv(fixtureDir, 1);
+    expect(argv1.slice(0, -1)).toEqual([
+      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(argv1).toHaveLength(10);
+    expect(argv1.at(-1)).toContain("REQ-001");
+    expect(run1.target).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" });
+    expect(startedEvents[0]).toEqual({ runId: run1.run.id, harness: "codex", model: SELECTED_MODEL });
+    const after1 = getRequirement(repo, "REQ-001");
+    expect(after1.state.agentRuns?.[0]).toMatchObject({
+      id: run1.run.id,
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "medium",
+      status: "succeeded",
+      nativeSessionId: FAKE_SESSION_ID,
+    });
+    const log1 = executor.getLiveLog(run1.run.id) ?? "";
+    expect(log1.split("\n")[0]).toBe(`$ ${fake} exec -C ${codeRoot} --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`);
+    expect(log1).toContain("model: gpt-6.1-sol");
+    expect(log1).toContain("reasoning effort: medium");
+    expect(log1).toContain(`warning: switching away from the recorded model ${CLI_DEFAULT_MODEL}`);
+    expect(log1).not.toContain("请接力执行工作台需求");
+
+    // 2. Eligible native resume keeps the session and still carries both overrides.
+    const run2 = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "medium",
+      message: `请补充注释 ${OPTION_LIKE_SENTINEL}`,
+    });
+    await waitFinished(run2.run.id);
+    const argv2 = readCapturedArgv(fixtureDir, 2);
+    expect(argv2.slice(0, -2)).toEqual([
+      "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(argv2).toHaveLength(10);
+    expect(argv2[8]).toBe(FAKE_SESSION_ID);
+    const prompt2 = argv2[9]!;
+    expect(prompt2).toContain(OPTION_LIKE_SENTINEL);
+    expect(argv2.filter((a) => a.includes(OPTION_LIKE_SENTINEL))).toEqual([prompt2]);
+    const after2 = getRequirement(repo, "REQ-001");
+    expect(after2.state.agentRuns?.[1]).toMatchObject({
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "medium",
+      status: "succeeded",
+      nativeSessionId: FAKE_SESSION_ID,
+    });
+    const log2 = executor.getLiveLog(run2.run.id) ?? "";
+    expect(log2.split("\n")[0]).toBe(`$ ${fake} exec resume ${FAKE_SESSION_ID} (model=${SELECTED_MODEL}, effort=medium)`);
+    expect(log2).not.toContain(OPTION_LIKE_SENTINEL);
+    expect(log2).toContain("mode: exec resume");
+    expect(log2).toContain("model: gpt-6.1-sol");
+
+    // 3. Same-harness model change resumes the session and dispatches the new model.
+    const run3 = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "codex",
+      model: "gpt-6-luna",
+    });
+    await waitFinished(run3.run.id);
+    const argv3 = readCapturedArgv(fixtureDir, 3);
+    expect(argv3.slice(0, -2)).toEqual([
+      "exec", "resume", "--skip-git-repo-check", "-m", "gpt-6-luna", "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(argv3[6]).toBe(FAKE_SESSION_ID);
+    expect(argv3).toHaveLength(8);
+    expect(argv3.filter((a) => a.startsWith("model_reasoning_effort="))).toEqual([]);
+    expect(run3.target).toEqual({ harness: "codex", model: "gpt-6-luna" });
+    expect(executor.getLiveLog(run3.run.id)).toContain("model: gpt-6-luna");
+
+    // 4. Review stays a fresh read-only session and never inherits the native session.
+    const run4 = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "review",
+      harness: "codex",
+      model: "codex-auto-review",
+    });
+    await waitFinished(run4.run.id);
+    const argv4 = readCapturedArgv(fixtureDir, 4);
+    expect(argv4.slice(0, -1)).toEqual([
+      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only",
+    ]);
+    expect(argv4).not.toContain(FAKE_SESSION_ID);
+    expect(argv4).not.toContain("resume");
+    expect(executor.getLiveLog(run4.run.id)?.split("\n")[0]).toBe(
+      `$ ${fake} exec -C ${codeRoot} -s read-only (model=codex-auto-review)`,
+    );
+    expect(startedEvents.map((e) => e.model)).toEqual([SELECTED_MODEL, SELECTED_MODEL, "gpt-6-luna", "codex-auto-review"]);
+  }, { timeout: 25000 });
+
+  test("dispatches a deliberate fallback target consistently across argv, response, record, and event", async () => {
+    makeTempHub();
+    applyHubRoutingPreset("sota_first");
+    const repo = await createBoundaryRepo();
+    const codeRoot = fs.realpathSync(repo);
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fake-codex-fallback-"));
+    tempDirs.push(fixtureDir);
+    const fake = writeFakeCodexCli(fixtureDir);
+    const { executor, startedEvents, waitFinished } = makeTrackedExecutor(fake);
+
+    const first = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      harness: "codex",
+      model: CLI_DEFAULT_MODEL,
+    });
+    await waitFinished(first.run.id);
+    expect(readCapturedArgv(fixtureDir, 1)).toContain(CLI_DEFAULT_MODEL);
+
+    const fallback = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      harness: "codex",
+      model: CLI_DEFAULT_MODEL,
+      useFallback: true,
+    });
+    await waitFinished(fallback.run.id);
+    const argv = readCapturedArgv(fixtureDir, 2);
+    expect(fallback.target).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" });
+    expect(argv.slice(0, -1)).toEqual([
+      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "-c", 'model_reasoning_effort="high"', "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+    expect(argv).not.toContain("resume");
+    expect(argv).not.toContain(FAKE_SESSION_ID);
+    expect(startedEvents[1]).toEqual({ runId: fallback.run.id, harness: "codex", model: SELECTED_MODEL });
+    expect(getRequirement(repo, "REQ-001").state.agentRuns?.[1]).toMatchObject({
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "high",
+    });
+  }, { timeout: 25000 });
+
+  test("keeps native session isolation for review, cancelled, rate-limited, cross-harness, and fallback runs", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("iso");
+    await initProject(repo, { name: "IsoRepo", privacyMode: "local" });
+
+    const seen: string[] = [];
+    let sessionSeq = 0;
+    const executor = new HubExecutor({
+      initialHarnesses: [fakeCodexHarness("codex"), qoderHarness()],
+      commandBuilder: (target, ctx) => {
+        sessionSeq += 1;
+        seen.push(`${target.harness}/${target.model}:${ctx.nativeSessionId ?? "none"}`);
+        const sessionId = `sess-iso-${sessionSeq}`;
+        if (target.model === "rate-limit-me") {
+          return {
+            command: "bash",
+            args: ["-c", `printf 'session_id: ${sessionId}\\n'; echo '429 quota exceeded' >&2; exit 1`],
+            displayCommand: "mock-rate-limit",
+          };
+        }
+        if (target.model === "cancel-me") {
+          return {
+            command: "bash",
+            args: ["-c", `printf 'session_id: ${sessionId}\\n'; exec sleep 5`],
+            displayCommand: "mock-cancel",
+          };
+        }
+        return { command: "bash", args: ["-c", `printf 'session_id: ${sessionId}\\n'; echo ok`], displayCommand: "mock-ok" };
+      },
+    });
+    const waiters = new Map<string, Array<() => void>>();
+    executor.subscribe((ev) => {
+      if (ev.type !== "agent.run.finished") return;
+      const pending = waiters.get(ev.runId) ?? [];
+      waiters.delete(ev.runId);
+      for (const resolve of pending) resolve();
+    });
+    const waitFinished = (runId: string) =>
+      new Promise<void>((resolve) => {
+        waiters.set(runId, [...(waiters.get(runId) ?? []), resolve]);
+      });
+
+    let reqIndex = 0;
+    const nextId = () => {
+      reqIndex += 1;
+      return `REQ-${String(reqIndex).padStart(3, "0")}`;
+    };
+
+    const lastDispatch = () => seen[seen.length - 1]!;
+    const sessionOf = (requirementId: string, runId: string) =>
+      getRequirement(repo, requirementId).state.agentRuns?.find((r) => r.id === runId)?.nativeSessionId ?? null;
+
+    // 1. A resume-eligible continuation reuses the previous native session; a review run never does.
+    const eligible = nextId();
+    await createRequirement(repo, { goal: "续接资格" });
+    const seed = await executor.startRun({
+      root: repo,
+      requirementId: eligible,
+      action: "ask",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      message: "为什么要用文件锁？",
+    });
+    await waitFinished(seed.run.id);
+    expect(lastDispatch()).toBe(`codex/${SELECTED_MODEL}:none`);
+    const seedSession = sessionOf(eligible, seed.run.id);
+    expect(seedSession).toBeTruthy();
+
+    const continued = await executor.startRun({
+      root: repo,
+      requirementId: eligible,
+      action: "implement",
+      harness: "codex",
+      model: SELECTED_MODEL,
+    });
+    await waitFinished(continued.run.id);
+    expect(lastDispatch()).toBe(`codex/${SELECTED_MODEL}:${seedSession}`);
+
+    const reviewed = await executor.startRun({
+      root: repo,
+      requirementId: eligible,
+      action: "review",
+      harness: "codex",
+      model: "codex-auto-review",
+    });
+    await waitFinished(reviewed.run.id);
+    expect(lastDispatch()).toBe("codex/codex-auto-review:none");
+
+    // 2. A cancelled previous run must not hand its session to the next continuation.
+    const cancelledReq = nextId();
+    await createRequirement(repo, { goal: "取消后隔离" });
+    const cancelled = await executor.startRun({
+      root: repo,
+      requirementId: cancelledReq,
+      action: "design",
+      harness: "codex",
+      model: "cancel-me",
+    });
+    const cancelledDone = waitFinished(cancelled.run.id);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(executor.cancelRun(cancelled.run.id)).toBe(true);
+    await cancelledDone;
+    expect(getRequirement(repo, cancelledReq).state.agentRuns?.[0]).toMatchObject({ status: "cancelled" });
+    expect(sessionOf(cancelledReq, cancelled.run.id)).toBeTruthy();
+    const afterCancel = await executor.startRun({
+      root: repo,
+      requirementId: cancelledReq,
+      action: "design",
+      harness: "codex",
+      model: SELECTED_MODEL,
+    });
+    await waitFinished(afterCancel.run.id);
+    expect(lastDispatch()).toBe(`codex/${SELECTED_MODEL}:none`);
+
+    // 3. A rate-limited previous run must not hand its session to the next continuation.
+    const rateReq = nextId();
+    await createRequirement(repo, { goal: "限流后隔离" });
+    const limited = await executor.startRun({
+      root: repo,
+      requirementId: rateReq,
+      action: "design",
+      harness: "codex",
+      model: "rate-limit-me",
+    });
+    await waitFinished(limited.run.id);
+    expect(getRequirement(repo, rateReq).state.agentRuns?.[0]).toMatchObject({ rateLimited: true });
+    expect(sessionOf(rateReq, limited.run.id)).toBeTruthy();
+    const afterRate = await executor.startRun({
+      root: repo,
+      requirementId: rateReq,
+      action: "design",
+      harness: "codex",
+      model: SELECTED_MODEL,
+    });
+    await waitFinished(afterRate.run.id);
+    expect(lastDispatch()).toBe(`codex/${SELECTED_MODEL}:none`);
+    clearModelCooldown("codex", "rate-limit-me");
+
+    // 4. Cross-harness continuation and a deliberate fallback request both start a fresh session.
+    const crossReq = nextId();
+    await createRequirement(repo, { goal: "跨 Harness 隔离" });
+    const crossSeed = await executor.startRun({
+      root: repo,
+      requirementId: crossReq,
+      action: "ask",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      message: "为什么要用文件锁？",
+    });
+    await waitFinished(crossSeed.run.id);
+    expect(lastDispatch()).toBe(`codex/${SELECTED_MODEL}:none`);
+    const crossRun = await executor.startRun({
+      root: repo,
+      requirementId: crossReq,
+      action: "implement",
+      harness: "qodercn",
+      model: "DeepSeek-V4-Pro",
+    });
+    await waitFinished(crossRun.run.id);
+    expect(lastDispatch()).toBe("qodercn/DeepSeek-V4-Pro:none");
+
+    const fbReq = nextId();
+    await createRequirement(repo, { goal: "备援后隔离" });
+    const fbSeed = await executor.startRun({
+      root: repo,
+      requirementId: fbReq,
+      action: "ask",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      message: "为什么要用文件锁？",
+    });
+    await waitFinished(fbSeed.run.id);
+    const fbRun = await executor.startRun({
+      root: repo,
+      requirementId: fbReq,
+      action: "implement",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      useFallback: true,
+    });
+    await waitFinished(fbRun.run.id);
+    expect(fbRun.target).toEqual({ harness: "qodercn", model: "Qwen4-Max" });
+    expect(lastDispatch()).toBe("qodercn/Qwen4-Max:none");
+  }, { timeout: 25000 });
+
+  test("prioritizes an explicit selection over a conflicting preset and cooldown while automatic routing keeps stage semantics", () => {
+    makeTempHub();
+    applyHubRoutingPreset("quota_saver");
+    const harnesses = [fakeCodexHarness("codex"), qoderHarness()];
+    const cfg = readHubConfig();
+    expect(cfg.routing.stages.design.primary).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
+
+    // Automatic mode keeps action routing semantics: ask maps onto the design stage rule.
+    const automatic = resolveRouteCandidates(cfg.routing, harnesses, "ask");
+    expect(automatic[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
+    expect(resolveRouteCandidates(cfg.routing, harnesses, "design")[0]).toEqual(automatic[0]);
+
+    const explicit: ModelTarget = { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" };
+    expect(resolveRouteCandidates(cfg.routing, harnesses, "design", explicit)[0]).toEqual(explicit);
+    expect(resolveRouteCandidates(buildPresetRouting("sota_first"), harnesses, "implement", explicit)[0]).toEqual(explicit);
+
+    recordModelRunOutcome({
+      harness: "codex",
+      model: SELECTED_MODEL,
+      action: "design",
+      status: "failed",
+      durationMs: 100,
+      rateLimited: true,
+    });
+    expect(isModelCoolingDown("codex", SELECTED_MODEL)).toBe(true);
+    expect(resolveRouteCandidates(cfg.routing, harnesses, "design", explicit)[0]).toEqual(explicit);
+
+    // Automatic routing only demotes the cooling model instead of substituting a selection.
+    const sota = buildPresetRouting("sota_first");
+    const cooled = resolveRouteCandidates(sota, harnesses, "design");
+    expect(cooled[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" });
+    expect(cooled.at(-1)).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" });
+
+    clearModelCooldown("codex", SELECTED_MODEL);
+    expect(isModelCoolingDown("codex", SELECTED_MODEL)).toBe(false);
+    expect(resolveRouteCandidates(sota, harnesses, "design")[0]).toEqual({
+      harness: "codex",
+      model: SELECTED_MODEL,
+      reasoningEffort: "high",
+    });
+  });
 });
