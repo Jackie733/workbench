@@ -11,7 +11,6 @@ import { discoverHarnesses } from "../../src/hub/discovery.ts";
 import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
-  addCustomModel,
   applyHubRoutingPreset,
   browseDirectory,
   isAutoRegistrableProjectRoot,
@@ -181,7 +180,7 @@ describe("WB-08 multi-project hub registry and daemon", () => {
 });
 
 describe("WB-09 harness discovery and stage-based model routing", () => {
-  test("discovers harnesses cleanly with custom models and graceful fallbacks", async () => {
+  test("discovers harnesses cleanly with graceful fallbacks", async () => {
     const fakeHome = makeTempHub();
     fs.mkdirSync(path.join(fakeHome, ".codex"), { recursive: true });
     fs.writeFileSync(
@@ -219,25 +218,22 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     );
     modelsDb.close();
 
-    const harnesses = await discoverHarnesses(
-      { opencode: ["opencode-go/custom-coder"] },
-      {
-        homeDir: fakeHome,
-        which: (cmd) => (cmd === "codex" || cmd === "opencode" || cmd === "agy" || cmd === "omp" ? `/usr/bin/${cmd}` : null),
-        runCmd: async (cmd) => {
-          if (cmd.includes("opencode")) {
-            return { code: 0, stdout: "opencode/deepseek-v4.1-flash-free\nopencode/glm-5.3-flash-free\n" };
-          }
-          if (cmd.includes("agy")) {
-            return {
-              code: 0,
-              stdout: "\r⠋ Fetching available models...\ngemini-4-hydrogen-xhigh         Gemini 4 Hydrogen (XHigh)\ngemini-4-argon-medium           Gemini 4 Argon (Medium)\n",
-            };
-          }
-          return { code: 1, stdout: "" };
-        },
+    const harnesses = await discoverHarnesses({
+      homeDir: fakeHome,
+      which: (cmd) => (cmd === "codex" || cmd === "opencode" || cmd === "agy" || cmd === "omp" ? `/usr/bin/${cmd}` : null),
+      runCmd: async (cmd) => {
+        if (cmd.includes("opencode")) {
+          return { code: 0, stdout: "opencode/deepseek-v4.1-flash-free\nopencode/glm-5.3-flash-free\n" };
+        }
+        if (cmd.includes("agy")) {
+          return {
+            code: 0,
+            stdout: "\r⠋ Fetching available models...\ngemini-4-hydrogen-xhigh         Gemini 4 Hydrogen (XHigh)\ngemini-4-argon-medium           Gemini 4 Argon (Medium)\n",
+          };
+        }
+        return { code: 1, stdout: "" };
       },
-    );
+    });
 
     const codex = harnesses.find((h) => h.id === "codex")!;
     const qoder = harnesses.find((h) => h.id === "qodercn")!;
@@ -249,7 +245,6 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     expect(codex.models[0]?.supportedEfforts).toContain("xhigh");
     expect(qoder.installed).toBe(false);
     expect(qoder.models.some((m) => m.id === "DeepSeek-Flash")).toBe(true);
-    expect(oc.models.some((m) => m.id === "opencode-go/custom-coder" && m.source === "custom")).toBe(true);
     expect(oc.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
     expect(agy.installed).toBe(true);
     expect(agy.models.some((m) => m.id === "gemini-4-hydrogen-xhigh")).toBe(true);
@@ -258,16 +253,14 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     expect(omp.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
   });
 
-  test("applies presets, custom models, routing overrides, and rate-limit detection", () => {
+  test("applies presets, routing overrides, and rate-limit detection", () => {
     makeTempHub();
     const sota = buildPresetRouting("sota_first");
     expect(sota.stages.design.primary.model).toBe("gpt-6.1-sol");
     expect(sota.stages.review.primary.harness).toBe("agy");
 
-    applyHubRoutingPreset("quota_saver");
-    const cfg = addCustomModel("opencode", "opencode-go/pro-model");
+    const cfg = applyHubRoutingPreset("quota_saver");
     expect(cfg.routing.activePreset).toBe("quota_saver");
-    expect(cfg.customModels.opencode).toContain("opencode-go/pro-model");
 
     const candidates = resolveRouteCandidates(cfg.routing, null, "implement", {
       harness: "qodercn",

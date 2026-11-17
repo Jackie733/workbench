@@ -132,7 +132,6 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           });
         }, i, i === 5);
       }
-      await page.click('[data-action="refresh"]');
       await page.waitForFunction(() => document.querySelectorAll(".req-row").length === 22, { timeout: 5000 });
 
       // Verify zero UUID/SHA/disclaimer noise on home screen
@@ -140,6 +139,11 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(homeText).not.toMatch(/[0-9a-f]{32,}/i);
       expect(homeText).not.toContain("revision");
       expect(homeText).not.toContain("sha256");
+
+      const subText = await page.evaluate(
+        () => document.querySelector('[data-testid="req-row-REQ-001"] .req-sub')?.textContent?.trim() ?? "",
+      );
+      expect(subText).toBe("草稿"); // 仅徽章一次，无重复进度文本
 
       // Search filters to REQ-005, then empty-search shows clear-search recovery
       await page.type('[data-testid="search-input"]', "Alpha");
@@ -264,7 +268,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       // Edit code behind the scenes -> live stale detection disables immediate acceptance!
       fs.appendFileSync(path.join(root, "calc.ts"), "// post-verify edit\n");
-      await page.click('[data-action="refresh"]');
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForFunction(
         () =>
           !document.querySelector('[data-testid="action-accept"]') &&
@@ -426,13 +431,23 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
-      // 2. Routing Center: switch preset + set effort + add custom model + save
+      // 2. Routing Center: switch preset + set effort + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="custom-model-input"]')))).toBe(false);
+      await page.select('[data-testid="hub-output-language-select"]', "en");
+      await clickReady(page, '[data-testid="settings-tab-project"]');
+      await page.waitForSelector('[data-testid="project-github-repo-input"]', { timeout: 5000 });
+      const inheritLabel = await page.evaluate(
+        () =>
+          document.querySelector('[data-testid="project-output-language-select"] option[value="inherit"]')?.textContent ?? "",
+      );
+      expect(inheritLabel).toContain("当前：zh-CN"); // 已持久化的全局语言，而非未保存草稿
+      await clickReady(page, '[data-testid="settings-tab-global"]');
+      await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
+      await page.select('[data-testid="hub-output-language-select"]', "zh-CN");
       await clickReady(page, '[data-testid="preset-quota_saver"]');
       await page.select('[data-testid="route-effort-design"]', "xhigh");
-      await page.type('[data-testid="custom-model-input"]', "opencode-go/my-pro");
-      await clickReady(page, '[data-testid="add-custom-model-btn"]');
       await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
@@ -447,7 +462,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
       await page.select('[data-testid="route-effort-design"]', "high");
-      await page.select('[data-testid="route-select-implement"]', "opencode::opencode-go/my-pro");
+      await page.select('[data-testid="route-select-implement"]', "opencode::opencode/deepseek-v4.1-flash-free");
       await page.select('[data-testid="route-effort-implement"]', "medium");
       await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
@@ -463,7 +478,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(secondReopen).toEqual({
         designModel: "codex::gpt-6-astra",
         designEffort: "high",
-        implementModel: "opencode::opencode-go/my-pro",
+        implementModel: "opencode::opencode/deepseek-v4.1-flash-free",
         implementEffort: "medium",
       });
 
@@ -730,6 +745,16 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("desktop-open")),
         { timeout: 5000 },
       );
+
+      const bottomPinned = await page.evaluate(() => {
+        const sb = document.querySelector('[data-testid="hub-sidebar"]')!.getBoundingClientRect();
+        const sec = document.querySelector('[data-testid="hub-sidebar"] .sb-section-bottom')!.getBoundingClientRect();
+        const brand = document.querySelector(".app-brand-btn")!.getBoundingClientRect();
+        const toggle = document.querySelector('[data-testid="toggle-sidebar-btn"]')!.getBoundingClientRect();
+        return { pinned: sb.bottom - sec.bottom < 40, toggleAfterBrand: toggle.left > brand.left };
+      });
+      expect(bottomPinned.pinned).toBe(true);
+      expect(bottomPinned.toggleAfterBrand).toBe(true);
 
       // 3. Open REQ-001 -> open RightDrawer via Header -> verify 720px default and no X close button inside drawer
       await clickReady(page, '[data-testid="req-row-REQ-001"]');

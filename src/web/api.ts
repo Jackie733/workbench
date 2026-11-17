@@ -62,7 +62,6 @@ export interface HubStateResponse {
   projects: HubProjectSummary[];
   harnesses: HarnessInfo[];
   routing: RoutingConfig;
-  customModels: Record<string, string[]>;
   outputLanguage?: OutputLanguage;
   activeRuns: Array<AgentRunRecord & { requirementId: string }>;
   evolutionOpenCount?: number;
@@ -159,19 +158,14 @@ export const api = {
     requestJson<BrowseResponse>(targetPath ? `/api/fs/browse?path=${encodeURIComponent(targetPath)}` : "/api/fs/browse"),
   refreshHarnesses: () => requestJson<{ harnesses: HarnessInfo[] }>("/api/hub/harnesses/refresh", { method: "POST" }),
   saveRouting: (routing: RoutingConfig) =>
-    requestJson<{ routing: RoutingConfig; customModels: Record<string, string[]> }>("/api/hub/routing", {
+    requestJson<{ routing: RoutingConfig }>("/api/hub/routing", {
       method: "PUT",
       body: JSON.stringify(routing),
     }),
   applyPreset: (preset: RoutingPreset) =>
-    requestJson<{ routing: RoutingConfig; customModels: Record<string, string[]> }>("/api/hub/routing/preset", {
+    requestJson<{ routing: RoutingConfig }>("/api/hub/routing/preset", {
       method: "POST",
       body: JSON.stringify({ preset }),
-    }),
-  addCustomModel: (harness: string, model: string) =>
-    requestJson<{ customModels: Record<string, string[]>; harnesses: HarnessInfo[] }>("/api/hub/models/custom", {
-      method: "POST",
-      body: JSON.stringify({ harness, model }),
     }),
   updateHubPreferences: (input: { outputLanguage?: OutputLanguage }) =>
     requestJson<{ outputLanguage: OutputLanguage }>("/api/hub/preferences", {

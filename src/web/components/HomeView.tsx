@@ -8,7 +8,7 @@ import {
   useProjectQuery,
   useRequirementsQuery,
 } from "../queries.ts";
-import { filteredItems, relativeTime, STAGE_META } from "../state.ts";
+import { filteredItems, progressDetail, relativeTime, STAGE_META } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
@@ -162,6 +162,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
               ) : (
                 list.map((item) => {
                   const meta = STAGE_META[item.stage];
+                  const detail = progressDetail(item);
                   return (
                     <div
                       key={item.id}
@@ -182,9 +183,11 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                         <span className={`badge ${meta.tone}`}>{meta.label}</span>
                       </div>
                       <div style={{ fontWeight: 500, fontSize: 13.5, marginBottom: 6 }}>{item.title}</div>
-                      <div className="muted" style={{ fontSize: 12 }}>
-                        {item.progressText}
-                      </div>
+                      {detail && (
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {detail}
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -362,6 +365,7 @@ export function HomeView() {
             <div className="req-list" data-testid="req-list">
               {visible.map((item) => {
                 const meta = STAGE_META[item.stage];
+                const detail = progressDetail(item);
                 const activeReqRun = Object.values(activeRuns).find(
                   (r) => r.requirementId === item.id && r.status === "running",
                 );
@@ -399,7 +403,7 @@ export function HomeView() {
                             <span className="pulse-dot" /> {activeReqRun.harness}/{activeReqRun.model} 执行中
                           </span>
                         )}
-                        <span>{item.progressText}</span>
+                        {detail && <span>{detail}</span>}
                       </div>
                     </div>
                     <span className="req-time">{relativeTime(item.updatedAt)}</span>

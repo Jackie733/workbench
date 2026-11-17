@@ -507,6 +507,52 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     const extra = reportPainPoint({ source: "ui_quick_report", category: "feature_gap", title: "Extra idea" });
     const dismissed = dismissPainPoint(extra!.id);
     expect(dismissed.status).toBe("dismissed");
+
+    // Open items rank ahead of dismissed ones (dismiss refreshes updatedAt).
+    reportPainPoint({ source: "ui_quick_report", category: "feature_gap", title: "Fresh open idea" });
+    const ordered = readPainPoints();
+    expect(ordered[0]!.status).toBe("open");
+    expect(ordered[ordered.length - 1]!.id).toBe(extra!.id);
+  });
+
+  test("keeps the newest entries when the inbox is at capacity", () => {
+    const hubDir = makeTempHub();
+    const inbox = path.join(hubDir, "evolution", "inbox.jsonl");
+    fs.mkdirSync(path.dirname(inbox), { recursive: true });
+    const base = {
+      source: "ui_quick_report",
+      category: "feature_gap",
+      detail: "old",
+      context: {},
+      occurrences: 1,
+    };
+    const rows = Array.from({ length: 299 }, (_, i) => ({
+      ...base,
+      id: `old-${i}`,
+      fingerprint: `old-${i}`,
+      title: `old-${i}`,
+      status: "open",
+      createdAt: i,
+      updatedAt: i,
+    }));
+    const promoted = {
+      ...base,
+      id: "recent-promoted",
+      fingerprint: "recent-promoted",
+      title: "recent promoted",
+      status: "promoted",
+      promotedReqId: "REQ-001",
+      createdAt: Date.now() - 1,
+      updatedAt: Date.now() - 1,
+    };
+    fs.writeFileSync(inbox, [...rows, promoted].map((row) => JSON.stringify(row)).join("\n") + "\n");
+
+    reportPainPoint({ source: "ui_quick_report", category: "feature_gap", title: "new report" });
+
+    const after = readPainPoints();
+    expect(after).toHaveLength(300);
+    expect(after.some((p) => p.id === "recent-promoted")).toBe(true);
+    expect(after.some((p) => p.id === "old-0")).toBe(false);
   });
 
   test("L4 RSI supports createGitHubIssue (with non-blocking offline warning) and syncRsiSandboxPrAndCleanup on merged PRs", async () => {

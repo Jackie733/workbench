@@ -1,18 +1,17 @@
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
-  Menu,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Moon,
-  RefreshCw,
   Settings,
   Sparkles,
   Sun,
   Zap,
 } from "lucide-react";
-import { backHome, invalidateAllWorkbenchQueries, useHubStateQuery, useProjectQuery } from "../queries.ts";
+import { backHome, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { bridgeStatusLabel } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -31,6 +30,16 @@ export function Topbar() {
   const setModal = useUiStore((s) => s.setModal);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
 
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 820px)");
+    const onChange = () => setIsMobile(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
   const activeRunCount = useStreamStore((s) => Object.keys(s.activeRuns).length);
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
@@ -44,32 +53,6 @@ export function Topbar() {
   return (
     <header className="topbar app-header" data-testid="app-header">
       <div className="topbar-left">
-        {isHub && (
-          <>
-            <button
-              className="btn ghost xs mobile-only"
-              type="button"
-              title="项目与算力侧栏"
-              aria-label="项目与算力侧栏"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-            >
-              <Icon icon={Menu} />
-            </button>
-            <button
-              className="btn ghost xs desktop-only"
-              type="button"
-              data-action="toggle-sidebar"
-              data-testid="toggle-sidebar-btn"
-              title={desktopSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
-              aria-label={desktopSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
-              aria-expanded={desktopSidebarOpen}
-              onClick={() => setDesktopSidebarOpen(!desktopSidebarOpen)}
-            >
-              <Icon icon={desktopSidebarOpen ? PanelLeftClose : PanelLeftOpen} />
-            </button>
-          </>
-        )}
-
         <button
           className="app-brand-btn"
           type="button"
@@ -81,6 +64,21 @@ export function Topbar() {
           <span className="sb-logo">W</span>
           <span className="app-brand-name">Workbench</span>
         </button>
+
+        {isHub && (
+          <button
+            className="btn ghost xs"
+            type="button"
+            data-action="toggle-sidebar"
+            data-testid="toggle-sidebar-btn"
+            title={isMobile ? "项目与算力侧栏" : desktopSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-label={isMobile ? "项目与算力侧栏" : desktopSidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-expanded={isMobile ? sidebarOpen : desktopSidebarOpen}
+            onClick={() => (isMobile ? setSidebarOpen(!sidebarOpen) : setDesktopSidebarOpen(!desktopSidebarOpen))}
+          >
+            <Icon icon={(isMobile ? sidebarOpen : desktopSidebarOpen) ? PanelLeftClose : PanelLeftOpen} />
+          </button>
+        )}
 
         {projName && (
           <div className="app-breadcrumb">
@@ -159,26 +157,6 @@ export function Topbar() {
         <button
           className="btn ghost xs"
           type="button"
-          data-action="open-routing"
-          data-testid="open-routing-btn"
-          title="算力路由、输出语言与 GitHub 设置"
-          aria-label="算力与模型路由配置"
-          onClick={() =>
-            setModal({
-              kind: "routing",
-              draft: null,
-              customHarness: "opencode",
-              customModel: "",
-            })
-          }
-        >
-          <Icon icon={Settings} size={14} />
-          <span className="header-btn-label">路由</span>
-        </button>
-
-        <button
-          className="btn ghost xs"
-          type="button"
           data-action="open-quick-report"
           data-testid="open-quick-report-btn"
           title="随手报修 / 自进化建议 (Alt+R)"
@@ -202,12 +180,14 @@ export function Topbar() {
         <button
           className="btn ghost xs"
           type="button"
-          data-action="refresh"
-          title="刷新状态"
-          aria-label="刷新状态"
-          onClick={() => void invalidateAllWorkbenchQueries()}
+          data-action="open-routing"
+          data-testid="open-routing-btn"
+          title="工作台设置（全局与项目）"
+          aria-label="工作台设置"
+          onClick={() => setModal({ kind: "routing", draft: null })}
         >
-          <Icon icon={RefreshCw} size={14} />
+          <Icon icon={Settings} size={14} />
+          <span className="header-btn-label">设置</span>
         </button>
 
         <button

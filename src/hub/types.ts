@@ -33,7 +33,7 @@ export interface DiscoveredModel {
   label?: string;
   provider?: string;
   tier: "sota" | "balanced" | "fast" | "review";
-  source: "detected" | "custom";
+  source: "detected";
   supportedEfforts?: ReasoningEffort[];
   defaultEffort?: ReasoningEffort;
 }
@@ -63,7 +63,6 @@ export interface HubConfig {
   activeProjectId: string | null;
   projects: HubProjectEntry[];
   routing: RoutingConfig;
-  customModels: Record<string, string[]>;
   outputLanguage?: OutputLanguage;
 }
 

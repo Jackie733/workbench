@@ -19,7 +19,6 @@ import {
 import type { OutputLanguage, PrivacyMode } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
-  HARNESS_IDS,
   ROUTING_STAGES,
   type HarnessId,
   type ReasoningEffort,
@@ -59,9 +58,9 @@ const STAGE_LABEL: Record<RoutingStage, string> = {
 };
 
 const PRESET_INFO: Array<{ id: RoutingPreset; name: string; desc: string }> = [
-  { id: "balanced", name: "性价比均衡 (推荐)", desc: "Codex/AGY 规划与审查，QoderCN/OpenCode 承担高频编码" },
-  { id: "sota_first", name: "SOTA 攻坚优先", desc: "关键阶段全线优先调用高推理主力模型" },
-  { id: "quota_saver", name: "极致省流保额", desc: "最大化使用 QoderCN 与 OpenCode 免费模型保留 SOTA 额度" },
+  { id: "balanced", name: "性价比均衡 (推荐)", desc: "规划与审查用强推理模型把关，高频编码交给大额度主力，质量与成本兼顾" },
+  { id: "sota_first", name: "SOTA 攻坚优先", desc: "四个阶段全线优先最强推理模型，追求质量上限，额度消耗最高" },
+  { id: "quota_saver", name: "极致省流保额", desc: "优先使用免费与高性价比模型，最大限度保留付费旗舰额度" },
 ];
 
 export function Modals() {
@@ -428,9 +427,10 @@ export function Modals() {
   }
 
   if (m.kind === "routing") {
-    const tab = m.tab ?? "routing";
+    const tab = m.tab ?? "global";
     const cfg = m.draft ?? routing;
     const hubLangValue = m.hubLangDraft ?? hub?.outputLanguage ?? "zh-CN";
+    const savedHubLang = hub?.outputLanguage ?? "zh-CN";
     const projLangValue = m.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
     const ghRepoValue = m.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
     const ghBaseValue =
@@ -439,7 +439,7 @@ export function Modals() {
     const ghAutoSyncValue = m.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
 
     const syncHubStatePatch = async (
-      patch: Partial<Pick<HubStateResponse, "routing" | "customModels" | "harnesses" | "outputLanguage">>,
+      patch: Partial<Pick<HubStateResponse, "routing" | "harnesses" | "outputLanguage">>,
     ) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
       queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
@@ -459,88 +459,73 @@ export function Modals() {
     const applyPreset = async (preset: RoutingPreset) => {
       const res = await runBusy(() => api.applyPreset(preset));
       if (res) {
-        await syncHubStatePatch({ routing: res.routing, customModels: res.customModels });
+        await syncHubStatePatch({ routing: res.routing });
         setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: res.routing } : prev));
         showToast(`已应用策略预设：${preset}`);
       }
     };
 
-    const addCustomModel = async () => {
-      const modelId = m.customModel.trim();
-      if (!modelId) {
-        showToast("请输入模型 ID", true);
-        return;
-      }
-      const res = await runBusy(() => api.addCustomModel(m.customHarness, modelId));
-      if (res) {
-        await syncHubStatePatch({ customModels: res.customModels, harnesses: res.harnesses });
-        setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: "" } : prev));
-        showToast(`已添加模型 ${modelId}`);
-      }
-    };
-
-    const saveRouting = async () => {
+    const saveGlobal = async () => {
       if (!cfg) return;
-      const res = await runBusy(() => api.saveRouting(cfg));
+      const res = await runBusy(async () => {
+        const routingRes = await api.saveRouting(cfg);
+        const prefRes = await api.updateHubPreferences({ outputLanguage: hubLangValue });
+        return { routingRes, prefRes };
+      });
       if (res) {
-        await syncHubStatePatch({ routing: res.routing, customModels: res.customModels });
+        await syncHubStatePatch({ routing: res.routingRes.routing, outputLanguage: res.prefRes.outputLanguage });
         setModal(null);
-        showToast("模型路由配置已保存");
+        showToast("全局设置已保存");
       }
     };
 
-    const savePreferences = async () => {
-      const out = await runBusy(async () => {
-        const hubRes = await api.updateHubPreferences({ outputLanguage: hubLangValue });
-        if (!noHubProject && project?.initialized) {
-          await api.updateProjectSettings({
-            outputLanguage: projLangValue,
-            github: {
-              repo: ghRepoValue.trim(),
-              defaultBaseBranch: ghBaseValue.trim() || "main",
-              autoCreateIssue: ghAutoCreateValue,
-              autoSyncIssue: ghAutoSyncValue,
-            },
-          });
-        }
-        return hubRes;
-      });
+    const saveProject = async () => {
+      const out = await runBusy(() =>
+        api.updateProjectSettings({
+          outputLanguage: projLangValue,
+          github: {
+            repo: ghRepoValue.trim(),
+            defaultBaseBranch: ghBaseValue.trim() || "main",
+            autoCreateIssue: ghAutoCreateValue,
+            autoSyncIssue: ghAutoSyncValue,
+          },
+        }),
+      );
       if (out) {
-        await syncHubStatePatch({ outputLanguage: out.outputLanguage });
         await invalidateAllWorkbenchQueries();
         setModal(null);
-        showToast("输出语言与 GitHub 配置已保存");
+        showToast("项目设置已保存");
       }
     };
 
     return (
       <ModalShell onClose={close} wide testId="routing-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>算力路由与工作台偏好</h3>
+          <h3 style={{ margin: 0 }}>工作台设置</h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <div className="segmented" role="tablist" aria-label="设置视图">
+            <div className="segmented" role="tablist" aria-label="设置作用域">
               <button
                 type="button"
                 role="tab"
-                aria-selected={tab === "routing"}
-                className={tab === "routing" ? "active" : ""}
-                data-testid="settings-tab-routing"
-                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "routing" } : prev))}
+                aria-selected={tab === "global"}
+                className={tab === "global" ? "active" : ""}
+                data-testid="settings-tab-global"
+                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "global" } : prev))}
               >
-                算力与模型路由
+                <Icon icon={Globe} size={14} /> 全局设置
               </button>
               <button
                 type="button"
                 role="tab"
-                aria-selected={tab === "preferences"}
-                className={tab === "preferences" ? "active" : ""}
-                data-testid="settings-tab-preferences"
-                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "preferences" } : prev))}
+                aria-selected={tab === "project"}
+                className={tab === "project" ? "active" : ""}
+                data-testid="settings-tab-project"
+                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "project" } : prev))}
               >
-                <Icon icon={Globe} size={14} /> 输出语言与 GitHub
+                <Icon icon={Folder} size={14} /> 项目设置
               </button>
             </div>
-            {tab === "routing" && (
+            {tab === "global" && (
               <button
                 className="btn xs"
                 type="button"
@@ -554,8 +539,8 @@ export function Modals() {
           </div>
         </div>
 
-        {tab === "routing" ? (
-          <>
+        {tab === "global" ? (
+          <div data-testid="settings-pane-global">
             <div className="preset-grid" data-testid="routing-presets">
               {PRESET_INFO.map((p) => (
                 <button
@@ -634,7 +619,6 @@ export function Modals() {
                                 return (
                                   <option key={val} value={val}>
                                     {h.id} · {mod.id}
-                                    {mod.source === "custom" ? " [自定义]" : ""}
                                   </option>
                                 );
                               })}
@@ -675,45 +659,29 @@ export function Modals() {
               </div>
             )}
 
-            <div className="custom-model-bar">
-              <strong className="xs">补充自定义模型（如 OpenCode Go 付费模型 ID）：</strong>
-              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                <select
-                  className="select"
-                  id="custom-model-harness"
-                  style={{ width: 140 }}
-                  value={m.customHarness}
-                  onChange={(e) =>
-                    setModal((prev) =>
-                      prev?.kind === "routing" ? { ...prev, customHarness: e.target.value as HarnessId } : prev,
-                    )
-                  }
-                >
-                  {HARNESS_IDS.map((h) => (
-                    <option key={h} value={h}>
-                      {h}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="input"
-                  id="custom-model-id"
-                  data-testid="custom-model-input"
-                  value={m.customModel}
-                  placeholder="例如 opencode-go/claude-sonnet-4.6"
-                  onChange={(e) =>
-                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: e.target.value } : prev))
-                  }
-                />
-                <button
-                  className="btn"
-                  type="button"
-                  data-testid="add-custom-model-btn"
-                  onClick={() => void addCustomModel()}
-                >
-                  添加模型
-                </button>
-              </div>
+            <div className="callout info xs" style={{ margin: "12px 0" }}>
+              所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
+            </div>
+
+            <div>
+              <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                Hub 全局默认输出语言（对所有项目生效）
+              </label>
+              <select
+                className="select"
+                data-testid="hub-output-language-select"
+                style={{ width: "100%" }}
+                value={hubLangValue}
+                onChange={(e) =>
+                  setModal((prev) =>
+                    prev?.kind === "routing" ? { ...prev, hubLangDraft: e.target.value as OutputLanguage } : prev,
+                  )
+                }
+              >
+                <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
+                <option value="en">English (en)</option>
+                <option value="auto">跟随需求输入语言 (auto)</option>
+              </select>
             </div>
 
             <div className="modal-actions">
@@ -725,43 +693,22 @@ export function Modals() {
                 type="button"
                 data-testid="save-routing-btn"
                 disabled={busy}
-                onClick={() => void saveRouting()}
+                onClick={() => void saveGlobal()}
               >
-                保存路由配置
+                保存全局设置
               </button>
             </div>
-          </>
+          </div>
         ) : (
-          <div data-testid="preferences-pane">
-            <div className="callout info xs" style={{ marginBottom: 12 }}>
-              所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <div>
-                <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                  Hub 全局默认输出语言（对所有项目生效）
-                </label>
-                <select
-                  className="select"
-                  data-testid="hub-output-language-select"
-                  style={{ width: "100%" }}
-                  value={hubLangValue}
-                  onChange={(e) =>
-                    setModal((prev) =>
-                      prev?.kind === "routing" ? { ...prev, hubLangDraft: e.target.value as OutputLanguage } : prev,
-                    )
-                  }
-                >
-                  <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
-                  <option value="en">English (en)</option>
-                  <option value="auto">跟随需求输入语言 (auto)</option>
-                </select>
+          <div data-testid="settings-pane-project">
+            {noHubProject || !project?.initialized ? (
+              <div className="empty-card xs muted" style={{ textAlign: "center" }}>
+                请先添加并初始化一个本地项目，再配置项目级设置。
               </div>
-
-              {!noHubProject && project?.initialized && (
-                <>
-                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+            ) : (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div>
                     <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
                       当前项目（{project.project?.name}）输出语言覆盖
                     </label>
@@ -778,7 +725,7 @@ export function Modals() {
                         )
                       }
                     >
-                      <option value="inherit">继承 Hub 全局设置（当前：{hubLangValue}）</option>
+                      <option value="inherit">继承 Hub 全局设置（当前：{savedHubLang}）</option>
                       <option value="zh-CN">简体中文 (zh-CN)</option>
                       <option value="en">English (en)</option>
                       <option value="auto">跟随需求输入语言 (auto)</option>
@@ -857,24 +804,24 @@ export function Modals() {
                       <span>验收通过与创建 PR 时自动向已关联 GitHub Issue 同步评论进展</span>
                     </label>
                   </div>
-                </>
-              )}
-            </div>
+                </div>
 
-            <div className="modal-actions">
-              <button className="btn" type="button" onClick={close}>
-                取消
-              </button>
-              <button
-                className="btn primary"
-                type="button"
-                data-testid="save-preferences-btn"
-                disabled={busy}
-                onClick={() => void savePreferences()}
-              >
-                保存偏好设置
-              </button>
-            </div>
+                <div className="modal-actions">
+                  <button className="btn" type="button" onClick={close}>
+                    取消
+                  </button>
+                  <button
+                    className="btn primary"
+                    type="button"
+                    data-testid="save-project-btn"
+                    disabled={busy}
+                    onClick={() => void saveProject()}
+                  >
+                    保存项目设置
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </ModalShell>

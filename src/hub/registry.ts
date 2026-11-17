@@ -8,7 +8,6 @@ import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/langua
 import { WORKBENCH_DIR, type OutputLanguage } from "../core/types.ts";
 import { buildPresetRouting, normalizeRoutingConfig } from "./routing.ts";
 import {
-  HARNESS_IDS,
   type BrowseEntry,
   type DaemonInfo,
   type HubConfig,
@@ -53,7 +52,6 @@ export function defaultHubConfig(): HubConfig {
     activeProjectId: null,
     projects: [],
     routing: buildPresetRouting("balanced"),
-    customModels: {},
     outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
   };
 }
@@ -83,15 +81,6 @@ export function readHubConfig(): HubConfig {
       });
     }
 
-    const customModels: Record<string, string[]> = {};
-    if (raw.customModels && typeof raw.customModels === "object") {
-      for (const [k, v] of Object.entries(raw.customModels as Record<string, unknown>)) {
-        if ((HARNESS_IDS as readonly string[]).includes(k) && Array.isArray(v)) {
-          customModels[k] = v.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-        }
-      }
-    }
-
     const activeId =
       typeof raw.activeProjectId === "string" && projects.some((p) => p.id === raw.activeProjectId)
         ? raw.activeProjectId
@@ -104,7 +93,6 @@ export function readHubConfig(): HubConfig {
       activeProjectId: activeId,
       projects,
       routing: normalizeRoutingConfig(raw.routing),
-      customModels,
       outputLanguage,
     };
   } catch {
@@ -208,23 +196,6 @@ export function updateHubPreferences(patch: { outputLanguage?: OutputLanguage })
     }
     config.outputLanguage = valid;
   }
-  return writeHubConfig(config);
-}
-
-export function addCustomModel(harness: string, modelId: string): HubConfig {
-  if (!(HARNESS_IDS as readonly string[]).includes(harness)) {
-    throw new WorkbenchError("invalid_input", `不支持的 Harness: ${harness}`);
-  }
-  const clean = modelId.trim();
-  if (!clean || clean.length > 200 || /[\x00-\x1f\x7f]/.test(clean)) {
-    throw new WorkbenchError("invalid_input", "模型名称无效");
-  }
-  const config = readHubConfig();
-  const list = config.customModels[harness] ?? [];
-  if (!list.includes(clean)) {
-    list.push(clean);
-  }
-  config.customModels[harness] = list;
   return writeHubConfig(config);
 }
 

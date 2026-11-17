@@ -149,13 +149,18 @@ export function readPainPoints(): EvolutionPainPoint[] {
       // Skip malformed line.
     }
   }
-  return list.sort((a, b) => b.updatedAt - a.updatedAt);
+  const statusRank: Record<string, number> = { open: 0, promoted: 1, dismissed: 2 };
+  return list.sort(
+    (a, b) => (statusRank[a.status] ?? 3) - (statusRank[b.status] ?? 3) || b.updatedAt - a.updatedAt,
+  );
 }
 
 function writePainPoints(list: EvolutionPainPoint[]): void {
   const filePath = inboxFilePath();
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const bounded = list.slice(0, MAX_INBOX_ENTRIES);
+  // Display order groups by status; retention must stay recency-based so a recent
+  // promoted/dismissed entry is never evicted ahead of an older open one.
+  const bounded = [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_INBOX_ENTRIES);
   const body = bounded.map((item) => JSON.stringify(item)).join("\n") + (bounded.length > 0 ? "\n" : "");
   atomicWriteFile(filePath, body);
 }

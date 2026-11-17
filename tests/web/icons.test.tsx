@@ -32,13 +32,11 @@ const ALLOWED_GLYPH_LINES: Record<string, RegExp[]> = {
 
 const EXPECTED_LUCIDE = {
   "Topbar.tsx": [
-    "Menu",
     "ArrowLeft",
     "PanelLeftClose",
     "PanelLeftOpen",
     "PanelRightClose",
     "PanelRightOpen",
-    "RefreshCw",
     "Sun",
     "Moon",
     "Settings",

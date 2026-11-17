@@ -561,38 +561,20 @@ export class HubExecutor {
   }
 
   async getHarnesses(forceRefresh = false, quickOnly = false): Promise<HarnessInfo[]> {
-    const cfg = readHubConfig();
     if (forceRefresh) {
-      this.cachedHarnesses = await discoverHarnesses(cfg.customModels);
+      this.cachedHarnesses = await discoverHarnesses();
       return this.cachedHarnesses;
     }
     if (!this.cachedHarnesses) {
-      this.cachedHarnesses = discoverHarnessesQuick(cfg.customModels);
+      this.cachedHarnesses = discoverHarnessesQuick();
       if (!quickOnly) {
-        void discoverHarnesses(cfg.customModels)
+        void discoverHarnesses()
           .then((full) => {
             this.cachedHarnesses = full;
           })
           .catch(() => {});
       }
     }
-    return this.cachedHarnesses;
-  }
-
-  syncCustomModels(customModels: Record<string, string[]>): HarnessInfo[] {
-    const base = this.cachedHarnesses ?? discoverHarnessesQuick(customModels);
-    this.cachedHarnesses = base.map((h) => {
-      const extras = customModels[h.id] ?? [];
-      const seen = new Set(h.models.map((m) => m.id));
-      const merged = [...h.models];
-      for (const id of extras) {
-        if (!seen.has(id)) {
-          seen.add(id);
-          merged.push({ id, tier: "balanced", source: "custom" });
-        }
-      }
-      return { ...h, models: merged };
-    });
     return this.cachedHarnesses;
   }
 

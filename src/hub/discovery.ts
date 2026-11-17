@@ -86,7 +86,7 @@ interface RawModelSpec {
   defaultEffort?: ReasoningEffort;
 }
 
-function mergeModels(detected: Array<string | RawModelSpec>, customIds: string[] = []): DiscoveredModel[] {
+function mergeModels(detected: Array<string | RawModelSpec>): DiscoveredModel[] {
   const seen = new Set<string>();
   const out: DiscoveredModel[] = [];
 
@@ -103,18 +103,6 @@ function mergeModels(detected: Array<string | RawModelSpec>, customIds: string[]
       source: "detected",
       ...(spec.supportedEfforts && spec.supportedEfforts.length > 0 ? { supportedEfforts: spec.supportedEfforts } : {}),
       ...(spec.defaultEffort ? { defaultEffort: spec.defaultEffort } : {}),
-    });
-  }
-
-  for (const id of customIds) {
-    const clean = id.trim();
-    if (!clean || seen.has(clean)) continue;
-    seen.add(clean);
-    out.push({
-      id: clean,
-      tier: classifyTier(clean),
-      source: "custom",
-      supportedEfforts: ["low", "medium", "high", "xhigh", "max"],
     });
   }
 
@@ -420,7 +408,6 @@ function qoderSpecsFromIds(ids: string[]): RawModelSpec[] {
 }
 
 export function discoverHarnessesQuick(
-  customModels: Record<string, string[]> = {},
   deps: Pick<ProbeDependencies, "homeDir" | "which"> = {},
 ): HarnessInfo[] {
   const homeDir = deps.homeDir ?? os.homedir();
@@ -453,7 +440,7 @@ export function discoverHarnessesQuick(
       subscription: "ChatGPT Plus",
       installed: Boolean(codexBin),
       executable: codexBin,
-      models: mergeModels(codexParsed.models, customModels.codex),
+      models: mergeModels(codexParsed.models),
       defaultModel: codexParsed.defaultModel ?? codexParsed.models[0]?.id ?? null,
       detectedAt: now,
     },
@@ -463,7 +450,7 @@ export function discoverHarnessesQuick(
       subscription: "QoderCN 订阅",
       installed: Boolean(qoderBin),
       executable: qoderBin,
-      models: mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), customModels.qodercn),
+      models: mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS)),
       defaultModel: "Qwen4-Max",
       detectedAt: now,
     },
@@ -473,7 +460,7 @@ export function discoverHarnessesQuick(
       subscription: "OpenCode Go / Free",
       installed: Boolean(opencodeBin),
       executable: opencodeBin,
-      models: mergeModels(opencodeList, customModels.opencode),
+      models: mergeModels(opencodeList),
       defaultModel: OPENCODE_DEFAULT_MODELS[0] ?? null,
       detectedAt: now,
     },
@@ -483,7 +470,7 @@ export function discoverHarnessesQuick(
       subscription: "Google AI Pro / AGY",
       installed: Boolean(agyBin),
       executable: agyBin,
-      models: mergeModels(agyModels, customModels.agy),
+      models: mergeModels(agyModels),
       defaultModel: agyModels.find((m) => m.id === "gemini-4-argon-medium")?.id ?? agyModels[0]?.id ?? null,
       detectedAt: now,
     },
@@ -493,17 +480,14 @@ export function discoverHarnessesQuick(
       subscription: "OMP Multi-Provider",
       installed: Boolean(ompBin),
       executable: ompBin,
-      models: mergeModels(ompList, customModels.omp),
+      models: mergeModels(ompList),
       defaultModel: ompDefault,
       detectedAt: now,
     },
   ];
 }
 
-export async function discoverHarnesses(
-  customModels: Record<string, string[]> = {},
-  deps: ProbeDependencies = {},
-): Promise<HarnessInfo[]> {
+export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<HarnessInfo[]> {
   const homeDir = deps.homeDir ?? os.homedir();
   const which = deps.which ?? defaultWhich;
   const runCmd = deps.runCmd ?? defaultRunCmd;
@@ -564,7 +548,7 @@ export async function discoverHarnesses(
       subscription: "ChatGPT Plus",
       installed: Boolean(codexBin),
       executable: codexBin,
-      models: mergeModels(codexParsed.models, customModels.codex),
+      models: mergeModels(codexParsed.models),
       defaultModel: codexParsed.defaultModel ?? codexParsed.models[0]?.id ?? null,
       detectedAt: now,
     },
@@ -574,7 +558,7 @@ export async function discoverHarnesses(
       subscription: "QoderCN 订阅",
       installed: Boolean(qoderBin),
       executable: qoderBin,
-      models: mergeModels(qoderModels, customModels.qodercn),
+      models: mergeModels(qoderModels),
       defaultModel: qoderIds.includes("Qwen4-Max") ? "Qwen4-Max" : (qoderIds[0] ?? null),
       detectedAt: now,
     },
@@ -584,7 +568,7 @@ export async function discoverHarnesses(
       subscription: "OpenCode Go / Free",
       installed: Boolean(opencodeBin),
       executable: opencodeBin,
-      models: mergeModels(opencodeCombined, customModels.opencode),
+      models: mergeModels(opencodeCombined),
       defaultModel: opencodeCliModels[0] ?? OPENCODE_DEFAULT_MODELS[0] ?? null,
       detectedAt: now,
     },
@@ -594,7 +578,7 @@ export async function discoverHarnesses(
       subscription: "Google AI Pro / AGY",
       installed: Boolean(agyBin),
       executable: agyBin,
-      models: mergeModels(agyCombined, customModels.agy),
+      models: mergeModels(agyCombined),
       defaultModel:
         agyCombined.find((m) => m.id === "gemini-4-argon-medium")?.id ?? agyCombined[0]?.id ?? null,
       detectedAt: now,
@@ -605,7 +589,7 @@ export async function discoverHarnesses(
       subscription: "OMP Multi-Provider",
       installed: Boolean(ompBin),
       executable: ompBin,
-      models: mergeModels(ompCombined, customModels.omp),
+      models: mergeModels(ompCombined),
       defaultModel: ompDefault,
       detectedAt: now,
     },

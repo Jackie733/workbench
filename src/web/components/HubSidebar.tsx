@@ -122,7 +122,7 @@ export function HubSidebar() {
             </div>
           </div>
 
-          <div className="sb-section">
+          <div className="sb-section sb-section-bottom">
             <div className="sb-head">
               <span>算力与模型路由</span>
               <button
@@ -131,7 +131,7 @@ export function HubSidebar() {
                 data-action="open-routing"
                 data-testid="sidebar-routing-btn"
                 onClick={() =>
-                  setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" })
+                  setModal({ kind: "routing", draft: null })
                 }
               >
                 <Icon icon={Settings} size={14} /> 配置
@@ -142,11 +142,11 @@ export function HubSidebar() {
               role="button"
               tabIndex={0}
               onClick={() =>
-                setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" })
+                setModal({ kind: "routing", draft: null })
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" });
+                  setModal({ kind: "routing", draft: null });
                 }
               }}
             >

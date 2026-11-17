@@ -285,12 +285,7 @@ describe("REQ-001 real browser icon behavior", () => {
         { timeout: 5000 },
       );
 
-      // Refresh and theme controls stay interactive and expose their accessible names.
-      expect(
-        await page.evaluate(() => document.querySelector('[data-action="refresh"]')?.getAttribute("aria-label")),
-      ).toBe("刷新状态");
-      await page.click('[data-action="refresh"]');
-      await new Promise((r) => setTimeout(r, 250));
+      // Theme controls stay interactive and expose their accessible names.
       const beforeTheme = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
       const themeLabel = await page.evaluate(() =>
         document.querySelector('[data-action="toggle-theme"]')?.getAttribute("aria-label"),

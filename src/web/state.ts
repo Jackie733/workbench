@@ -50,10 +50,8 @@ export type ModalState =
   | { kind: "add_project"; browse: BrowseResponse | null; pathInput: string; nameInput: string; initPrivacy: PrivacyMode | "none" }
   | {
       kind: "routing";
-      tab?: "routing" | "preferences";
+      tab?: "global" | "project";
       draft: RoutingConfig | null;
-      customHarness: HarnessId;
-      customModel: string;
       hubLangDraft?: OutputLanguage;
       projLangDraft?: OutputLanguage | "inherit";
       ghRepoDraft?: string;
@@ -239,6 +237,25 @@ export function filteredItems(items: RequirementSummary[], query: string): Requi
       item.title.toLowerCase().includes(q) ||
       item.progressText.toLowerCase().includes(q),
   );
+}
+
+/** 去除与阶段徽章重复的进度文本，仅保留增量信息。 */
+export function progressDetail(item: RequirementSummary): string {
+  switch (item.stage) {
+    case "draft":
+    case "designing":
+    case "done":
+    case "cancelled":
+      return "";
+    case "awaiting_approval":
+      return item.designVersion > 0 ? `方案 v${item.designVersion}` : "规范变更待确认";
+    case "implementing":
+      return item.progressText === "实施中" ? "" : item.progressText;
+    case "awaiting_acceptance":
+      return `验证 ${item.requiredPassed}/${item.requiredTotal}`;
+    case "blocked":
+      return item.blockedReason ?? "";
+  }
 }
 
 export function defaultActionForRequirement(d: RequirementDetail): AgentAction {

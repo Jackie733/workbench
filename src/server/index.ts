@@ -81,7 +81,6 @@ import { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
 import { clearModelCooldown, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
-  addCustomModel,
   applyHubRoutingPreset,
   browseDirectory,
   isAutoRegistrableProjectRoot,
@@ -505,7 +504,6 @@ export async function startWorkbenchServer(options: {
         projects: hubMode ? projects : [],
         harnesses,
         routing: cfg.routing,
-        customModels: cfg.customModels,
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
         activeRuns: executor.getActiveRuns(),
         evolutionOpenCount,
@@ -575,14 +573,14 @@ export async function startWorkbenchServer(options: {
 
     if (method === "GET" && pathname === "/api/hub/routing") {
       const cfg = readHubConfig();
-      return jsonResponse({ routing: cfg.routing, customModels: cfg.customModels });
+      return jsonResponse({ routing: cfg.routing });
     }
 
     if (method === "PUT" && pathname === "/api/hub/routing") {
       const body = await readBody(req);
       const cfg = updateHubRouting(body as unknown as RoutingConfig);
       broadcastUi({ type: "hub.updated", reason: "routing.updated", at: Date.now() });
-      return jsonResponse({ routing: cfg.routing, customModels: cfg.customModels });
+      return jsonResponse({ routing: cfg.routing });
     }
 
     if (method === "POST" && pathname === "/api/hub/routing/preset") {
@@ -593,16 +591,7 @@ export async function startWorkbenchServer(options: {
       }
       const cfg = applyHubRoutingPreset(preset as RoutingPreset);
       broadcastUi({ type: "hub.updated", reason: "routing.preset", preset, at: Date.now() });
-      return jsonResponse({ routing: cfg.routing, customModels: cfg.customModels });
-    }
-
-    if (method === "POST" && pathname === "/api/hub/models/custom") {
-      const body = await readBody(req);
-      const harness = typeof body.harness === "string" ? body.harness : "";
-      const model = typeof body.model === "string" ? body.model : "";
-      const cfg = addCustomModel(harness, model);
-      const harnesses = executor.syncCustomModels(cfg.customModels);
-      return jsonResponse({ customModels: cfg.customModels, harnesses });
+      return jsonResponse({ routing: cfg.routing });
     }
 
     if (method === "GET" && pathname === "/api/hub/evolution") {
