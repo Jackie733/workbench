@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Ellipsis, MessageSquare, Plus, Search, Zap } from "lucide-react";
+import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
 import { api } from "../api.ts";
 import {
@@ -1043,16 +1043,37 @@ export function WorkspaceView() {
   const { banner } = validity;
   const bridgeConnected = Boolean(project?.bridge.connected);
 
-  const openDeliverModal = () => {
+  const openDeliverModal = (preferPr?: boolean) => {
     const candidates = deliveryPreview?.candidates ?? [];
     const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
     const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
+    const usePr = preferPr ?? Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr);
     setModal({
       kind: "deliver",
       commitMessage: deliveryPreview?.suggestedMessage ?? `feat(${s.id.toLowerCase()}): ${s.title}`,
       selectedFiles: defaultSelected,
       note: "",
+      createPr: usePr,
+      branchName: deliveryPreview?.suggestedBranch ?? `feat/${s.id.toLowerCase()}`,
+      baseBranch: deliveryPreview?.baseBranch ?? "main",
+      prTitle: `${s.id}: ${s.title}`,
     });
+  };
+
+  const syncPrStatus = async () => {
+    const res = await runBusy(() => api.syncRequirementPr(s.id));
+    if (res) {
+      await invalidateAllWorkbenchQueries();
+      if (res.pr.state === "merged") {
+        showToast(
+          res.cleanedSandbox
+            ? `PR #${res.pr.number} 已合并并清理沙箱${res.mainUpdated ? "（主干已同步）" : res.mainSyncReason ? `（${res.mainSyncReason}）` : ""}`
+            : `PR #${res.pr.number} 已合并`,
+        );
+      } else {
+        showToast(`PR #${res.pr.number} 当前状态：${res.pr.state}`);
+      }
+    }
   };
 
   const harnesses = hub?.harnesses ?? [];
@@ -1079,10 +1100,34 @@ export function WorkspaceView() {
           <span
             className="badge info"
             data-testid="sandbox-active-badge"
-            title={`沙箱分支: ${reqData.sandbox.branch}（验收通过后可一键应用改动到主干）`}
+            title={`沙箱分支: ${reqData.sandbox.branch}（验收通过后可推送分支提 PR 或应用到主干）`}
           >
             沙箱隔离中
           </span>
+        )}
+        {s.github?.issue && (
+          <a
+            className={`badge ${s.github.issue.state === "closed" ? "neutral" : "info"}`}
+            href={s.github.issue.url}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="ws-github-issue-link"
+            title={s.github.issue.title}
+          >
+            <Icon icon={Link2} size={14} /> Issue #{s.github.issue.number}
+          </a>
+        )}
+        {s.github?.pr && (
+          <a
+            className={`badge ${s.github.pr.state === "merged" ? "success" : s.github.pr.state === "closed" ? "neutral" : "info"}`}
+            href={s.github.pr.url}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="ws-github-pr-link"
+            title={s.github.pr.title}
+          >
+            <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {s.github.pr.state}
+          </a>
         )}
         <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
           {stageMeta.label}
@@ -1128,6 +1173,33 @@ export function WorkspaceView() {
               <button type="button" onClick={() => void openHandoff(s.id)}>
                 查看交接简报 handoff.md
               </button>
+              {!s.github?.issue ? (
+                <button
+                  type="button"
+                  data-testid="menu-link-issue-btn"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setModal({ kind: "link_issue", requirementId: s.id, mode: "create", issueRef: "" });
+                  }}
+                >
+                  关联 / 创建 GitHub Issue…
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="menu-sync-issue-btn"
+                  onClick={async () => {
+                    setMoreMenuOpen(false);
+                    const out = await runBusy(() => api.syncRequirementIssue(s.id));
+                    if (out) {
+                      await invalidateAllWorkbenchQueries();
+                      showToast(`已同步状态至 Issue #${s.github!.issue!.number}`);
+                    }
+                  }}
+                >
+                  同步当前状态到 Issue #{s.github.issue.number}
+                </button>
+              )}
               {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
                 <button
                   type="button"
@@ -1222,16 +1294,19 @@ export function WorkspaceView() {
               已交付提交 <code>{s.delivery.shortHash}</code>
               {s.delivery.branch ? ` · 分支 ${s.delivery.branch}` : ""} · {s.delivery.files.length} 个文件 ·{" "}
               {formatDateTime(s.delivery.deliveredAt)}
+              {s.github?.pr && ` · PR #${s.github.pr.number} (${s.github.pr.state})`}
             </div>
           )}
-          {s.stage === "done" && !s.delivery && deliveryPreview?.canCommit && (
+          {s.stage === "done" && !s.delivery && !deliveryPreview?.sandboxActive && deliveryPreview?.canCommit && (
             <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-pending-hint">
               工作区尚有 {deliveryPreview.candidates.length} 个未提交变更，建议完成 Git 交付提交以保持下一条需求基线干净。
             </div>
           )}
-          {s.stage === "done" && !s.delivery && deliveryPreview?.sandboxActive && (
+          {s.stage === "done" && deliveryPreview?.sandboxActive && !s.github?.pr && (
             <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-sandbox-hint">
-              改动仍在隔离沙箱中，请先点击「应用沙箱改动」合并到主干后再执行 Git 交付提交。
+              {deliveryPreview.canCreatePr
+                ? `改动位于沙箱分支 ${deliveryPreview.branch ?? reqData?.sandbox?.branch}，建议推送分支并创建标准化 GitHub PR（也可本地应急应用）。`
+                : "改动仍在隔离沙箱中，可点击「应用沙箱改动」合并到主干，或配置 GitHub 远端后提交 PR。"}
             </div>
           )}
           {canRunModel && (
@@ -1289,15 +1364,33 @@ export function WorkspaceView() {
               {sec.label}
             </button>
           ))}
-          {s.stage === "done" && deliveryPreview?.canCommit && (
+          {s.stage === "done" && (deliveryPreview?.canCommit || deliveryPreview?.canCreatePr) && (
             <button
               className={s.delivery ? "btn" : "btn primary"}
               type="button"
               data-testid="open-deliver-btn"
               disabled={busy}
-              onClick={openDeliverModal}
+              onClick={() => openDeliverModal(Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr))}
             >
-              {s.delivery ? "补充交付提交…" : "提交代码交付…"}
+              {reqData?.sandbox && deliveryPreview?.canCreatePr
+                ? s.github?.pr
+                  ? "追加提交 / 更新 PR…"
+                  : "提交并创建 GitHub PR…"
+                : s.delivery
+                  ? "补充交付提交…"
+                  : "提交代码交付…"}
+            </button>
+          )}
+          {s.stage === "done" && s.github?.pr && (
+            <button
+              className="btn"
+              type="button"
+              data-testid="sync-pr-btn"
+              disabled={busy}
+              onClick={() => void syncPrStatus()}
+            >
+              <Icon icon={RefreshCw} size={14} />{" "}
+              {reqData?.sandbox ? "同步 PR 状态并清理沙箱" : "同步 PR 状态"}
             </button>
           )}
           {reqData?.sandbox && s.stage === "done" && (
@@ -1320,7 +1413,7 @@ export function WorkspaceView() {
                 }
               }}
             >
-              应用沙箱改动
+              {deliveryPreview?.canCreatePr ? "本地应急应用" : "应用沙箱改动"}
             </button>
           )}
         </div>

@@ -20,22 +20,48 @@ import {
   getRequirementDiff,
   getVerificationEvidence,
   initProject,
+  linkRequirementGitHubIssue,
   listRequirements,
   markDesigning,
+  recordRequirementGitHubSync,
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
   unblockRequirement,
   updateDesign,
+  updateProjectConfig,
   updateSpec,
 } from "../core/engine.ts";
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import {
+  buildRequirementIssueBody,
+  commentOnGitHubIssue,
+  createGitHubIssue,
+  inspectGitHubEnvironment,
+  parseGitHubRepoFromRemoteUrl,
+  setGitHubIssueState,
+  viewGitHubIssue,
+  viewGitHubPr,
+  type GitHubCommandDeps,
+} from "../core/github.ts";
+import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
-import { AGENT_ACTIONS, WORKBENCH_DIR, type AgentAction, type CriterionInput, type PrivacyMode, type Stage, type Track } from "../core/types.ts";
+import {
+  AGENT_ACTIONS,
+  WORKBENCH_DIR,
+  type AgentAction,
+  type CriterionInput,
+  type OutputLanguage,
+  type PrivacyMode,
+  type ProjectGitHubConfig,
+  type RequirementDetail,
+  type Stage,
+  type Track,
+} from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
 import {
   applySandboxToMain,
@@ -46,6 +72,7 @@ import {
   readPainPoints,
   reportPainPoint,
   resolveWorkbenchRepoRoot,
+  syncRsiSandboxPrAndCleanup,
   type PainPointCategory,
   type PainPointContext,
   type PainPointSource,
@@ -63,6 +90,7 @@ import {
   removeDaemonInfo,
   removeHubProject,
   setActiveHubProject,
+  updateHubPreferences,
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
@@ -191,6 +219,7 @@ export async function startWorkbenchServer(options: {
   hubMode?: boolean;
   webDir?: string;
   executor?: HubExecutor;
+  githubDeps?: GitHubCommandDeps;
 }): Promise<WorkbenchServerHandle> {
   const defaultRoot = canonicalRoot(options.root);
   const hubMode = options.hubMode === true;
@@ -378,6 +407,85 @@ export async function startWorkbenchServer(options: {
     return { ...ack, prompt };
   };
 
+  const resolveOutputLang = (projectRoot: string, detail?: RequirementDetail) => {
+    const projectMeta = getProjectStatus(projectRoot).project;
+    const hubCfg = readHubConfig();
+    return resolveEffectiveOutputLanguage({
+      projectLanguage: projectMeta?.outputLanguage,
+      hubLanguage: hubCfg.outputLanguage,
+      contextText: detail ? `${detail.state.title}\n${detail.specMarkdown}` : undefined,
+    });
+  };
+
+  const tryCreateAndLinkIssue = async (
+    projectRoot: string,
+    detail: RequirementDetail,
+    snapHash: string | null,
+    labels?: string[],
+  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+    try {
+      const projectMeta = getProjectStatus(projectRoot).project;
+      const ghEnv = await inspectGitHubEnvironment(projectRoot, projectMeta?.github, options.githubDeps);
+      if (!ghEnv.ready || !ghEnv.repo) {
+        return { detail, warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue" };
+      }
+      const issue = await createGitHubIssue(
+        {
+          root: projectRoot,
+          repo: ghEnv.repo,
+          title: `[${detail.state.id}] ${detail.state.title}`,
+          body: buildRequirementIssueBody(detail),
+          labels,
+        },
+        options.githubDeps,
+      );
+      const updated = await linkRequirementGitHubIssue(projectRoot, detail.state.id, {
+        repo: ghEnv.repo,
+        issue,
+        currentCodeSnapshotHash: snapHash,
+      });
+      return { detail: updated };
+    } catch (err) {
+      return { detail, warning: err instanceof Error ? err.message : String(err) };
+    }
+  };
+
+  const trySyncIssueMilestone = async (
+    projectRoot: string,
+    detail: RequirementDetail,
+    comment: string,
+    opts?: { state?: "open" | "closed"; snapHash?: string | null },
+  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+    const linked = detail.state.github?.issue;
+    const repo = detail.state.github?.repo;
+    if (!linked || !repo) return { detail };
+    try {
+      if (opts?.state && opts.state !== linked.state) {
+        await setGitHubIssueState(
+          { root: projectRoot, repo, issueNumber: linked.number, state: opts.state, comment },
+          options.githubDeps,
+        );
+      } else {
+        await commentOnGitHubIssue(
+          { root: projectRoot, repo, issueNumber: linked.number, body: comment },
+          options.githubDeps,
+        );
+      }
+      const updated = await recordRequirementGitHubSync(projectRoot, detail.state.id, {
+        issuePatch: {
+          ...(opts?.state ? { state: opts.state } : {}),
+          lastSyncedStage: detail.state.stage,
+        },
+        eventKind: "github_issue_synced",
+        summary: `已同步阶段 [${detail.state.stage}] 至 GitHub Issue #${linked.number}`,
+        currentCodeSnapshotHash: opts?.snapHash ?? null,
+      });
+      return { detail: updated };
+    } catch (err) {
+      return { detail, warning: err instanceof Error ? err.message : String(err) };
+    }
+  };
+
   const handleApi = async (req: Request, url: URL): Promise<Response> => {
     const pathname = url.pathname;
     const method = req.method.toUpperCase();
@@ -398,10 +506,22 @@ export async function startWorkbenchServer(options: {
         harnesses,
         routing: cfg.routing,
         customModels: cfg.customModels,
+        outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
         activeRuns: executor.getActiveRuns(),
         evolutionOpenCount,
         cooldownCount: telemetry.activeCooldowns.length,
       });
+    }
+
+    if (method === "PUT" && pathname === "/api/hub/preferences") {
+      const body = await readBody(req);
+      const outputLanguage = body.outputLanguage !== undefined ? normalizeOutputLanguage(body.outputLanguage) : undefined;
+      if (body.outputLanguage !== undefined && !outputLanguage) {
+        throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
+      }
+      const cfg = updateHubPreferences({ outputLanguage });
+      broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
+      return jsonResponse({ outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE });
     }
 
     if (method === "POST" && pathname === "/api/hub/projects") {
@@ -498,16 +618,18 @@ export async function startWorkbenchServer(options: {
       const sandboxes = Object.values(readSandboxes()).map((sb) => {
         let stage: Stage | null = null;
         let canApply = false;
+        let github: RequirementDetail["state"]["github"] = null;
         try {
           if (fs.existsSync(sb.worktreePath)) {
             const detail = getRequirement(sb.projectRoot, sb.requirementId);
             stage = detail.state.stage;
             canApply = detail.state.stage === "done" && detail.state.acceptance !== null;
+            github = detail.state.github ?? null;
           }
         } catch {
           // Ignore stale or inaccessible requirement state.
         }
-        return { ...sb, stage, canApply };
+        return { ...sb, stage, canApply, github };
       });
       return jsonResponse({
         painPoints: readPainPoints(),
@@ -543,10 +665,16 @@ export async function startWorkbenchServer(options: {
     if (method === "POST" && evoPromoteMatch) {
       const painId = decodeURIComponent(evoPromoteMatch[1]!);
       const body = await readBody(req);
-      const result = await promotePainPoint(painId, {
-        workbenchRoot: defaultRoot,
-        createSandbox: body.createSandbox !== false,
-      });
+      const result = await promotePainPoint(
+        painId,
+        {
+          workbenchRoot: defaultRoot,
+          createSandbox: body.createSandbox !== false,
+          createGitHubIssue:
+            body.createGitHubIssue === true ? true : body.createGitHubIssue === false ? false : undefined,
+        },
+        options.githubDeps,
+      );
       ensureWatcherFor(result.workbenchRoot);
       broadcastUi({ type: "hub.updated", reason: "evolution.promoted", painId, at: Date.now() });
       broadcastUi({
@@ -582,6 +710,27 @@ export async function startWorkbenchServer(options: {
       });
     }
 
+    const evoSyncPrMatch = /^\/api\/hub\/evolution\/sync-pr\/(REQ-\d{3,})$/.exec(pathname);
+    if (method === "POST" && evoSyncPrMatch) {
+      const reqId = evoSyncPrMatch[1]!;
+      const body = await readBody(req);
+      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
+      const synced = await syncRsiSandboxPrAndCleanup(
+        wbRoot,
+        reqId,
+        { forceCleanup: body.forceCleanup === true },
+        options.githubDeps,
+      );
+      const reloadRes = synced.cleanedSandbox && synced.touchesWeb ? await reloadWebBundle() : { reloaded: false };
+      broadcastUi({ type: "hub.updated", reason: "evolution.pr_synced", reqId, at: Date.now() });
+      broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: wbRoot, id: reqId, at: Date.now() });
+      return jsonResponse({
+        ...synced,
+        webReloaded: reloadRes.reloaded,
+        restartRecommended: synced.cleanedSandbox && synced.touchesBackend,
+      });
+    }
+
     if (method === "POST" && pathname === "/api/hub/telemetry/clear-cooldown") {
       const body = await readBody(req);
       const harness = typeof body.harness === "string" ? body.harness : undefined;
@@ -602,12 +751,64 @@ export async function startWorkbenchServer(options: {
     if (method === "GET" && pathname === "/api/project") {
       const status = getProjectStatus(base);
       const git = await observeGitSnapshot(base);
+      const remoteRepo = git ? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base)) : null;
+      const hubCfg = readHubConfig();
+      const effectiveOutputLanguage = resolveEffectiveOutputLanguage({
+        projectLanguage: status.project?.outputLanguage,
+        hubLanguage: hubCfg.outputLanguage,
+      });
       return jsonResponse({
         ...status,
         root: base,
         bridge: bridgeStatus,
+        effectiveOutputLanguage,
+        remoteRepo,
         git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
       });
+    }
+
+    if (method === "PATCH" && pathname === "/api/project/settings") {
+      const body = await readBody(req);
+      let outputLanguagePatch: OutputLanguage | null | undefined = undefined;
+      if (body.outputLanguage === null || body.outputLanguage === "inherit") {
+        outputLanguagePatch = null;
+      } else if (body.outputLanguage !== undefined) {
+        const valid = normalizeOutputLanguage(body.outputLanguage);
+        if (!valid) {
+          throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
+        }
+        outputLanguagePatch = valid;
+      }
+      let githubPatch: ProjectGitHubConfig | null | undefined = undefined;
+      if (body.github === null) {
+        githubPatch = null;
+      } else if (isRecord(body.github)) {
+        githubPatch = {
+          ...(typeof body.github.repo === "string" ? { repo: body.github.repo } : {}),
+          ...(typeof body.github.defaultBaseBranch === "string"
+            ? { defaultBaseBranch: body.github.defaultBaseBranch }
+            : {}),
+          ...(typeof body.github.autoCreateIssue === "boolean"
+            ? { autoCreateIssue: body.github.autoCreateIssue }
+            : {}),
+          ...(typeof body.github.autoSyncIssue === "boolean"
+            ? { autoSyncIssue: body.github.autoSyncIssue }
+            : {}),
+        };
+      }
+      const project = await updateProjectConfig(base, {
+        ...(typeof body.name === "string" ? { name: body.name } : {}),
+        ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
+        ...(githubPatch !== undefined ? { github: githubPatch } : {}),
+      });
+      broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
+      return jsonResponse({ project });
+    }
+
+    if (method === "GET" && pathname === "/api/github/status") {
+      const status = getProjectStatus(base);
+      const envStatus = await inspectGitHubEnvironment(base, status.project?.github, options.githubDeps);
+      return jsonResponse(envStatus);
     }
 
     if (method === "GET" && pathname === "/api/project/playbook") {
@@ -651,9 +852,17 @@ export async function startWorkbenchServer(options: {
 
     if (method === "POST" && pathname === "/api/project/init") {
       const body = await readBody(req);
+      let outputLanguage: OutputLanguage | undefined;
+      if (body.outputLanguage !== undefined && body.outputLanguage !== "inherit") {
+        outputLanguage = normalizeOutputLanguage(body.outputLanguage);
+        if (!outputLanguage) {
+          throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
+        }
+      }
       const project = await initProject(base, {
         name: typeof body.name === "string" ? body.name : undefined,
         privacyMode: body.privacyMode === "tracked" ? "tracked" : "local",
+        ...(outputLanguage ? { outputLanguage } : {}),
       });
       ensureWatcherFor(base);
       broadcastUi({ type: "workbench.updated", reason: "project.init", root: base, at: Date.now() });
@@ -677,6 +886,76 @@ export async function startWorkbenchServer(options: {
       });
     }
 
+    if (method === "POST" && pathname === "/api/requirements/import-issue") {
+      const body = await readBody(req);
+      const issueRef =
+        typeof body.issueRef === "string" || typeof body.issueRef === "number" ? body.issueRef : "";
+      if (!String(issueRef).trim()) {
+        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL");
+      }
+      const projectMeta = getProjectStatus(base).project;
+      const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
+      const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef }, options.githubDeps);
+      const snapshot = await observeGitSnapshot(base);
+
+      // Avoid importing the exact same GitHub Issue twice if an active/existing requirement already tracks it.
+      const existingList = listRequirements(base, {
+        scope: "all",
+        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+      });
+      const existingMatch = existingList.find(
+        (item) => item.github?.repo === issue.repo && item.github?.issue?.number === issue.number,
+      );
+      if (existingMatch) {
+        const existingDetail = getRequirement(base, existingMatch.id, {
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        return jsonResponse({ detail: existingDetail, alreadyExisted: true, issue }, 200);
+      }
+
+      const goal = [
+        `# ${issue.title}`,
+        "",
+        `> 导入自 GitHub Issue: ${issue.url}`,
+        issue.labels.length > 0 ? `> 标签：${issue.labels.join(", ")}` : "",
+        "",
+        issue.body || issue.title,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      let detail = await createRequirement(base, {
+        goal,
+        title: issue.title,
+        track: body.track === "fast_track" ? "fast_track" : "plan_first",
+        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+      });
+      detail = await linkRequirementGitHubIssue(base, detail.state.id, {
+        repo: issue.repo,
+        issue: {
+          number: issue.number,
+          url: issue.url,
+          title: issue.title,
+          state: issue.state,
+          lastSyncedAt: Date.now(),
+        },
+        summary: `从 GitHub Issue #${issue.number} 导入`,
+        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+      });
+
+      let dispatch: DispatchOutcome | null = null;
+      if (body.dispatchAgent === true) {
+        detail = await markDesigning(base, detail.state.id, {
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
+        dispatch = await dispatchToBridge(detail.state.id, "design", "send", prompt);
+      }
+
+      broadcastUi({ type: "workbench.updated", reason: "requirement.created", id: detail.state.id, at: Date.now() });
+      return jsonResponse({ detail, dispatch, alreadyExisted: false, issue }, 201);
+    }
+
     if (method === "POST" && pathname === "/api/requirements") {
       const body = await readBody(req);
       const goal = typeof body.goal === "string" ? body.goal : "";
@@ -691,17 +970,28 @@ export async function startWorkbenchServer(options: {
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
 
+      const projectMeta = getProjectStatus(base).project;
+      const shouldCreateIssue =
+        body.createGitHubIssue === true ||
+        (body.createGitHubIssue !== false && projectMeta?.github?.autoCreateIssue === true);
+      let githubWarning: string | undefined;
+      if (shouldCreateIssue) {
+        const linked = await tryCreateAndLinkIssue(base, detail, snapshot?.fingerprint ?? null);
+        detail = linked.detail;
+        githubWarning = linked.warning;
+      }
+
       let dispatch: DispatchOutcome | null = null;
       if (body.dispatchAgent === true) {
         detail = await markDesigning(base, detail.state.id, {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        const prompt = buildAgentPrompt(detail, "design");
+        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
         dispatch = await dispatchToBridge(detail.state.id, "design", "send", prompt);
       }
 
       broadcastUi({ type: "workbench.updated", reason: "requirement.created", id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch }, 201);
+      return jsonResponse({ detail, dispatch, ...(githubWarning ? { githubWarning } : {}) }, 201);
     }
 
     // Routes matching /api/requirements/:id[/...]
@@ -857,7 +1147,7 @@ export async function startWorkbenchServer(options: {
         });
         let dispatch: DispatchOutcome | null = null;
         if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement");
+          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
           dispatch = await dispatchToBridge(id, "implement", "send", prompt);
         }
         broadcastUi({ type: "workbench.updated", reason: "approved", id, at: Date.now() });
@@ -875,7 +1165,7 @@ export async function startWorkbenchServer(options: {
         });
         let dispatch: DispatchOutcome | null = null;
         if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement");
+          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
           dispatch = await dispatchToBridge(id, "implement", "send", prompt);
         }
         broadcastUi({ type: "workbench.updated", reason: "fast_tracked", id, at: Date.now() });
@@ -896,7 +1186,12 @@ export async function startWorkbenchServer(options: {
         let dispatch: DispatchOutcome | null = null;
         if (body.dispatchAgent === true) {
           const action: DispatchAction = detail.state.stage === "designing" ? "design" : "fix";
-          dispatch = await dispatchToBridge(id, action, "send", buildAgentPrompt(detail, action));
+          dispatch = await dispatchToBridge(
+            id,
+            action,
+            "send",
+            buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) }),
+          );
         }
         broadcastUi({ type: "workbench.updated", reason: "changes_requested", id, at: Date.now() });
         return jsonResponse({ detail, dispatch });
@@ -930,18 +1225,30 @@ export async function startWorkbenchServer(options: {
       if (method === "POST" && sub === "accept") {
         const body = await readBody(req);
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await acceptRequirement(base, id, {
+        let detail = await acceptRequirement(base, id, {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           note: typeof body.note === "string" ? body.note : undefined,
         });
         await distillRequirementToPlaybook(base, detail).catch(() => {});
+        const projectMeta = getProjectStatus(base).project;
+        let githubSyncWarning: string | undefined;
+        if (detail.state.github?.issue && projectMeta?.github?.autoSyncIssue !== false) {
+          const synced = await trySyncIssueMilestone(
+            base,
+            detail,
+            `需求 \`${id}\` 已通过人类最终验收（必需验收条件 ${detail.validity.coverage.requiredPassed}/${detail.validity.coverage.requiredTotal} 通过${detail.state.acceptance?.snapshot ? ` · 快照 \`${detail.state.acceptance.snapshot.id}\`` : ""}）。`,
+            { snapHash: snapshot?.fingerprint ?? null },
+          );
+          detail = synced.detail;
+          githubSyncWarning = synced.warning;
+        }
         broadcastUi({ type: "workbench.updated", reason: "accepted", id, at: Date.now() });
-        return jsonResponse({ detail });
+        return jsonResponse({ detail, ...(githubSyncWarning ? { githubSyncWarning } : {}) });
       }
 
       if (method === "GET" && sub === "delivery") {
-        const preview = await getRequirementDeliveryPreview(base, id);
+        const preview = await getRequirementDeliveryPreview(base, id, options.githubDeps);
         return jsonResponse(preview);
       }
 
@@ -949,20 +1256,148 @@ export async function startWorkbenchServer(options: {
         const body = await readBody(req);
         const files = Array.isArray(body.files) ? body.files.filter((f): f is string => typeof f === "string") : [];
         const commitMessage = typeof body.commitMessage === "string" ? body.commitMessage : "";
-        const res = await deliverRequirement(base, id, {
-          files,
-          commitMessage,
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          note: typeof body.note === "string" ? body.note : undefined,
-        });
-        const reloadRes = res.touchesWeb ? await reloadWebBundle() : { reloaded: false };
+        const res = await deliverRequirement(
+          base,
+          id,
+          {
+            files,
+            commitMessage,
+            expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+            note: typeof body.note === "string" ? body.note : undefined,
+            createPr: body.createPr === true,
+            branchName: typeof body.branchName === "string" ? body.branchName : undefined,
+            baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : undefined,
+            prTitle: typeof body.prTitle === "string" ? body.prTitle : undefined,
+            prBody: typeof body.prBody === "string" ? body.prBody : undefined,
+          },
+          options.githubDeps,
+        );
+        const reloadRes = !body.createPr && res.touchesWeb ? await reloadWebBundle() : { reloaded: false };
         broadcastUi({ type: "workbench.updated", reason: "delivered", root: base, id, at: Date.now() });
+        if (res.pr) {
+          broadcastUi({ type: "hub.updated", reason: "github.pr_created", id, at: Date.now() });
+        }
         return jsonResponse({
           detail: res.detail,
           delivery: res.delivery,
+          ...(res.pr ? { pr: res.pr } : {}),
+          ...(res.githubSyncWarning ? { githubSyncWarning: res.githubSyncWarning } : {}),
           webReloaded: reloadRes.reloaded,
-          restartRecommended: res.touchesBackend,
+          restartRecommended: !body.createPr && res.touchesBackend,
         });
+      }
+
+      if (method === "POST" && sub === "github/issue") {
+        const body = await readBody(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const projectMeta = getProjectStatus(base).project;
+        if (typeof body.issueRef === "string" || typeof body.issueRef === "number") {
+          const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
+          const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef: body.issueRef }, options.githubDeps);
+          const updated = await linkRequirementGitHubIssue(base, id, {
+            repo: issue.repo,
+            issue: {
+              number: issue.number,
+              url: issue.url,
+              title: issue.title,
+              state: issue.state,
+              lastSyncedAt: Date.now(),
+            },
+            summary: `关联已有 GitHub Issue #${issue.number}`,
+            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          });
+          broadcastUi({ type: "workbench.updated", reason: "github.issue_linked", root: base, id, at: Date.now() });
+          return jsonResponse({ detail: updated });
+        }
+        const ghEnv = await inspectGitHubEnvironment(base, projectMeta?.github, options.githubDeps);
+        if (!ghEnv.ready || !ghEnv.repo) {
+          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue");
+        }
+        const issue = await createGitHubIssue(
+          {
+            root: base,
+            repo: ghEnv.repo,
+            title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : `[${id}] ${detail.state.title}`,
+            body: typeof body.body === "string" && body.body.trim() ? body.body.trim() : buildRequirementIssueBody(detail),
+          },
+          options.githubDeps,
+        );
+        const updated = await linkRequirementGitHubIssue(base, id, {
+          repo: ghEnv.repo,
+          issue,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        broadcastUi({ type: "workbench.updated", reason: "github.issue_linked", root: base, id, at: Date.now() });
+        return jsonResponse({ detail: updated }, 201);
+      }
+
+      if (method === "POST" && sub === "github/sync-issue") {
+        const body = await readBody(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        if (!detail.state.github?.issue || !detail.state.github?.repo) {
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`);
+        }
+        const targetState =
+          body.state === "closed" || body.state === "open"
+            ? (body.state as "open" | "closed")
+            : detail.state.stage === "cancelled"
+              ? "closed"
+              : undefined;
+        const comment =
+          typeof body.comment === "string" && body.comment.trim()
+            ? body.comment.trim()
+            : `Workbench 状态同步：需求 \`${id}\` 当前处于阶段 \`${detail.state.stage}\`（必需条件通过 ${detail.validity.coverage.requiredPassed}/${detail.validity.coverage.requiredTotal}${detail.state.github.pr ? ` · PR: ${detail.state.github.pr.url}` : ""}）。`;
+        const synced = await trySyncIssueMilestone(base, detail, comment, {
+          state: targetState,
+          snapHash: snapshot?.fingerprint ?? null,
+        });
+        if (synced.warning) {
+          throw new WorkbenchError("execution_failed", synced.warning);
+        }
+        broadcastUi({ type: "workbench.updated", reason: "github.issue_synced", root: base, id, at: Date.now() });
+        return jsonResponse({ detail: synced.detail });
+      }
+
+      if (method === "POST" && sub === "github/pr-sync") {
+        const body = await readBody(req);
+        const hasSandbox = Boolean(getSandboxForRequirement(base, id));
+        if (hasSandbox) {
+          const synced = await syncRsiSandboxPrAndCleanup(
+            base,
+            id,
+            { forceCleanup: body.forceCleanup === true },
+            options.githubDeps,
+          );
+          const reloadRes = synced.cleanedSandbox && synced.touchesWeb ? await reloadWebBundle() : { reloaded: false };
+          broadcastUi({ type: "hub.updated", reason: "evolution.pr_synced", id, at: Date.now() });
+          broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
+          return jsonResponse({
+            ...synced,
+            webReloaded: reloadRes.reloaded,
+            restartRecommended: synced.cleanedSandbox && synced.touchesBackend,
+          });
+        }
+        const snapshot = await observeGitSnapshot(base);
+        const current = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        if (!current.state.github?.repo || !current.state.github?.pr) {
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub PR`);
+        }
+        const latestPr = await viewGitHubPr(
+          { root: base, repo: current.state.github.repo, prNumber: current.state.github.pr.number },
+          options.githubDeps,
+        );
+        const updated = await recordRequirementGitHubSync(base, id, {
+          prPatch: latestPr,
+          ...(latestPr.state === "merged" && current.state.github.issue ? { issuePatch: { state: "closed" } } : {}),
+          eventKind: "github_pr_synced",
+          summary: `同步 GitHub PR #${latestPr.number} 状态：${latestPr.state}`,
+          detail: latestPr.url,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
+        return jsonResponse({ detail: updated, pr: latestPr, cleanedSandbox: false, mainUpdated: false, mainSyncReason: null });
       }
 
       if (method === "POST" && sub === "block") {
@@ -1024,7 +1459,7 @@ export async function startWorkbenchServer(options: {
           broadcastUi({ type: "workbench.updated", reason: "designing", id, at: Date.now() });
         }
 
-        const prompt = buildAgentPrompt(detail, action);
+        const prompt = buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) });
         const dispatch = await dispatchToBridge(id, action, mode, prompt);
         return jsonResponse({ detail, dispatch });
       }

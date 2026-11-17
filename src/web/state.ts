@@ -2,6 +2,7 @@ import type {
   AgentAction,
   CriterionCoverageState,
   EffectiveVerificationState,
+  OutputLanguage,
   PrivacyMode,
   RequirementDetail,
   RequirementDiffView,
@@ -36,12 +37,30 @@ export interface PendingAnnotation {
 
 export type ModalState =
   | null
-  | { kind: "new_req"; goal: string }
+  | {
+      kind: "new_req";
+      goal: string;
+      mode?: "create" | "import_issue";
+      issueRef?: string;
+      createGitHubIssue?: boolean;
+    }
   | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
   | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
   | { kind: "prompt_fallback"; title: string; subtitle: string; prompt: string }
   | { kind: "add_project"; browse: BrowseResponse | null; pathInput: string; nameInput: string; initPrivacy: PrivacyMode | "none" }
-  | { kind: "routing"; draft: RoutingConfig | null; customHarness: HarnessId; customModel: string }
+  | {
+      kind: "routing";
+      tab?: "routing" | "preferences";
+      draft: RoutingConfig | null;
+      customHarness: HarnessId;
+      customModel: string;
+      hubLangDraft?: OutputLanguage;
+      projLangDraft?: OutputLanguage | "inherit";
+      ghRepoDraft?: string;
+      ghBaseBranchDraft?: string;
+      ghAutoCreateDraft?: boolean;
+      ghAutoSyncDraft?: boolean;
+    }
   | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
   | { kind: "handoff_preview"; markdown: string }
   | {
@@ -52,6 +71,7 @@ export type ModalState =
       domSelector: string;
       pickingElement: boolean;
       autoPromote: boolean;
+      createGitHubIssue?: boolean;
     }
   | { kind: "evolution"; tab: "inbox" | "playbook" | "telemetry"; playbookDraft: string | null }
   | {
@@ -59,6 +79,16 @@ export type ModalState =
       commitMessage: string;
       selectedFiles: string[];
       note: string;
+      createPr?: boolean;
+      branchName?: string;
+      baseBranch?: string;
+      prTitle?: string;
+    }
+  | {
+      kind: "link_issue";
+      requirementId: string;
+      mode: "create" | "link";
+      issueRef: string;
     }
   | { kind: "debug_info"; text: string };
 

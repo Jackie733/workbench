@@ -181,6 +181,11 @@ button, input, textarea, select { font: inherit; color: inherit; }
     opacity 150ms var(--ease-drawer-exit);
 }
 
+.sidebar.desktop-collapsed.settled {
+  /* Cancel any lingering compositor subpixel tail once React marks the collapse settled. */
+  transition: none;
+}
+
 .sidebar.desktop-collapsed.settled .sidebar-inner {
   display: none;
 }
@@ -266,6 +271,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
   transition:
     transform 190ms var(--ease-drawer-exit),
     opacity 150ms var(--ease-drawer-exit);
+}
+
+.drawer.collapsed.settled {
+  transition: none;
 }
 
 .drawer.collapsed.settled .drawer-inner {

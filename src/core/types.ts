@@ -48,12 +48,24 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export type PrivacyMode = "local" | "tracked";
 
+export const OUTPUT_LANGUAGES = ["zh-CN", "en", "auto"] as const;
+export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
+
+export interface ProjectGitHubConfig {
+  repo?: string;
+  autoCreateIssue?: boolean;
+  autoSyncIssue?: boolean;
+  defaultBaseBranch?: string;
+}
+
 export interface ProjectMetadata {
   schemaVersion: typeof SCHEMA_VERSION;
   projectId: string;
   name: string;
   nextNumber: number;
   privacyMode: PrivacyMode;
+  outputLanguage?: OutputLanguage;
+  github?: ProjectGitHubConfig;
   createdAt: number;
   updatedAt: number;
 }
@@ -240,6 +252,8 @@ export interface DeliveryRecord {
   commitMessage: string;
   files: string[];
   branch: string | null;
+  prNumber?: number;
+  prUrl?: string;
   note?: string;
 }
 
@@ -255,16 +269,25 @@ export interface DeliveryPreview {
   requirementId: string;
   stage: Stage;
   isGitRepo: boolean;
+  codeRootKind: "project" | "sandbox";
   branch: string | null;
   head: string | null;
   dirty: boolean;
   sandboxActive: boolean;
+  aheadCommitsCount: number;
   canCommit: boolean;
+  canCreatePr: boolean;
+  baseBranch: string | null;
+  githubRepo: string | null;
+  githubReady: boolean;
+  githubReason: string | null;
   reason: string | null;
   suggestedMessage: string;
+  suggestedBranch: string;
   candidates: DeliveryCandidateFile[];
   acceptedSnapshotFileCount: number;
   delivered: DeliveryRecord | null;
+  githubPr: RequirementGitHubPrLink | null;
 }
 
 export type TimelineEventKind =
@@ -285,7 +308,37 @@ export type TimelineEventKind =
   | "cancelled"
   | "reopened"
   | "discussed"
-  | "review_submitted";
+  | "review_submitted"
+  | "github_issue_linked"
+  | "github_issue_synced"
+  | "github_pr_created"
+  | "github_pr_synced";
+
+export interface RequirementGitHubIssueLink {
+  number: number;
+  url: string;
+  title: string;
+  state: "open" | "closed";
+  lastSyncedStage?: Stage;
+  lastSyncedAt: number;
+}
+
+export interface RequirementGitHubPrLink {
+  number: number;
+  url: string;
+  title: string;
+  headBranch: string;
+  baseBranch: string;
+  state: "open" | "merged" | "closed";
+  mergedAt?: number | null;
+  lastSyncedAt: number;
+}
+
+export interface RequirementGitHubLink {
+  repo: string;
+  issue?: RequirementGitHubIssueLink | null;
+  pr?: RequirementGitHubPrLink | null;
+}
 
 export interface HandoffNote {
   updatedAt: number;
@@ -369,6 +422,7 @@ export interface RequirementState {
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
   reviewReport?: ReviewReport | null;
+  github?: RequirementGitHubLink | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -508,6 +562,7 @@ export interface RequirementSummary {
   decisionReason: string | null;
   blockedReason: string | null;
   progressText: string;
+  github?: RequirementGitHubLink | null;
   createdAt: number;
   updatedAt: number;
 }

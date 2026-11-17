@@ -14,6 +14,11 @@ import {
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
+import {
+  buildOutputLanguageDirective,
+  buildResumeLanguageReminder,
+  type ResolvedOutputLanguage,
+} from "../core/language.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
@@ -261,10 +266,15 @@ export function buildHarnessCommand(
   }
 }
 
-function buildCompactResumeContext(detail: RequirementDetail, input: StartRunInput): string {
+function buildCompactResumeContext(
+  detail: RequirementDetail,
+  input: StartRunInput,
+  outputLanguage: ResolvedOutputLanguage,
+): string {
   const { state, validity } = detail;
   const parts: string[] = [
     `- **当前阶段**：\`${state.stage}\` | **版本**：rev ${state.revision}（当前为同会话原生续接，完整简报已更新至 \`${WORKBENCH_DIR}/items/${state.id}/handoff.md\`，无需重复通读未改动文件）`,
+    buildResumeLanguageReminder(outputLanguage),
   ];
   if (state.tasks.length > 0) {
     const remaining = state.tasks.filter((t) => t.status !== "done");
@@ -299,15 +309,22 @@ export function buildExecutionPrompt(
   detail: RequirementDetail,
   handoffMarkdown: string,
   input: StartRunInput,
-  options: { resumedSession?: boolean } = {},
+  options: { resumedSession?: boolean; outputLanguage?: ResolvedOutputLanguage } = {},
 ): string {
   const reqId = detail.state.id;
+  const lang: ResolvedOutputLanguage = options.outputLanguage ?? "zh-CN";
+
   if (input.action === "ask") {
+    const langInstruction =
+      lang === "en"
+        ? "- Reply in clear, concise English Markdown."
+        : "- 请直接用清晰简练的简体中文 Markdown 给出解答、原理分析或方案权衡建议。";
     return [
       `你当前处于「仅提问探讨（Read-Only Consultation）」模式，请针对需求 ${reqId}（${detail.state.title}）回答用户问题。`,
       "重要约束：",
       "- 严禁修改任何仓库代码、严禁运行写操作工具、严禁修改 .workbench/ 文件或调用 wb propose / wb tasks。",
-      "- 请直接用清晰简练的中文 Markdown 给出解答、原理分析或方案权衡建议。",
+      langInstruction,
+      buildOutputLanguageDirective(lang, "ask"),
       "",
       input.anchor ? `提问锚点：${input.anchor}` : "",
       `用户问题：${input.message?.trim() || "请解释当前技术方案的核心思路与风险点。"}`,
@@ -327,8 +344,11 @@ export function buildExecutionPrompt(
       `请你作为独立的代码与交付审查者（Cross-Model Reviewer），审查工作台需求 ${reqId}（${detail.state.title}）。`,
       "重要约束：",
       "- 严禁修改仓库业务代码或调用 wb propose / wb tasks；只读检查 Git Diff、测试证据与 Spec 一致性。",
+      buildOutputLanguageDirective(lang, "review"),
       "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下：",
-      '```json\n{"verdict":"pass"|"concern"|"block","summary":"一句话核心审查结论"}\n```',
+      lang === "en"
+        ? '```json\n{"verdict":"pass"|"concern"|"block","summary":"One-sentence core review summary in English"}\n```'
+        : '```json\n{"verdict":"pass"|"concern"|"block","summary":"用简体中文写出的一句话核心审查结论"}\n```',
       "",
       "审查范围与交接简报（包含需求契约、验收状态与当前 Git 现场）：",
       handoffMarkdown,
@@ -347,7 +367,9 @@ export function buildExecutionPrompt(
     modeVerb,
     "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。",
     "",
-    options.resumedSession ? buildCompactResumeContext(detail, input) : handoffMarkdown,
+    buildOutputLanguageDirective(lang, "plan"),
+    "",
+    options.resumedSession ? buildCompactResumeContext(detail, input, lang) : handoffMarkdown,
   ].join("\n");
 }
 
@@ -645,7 +667,11 @@ export class HubExecutor {
     }
 
     const prevTail = prevRun ? (this.runLogs.get(prevRun.id) ?? undefined) : undefined;
-    const { markdown: handoffMd, detail: postHandoffDetail } = await synthesizeHandoffPacket(base, id, {
+    const {
+      markdown: handoffMd,
+      detail: postHandoffDetail,
+      outputLanguage,
+    } = await synthesizeHandoffPacket(base, id, {
       action: input.action,
       humanInstruction: input.message,
       anchorIds: input.anchorIds,
@@ -665,6 +691,7 @@ export class HubExecutor {
 
     const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
       resumedSession: Boolean(canResumeSameHarness),
+      outputLanguage,
     });
     const built = this.commandBuilder
       ? this.commandBuilder(target, {

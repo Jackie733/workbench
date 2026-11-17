@@ -161,7 +161,7 @@ export function Topbar() {
           type="button"
           data-action="open-routing"
           data-testid="open-routing-btn"
-          title="算力与模型路由配置"
+          title="算力路由、输出语言与 GitHub 设置"
           aria-label="算力与模型路由配置"
           onClick={() =>
             setModal({

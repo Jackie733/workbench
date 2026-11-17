@@ -2,15 +2,40 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createRequirement, getRequirement, initProject, recordReviewReport } from "../core/engine.ts";
+import {
+  createRequirement,
+  getProjectStatus,
+  getRequirement,
+  initProject,
+  linkRequirementGitHubIssue,
+  listRequirements,
+  recordReviewReport,
+  updateProjectConfig,
+} from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot, readBoundedText } from "../core/fs.ts";
-import { observeGitSnapshot } from "../core/git.ts";
+import { getGitRemoteUrl, observeGitSnapshot } from "../core/git.ts";
+import {
+  buildRequirementIssueBody,
+  createGitHubIssue,
+  inspectGitHubEnvironment,
+  parseGitHubRepoFromRemoteUrl,
+  viewGitHubIssue,
+} from "../core/github.ts";
+import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runAllVerifications } from "../core/runner.ts";
 import { resolveCodeRoot, resolveWorkbenchRootFromCwd } from "../core/sandbox.ts";
-import { REVIEW_VERDICTS, WORKBENCH_DIR, type CriterionInput, type PrivacyMode, type ReviewVerdict, type TaskInput } from "../core/types.ts";
+import {
+  REVIEW_VERDICTS,
+  WORKBENCH_DIR,
+  type CriterionInput,
+  type OutputLanguage,
+  type PrivacyMode,
+  type ReviewVerdict,
+  type TaskInput,
+} from "../core/types.ts";
 import { PAIN_POINT_CATEGORIES, reportPainPoint, type PainPointCategory } from "../hub/evolution.ts";
-import { isAutoRegistrableProjectRoot, registerHubProject } from "../hub/registry.ts";
+import { isAutoRegistrableProjectRoot, readHubConfig, registerHubProject, updateHubPreferences } from "../hub/registry.ts";
 import { startMcpServer } from "../mcp/server.ts";
 import { executeWorkbenchTool } from "../mcp/tools.ts";
 import { startWorkbenchServer } from "../server/index.ts";
@@ -40,7 +65,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
-        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track", "hub"]);
+        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track", "hub", "global"]);
         if (!booleanFlags.has(key) && next !== undefined && !next.startsWith("--")) {
           flags.set(key, next);
           i += 1;
@@ -122,6 +147,12 @@ function helpText(): string {
     "  service install [--port 4318]             安装并启动当前用户的原生 Hub 服务",
     "  service start|stop|restart|status|uninstall 管理当前用户的原生 Hub 服务",
     "  init [--name <name>] [--local|--tracked]   初始化项目 .workbench/ 存储",
+    "       [--lang <zh-CN|en|auto>]",
+    "  config [--global] [--output-language <zh-CN|en|auto|inherit>]",
+    "         [--github-repo <owner/repo>] [--auto-create-issue true|false]",
+    "                                             查看或修改全局/项目输出语言与 GitHub 配置",
+    "  github status | import <issueRef> | link-issue <REQ-ID> [issueRef]",
+    "                                             GitHub 仓库探测、Issue 导入或关联",
     "  list [--scope active|done|cancelled|all]   列出需求摘要",
     "  get <REQ-ID> [--diff]                      查看需求详情与覆盖状态",
     "  create <goal|@file> [--title <title>]      创建一条新需求草稿",
@@ -303,12 +334,187 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
       case "init": {
         const privacyMode: PrivacyMode = parsed.flags.get("tracked") === true ? "tracked" : "local";
         const nameFlag = parsed.flags.get("name");
+        const langFlag = parsed.flags.get("lang");
+        let outputLanguage: OutputLanguage | undefined;
+        if (langFlag !== undefined) {
+          outputLanguage = typeof langFlag === "string" ? normalizeOutputLanguage(langFlag) : undefined;
+          if (!outputLanguage) {
+            throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(langFlag)}（可选: zh-CN, en, auto）`);
+          }
+        }
         const meta = await initProject(root, {
           name: typeof nameFlag === "string" ? nameFlag : undefined,
           privacyMode,
+          ...(outputLanguage ? { outputLanguage } : {}),
         });
         printResult(meta, asJson);
         return 0;
+      }
+
+      case "config": {
+        const isGlobal = parsed.flags.get("global") === true;
+        const langFlag = parsed.flags.get("output-language");
+        const repoFlag = parsed.flags.get("github-repo");
+        const autoCreateFlag = parsed.flags.get("auto-create-issue");
+        const autoSyncFlag = parsed.flags.get("auto-sync-issue");
+        const baseBranchFlag = parsed.flags.get("base-branch");
+
+        if (isGlobal) {
+          if (langFlag !== undefined) {
+            const valid = typeof langFlag === "string" ? normalizeOutputLanguage(langFlag) : undefined;
+            if (!valid) {
+              throw new WorkbenchError("invalid_input", `全局输出语言必须是 zh-CN | en | auto: ${String(langFlag)}`);
+            }
+            const nextHub = updateHubPreferences({ outputLanguage: valid });
+            printResult({ scope: "hub", outputLanguage: nextHub.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE }, asJson);
+            return 0;
+          }
+          const hubCfg = readHubConfig();
+          printResult({ scope: "hub", outputLanguage: hubCfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE }, asJson);
+          return 0;
+        }
+
+        const hasProjectUpdates =
+          langFlag !== undefined ||
+          repoFlag !== undefined ||
+          autoCreateFlag !== undefined ||
+          autoSyncFlag !== undefined ||
+          baseBranchFlag !== undefined;
+
+        if (hasProjectUpdates) {
+          let langPatch: OutputLanguage | null | undefined;
+          if (langFlag === "inherit") {
+            langPatch = null;
+          } else if (langFlag !== undefined) {
+            const valid = typeof langFlag === "string" ? normalizeOutputLanguage(langFlag) : undefined;
+            if (!valid) {
+              throw new WorkbenchError("invalid_input", `输出语言必须是 zh-CN | en | auto | inherit: ${String(langFlag)}`);
+            }
+            langPatch = valid;
+          }
+          const parseBoolFlag = (v: string | boolean | undefined): boolean | undefined => {
+            if (v === undefined) return undefined;
+            if (v === true || v === "true") return true;
+            if (v === false || v === "false") return false;
+            throw new WorkbenchError("invalid_input", `布尔参数值无效: ${String(v)}`);
+          };
+          const ghPatch =
+            repoFlag !== undefined || autoCreateFlag !== undefined || autoSyncFlag !== undefined || baseBranchFlag !== undefined
+              ? {
+                  ...(typeof repoFlag === "string" ? { repo: repoFlag } : {}),
+                  ...(typeof baseBranchFlag === "string" ? { defaultBaseBranch: baseBranchFlag } : {}),
+                  ...(autoCreateFlag !== undefined ? { autoCreateIssue: parseBoolFlag(autoCreateFlag) } : {}),
+                  ...(autoSyncFlag !== undefined ? { autoSyncIssue: parseBoolFlag(autoSyncFlag) } : {}),
+                }
+              : undefined;
+
+          const updated = await updateProjectConfig(root, {
+            ...(langPatch !== undefined ? { outputLanguage: langPatch } : {}),
+            ...(ghPatch !== undefined ? { github: ghPatch } : {}),
+          });
+          printResult({ scope: "project", project: updated }, asJson);
+          return 0;
+        }
+
+        const hubCfg = readHubConfig();
+        const proj = getProjectStatus(root).project;
+        printResult(
+          {
+            hubOutputLanguage: hubCfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+            projectOutputLanguage: proj?.outputLanguage ?? null,
+            effectiveOutputLanguage: resolveEffectiveOutputLanguage({
+              projectLanguage: proj?.outputLanguage,
+              hubLanguage: hubCfg.outputLanguage,
+            }),
+            github: proj?.github ?? null,
+          },
+          asJson,
+        );
+        return 0;
+      }
+
+      case "github": {
+        const subCmd = parsed.positionals[0] ?? "status";
+        const projectMeta = getProjectStatus(root).project;
+        if (subCmd === "status") {
+          const status = await inspectGitHubEnvironment(root, projectMeta?.github);
+          printResult(status, asJson);
+          return 0;
+        }
+        if (subCmd === "import") {
+          const issueRef = parsed.positionals[1];
+          if (!issueRef) throw new WorkbenchError("invalid_input", "请提供 Issue 编号或 URL，例如: wb github import 42");
+          const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(root));
+          const issue = await viewGitHubIssue({ root, repo: remoteRepo, issueRef });
+          const snap = await observeGitSnapshot(root);
+          const existing = listRequirements(root, { scope: "all", currentCodeSnapshotHash: snap?.fingerprint ?? null }).find(
+            (i) => i.github?.repo === issue.repo && i.github?.issue?.number === issue.number,
+          );
+          if (existing) {
+            printResult({ alreadyExisted: true, id: existing.id, issue }, asJson);
+            return 0;
+          }
+          const created = await createRequirement(root, {
+            title: issue.title,
+            goal: `# ${issue.title}\n\n> 导入自 GitHub Issue: ${issue.url}\n\n${issue.body || issue.title}`,
+            currentCodeSnapshotHash: snap?.fingerprint ?? null,
+          });
+          const linked = await linkRequirementGitHubIssue(root, created.state.id, {
+            repo: issue.repo,
+            issue: {
+              number: issue.number,
+              url: issue.url,
+              title: issue.title,
+              state: issue.state,
+              lastSyncedAt: Date.now(),
+            },
+            currentCodeSnapshotHash: snap?.fingerprint ?? null,
+          });
+          printResult({ alreadyExisted: false, id: linked.state.id, github: linked.state.github }, asJson);
+          return 0;
+        }
+        if (subCmd === "link-issue") {
+          const reqId = parsed.positionals[1];
+          const issueRef = parsed.positionals[2];
+          if (!reqId) throw new WorkbenchError("invalid_input", "用法: wb github link-issue <REQ-ID> [issueRef]");
+          const snap = await observeGitSnapshot(resolveCodeRoot(root, reqId));
+          const detail = getRequirement(root, reqId, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+          if (issueRef) {
+            const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(root));
+            const issue = await viewGitHubIssue({ root, repo: remoteRepo, issueRef });
+            const linked = await linkRequirementGitHubIssue(root, reqId, {
+              repo: issue.repo,
+              issue: {
+                number: issue.number,
+                url: issue.url,
+                title: issue.title,
+                state: issue.state,
+                lastSyncedAt: Date.now(),
+              },
+              currentCodeSnapshotHash: snap?.fingerprint ?? null,
+            });
+            printResult({ id: linked.state.id, github: linked.state.github }, asJson);
+            return 0;
+          }
+          const env = await inspectGitHubEnvironment(root, projectMeta?.github);
+          if (!env.ready || !env.repo) {
+            throw new WorkbenchError("execution_failed", env.reason ?? "GitHub CLI 环境未就绪");
+          }
+          const issue = await createGitHubIssue({
+            root,
+            repo: env.repo,
+            title: `[${reqId}] ${detail.state.title}`,
+            body: buildRequirementIssueBody(detail),
+          });
+          const linked = await linkRequirementGitHubIssue(root, reqId, {
+            repo: env.repo,
+            issue,
+            currentCodeSnapshotHash: snap?.fingerprint ?? null,
+          });
+          printResult({ id: linked.state.id, github: linked.state.github }, asJson);
+          return 0;
+        }
+        throw new WorkbenchError("invalid_input", `未知 github 子命令: ${subCmd}（支持 status | import | link-issue）`);
       }
 
       case "list": {

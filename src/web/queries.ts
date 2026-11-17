@@ -23,11 +23,20 @@ export const queryKeys = {
   evolution: ["hub", "evolution"] as const,
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
+  githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
   delivery: (projectId: string | null, id: string | null) => ["delivery", projectId, id] as const,
 };
+
+export function useGitHubStatusQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.githubStatus(activeProjectId),
+    queryFn: () => api.getGitHubStatus(),
+    enabled,
+  });
+}
 
 export function useEvolutionQuery(enabled: boolean) {
   return useQuery({
@@ -538,7 +547,11 @@ export async function cancelRun(reqId: string, runId: string): Promise<void> {
 export async function initProjectSubmit(): Promise<void> {
   const ui = useUiStore.getState();
   const res = await runBusy(() =>
-    api.initProject({ name: ui.initName.trim() || undefined, privacyMode: ui.initPrivacy }),
+    api.initProject({
+      name: ui.initName.trim() || undefined,
+      privacyMode: ui.initPrivacy,
+      ...(ui.initOutputLanguage !== "inherit" ? { outputLanguage: ui.initOutputLanguage } : {}),
+    }),
   );
   if (res) {
     await invalidateAllWorkbenchQueries();
@@ -546,7 +559,12 @@ export async function initProjectSubmit(): Promise<void> {
   }
 }
 
-export async function submitNewRequirement(goalRaw: string, dispatchAgent: boolean, bridgeConnected: boolean): Promise<void> {
+export async function submitNewRequirement(
+  goalRaw: string,
+  dispatchAgent: boolean,
+  _bridgeConnected: boolean,
+  createGitHubIssue?: boolean,
+): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
   if (!goal) {
@@ -558,6 +576,7 @@ export async function submitNewRequirement(goalRaw: string, dispatchAgent: boole
     api.createRequirement({
       goal,
       dispatchAgent: dispatchAgent && !useCli,
+      ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
     }),
   );
   if (res) {
@@ -565,14 +584,53 @@ export async function submitNewRequirement(goalRaw: string, dispatchAgent: boole
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
+    if (res.githubWarning) {
+      ui.showToast(`需求 ${res.detail.state.id} 已创建（GitHub Issue 未同步：${res.githubWarning}）`, true);
+    }
     if (dispatchAgent) {
       if (useCli) {
         await triggerActiveRun(res.detail.state.id, "design");
       } else {
         handleDispatchOutcome(res.dispatch, "新建需求并发送给 Agent");
       }
+    } else if (!res.githubWarning) {
+      const issueTag = res.detail.state.github?.issue ? `（已同步 Issue #${res.detail.state.github.issue.number}）` : "";
+      ui.showToast(`已创建需求 ${res.detail.state.id}${issueTag}`);
+    }
+  }
+}
+
+export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent: boolean): Promise<void> {
+  const issueRef = issueRefRaw.trim();
+  const ui = useUiStore.getState();
+  if (!issueRef) {
+    ui.showToast("请输入 GitHub Issue 编号或 URL", true);
+    return;
+  }
+  const useCli = dispatchAgent && shouldUseCliRunner();
+  const res = await runBusy(() =>
+    api.importGitHubIssue({
+      issueRef,
+      dispatchAgent: dispatchAgent && !useCli,
+    }),
+  );
+  if (res) {
+    ui.setModal(null);
+    ui.setSelectedId(res.detail.state.id);
+    ui.setWorkspaceTab("spec");
+    await invalidateAllWorkbenchQueries();
+    if (res.alreadyExisted) {
+      ui.showToast(`Issue #${res.issue.number} 已关联至现有需求 ${res.detail.state.id}`);
+      return;
+    }
+    if (dispatchAgent) {
+      if (useCli) {
+        await triggerActiveRun(res.detail.state.id, "design");
+      } else {
+        handleDispatchOutcome(res.dispatch ?? null, "导入 Issue 并发送给 Agent");
+      }
     } else {
-      ui.showToast(`已创建需求 ${res.detail.state.id}`);
+      ui.showToast(`已从 Issue #${res.issue.number} 创建需求 ${res.detail.state.id}`);
     }
   }
 }

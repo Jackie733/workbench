@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
 import { WorkbenchError } from "./errors.ts";
 import { listProjectSandboxes } from "./sandbox.ts";
+import { sanitizeOutput, validateGitBranchName } from "./validate.ts";
 import {
   MAX_ACCEPTANCE_DIFF_BYTES,
   type BaselineSnapshot,
@@ -513,4 +514,173 @@ export async function commitFilesInGit(
     throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希");
   }
   return { commitHash, shortHash, branch };
+}
+
+/** Reads current HEAD commit hash, short hash, subject, and branch name. */
+export async function getHeadCommitInfo(root: string): Promise<{
+  commitHash: string;
+  shortHash: string;
+  subject: string;
+  branch: string | null;
+} | null> {
+  const base = canonicalRoot(root);
+  const headRes = await execGit(base, ["rev-parse", "--verify", "HEAD"]);
+  if (headRes.code !== 0) return null;
+  const commitHash = headRes.stdout.toString("utf8").trim();
+  const shortRes = await execGit(base, ["rev-parse", "--short", "HEAD"]);
+  const subjRes = await execGit(base, ["log", "-1", "--format=%s", "HEAD"]);
+  const branchRes = await execGit(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const shortHash = shortRes.code === 0 ? shortRes.stdout.toString("utf8").trim() : commitHash.slice(0, 7);
+  const subject = subjRes.code === 0 ? subjRes.stdout.toString("utf8").trim() : "";
+  const rawBranch = branchRes.code === 0 ? branchRes.stdout.toString("utf8").trim() : "";
+  return {
+    commitHash,
+    shortHash,
+    subject,
+    branch: rawBranch && rawBranch !== "HEAD" ? rawBranch : null,
+  };
+}
+
+/** Reads the configured URL of a Git remote (defaults to origin), or null if unavailable. */
+export async function getGitRemoteUrl(root: string, remote = "origin"): Promise<string | null> {
+  const base = canonicalRoot(root);
+  try {
+    const res = await execGit(base, ["remote", "get-url", remote]);
+    if (res.code !== 0) return null;
+    const url = res.stdout.toString("utf8").trim();
+    return url || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolves the repository's default base branch from origin/HEAD or common branch names. */
+export async function resolveDefaultBaseBranch(root: string, remote = "origin"): Promise<string | null> {
+  const base = canonicalRoot(root);
+  try {
+    const sym = await execGit(base, ["symbolic-ref", `refs/remotes/${remote}/HEAD`]);
+    if (sym.code === 0) {
+      const ref = sym.stdout.toString("utf8").trim();
+      const prefix = `refs/remotes/${remote}/`;
+      if (ref.startsWith(prefix)) {
+        const name = ref.slice(prefix.length).trim();
+        if (name) return name;
+      }
+    }
+    for (const candidate of ["main", "master"]) {
+      const remoteRef = await execGit(base, ["rev-parse", "--verify", `refs/remotes/${remote}/${candidate}`]);
+      if (remoteRef.code === 0) return candidate;
+    }
+    for (const candidate of ["main", "master"]) {
+      const localRef = await execGit(base, ["rev-parse", "--verify", `refs/heads/${candidate}`]);
+      if (localRef.code === 0) return candidate;
+    }
+    const cur = await execGit(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (cur.code === 0) {
+      const name = cur.stdout.toString("utf8").trim();
+      if (name && name !== "HEAD") return name;
+    }
+  } catch {
+    // Ignore git inspection failures.
+  }
+  return null;
+}
+
+/** Counts commits reachable from headRef that are not in baseRef. */
+export async function countCommitsBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<number> {
+  const base = canonicalRoot(root);
+  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return 0;
+  try {
+    const res = await execGit(base, ["rev-list", "--count", `${baseRef}..${headRef}`]);
+    if (res.code !== 0) return 0;
+    const count = Number(res.stdout.toString("utf8").trim());
+    return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Lists non-workbench files changed between baseRef and headRef. */
+export async function listCommittedFilesBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<string[]> {
+  const base = canonicalRoot(root);
+  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return [];
+  try {
+    const res = await execGit(base, [
+      "diff",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      `${baseRef}..${headRef}`,
+      "--",
+      ".",
+      ...EXCLUDE_PATHSPECS,
+    ]);
+    if (res.code !== 0) return [];
+    return res.stdout.toString("utf8").split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Creates and checks out a feature branch at current HEAD, or switches to it if already at HEAD. */
+export async function createFeatureBranchAtHead(root: string, branchName: string): Promise<string> {
+  const base = canonicalRoot(root);
+  const safeBranch = validateGitBranchName(branchName);
+  const curRes = await execGit(base, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const curBranch = curRes.code === 0 ? curRes.stdout.toString("utf8").trim() : "";
+  if (curBranch === safeBranch) return safeBranch;
+
+  const exists = await execGit(base, ["rev-parse", "--verify", `refs/heads/${safeBranch}`]);
+  if (exists.code === 0) {
+    throw new WorkbenchError("revision_conflict", `本地分支 ${safeBranch} 已存在，请换用其他分支名或先切换过去`);
+  }
+  const createRes = await execGit(base, ["checkout", "-b", safeBranch], 15_000);
+  if (createRes.code !== 0) {
+    const msg = sanitizeOutput(createRes.stderr.toString("utf8").trim() || createRes.stdout.toString("utf8").trim(), 512).text;
+    throw new WorkbenchError("execution_failed", `创建分支 ${safeBranch} 失败: ${msg || "git checkout -b 返回非零"}`);
+  }
+  return safeBranch;
+}
+
+/** Pushes branchName to remote (defaults to origin) with upstream tracking. */
+export async function pushBranchToRemote(root: string, branchName: string, remote = "origin"): Promise<void> {
+  const base = canonicalRoot(root);
+  const safeBranch = validateGitBranchName(branchName);
+  const res = await execGit(base, ["push", "-u", remote, safeBranch], 60_000);
+  if (res.code !== 0) {
+    const raw = res.stderr.toString("utf8").trim() || res.stdout.toString("utf8").trim();
+    const msg = sanitizeOutput(raw, 800).text;
+    throw new WorkbenchError("execution_failed", `推送分支 ${safeBranch} 至 ${remote} 失败: ${msg || "git push 返回非零"}`);
+  }
+}
+
+/** Safely fetches and fast-forwards targetBranch in root only when root is clean and on targetBranch. */
+export async function fetchAndFastForwardBranch(
+  root: string,
+  targetBranch: string,
+  remote = "origin",
+): Promise<{ updated: boolean; reason: string | null }> {
+  const base = canonicalRoot(root);
+  const safeBranch = validateGitBranchName(targetBranch);
+  const tree = await inspectWorkingTreeForDelivery(base);
+  if (!tree.isGitRepo) {
+    return { updated: false, reason: "主目录不是 Git 仓库" };
+  }
+  if (tree.branch !== safeBranch) {
+    return { updated: false, reason: `主仓库当前位于分支 ${tree.branch ?? "HEAD"}（非 ${safeBranch}），已保留主仓库现状` };
+  }
+  if (tree.dirty) {
+    return { updated: false, reason: "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull" };
+  }
+  const fetchRes = await execGit(base, ["fetch", remote, safeBranch], 30_000);
+  if (fetchRes.code !== 0) {
+    const msg = sanitizeOutput(fetchRes.stderr.toString("utf8").trim(), 400).text;
+    return { updated: false, reason: `git fetch 失败: ${msg || "未知错误"}` };
+  }
+  const ffRes = await execGit(base, ["merge", "--ff-only", `${remote}/${safeBranch}`], 20_000);
+  if (ffRes.code !== 0) {
+    const msg = sanitizeOutput(ffRes.stderr.toString("utf8").trim(), 400).text;
+    return { updated: false, reason: `无法快进合并 ${remote}/${safeBranch}: ${msg || "存在分叉提交"}` };
+  }
+  return { updated: true, reason: null };
 }

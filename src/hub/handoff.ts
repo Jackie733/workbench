@@ -1,9 +1,11 @@
-import { getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
+import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
+import { readHubConfig } from "./registry.ts";
 
 const HANDOFF_MAX_BYTES = 10 * 1024;
 
@@ -23,16 +25,28 @@ export async function synthesizeHandoffPacket(
   root: string,
   id: string,
   options: HandoffSynthesisOptions,
-): Promise<{ markdown: string; detail: RequirementDetail }> {
+): Promise<{ markdown: string; detail: RequirementDetail; outputLanguage: ResolvedOutputLanguage }> {
   const codeRoot = resolveCodeRoot(root, id);
   const gitChanges = await observeGitChanges(codeRoot, { maxDiffBytes: 4096 });
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
   const { state, specMarkdown, designMarkdown, validity } = detail;
+  const projectMeta = getProjectStatus(root).project;
+  const hubCfg = readHubConfig();
+  const outputLanguage = resolveEffectiveOutputLanguage({
+    projectLanguage: projectMeta?.outputLanguage,
+    hubLanguage: hubCfg.outputLanguage,
+    contextText: `${state.title}\n${specMarkdown}`,
+  });
 
   const lines: string[] = [];
   lines.push(`# ${state.id} · ${state.title} — 上下文交接简报`);
   lines.push("");
   lines.push(`- **当前阶段**：\`${state.stage}\` | **轨道**：\`${state.track}\` | **拟执行动作**：\`${options.action}\``);
+  lines.push(
+    outputLanguage === "en"
+      ? "- **Output Language Policy**：`English (en)` — Write all titles, specs, designs, criteria descriptions, tasks, reviews, and handoff memos strictly in English."
+      : "- **输出语言规范**：`简体中文 (zh-CN)` — 所有提交的标题、规范、方案、验收条件描述、任务、审查意见与交接备忘必须严格使用简体中文（代码符号与命令原文除外）。",
+  );
   if (codeRoot !== root) {
     lines.push(`- **隔离沙箱目录**：\`${codeRoot}\`（请在当前沙箱目录修改代码并运行验证；数据仍绑定主仓库）`);
   }
@@ -177,5 +191,5 @@ export async function synthesizeHandoffPacket(
 
   const markdown = sanitizeOutput(lines.join("\n"), HANDOFF_MAX_BYTES).text;
   const saved = await saveHandoffMarkdown(root, id, markdown, gitChanges.fingerprint ?? null);
-  return { markdown, detail: saved };
+  return { markdown, detail: saved, outputLanguage };
 }

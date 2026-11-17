@@ -15,6 +15,7 @@ import {
   MAX_TASKS,
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
+  OUTPUT_LANGUAGES,
   REVIEW_VERDICTS,
   SCHEMA_VERSION,
   STAGES,
@@ -41,7 +42,12 @@ import {
   type DiscussionEntry,
   type EffectiveVerificationState,
   type HandoffNote,
+  type OutputLanguage,
+  type ProjectGitHubConfig,
   type ProjectMetadata,
+  type RequirementGitHubIssueLink,
+  type RequirementGitHubLink,
+  type RequirementGitHubPrLink,
   type RequirementState,
   type ReviewReport,
   type ReviewVerdict,
@@ -61,10 +67,38 @@ const TOKEN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SNAPSHOT_PATH_RE = /^snapshots\/acceptance-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
 const GIT_REF_RE = /^[0-9a-f]{7,64}$/i;
+const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const GIT_BRANCH_RE = /^(?![-.])(?!.*\.\.)(?!.*@\{)[A-Za-z0-9._/-]{1,128}(?<!\.lock)(?<![./])$/;
 const DIFF_STATUSES: DiffEvidenceStatus[] = ["captured", "empty", "unavailable"];
 const FILES_SCOPES: DiffFilesScope[] = ["baseline-relative", "worktree", "none"];
 const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "stale", "unknown"];
 const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
+
+export function validateGitHubRepoSlug(repo: string): string {
+  const trimmed = repo.trim();
+  if (!GITHUB_REPO_RE.test(trimmed)) {
+    throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`);
+  }
+  return trimmed;
+}
+
+export function validateGitBranchName(branch: string): string {
+  const trimmed = branch.trim();
+  if (!GIT_BRANCH_RE.test(trimmed) || trimmed.includes("//") || trimmed === "HEAD") {
+    throw new WorkbenchError("invalid_input", `非法的 Git 分支名: ${branch}`);
+  }
+  return trimmed;
+}
+
+function isSafeHttpsUrl(raw: unknown, maxBytes = 1024): raw is string {
+  if (!isSafeText(raw, maxBytes)) return false;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -218,6 +252,28 @@ export function normalizeTasks(inputs: TaskInput[], existing: TaskItem[], now: n
   return out;
 }
 
+function validateProjectGitHubConfig(raw: unknown): ProjectGitHubConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json github 配置必须是对象");
+  assertAllowedKeys(raw, ["repo", "autoCreateIssue", "autoSyncIssue", "defaultBaseBranch"], "project.github");
+  if (raw.repo !== undefined && (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo.trim()))) {
+    throw new WorkbenchError("corrupt_record", "project.github.repo 格式不合法");
+  }
+  if (raw.autoCreateIssue !== undefined && typeof raw.autoCreateIssue !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.github.autoCreateIssue 必须是布尔值");
+  }
+  if (raw.autoSyncIssue !== undefined && typeof raw.autoSyncIssue !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.github.autoSyncIssue 必须是布尔值");
+  }
+  if (
+    raw.defaultBaseBranch !== undefined &&
+    (typeof raw.defaultBaseBranch !== "string" || !GIT_BRANCH_RE.test(raw.defaultBaseBranch.trim()) || raw.defaultBaseBranch.includes("//"))
+  ) {
+    throw new WorkbenchError("corrupt_record", "project.github.defaultBaseBranch 格式不合法");
+  }
+  return raw as unknown as ProjectGitHubConfig;
+}
+
 export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -225,7 +281,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   }
   assertAllowedKeys(
     raw,
-    ["schemaVersion", "projectId", "name", "nextNumber", "privacyMode", "createdAt", "updatedAt"],
+    ["schemaVersion", "projectId", "name", "nextNumber", "privacyMode", "outputLanguage", "github", "createdAt", "updatedAt"],
     "project.json",
   );
   if (
@@ -234,11 +290,13 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
     !isSafeText(raw.name, 200) ||
     !isSafeInt(raw.nextNumber, 1) ||
     (raw.privacyMode !== "local" && raw.privacyMode !== "tracked") ||
+    (raw.outputLanguage !== undefined && !OUTPUT_LANGUAGES.includes(raw.outputLanguage as OutputLanguage)) ||
     !isSafeInt(raw.createdAt, 0) ||
     !isSafeInt(raw.updatedAt, 0)
   ) {
     throw new WorkbenchError("corrupt_record", "project.json 字段不合法");
   }
+  validateProjectGitHubConfig(raw.github);
   return raw as unknown as ProjectMetadata;
 }
 
@@ -317,9 +375,10 @@ function validateDelivery(raw: unknown): DeliveryRecord | null | undefined {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "delivery 字段无效");
   assertAllowedKeys(
     raw,
-    ["deliveredAt", "commitHash", "shortHash", "commitMessage", "files", "branch", "note"],
+    ["deliveredAt", "commitHash", "shortHash", "commitMessage", "files", "branch", "prNumber", "prUrl", "note"],
     "delivery",
   );
+  const hasPr = typeof raw.prNumber === "number";
   if (
     !isSafeInt(raw.deliveredAt, 0) ||
     typeof raw.commitHash !== "string" ||
@@ -328,10 +387,12 @@ function validateDelivery(raw: unknown): DeliveryRecord | null | undefined {
     !isSafeText(raw.shortHash, 64) ||
     !isSafeText(raw.commitMessage, 4000) ||
     !Array.isArray(raw.files) ||
-    raw.files.length === 0 ||
+    (!hasPr && raw.files.length === 0) ||
     raw.files.length > 5000 ||
     raw.files.some((f) => typeof f !== "string" || !isSafeText(f, 4096) || f.startsWith("/") || f.split("/").includes("..")) ||
     (raw.branch !== null && !isSafeText(raw.branch, 256)) ||
+    (raw.prNumber !== undefined && !isSafeInt(raw.prNumber, 1)) ||
+    (raw.prUrl !== undefined && !isSafeHttpsUrl(raw.prUrl)) ||
     (raw.note !== undefined && !isSafeText(raw.note, MAX_REASON_CHARS, true))
   ) {
     throw new WorkbenchError("corrupt_record", "delivery 记录损坏");
@@ -711,6 +772,58 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
   return raw as unknown as ReviewReport;
 }
 
+function validateRequirementGitHubIssue(raw: unknown): RequirementGitHubIssueLink | null | undefined {
+  if (raw === undefined || raw === null) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "github.issue 字段无效");
+  assertAllowedKeys(raw, ["number", "url", "title", "state", "lastSyncedStage", "lastSyncedAt"], "github.issue");
+  if (
+    !isSafeInt(raw.number, 1) ||
+    !isSafeHttpsUrl(raw.url) ||
+    !isSafeText(raw.title, 400) ||
+    (raw.state !== "open" && raw.state !== "closed") ||
+    (raw.lastSyncedStage !== undefined && !STAGES.includes(raw.lastSyncedStage as Stage)) ||
+    !isSafeInt(raw.lastSyncedAt, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "github.issue 记录损坏");
+  }
+  return raw as unknown as RequirementGitHubIssueLink;
+}
+
+function validateRequirementGitHubPr(raw: unknown): RequirementGitHubPrLink | null | undefined {
+  if (raw === undefined || raw === null) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "github.pr 字段无效");
+  assertAllowedKeys(
+    raw,
+    ["number", "url", "title", "headBranch", "baseBranch", "state", "mergedAt", "lastSyncedAt"],
+    "github.pr",
+  );
+  if (
+    !isSafeInt(raw.number, 1) ||
+    !isSafeHttpsUrl(raw.url) ||
+    !isSafeText(raw.title, 400) ||
+    !isSafeText(raw.headBranch, 256) ||
+    !isSafeText(raw.baseBranch, 256) ||
+    (raw.state !== "open" && raw.state !== "merged" && raw.state !== "closed") ||
+    (raw.mergedAt !== undefined && raw.mergedAt !== null && !isSafeInt(raw.mergedAt, 0)) ||
+    !isSafeInt(raw.lastSyncedAt, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "github.pr 记录损坏");
+  }
+  return raw as unknown as RequirementGitHubPrLink;
+}
+
+function validateRequirementGitHubLink(raw: unknown): RequirementGitHubLink | null | undefined {
+  if (raw === undefined || raw === null) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "state.github 字段无效");
+  assertAllowedKeys(raw, ["repo", "issue", "pr"], "state.github");
+  if (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo)) {
+    throw new WorkbenchError("corrupt_record", "state.github.repo 格式损坏");
+  }
+  validateRequirementGitHubIssue(raw.issue);
+  validateRequirementGitHubPr(raw.pr);
+  return raw as unknown as RequirementGitHubLink;
+}
+
 export function validateRequirementState(raw: unknown, expectedId?: string): RequirementState {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "state.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -743,6 +856,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       "discussions",
       "agentRuns",
       "reviewReport",
+      "github",
       "createdAt",
       "updatedAt",
     ],
@@ -805,6 +919,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   validateBaseline(raw.baseline);
   validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);
+  validateRequirementGitHubLink(raw.github);
   if (Array.isArray(raw.discussions)) {
     for (const d of raw.discussions) validateDiscussionEntry(d);
   }

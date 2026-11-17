@@ -1,14 +1,27 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { WorkbenchError } from "./errors.ts";
-import { canonicalRoot } from "./fs.ts";
+import { atomicWriteJson, canonicalRoot, resolveSafePath, withProjectWriteLock } from "./fs.ts";
 import {
   commitFilesInGit,
+  countCommitsBetween,
+  createFeatureBranchAtHead,
   detectOmittedDiffContent,
+  getHeadCommitInfo,
   inspectWorkingTreeForDelivery,
+  listCommittedFilesBetween,
   observeGitChanges,
   observeGitSnapshot,
+  pushBranchToRemote,
 } from "./git.ts";
+import {
+  buildRequirementPrBody,
+  commentOnGitHubIssue,
+  createOrUpdateGitHubPr,
+  inspectGitHubEnvironment,
+  type GitHubCommandDeps,
+} from "./github.ts";
+import { normalizeOutputLanguage } from "./language.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
   createRequirementFiles,
@@ -32,6 +45,7 @@ import {
   MAX_TIMELINE,
   REVIEW_VERDICTS,
   SCHEMA_VERSION,
+  WORKBENCH_DIR,
   type AcceptanceSnapshot,
   type AcceptanceVerificationEvidence,
   type AgentRunRecord,
@@ -43,10 +57,15 @@ import {
   type DiscussionEntry,
   type GitObservation,
   type HandoffNote,
+  type OutputLanguage,
   type PrivacyMode,
+  type ProjectGitHubConfig,
   type ProjectMetadata,
   type RequirementDetail,
   type RequirementDiffView,
+  type RequirementGitHubIssueLink,
+  type RequirementGitHubLink,
+  type RequirementGitHubPrLink,
   type RequirementState,
   type RequirementSummary,
   type ReviewReport,
@@ -67,7 +86,10 @@ import {
   normalizeTitle,
   sanitizeOutput,
   validateAgentRunRecord,
+  validateGitBranchName,
+  validateGitHubRepoSlug,
   validateMarkdownContent,
+  validateProjectMetadata,
   validateVerificationRecord,
 } from "./validate.ts";
 import {
@@ -165,6 +187,7 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     decisionReason: validity.decisionReason,
     blockedReason: state.blockedReason,
     progressText: buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed),
+    ...(state.github ? { github: state.github } : {}),
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
   };
@@ -179,9 +202,77 @@ export function getProjectStatus(root: string): { initialized: boolean; project:
 
 export async function initProject(
   root: string,
-  options: { name?: string; privacyMode?: PrivacyMode } = {},
+  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage } = {},
 ): Promise<ProjectMetadata> {
   return storeInitProject(root, options);
+}
+
+export async function updateProjectConfig(
+  root: string,
+  patch: {
+    name?: string;
+    outputLanguage?: OutputLanguage | null;
+    github?: ProjectGitHubConfig | null;
+  },
+): Promise<ProjectMetadata> {
+  const base = canonicalRoot(root);
+  return withProjectWriteLock(base, () => {
+    const projectPath = resolveSafePath(base, `${WORKBENCH_DIR}/project.json`);
+    const current = readProject(base);
+    const next: ProjectMetadata = {
+      ...current,
+      updatedAt: Date.now(),
+    };
+
+    if (patch.name !== undefined) {
+      const cleanName = patch.name.trim();
+      if (!isSafeText(cleanName, 200)) {
+        throw new WorkbenchError("invalid_input", "项目名称无效或过长");
+      }
+      next.name = cleanName;
+    }
+
+    if (patch.outputLanguage === null) {
+      delete next.outputLanguage;
+    } else if (patch.outputLanguage !== undefined) {
+      const valid = normalizeOutputLanguage(patch.outputLanguage);
+      if (!valid) {
+        throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(patch.outputLanguage)}`);
+      }
+      next.outputLanguage = valid;
+    }
+
+    if (patch.github === null) {
+      delete next.github;
+    } else if (patch.github !== undefined) {
+      const mergedGh: ProjectGitHubConfig = { ...(current.github ?? {}) };
+      if (patch.github.repo !== undefined) {
+        const cleanRepo = patch.github.repo.trim();
+        if (cleanRepo) mergedGh.repo = validateGitHubRepoSlug(cleanRepo);
+        else delete mergedGh.repo;
+      }
+      if (patch.github.defaultBaseBranch !== undefined) {
+        const cleanBranch = patch.github.defaultBaseBranch.trim();
+        if (cleanBranch) mergedGh.defaultBaseBranch = validateGitBranchName(cleanBranch);
+        else delete mergedGh.defaultBaseBranch;
+      }
+      if (patch.github.autoCreateIssue !== undefined) {
+        mergedGh.autoCreateIssue = Boolean(patch.github.autoCreateIssue);
+      }
+      if (patch.github.autoSyncIssue !== undefined) {
+        mergedGh.autoSyncIssue = Boolean(patch.github.autoSyncIssue);
+      }
+      if (Object.keys(mergedGh).length > 0) {
+        next.github = mergedGh;
+      } else {
+        delete next.github;
+      }
+    }
+
+    const validated = validateProjectMetadata(next);
+    atomicWriteJson(projectPath, validated);
+    return validated;
+  });
 }
 
 export function listRequirements(
@@ -1152,13 +1243,21 @@ function normalizeDeliveryFiles(files: string[]): string[] {
   return unique;
 }
 
-/** Previews uncommitted workspace changes for post-acceptance Git delivery wrap-up. */
-export async function getRequirementDeliveryPreview(root: string, id: string): Promise<DeliveryPreview> {
+/** Previews workspace or RSI sandbox changes for post-acceptance Git commit & GitHub PR delivery. */
+export async function getRequirementDeliveryPreview(
+  root: string,
+  id: string,
+  deps?: GitHubCommandDeps,
+): Promise<DeliveryPreview> {
   const base = canonicalRoot(root);
   const bundle = readRequirementBundle(base, id);
+  const projectMeta = readProject(base);
   const { state } = bundle;
-  const sandboxActive = Boolean(getSandboxForRequirement(base, id));
-  const tree = await inspectWorkingTreeForDelivery(base);
+  const sandbox = getSandboxForRequirement(base, id);
+  const sandboxActive = Boolean(sandbox);
+  const codeRoot = sandbox ? sandbox.worktreePath : base;
+  const codeRootKind = sandbox ? "sandbox" : "project";
+  const tree = await inspectWorkingTreeForDelivery(codeRoot);
   const acceptedSet = new Set((bundle.acceptanceSnapshot?.git.files ?? []).map((f) => f.path));
 
   const candidates: DeliveryCandidateFile[] = tree.files.map((f) => ({
@@ -1169,38 +1268,76 @@ export async function getRequirementDeliveryPreview(root: string, id: string): P
     inAcceptedSnapshot: acceptedSet.has(f.path),
   }));
 
+  const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
+  const baseBranch = projectMeta.github?.defaultBaseBranch ?? ghEnv.defaultBaseBranch ?? "main";
+  const aheadRef = sandbox
+    ? (sandbox.baseHead ?? baseBranch)
+    : tree.branch && tree.branch !== baseBranch
+      ? baseBranch
+      : null;
+  const aheadCommitsCount = tree.isGitRepo && aheadRef ? await countCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
+
   let reason: string | null = null;
   let canCommit = false;
+  let canCreatePr = false;
+
   if (state.stage !== "done") {
     reason = "仅已验收完成（done）的需求可执行交付提交";
-  } else if (sandboxActive) {
-    reason = "改动仍在隔离沙箱中，请先点击「应用沙箱改动」合并到主干";
   } else if (!tree.isGitRepo) {
     reason = "当前目录不是 Git 仓库，无法创建交付提交";
-  } else if (candidates.length === 0) {
-    reason = "当前工作区干净，暂无未提交改动";
+  } else if (sandboxActive) {
+    if (candidates.length === 0 && aheadCommitsCount === 0) {
+      reason = "隔离沙箱中暂无可提交或待推送的变更";
+    } else if (!ghEnv.ready) {
+      reason = ghEnv.reason ?? "GitHub 环境未就绪，可使用「应用沙箱改动」本地合并";
+    } else {
+      canCreatePr = true;
+    }
   } else {
-    canCommit = true;
+    if (candidates.length === 0 && aheadCommitsCount === 0) {
+      reason = "当前工作区干净，暂无未提交改动";
+    } else {
+      canCommit = candidates.length > 0;
+      canCreatePr = ghEnv.ready && (candidates.length > 0 || aheadCommitsCount > 0);
+    }
   }
+
+  const suggestedBranch = sandbox
+    ? sandbox.branch
+    : tree.branch && tree.branch !== baseBranch && tree.branch !== "master"
+      ? tree.branch
+      : `feat/${state.id.toLowerCase()}`;
 
   return {
     requirementId: state.id,
     stage: state.stage,
     isGitRepo: tree.isGitRepo,
+    codeRootKind,
     branch: tree.branch,
     head: tree.head,
     dirty: tree.dirty,
     sandboxActive,
+    aheadCommitsCount,
     canCommit,
+    canCreatePr,
+    baseBranch,
+    githubRepo: ghEnv.repo,
+    githubReady: ghEnv.ready,
+    githubReason: ghEnv.reason,
     reason,
     suggestedMessage: buildSuggestedCommitMessage(state.id, state.title),
+    suggestedBranch,
     candidates,
     acceptedSnapshotFileCount: acceptedSet.size,
     delivered: state.delivery ?? null,
+    githubPr: state.github?.pr ?? null,
   };
 }
 
-/** Commits selected requirement files to Git and records durable delivery metadata without altering acceptance. */
+/**
+ * Commits selected files to Git (and optionally pushes branch + opens/updates a GitHub PR
+ * from either the main workspace or an isolated RSI sandbox worktree) without altering acceptance.
+ */
 export async function deliverRequirement(
   root: string,
   id: string,
@@ -1209,77 +1346,284 @@ export async function deliverRequirement(
     commitMessage: string;
     expectedRevision?: number;
     note?: string;
+    createPr?: boolean;
+    branchName?: string;
+    baseBranch?: string;
+    prTitle?: string;
+    prBody?: string;
   },
+  deps?: GitHubCommandDeps,
 ): Promise<{
   detail: RequirementDetail;
   delivery: DeliveryRecord;
+  pr?: RequirementGitHubPrLink;
+  githubSyncWarning?: string;
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
   const base = canonicalRoot(root);
-  const files = normalizeDeliveryFiles(input.files);
-  const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
-  if (!commitMessage || !isSafeText(commitMessage, 4000)) {
-    throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
-  }
+  const createPr = input.createPr === true;
   const note = input.note?.trim() ? normalizeReason(input.note, "交付备注") : undefined;
 
-  let recordedDelivery: DeliveryRecord | null = null;
-  const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
-    const { state } = current;
-    if (state.stage !== "done") {
-      throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能执行交付提交（当前：${state.stage}）`);
+  if (!createPr) {
+    const files = normalizeDeliveryFiles(input.files);
+    const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
+    if (!commitMessage || !isSafeText(commitMessage, 4000)) {
+      throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
     }
-    if (getSandboxForRequirement(base, id)) {
-      throw new WorkbenchError("invalid_transition", "请先将隔离沙箱改动应用到主干，再执行交付提交");
-    }
-    const tree = await inspectWorkingTreeForDelivery(base);
-    if (!tree.isGitRepo) {
-      throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法创建交付提交");
+
+    let recordedDelivery: DeliveryRecord | null = null;
+    const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
+      const { state } = current;
+      if (state.stage !== "done") {
+        throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能执行交付提交（当前：${state.stage}）`);
+      }
+      if (getSandboxForRequirement(base, id)) {
+        throw new WorkbenchError("invalid_transition", "改动仍在隔离沙箱中，请勾选提交 GitHub PR 或先应用沙箱改动到主干");
+      }
+      const tree = await inspectWorkingTreeForDelivery(base);
+      if (!tree.isGitRepo) {
+        throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法创建交付提交");
+      }
+      const dirtySet = new Set(tree.files.map((f) => f.path));
+      const missing = files.filter((f) => !dirtySet.has(f));
+      if (missing.length > 0) {
+        throw new WorkbenchError(
+          "invalid_input",
+          `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
+        );
+      }
+
+      const committed = await commitFilesInGit(base, files, commitMessage);
+      const delivery: DeliveryRecord = {
+        deliveredAt: now,
+        commitHash: committed.commitHash,
+        shortHash: committed.shortHash,
+        commitMessage,
+        files,
+        branch: committed.branch,
+        ...(note ? { note } : {}),
+      };
+      recordedDelivery = delivery;
+
+      const firstLine = commitMessage.split(/\r?\n/, 1)[0] ?? commitMessage;
+      return {
+        state: {
+          ...state,
+          delivery,
+          timeline: appendTimeline(
+            state.timeline,
+            makeEvent(
+              now,
+              "delivered",
+              "human",
+              `已提交代码交付（${committed.shortHash} · ${files.length} 个文件）：${firstLine.slice(0, 140)}`,
+              note,
+            ),
+          ),
+        },
+      };
+    });
+
+    const postSnap = await observeGitSnapshot(base);
+    const touchesWeb = files.some((f) => f.startsWith("src/web/"));
+    const touchesBackend = files.some(
+      (f) =>
+        f.startsWith("src/server/") ||
+        f.startsWith("src/hub/") ||
+        f.startsWith("src/core/") ||
+        f.startsWith("src/cli/") ||
+        f.startsWith("src/mcp/"),
+    );
+
+    return {
+      detail: toDetail(bundle, postSnap?.fingerprint ?? null),
+      delivery: recordedDelivery!,
+      touchesWeb,
+      touchesBackend,
+    };
+  }
+
+  // PR delivery path (supports both RSI worktree sandbox and standard repository branches).
+  const preBundle = readRequirementBundle(base, id);
+  const projectMeta = readProject(base);
+  if (input.expectedRevision !== undefined && preBundle.state.revision !== input.expectedRevision) {
+    throw new WorkbenchError(
+      "revision_conflict",
+      `需求 ${id} 已被更新（当前修订 ${preBundle.state.revision}，预期修订 ${input.expectedRevision}），请刷新后重试`,
+      {
+        requirementId: id,
+        expectedRevision: input.expectedRevision,
+        currentRevision: preBundle.state.revision,
+      },
+    );
+  }
+  if (preBundle.state.stage !== "done" || !preBundle.state.acceptance) {
+    throw new WorkbenchError("invalid_transition", `仅已完成人工验收的需求才能提交 GitHub PR（当前：${preBundle.state.stage}）`);
+  }
+
+  const sandbox = getSandboxForRequirement(base, id);
+  const codeRoot = sandbox ? sandbox.worktreePath : base;
+  const tree = await inspectWorkingTreeForDelivery(codeRoot);
+  if (!tree.isGitRepo) {
+    throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法推送分支或创建 PR");
+  }
+
+  const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
+  if (!ghEnv.ready || !ghEnv.repo) {
+    throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR");
+  }
+  const repo = ghEnv.repo;
+  const baseBranch = validateGitBranchName(
+    input.baseBranch?.trim() || projectMeta.github?.defaultBaseBranch || ghEnv.defaultBaseBranch || "main",
+  );
+
+  let targetBranch = sandbox ? sandbox.branch : (tree.branch ?? "");
+  if (!sandbox && (!targetBranch || targetBranch === baseBranch || targetBranch === "master" || targetBranch === "HEAD")) {
+    const requestedBranch = input.branchName?.trim() || `feat/${id.toLowerCase()}`;
+    targetBranch = await createFeatureBranchAtHead(codeRoot, requestedBranch);
+  }
+  targetBranch = validateGitBranchName(targetBranch);
+
+  const requestedFiles = Array.isArray(input.files) ? input.files.filter((f) => typeof f === "string" && f.trim().length > 0) : [];
+  let committedFiles: string[];
+  let commitHash: string;
+  let shortHash: string;
+  let effectiveCommitMessage: string;
+
+  if (requestedFiles.length > 0) {
+    const normalizedFiles = normalizeDeliveryFiles(requestedFiles);
+    const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
+    if (!commitMessage || !isSafeText(commitMessage, 4000)) {
+      throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
     }
     const dirtySet = new Set(tree.files.map((f) => f.path));
-    const missing = files.filter((f) => !dirtySet.has(f));
+    const missing = normalizedFiles.filter((f) => !dirtySet.has(f));
     if (missing.length > 0) {
       throw new WorkbenchError(
         "invalid_input",
         `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
       );
     }
+    const committed = await commitFilesInGit(codeRoot, normalizedFiles, commitMessage);
+    commitHash = committed.commitHash;
+    shortHash = committed.shortHash;
+    committedFiles = normalizedFiles;
+    effectiveCommitMessage = commitMessage;
+  } else {
+    const aheadRef = sandbox?.baseHead || baseBranch;
+    const aheadCount = await countCommitsBetween(codeRoot, aheadRef, "HEAD");
+    if (aheadCount <= 0) {
+      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交");
+    }
+    const headInfo = await getHeadCommitInfo(codeRoot);
+    if (!headInfo) {
+      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息");
+    }
+    commitHash = headInfo.commitHash;
+    shortHash = headInfo.shortHash;
+    committedFiles = await listCommittedFilesBetween(codeRoot, aheadRef, "HEAD");
+    effectiveCommitMessage =
+      (typeof input.commitMessage === "string" && input.commitMessage.trim()) ||
+      headInfo.subject ||
+      buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title);
+  }
 
-    const committed = await commitFilesInGit(base, files, commitMessage);
+  await pushBranchToRemote(codeRoot, targetBranch, "origin");
+
+  const firstLine = effectiveCommitMessage.split(/\r?\n/, 1)[0] ?? effectiveCommitMessage;
+  const prTitle = (input.prTitle?.trim() || `${id}: ${preBundle.state.title}`).slice(0, 200);
+  const currentSnap = await observeGitSnapshot(codeRoot);
+  const detailForBody = toDetail(preBundle, currentSnap?.fingerprint ?? null);
+  const prBody = input.prBody?.trim() || buildRequirementPrBody(detailForBody, note);
+
+  const prResult = await createOrUpdateGitHubPr(
+    {
+      root: codeRoot,
+      repo,
+      headBranch: targetBranch,
+      baseBranch,
+      title: prTitle,
+      body: prBody,
+    },
+    deps,
+  );
+  const { created: prCreated, ...prLink } = prResult;
+
+  let recordedDelivery: DeliveryRecord | null = null;
+  const bundle = await mutateRequirement(base, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
     const delivery: DeliveryRecord = {
       deliveredAt: now,
-      commitHash: committed.commitHash,
-      shortHash: committed.shortHash,
-      commitMessage,
-      files,
-      branch: committed.branch,
+      commitHash,
+      shortHash,
+      commitMessage: effectiveCommitMessage,
+      files: committedFiles,
+      branch: targetBranch,
+      prNumber: prLink.number,
+      prUrl: prLink.url,
       ...(note ? { note } : {}),
     };
     recordedDelivery = delivery;
 
-    const firstLine = commitMessage.split(/\r?\n/, 1)[0] ?? commitMessage;
+    const prevGithub: RequirementGitHubLink = state.github ?? { repo };
+    const nextGithub: RequirementGitHubLink = {
+      ...prevGithub,
+      repo,
+      pr: prLink,
+    };
+
+    let timeline = appendTimeline(
+      state.timeline,
+      makeEvent(
+        now,
+        "delivered",
+        "human",
+        `已提交并推送至 ${targetBranch}（${shortHash} · ${committedFiles.length} 个文件）：${firstLine.slice(0, 120)}`,
+        note,
+      ),
+    );
+    timeline = appendTimeline(
+      timeline,
+      makeEvent(
+        now,
+        "github_pr_created",
+        "human",
+        `${prCreated ? "已创建" : "已更新"} GitHub PR #${prLink.number} (${targetBranch} -> ${baseBranch})`,
+        prLink.url,
+      ),
+    );
+
     return {
       state: {
         ...state,
         delivery,
-        timeline: appendTimeline(
-          state.timeline,
-          makeEvent(
-            now,
-            "delivered",
-            "human",
-            `已提交代码交付（${committed.shortHash} · ${files.length} 个文件）：${firstLine.slice(0, 140)}`,
-            note,
-          ),
-        ),
+        github: nextGithub,
+        timeline,
       },
     };
   });
 
-  const postSnap = await observeGitSnapshot(base);
-  const touchesWeb = files.some((f) => f.startsWith("src/web/"));
-  const touchesBackend = files.some(
+  let githubSyncWarning: string | undefined;
+  const linkedIssue = bundle.state.github?.issue;
+  if (linkedIssue && projectMeta.github?.autoSyncIssue !== false) {
+    try {
+      await commentOnGitHubIssue(
+        {
+          root: base,
+          repo,
+          issueNumber: linkedIssue.number,
+          body: `已从需求 \`${id}\` 提交 Pull Request：${prLink.url}（分支 \`${targetBranch}\` → \`${baseBranch}\`，提交 \`${shortHash}\`）。`,
+        },
+        deps,
+      );
+    } catch (err) {
+      githubSyncWarning = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  const touchesWeb = committedFiles.some((f) => f.startsWith("src/web/"));
+  const touchesBackend = committedFiles.some(
     (f) =>
       f.startsWith("src/server/") ||
       f.startsWith("src/hub/") ||
@@ -1289,11 +1633,90 @@ export async function deliverRequirement(
   );
 
   return {
-    detail: toDetail(bundle, postSnap?.fingerprint ?? null),
+    detail: toDetail(bundle, currentSnap?.fingerprint ?? null),
     delivery: recordedDelivery!,
+    pr: prLink,
+    ...(githubSyncWarning ? { githubSyncWarning } : {}),
     touchesWeb,
     touchesBackend,
   };
+}
+
+export async function linkRequirementGitHubIssue(
+  root: string,
+  id: string,
+  input: {
+    repo: string;
+    issue: RequirementGitHubIssueLink;
+    summary?: string;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const base = canonicalRoot(root);
+  const repo = validateGitHubRepoSlug(input.repo);
+  const bundle = await mutateRequirement(base, id, undefined, (current, now) => {
+    const { state } = current;
+    const nextGithub: RequirementGitHubLink = {
+      ...(state.github ?? { repo }),
+      repo,
+      issue: input.issue,
+    };
+    return {
+      state: {
+        ...state,
+        github: nextGithub,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "github_issue_linked",
+            "human",
+            input.summary?.trim() || `已关联 GitHub Issue #${input.issue.number}`,
+            input.issue.url,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+export async function recordRequirementGitHubSync(
+  root: string,
+  id: string,
+  input: {
+    issuePatch?: Partial<RequirementGitHubIssueLink>;
+    prPatch?: RequirementGitHubPrLink;
+    eventKind: "github_issue_synced" | "github_pr_synced";
+    summary: string;
+    detail?: string;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const base = canonicalRoot(root);
+  const bundle = await mutateRequirement(base, id, undefined, (current, now) => {
+    const { state } = current;
+    if (!state.github) {
+      throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub 仓库或 Issue/PR`);
+    }
+    const nextIssue =
+      input.issuePatch && state.github.issue
+        ? { ...state.github.issue, ...input.issuePatch, lastSyncedAt: now }
+        : state.github.issue;
+    const nextPr = input.prPatch ? { ...input.prPatch, lastSyncedAt: now } : state.github.pr;
+    return {
+      state: {
+        ...state,
+        github: {
+          ...state.github,
+          ...(nextIssue !== undefined ? { issue: nextIssue } : {}),
+          ...(nextPr !== undefined ? { pr: nextPr } : {}),
+        },
+        timeline: appendTimeline(state.timeline, makeEvent(now, input.eventKind, "system", input.summary, input.detail)),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
 export async function blockRequirement(

@@ -1,6 +1,22 @@
 import { useRef } from "react";
-import { ArrowUp, Check, Crosshair, ExternalLink, Flame, Folder, Lightbulb, Pencil, RefreshCw, Sparkles, Trash2, Zap } from "lucide-react";
-import type { PrivacyMode } from "../../core/types.ts";
+import {
+  ArrowUp,
+  Check,
+  Crosshair,
+  ExternalLink,
+  Flame,
+  Folder,
+  GitPullRequest,
+  Globe,
+  Lightbulb,
+  Link2,
+  Pencil,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  Zap,
+} from "lucide-react";
+import type { OutputLanguage, PrivacyMode } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   HARNESS_IDS,
@@ -19,10 +35,12 @@ import {
   runBusy,
   submitAnnotation,
   submitFeedback,
+  submitImportGitHubIssue,
   submitLifecycle,
   submitNewRequirement,
   useDeliveryQuery,
   useEvolutionQuery,
+  useGitHubStatusQuery,
   useHubStateQuery,
   usePlaybookQuery,
   useProjectQuery,
@@ -72,6 +90,15 @@ export function Modals() {
     selectedId,
     Boolean(selectedId && m?.kind === "deliver"),
   );
+  const { data: githubStatus } = useGitHubStatusQuery(
+    activeProjectId,
+    Boolean(
+      !noHubProject &&
+        project?.initialized &&
+        m &&
+        (m.kind === "new_req" || m.kind === "routing" || m.kind === "link_issue" || m.kind === "deliver"),
+    ),
+  );
 
   const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
   if (!m) return null;
@@ -83,46 +110,148 @@ export function Modals() {
   const detail = reqData?.detail ?? null;
 
   if (m.kind === "new_req") {
+    const mode = m.mode ?? "create";
+    const createIssueChecked =
+      m.createGitHubIssue ?? Boolean(project?.project?.github?.autoCreateIssue && githubStatus?.ready);
+
     return (
       <ModalShell onClose={close} testId="new-req-modal">
-        <h3>新建需求</h3>
-        <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
-          你想实现或修复什么？
-        </label>
-        <textarea
-          className="textarea"
-          id="new-req-goal"
-          data-testid="new-req-goal"
-          autoFocus
-          value={m.goal}
-          placeholder="用一句话描述需求目标，细节与验收标准可交给 Agent 整理…"
-          onChange={(e) =>
-            setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
-          }
-        />
-        <div className="modal-actions">
-          <button className="btn" type="button" onClick={close}>
-            取消
-          </button>
-          <button
-            className="btn"
-            type="button"
-            data-testid="save-draft-btn"
-            disabled={busy}
-            onClick={() => void submitNewRequirement(m.goal, false, bridgeConnected)}
-          >
-            仅保存草稿
-          </button>
-          <button
-            className="btn primary"
-            type="button"
-            data-testid="create-and-dispatch-btn"
-            disabled={busy}
-            onClick={() => void submitNewRequirement(m.goal, true, bridgeConnected)}
-          >
-            创建并让 Agent 整理方案
-          </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>新建需求</h3>
+          <div className="segmented" role="tablist" aria-label="新建需求方式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "create"}
+              className={mode === "create" ? "active" : ""}
+              data-testid="new-req-mode-create"
+              onClick={() =>
+                setModal((prev) => (prev?.kind === "new_req" ? { ...prev, mode: "create" } : prev))
+              }
+            >
+              直接描述
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "import_issue"}
+              className={mode === "import_issue" ? "active" : ""}
+              data-testid="new-req-mode-import"
+              onClick={() =>
+                setModal((prev) =>
+                  prev?.kind === "new_req" ? { ...prev, mode: "import_issue", issueRef: prev.issueRef ?? "" } : prev,
+                )
+              }
+            >
+              从 GitHub Issue 导入
+            </button>
+          </div>
         </div>
+
+        {mode === "create" ? (
+          <>
+            <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
+              你想实现或修复什么？
+            </label>
+            <textarea
+              className="textarea"
+              id="new-req-goal"
+              data-testid="new-req-goal"
+              autoFocus
+              value={m.goal}
+              placeholder="用一句话描述需求目标，细节与验收标准可交给 Agent 整理…"
+              onChange={(e) =>
+                setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
+              }
+            />
+            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
+              <input
+                type="checkbox"
+                data-testid="new-req-create-issue"
+                checked={createIssueChecked}
+                disabled={githubStatus !== undefined && !githubStatus.ready}
+                onChange={(e) =>
+                  setModal((prev) =>
+                    prev?.kind === "new_req" ? { ...prev, createGitHubIssue: e.target.checked } : prev,
+                  )
+                }
+              />
+              <span>
+                同步在 GitHub 创建 Issue
+                {githubStatus?.repo ? ` (${githubStatus.repo})` : ""}
+                {githubStatus && !githubStatus.ready ? ` — ${githubStatus.reason}` : ""}
+              </span>
+            </label>
+            <div className="modal-actions">
+              <button className="btn" type="button" onClick={close}>
+                取消
+              </button>
+              <button
+                className="btn"
+                type="button"
+                data-testid="save-draft-btn"
+                disabled={busy}
+                onClick={() => void submitNewRequirement(m.goal, false, bridgeConnected, createIssueChecked)}
+              >
+                仅保存草稿
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                data-testid="create-and-dispatch-btn"
+                disabled={busy}
+                onClick={() => void submitNewRequirement(m.goal, true, bridgeConnected, createIssueChecked)}
+              >
+                创建并让 Agent 整理方案
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
+              GitHub Issue 编号或完整 URL{githubStatus?.repo ? `（默认仓库 ${githubStatus.repo}）` : ""}
+            </label>
+            <input
+              className="input"
+              id="import-issue-ref"
+              data-testid="import-issue-ref"
+              autoFocus
+              value={m.issueRef ?? ""}
+              placeholder="例如 #42、42 或 https://github.com/owner/repo/issues/42"
+              onChange={(e) =>
+                setModal((prev) => (prev?.kind === "new_req" ? { ...prev, issueRef: e.target.value } : prev))
+              }
+            />
+            {githubStatus && !githubStatus.ready && (
+              <div className="callout warning xs" style={{ marginTop: 8 }}>
+                {githubStatus.reason}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="btn" type="button" onClick={close}>
+                取消
+              </button>
+              <button
+                className="btn"
+                type="button"
+                data-testid="import-issue-draft-btn"
+                disabled={busy}
+                onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", false)}
+              >
+                仅导入草稿
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                data-testid="import-issue-dispatch-btn"
+                disabled={busy}
+                onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", true)}
+              >
+                导入并让 Agent 整理方案
+              </button>
+            </div>
+          </>
+        )}
       </ModalShell>
     );
   }
@@ -299,10 +428,18 @@ export function Modals() {
   }
 
   if (m.kind === "routing") {
+    const tab = m.tab ?? "routing";
     const cfg = m.draft ?? routing;
+    const hubLangValue = m.hubLangDraft ?? hub?.outputLanguage ?? "zh-CN";
+    const projLangValue = m.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
+    const ghRepoValue = m.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
+    const ghBaseValue =
+      m.ghBaseBranchDraft ?? project?.project?.github?.defaultBaseBranch ?? githubStatus?.defaultBaseBranch ?? "main";
+    const ghAutoCreateValue = m.ghAutoCreateDraft ?? Boolean(project?.project?.github?.autoCreateIssue);
+    const ghAutoSyncValue = m.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
 
     const syncHubStatePatch = async (
-      patch: Partial<Pick<HubStateResponse, "routing" | "customModels" | "harnesses">>,
+      patch: Partial<Pick<HubStateResponse, "routing" | "customModels" | "harnesses" | "outputLanguage">>,
     ) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
       queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
@@ -352,195 +489,394 @@ export function Modals() {
       }
     };
 
+    const savePreferences = async () => {
+      const out = await runBusy(async () => {
+        const hubRes = await api.updateHubPreferences({ outputLanguage: hubLangValue });
+        if (!noHubProject && project?.initialized) {
+          await api.updateProjectSettings({
+            outputLanguage: projLangValue,
+            github: {
+              repo: ghRepoValue.trim(),
+              defaultBaseBranch: ghBaseValue.trim() || "main",
+              autoCreateIssue: ghAutoCreateValue,
+              autoSyncIssue: ghAutoSyncValue,
+            },
+          });
+        }
+        return hubRes;
+      });
+      if (out) {
+        await syncHubStatePatch({ outputLanguage: out.outputLanguage });
+        await invalidateAllWorkbenchQueries();
+        setModal(null);
+        showToast("输出语言与 GitHub 配置已保存");
+      }
+    };
+
     return (
       <ModalShell onClose={close} wide testId="routing-modal">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <h3 style={{ margin: 0 }}>算力探测与分阶段模型路由中心</h3>
-          <button
-            className="btn xs"
-            type="button"
-            data-testid="refresh-harnesses-btn"
-            disabled={busy}
-            onClick={() => void refreshHarnesses()}
-          >
-            <Icon icon={RefreshCw} size={14} /> 重新探测本机模型
-          </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>算力路由与工作台偏好</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div className="segmented" role="tablist" aria-label="设置视图">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "routing"}
+                className={tab === "routing" ? "active" : ""}
+                data-testid="settings-tab-routing"
+                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "routing" } : prev))}
+              >
+                算力与模型路由
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "preferences"}
+                className={tab === "preferences" ? "active" : ""}
+                data-testid="settings-tab-preferences"
+                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "preferences" } : prev))}
+              >
+                <Icon icon={Globe} size={14} /> 输出语言与 GitHub
+              </button>
+            </div>
+            {tab === "routing" && (
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="refresh-harnesses-btn"
+                disabled={busy}
+                onClick={() => void refreshHarnesses()}
+              >
+                <Icon icon={RefreshCw} size={14} /> 重新探测本机模型
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="preset-grid" data-testid="routing-presets">
-          {PRESET_INFO.map((p) => (
-            <button
-              key={p.id}
-              className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
-              type="button"
-              data-testid={`preset-${p.id}`}
-              onClick={() => void applyPreset(p.id)}
-            >
-              <strong>{p.name}</strong>
-              <div className="xs muted" style={{ marginTop: 4 }}>
-                {p.desc}
-              </div>
-            </button>
-          ))}
-        </div>
-
-        {cfg && (
-          <div className="routing-table" style={{ marginTop: 12 }}>
-            {ROUTING_STAGES.map((stg) => {
-              const rule = cfg.stages[stg];
-              const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
-              const customInList = harnesses.some(
-                (h) => h.id === rule.primary.harness && h.models.some((x) => x.id === rule.primary.model),
-              );
-              const efforts = supportedEffortsForModel(harnesses, rule.primary.harness, rule.primary.model);
-
-              return (
-                <div key={stg} className="routing-row">
-                  <div className="min-w-0">
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>{STAGE_LABEL[stg]}</div>
-                    <div className="xs muted truncate">
-                      备援：{rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") || "无"}
-                    </div>
+        {tab === "routing" ? (
+          <>
+            <div className="preset-grid" data-testid="routing-presets">
+              {PRESET_INFO.map((p) => (
+                <button
+                  key={p.id}
+                  className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
+                  type="button"
+                  data-testid={`preset-${p.id}`}
+                  onClick={() => void applyPreset(p.id)}
+                >
+                  <strong>{p.name}</strong>
+                  <div className="xs muted" style={{ marginTop: 4 }}>
+                    {p.desc}
                   </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <select
-                      className="select min-w-[230px]"
-                      data-testid={`route-select-${stg}`}
-                      value={selectedVal}
-                      onChange={(e) => {
-                        const parsed = parseRunnerKey(e.target.value);
-                        if (!parsed || !cfg) return;
-                        const { harness, model } = parsed;
-                        const nextEfforts = supportedEffortsForModel(harnesses, harness, model);
-                        const keepEffort =
-                          rule.primary.reasoningEffort && nextEfforts.includes(rule.primary.reasoningEffort)
-                            ? rule.primary.reasoningEffort
-                            : undefined;
-                        const nextCfg = {
-                          ...cfg,
-                          stages: {
-                            ...cfg.stages,
-                            [stg]: {
-                              ...cfg.stages[stg],
-                              primary: {
-                                harness: harness as HarnessId,
-                                model,
-                                ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
+                </button>
+              ))}
+            </div>
+
+            {cfg && (
+              <div className="routing-table" style={{ marginTop: 12 }}>
+                {ROUTING_STAGES.map((stg) => {
+                  const rule = cfg.stages[stg];
+                  const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
+                  const customInList = harnesses.some(
+                    (h) => h.id === rule.primary.harness && h.models.some((x) => x.id === rule.primary.model),
+                  );
+                  const efforts = supportedEffortsForModel(harnesses, rule.primary.harness, rule.primary.model);
+
+                  return (
+                    <div key={stg} className="routing-row">
+                      <div className="min-w-0">
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{STAGE_LABEL[stg]}</div>
+                        <div className="xs muted truncate">
+                          备援：{rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") || "无"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <select
+                          className="select min-w-[230px]"
+                          data-testid={`route-select-${stg}`}
+                          value={selectedVal}
+                          onChange={(e) => {
+                            const parsed = parseRunnerKey(e.target.value);
+                            if (!parsed || !cfg) return;
+                            const { harness, model } = parsed;
+                            const nextEfforts = supportedEffortsForModel(harnesses, harness, model);
+                            const keepEffort =
+                              rule.primary.reasoningEffort && nextEfforts.includes(rule.primary.reasoningEffort)
+                                ? rule.primary.reasoningEffort
+                                : undefined;
+                            const nextCfg = {
+                              ...cfg,
+                              stages: {
+                                ...cfg.stages,
+                                [stg]: {
+                                  ...cfg.stages[stg],
+                                  primary: {
+                                    harness: harness as HarnessId,
+                                    model,
+                                    ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
+                                  },
+                                },
                               },
-                            },
-                          },
-                        };
-                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                      }}
-                    >
-                      {!customInList && (
-                        <option value={selectedVal}>
-                          {rule.primary.harness} · {rule.primary.model}
-                        </option>
-                      )}
-                      {harnesses.map((h) => (
-                        <optgroup key={h.id} label={`${h.label} (${h.installed ? h.subscription : "未安装"})`}>
-                          {h.models.map((mod) => {
-                            const val = `${h.id}::${mod.id}`;
-                            return (
-                              <option key={val} value={val}>
-                                {h.id} · {mod.id}
-                                {mod.source === "custom" ? " [自定义]" : ""}
-                              </option>
-                            );
-                          })}
-                        </optgroup>
-                      ))}
-                    </select>
+                            };
+                            setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                          }}
+                        >
+                          {!customInList && (
+                            <option value={selectedVal}>
+                              {rule.primary.harness} · {rule.primary.model}
+                            </option>
+                          )}
+                          {harnesses.map((h) => (
+                            <optgroup key={h.id} label={`${h.label} (${h.installed ? h.subscription : "未安装"})`}>
+                              {h.models.map((mod) => {
+                                const val = `${h.id}::${mod.id}`;
+                                return (
+                                  <option key={val} value={val}>
+                                    {h.id} · {mod.id}
+                                    {mod.source === "custom" ? " [自定义]" : ""}
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          ))}
+                        </select>
+                        <select
+                          className="select font-mono w-[135px]"
+                          data-testid={`route-effort-${stg}`}
+                          title="该阶段推理强度 (Reasoning Effort)"
+                          value={rule.primary.reasoningEffort ?? ""}
+                          onChange={(e) => {
+                            const eff = e.target.value as ReasoningEffort | "";
+                            const nextPrimary = { ...rule.primary };
+                            if (eff) nextPrimary.reasoningEffort = eff;
+                            else delete nextPrimary.reasoningEffort;
+                            const nextCfg = {
+                              ...cfg,
+                              stages: {
+                                ...cfg.stages,
+                                [stg]: { ...cfg.stages[stg], primary: nextPrimary },
+                              },
+                            };
+                            setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                          }}
+                        >
+                          <option value="">默认强度</option>
+                          {efforts.map((eff) => (
+                            <option key={eff} value={eff}>
+                              {EFFORT_LABELS[eff] ?? eff}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="custom-model-bar">
+              <strong className="xs">补充自定义模型（如 OpenCode Go 付费模型 ID）：</strong>
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <select
+                  className="select"
+                  id="custom-model-harness"
+                  style={{ width: 140 }}
+                  value={m.customHarness}
+                  onChange={(e) =>
+                    setModal((prev) =>
+                      prev?.kind === "routing" ? { ...prev, customHarness: e.target.value as HarnessId } : prev,
+                    )
+                  }
+                >
+                  {HARNESS_IDS.map((h) => (
+                    <option key={h} value={h}>
+                      {h}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="input"
+                  id="custom-model-id"
+                  data-testid="custom-model-input"
+                  value={m.customModel}
+                  placeholder="例如 opencode-go/claude-sonnet-4.6"
+                  onChange={(e) =>
+                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: e.target.value } : prev))
+                  }
+                />
+                <button
+                  className="btn"
+                  type="button"
+                  data-testid="add-custom-model-btn"
+                  onClick={() => void addCustomModel()}
+                >
+                  添加模型
+                </button>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn" type="button" onClick={close}>
+                取消
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                data-testid="save-routing-btn"
+                disabled={busy}
+                onClick={() => void saveRouting()}
+              >
+                保存路由配置
+              </button>
+            </div>
+          </>
+        ) : (
+          <div data-testid="preferences-pane">
+            <div className="callout info xs" style={{ marginBottom: 12 }}>
+              所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                  Hub 全局默认输出语言（对所有项目生效）
+                </label>
+                <select
+                  className="select"
+                  data-testid="hub-output-language-select"
+                  style={{ width: "100%" }}
+                  value={hubLangValue}
+                  onChange={(e) =>
+                    setModal((prev) =>
+                      prev?.kind === "routing" ? { ...prev, hubLangDraft: e.target.value as OutputLanguage } : prev,
+                    )
+                  }
+                >
+                  <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
+                  <option value="en">English (en)</option>
+                  <option value="auto">跟随需求输入语言 (auto)</option>
+                </select>
+              </div>
+
+              {!noHubProject && project?.initialized && (
+                <>
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                    <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                      当前项目（{project.project?.name}）输出语言覆盖
+                    </label>
                     <select
-                      className="select font-mono w-[135px]"
-                      data-testid={`route-effort-${stg}`}
-                      title="该阶段推理强度 (Reasoning Effort)"
-                      value={rule.primary.reasoningEffort ?? ""}
-                      onChange={(e) => {
-                        const eff = e.target.value as ReasoningEffort | "";
-                        const nextPrimary = { ...rule.primary };
-                        if (eff) nextPrimary.reasoningEffort = eff;
-                        else delete nextPrimary.reasoningEffort;
-                        const nextCfg = {
-                          ...cfg,
-                          stages: {
-                            ...cfg.stages,
-                            [stg]: { ...cfg.stages[stg], primary: nextPrimary },
-                          },
-                        };
-                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                      }}
+                      className="select"
+                      data-testid="project-output-language-select"
+                      style={{ width: "100%" }}
+                      value={projLangValue}
+                      onChange={(e) =>
+                        setModal((prev) =>
+                          prev?.kind === "routing"
+                            ? { ...prev, projLangDraft: e.target.value as OutputLanguage | "inherit" }
+                            : prev,
+                        )
+                      }
                     >
-                      <option value="">默认强度</option>
-                      {efforts.map((eff) => (
-                        <option key={eff} value={eff}>
-                          {EFFORT_LABELS[eff] ?? eff}
-                        </option>
-                      ))}
+                      <option value="inherit">继承 Hub 全局设置（当前：{hubLangValue}）</option>
+                      <option value="zh-CN">简体中文 (zh-CN)</option>
+                      <option value="en">English (en)</option>
+                      <option value="auto">跟随需求输入语言 (auto)</option>
                     </select>
                   </div>
-                </div>
-              );
-            })}
+
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <strong style={{ fontSize: 13 }}>当前项目 GitHub 集成设置</strong>
+                      {githubStatus && (
+                        <span className={`badge ${githubStatus.ready ? "success" : "warning"}`}>
+                          {githubStatus.ready
+                            ? `gh 已就绪 (${githubStatus.account ?? "authenticated"})`
+                            : githubStatus.reason ?? "未就绪"}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 8, marginBottom: 8 }}>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          GitHub 仓库（owner/repo，留空自动识别 origin）
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-github-repo-input"
+                          value={ghRepoValue}
+                          placeholder="Jackie733/workbench"
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, ghRepoDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          PR 默认 Base 分支
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-github-base-input"
+                          value={ghBaseValue}
+                          placeholder="main"
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, ghBaseBranchDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="project-github-autocreate"
+                        checked={ghAutoCreateValue}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: e.target.checked } : prev,
+                          )
+                        }
+                      />
+                      <span>新建需求或痛点转化需求时自动在 GitHub 创建对应 Issue</span>
+                    </label>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="project-github-autosync"
+                        checked={ghAutoSyncValue}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: e.target.checked } : prev,
+                          )
+                        }
+                      />
+                      <span>验收通过与创建 PR 时自动向已关联 GitHub Issue 同步评论进展</span>
+                    </label>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn" type="button" onClick={close}>
+                取消
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                data-testid="save-preferences-btn"
+                disabled={busy}
+                onClick={() => void savePreferences()}
+              >
+                保存偏好设置
+              </button>
+            </div>
           </div>
         )}
-
-        <div className="custom-model-bar">
-          <strong className="xs">补充自定义模型（如 OpenCode Go 付费模型 ID）：</strong>
-          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <select
-              className="select"
-              id="custom-model-harness"
-              style={{ width: 140 }}
-              value={m.customHarness}
-              onChange={(e) =>
-                setModal((prev) =>
-                  prev?.kind === "routing" ? { ...prev, customHarness: e.target.value as HarnessId } : prev,
-                )
-              }
-            >
-              {HARNESS_IDS.map((h) => (
-                <option key={h} value={h}>
-                  {h}
-                </option>
-              ))}
-            </select>
-            <input
-              className="input"
-              id="custom-model-id"
-              data-testid="custom-model-input"
-              value={m.customModel}
-              placeholder="例如 opencode-go/claude-sonnet-4.6"
-              onChange={(e) =>
-                setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: e.target.value } : prev))
-              }
-            />
-            <button
-              className="btn"
-              type="button"
-              data-testid="add-custom-model-btn"
-              onClick={() => void addCustomModel()}
-            >
-              添加模型
-            </button>
-          </div>
-        </div>
-
-        <div className="modal-actions">
-          <button className="btn" type="button" onClick={close}>
-            取消
-          </button>
-          <button
-            className="btn primary"
-            type="button"
-            data-testid="save-routing-btn"
-            disabled={busy}
-            onClick={() => void saveRouting()}
-          >
-            保存路由配置
-          </button>
-        </div>
       </ModalShell>
     );
   }
@@ -746,10 +1082,17 @@ export function Modals() {
             urlPath: typeof window !== "undefined" ? window.location.pathname : undefined,
           },
         });
-        let promoted: { id: string; projectId: string } | null = null;
+        let promoted: { id: string; projectId: string; warning?: string } | null = null;
         if (m.autoPromote && rep.painPoint) {
-          const out = await api.promotePainPoint(rep.painPoint.id, { createSandbox: true });
-          promoted = { id: out.requirement.state.id, projectId: out.workbenchProjectId };
+          const out = await api.promotePainPoint(rep.painPoint.id, {
+            createSandbox: true,
+            ...(m.createGitHubIssue !== undefined ? { createGitHubIssue: m.createGitHubIssue } : {}),
+          });
+          promoted = {
+            id: out.requirement.state.id,
+            projectId: out.workbenchProjectId,
+            warning: out.githubIssueWarning,
+          };
         }
         return { painPoint: rep.painPoint, promoted };
       });
@@ -760,7 +1103,11 @@ export function Modals() {
           setApiProjectScope(res.promoted.projectId);
           setActiveProjectId(res.promoted.projectId);
           await openRequirement(res.promoted.id);
-          showToast(`已建单并创建沙箱需求 ${res.promoted.id}`);
+          showToast(
+            res.promoted.warning
+              ? `已建单并创建沙箱需求 ${res.promoted.id}（Issue 未同步：${res.promoted.warning}）`
+              : `已建单并创建沙箱需求 ${res.promoted.id}`,
+          );
         } else {
           showToast("已记录到自进化痛点收集箱");
         }
@@ -850,6 +1197,21 @@ export function Modals() {
           />
           <span>立即转化为 Workbench 仓库标准需求并创建隔离 Worktree 沙箱</span>
         </label>
+        {m.autoPromote && (
+          <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, marginLeft: 20, fontSize: 12.5 }}>
+            <input
+              type="checkbox"
+              data-testid="quick-report-create-issue"
+              checked={m.createGitHubIssue ?? false}
+              onChange={(e) =>
+                setModal((prev) =>
+                  prev?.kind === "quick_report" ? { ...prev, createGitHubIssue: e.target.checked } : prev,
+                )
+              }
+            />
+            <span>同步在 GitHub 创建对应 Issue</span>
+          </label>
+        )}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
             取消
@@ -913,6 +1275,18 @@ export function Modals() {
           out.webReloaded
             ? `已应用 ${reqId} 改动并热重载前端`
             : `已应用 ${reqId} 改动（${out.appliedFiles.length} 个文件）`,
+        );
+      }
+    };
+
+    const handleSyncSandboxPr = async (reqId: string) => {
+      const out = await runBusy(() => api.syncRsiSandboxPr(reqId));
+      if (out) {
+        await invalidateAllWorkbenchQueries();
+        showToast(
+          out.pr.state === "merged"
+            ? `PR #${out.pr.number} 已合并${out.cleanedSandbox ? "并清理沙箱" : ""}`
+            : `PR #${out.pr.number} 当前状态：${out.pr.state}`,
         );
       }
     };
@@ -1021,6 +1395,14 @@ export function Modals() {
                             {sandboxItem?.stage && sandboxItem.stage !== "done" && (
                               <span className="badge">沙箱 {sandboxItem.stage}</span>
                             )}
+                            {sandboxItem?.github?.issue && (
+                              <span className="badge info">Issue #{sandboxItem.github.issue.number}</span>
+                            )}
+                            {sandboxItem?.github?.pr && (
+                              <span className={`badge ${sandboxItem.github.pr.state === "merged" ? "success" : "info"}`}>
+                                PR #{sandboxItem.github.pr.number} · {sandboxItem.github.pr.state}
+                              </span>
+                            )}
                             <span className="xs muted">{formatDateTime(p.updatedAt)}</span>
                           </div>
                           <div style={{ fontWeight: 600 }}>{p.title}</div>
@@ -1030,7 +1412,7 @@ export function Modals() {
                             </div>
                           )}
                         </div>
-                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
                           {p.status === "open" && (
                             <>
                               <button
@@ -1064,9 +1446,20 @@ export function Modals() {
                               <Icon icon={ExternalLink} size={14} /> 查看需求
                             </button>
                           )}
-                          {sandboxItem?.canApply && p.promotedReqId && (
+                          {sandboxItem?.canApply && p.promotedReqId && sandboxItem.github?.pr && (
                             <button
                               className="btn primary xs"
+                              type="button"
+                              data-testid={`sync-pain-pr-${p.id}`}
+                              disabled={busy}
+                              onClick={() => void handleSyncSandboxPr(p.promotedReqId!)}
+                            >
+                              <Icon icon={RefreshCw} size={14} /> 同步 PR 并清理沙箱
+                            </button>
+                          )}
+                          {sandboxItem?.canApply && p.promotedReqId && (
+                            <button
+                              className={sandboxItem.github?.pr ? "btn xs" : "btn primary xs"}
                               type="button"
                               data-testid={`apply-pain-sandbox-${p.id}`}
                               disabled={busy}
@@ -1217,10 +1610,101 @@ export function Modals() {
     );
   }
 
+  if (m.kind === "link_issue") {
+    const submitLinkIssue = async () => {
+      if (m.mode === "link" && !m.issueRef.trim()) {
+        showToast("请输入 GitHub Issue 编号或 URL", true);
+        return;
+      }
+      const res = await runBusy(() =>
+        api.linkRequirementIssue(
+          m.requirementId,
+          m.mode === "link" ? { issueRef: m.issueRef.trim() } : {},
+        ),
+      );
+      if (res) {
+        setModal(null);
+        await invalidateAllWorkbenchQueries();
+        const num = res.detail.state.github?.issue?.number;
+        showToast(num ? `已关联 GitHub Issue #${num}` : "已关联 GitHub Issue");
+      }
+    };
+
+    return (
+      <ModalShell onClose={close} testId="link-issue-modal">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>关联 GitHub Issue</h3>
+          <div className="segmented" role="tablist">
+            <button
+              type="button"
+              className={m.mode === "create" ? "active" : ""}
+              onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "create" } : prev))}
+            >
+              新建并关联 Issue
+            </button>
+            <button
+              type="button"
+              className={m.mode === "link" ? "active" : ""}
+              onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "link" } : prev))}
+            >
+              绑定已有 Issue
+            </button>
+          </div>
+        </div>
+        {m.mode === "create" ? (
+          <div className="callout info xs">
+            将根据当前需求 <strong>{m.requirementId}</strong> 的标题、目标正文与验收条件在 GitHub 仓库
+            {githubStatus?.repo ? ` (${githubStatus.repo}) ` : " "}创建新 Issue 并双向绑定。
+          </div>
+        ) : (
+          <>
+            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+              GitHub Issue 编号或完整 URL
+            </label>
+            <input
+              className="input"
+              data-testid="link-issue-ref-input"
+              autoFocus
+              value={m.issueRef}
+              placeholder="例如 #42 或 https://github.com/owner/repo/issues/42"
+              onChange={(e) =>
+                setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, issueRef: e.target.value } : prev))
+              }
+            />
+          </>
+        )}
+        {githubStatus && !githubStatus.ready && (
+          <div className="callout warning xs" style={{ marginTop: 8 }}>
+            {githubStatus.reason}
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="submit-link-issue-btn"
+            disabled={busy || (githubStatus !== undefined && !githubStatus.ready)}
+            onClick={() => void submitLinkIssue()}
+          >
+            <Icon icon={Link2} size={14} /> {m.mode === "create" ? "创建并绑定" : "绑定 Issue"}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
   if (m.kind === "deliver") {
     if (!detail) return null;
     const candidates = deliveryPreview?.candidates ?? [];
     const selectedSet = new Set(m.selectedFiles);
+    const sandboxActive = Boolean(deliveryPreview?.sandboxActive);
+    const createPr = sandboxActive ? true : Boolean(m.createPr);
+    const canSubmitExistingCommits = createPr && candidates.length === 0 && (deliveryPreview?.aheadCommitsCount ?? 0) > 0;
+    const prAvailable = Boolean(deliveryPreview?.canCreatePr || githubStatus?.ready);
+
     const toggleFile = (filePath: string) => {
       setModal((prev) => {
         if (prev?.kind !== "deliver") return prev;
@@ -1241,12 +1725,12 @@ export function Modals() {
     };
     const submitDeliver = async () => {
       const files = m.selectedFiles.filter((f) => candidates.some((c) => c.path === f));
-      if (files.length === 0) {
+      if (files.length === 0 && !canSubmitExistingCommits) {
         showToast("请至少选择 1 个要纳入提交的文件", true);
         return;
       }
       const msg = m.commitMessage.trim();
-      if (!msg) {
+      if (files.length > 0 && !msg) {
         showToast("请填写 Git 提交说明", true);
         return;
       }
@@ -1256,98 +1740,208 @@ export function Modals() {
           commitMessage: msg,
           expectedRevision: detail.state.revision,
           note: m.note.trim() || undefined,
+          ...(createPr
+            ? {
+                createPr: true,
+                branchName: m.branchName?.trim() || undefined,
+                baseBranch: m.baseBranch?.trim() || undefined,
+                prTitle: m.prTitle?.trim() || undefined,
+              }
+            : {}),
         }),
       );
       if (res) {
         setModal(null);
         await invalidateAllWorkbenchQueries();
-        showToast(
-          res.restartRecommended
-            ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）；检测到服务端变更，建议执行 wb restart 重启生效`
-            : res.webReloaded
-              ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）并热刷新前端`
-              : `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）`,
-        );
+        if (res.pr) {
+          showToast(
+            res.githubSyncWarning
+              ? `已创建 PR #${res.pr.number}（Issue 同步警告：${res.githubSyncWarning}）`
+              : `已推送分支并创建 PR #${res.pr.number}`,
+          );
+        } else {
+          showToast(
+            res.restartRecommended
+              ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）；检测到服务端变更，建议执行 wb restart 重启生效`
+              : res.webReloaded
+                ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）并热刷新前端`
+                : `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）`,
+          );
+        }
       }
     };
 
     return (
       <ModalShell onClose={close} testId="deliver-modal">
-        <h3 style={{ marginTop: 0 }}>交付收尾 · 提交代码到 Git</h3>
-        <div className="muted xs" style={{ marginBottom: 10 }}>
-          目标需求：<strong>{detail.state.id}</strong> · 当前分支：
-          <code>{deliveryPreview?.branch ?? "HEAD"}</code> · 仅提交你勾选的文件，不会自动推送远程或覆盖其他暂存改动。
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8, flexWrap: "wrap" }}>
-          <strong style={{ fontSize: 13 }}>
-            选择纳入本次提交的文件（已选 {m.selectedFiles.length}/{candidates.length}）
-          </strong>
-          <div style={{ display: "flex", gap: 6 }}>
-            {candidates.some((c) => c.inAcceptedSnapshot) && (
-              <button className="btn xs" type="button" onClick={() => selectPreset("accepted")}>
-                仅选本次验收文件
-              </button>
-            )}
-            <button className="btn xs" type="button" onClick={() => selectPreset("all")}>
-              全选
-            </button>
-            <button className="btn xs" type="button" onClick={() => selectPreset("none")}>
-              清空
-            </button>
-          </div>
-        </div>
-        <div
-          style={{
-            maxHeight: 210,
-            overflowY: "auto",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            padding: 8,
-            marginBottom: 10,
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-          }}
-        >
-          {candidates.length === 0 ? (
-            <div className="muted xs">当前工作区无待提交文件。</div>
-          ) : (
-            candidates.map((c) => (
-              <label
-                key={c.path}
-                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>{createPr ? "标准化交付 · 提交并创建 GitHub PR" : "交付收尾 · 提交代码到 Git"}</h3>
+          {!sandboxActive && (
+            <div className="segmented" role="tablist" aria-label="交付方式">
+              <button
+                type="button"
+                className={!createPr ? "active" : ""}
+                data-testid="deliver-mode-local"
+                onClick={() => setModal((prev) => (prev?.kind === "deliver" ? { ...prev, createPr: false } : prev))}
               >
-                <input
-                  type="checkbox"
-                  data-testid={`deliver-file-${c.path}`}
-                  checked={selectedSet.has(c.path)}
-                  onChange={() => toggleFile(c.path)}
-                />
-                <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {c.path}
-                </code>
-                <span className="badge neutral">{c.status}</span>
-                {deliveryPreview && deliveryPreview.acceptedSnapshotFileCount > 0 && (
-                  <span className={`badge ${c.inAcceptedSnapshot ? "success" : "warning"}`}>
-                    {c.inAcceptedSnapshot ? "本次验收" : "工作区其他"}
-                  </span>
-                )}
-              </label>
-            ))
+                仅本地提交
+              </button>
+              <button
+                type="button"
+                className={createPr ? "active" : ""}
+                data-testid="deliver-mode-pr"
+                disabled={!prAvailable}
+                onClick={() => setModal((prev) => (prev?.kind === "deliver" ? { ...prev, createPr: true } : prev))}
+              >
+                <Icon icon={GitPullRequest} size={14} /> 推送并提 PR
+              </button>
+            </div>
           )}
         </div>
-        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-          Git 提交说明（Commit Message）
-        </label>
-        <input
-          className="input"
-          data-testid="deliver-commit-message"
-          style={{ marginBottom: 8 }}
-          value={m.commitMessage}
-          onChange={(e) =>
-            setModal((prev) => (prev?.kind === "deliver" ? { ...prev, commitMessage: e.target.value } : prev))
-          }
-        />
+        <div className="muted xs" style={{ marginBottom: 10 }}>
+          目标需求：<strong>{detail.state.id}</strong> · 当前分支：
+          <code>{deliveryPreview?.branch ?? "HEAD"}</code>
+          {deliveryPreview?.githubRepo ? ` · 仓库 ${deliveryPreview.githubRepo}` : ""}
+          {!createPr && " · 仅提交你勾选的文件，不会自动推送远程或覆盖其他暂存改动。"}
+        </div>
+
+        {(candidates.length > 0 || !canSubmitExistingCommits) && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8, flexWrap: "wrap" }}>
+              <strong style={{ fontSize: 13 }}>
+                选择纳入本次提交的文件（已选 {m.selectedFiles.length}/{candidates.length}）
+              </strong>
+              <div style={{ display: "flex", gap: 6 }}>
+                {candidates.some((c) => c.inAcceptedSnapshot) && (
+                  <button className="btn xs" type="button" onClick={() => selectPreset("accepted")}>
+                    仅选本次验收文件
+                  </button>
+                )}
+                <button className="btn xs" type="button" onClick={() => selectPreset("all")}>
+                  全选
+                </button>
+                <button className="btn xs" type="button" onClick={() => selectPreset("none")}>
+                  清空
+                </button>
+              </div>
+            </div>
+            <div
+              style={{
+                maxHeight: 190,
+                overflowY: "auto",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: 8,
+                marginBottom: 10,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              {candidates.length === 0 ? (
+                <div className="muted xs">当前工作区无未提交文件。</div>
+              ) : (
+                candidates.map((c) => (
+                  <label
+                    key={c.path}
+                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid={`deliver-file-${c.path}`}
+                      checked={selectedSet.has(c.path)}
+                      onChange={() => toggleFile(c.path)}
+                    />
+                    <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.path}
+                    </code>
+                    <span className="badge neutral">{c.status}</span>
+                    {deliveryPreview && deliveryPreview.acceptedSnapshotFileCount > 0 && (
+                      <span className={`badge ${c.inAcceptedSnapshot ? "success" : "warning"}`}>
+                        {c.inAcceptedSnapshot ? "本次验收" : "工作区其他"}
+                      </span>
+                    )}
+                  </label>
+                ))
+              )}
+            </div>
+          </>
+        )}
+
+        {canSubmitExistingCommits && (
+          <div className="callout info xs" style={{ marginBottom: 10 }}>
+            当前分支已有 <strong>{deliveryPreview?.aheadCommitsCount}</strong> 个先行提交且工作区干净，将直接推送现有提交至远端并创建 PR。
+          </div>
+        )}
+
+        {(candidates.length > 0 || !canSubmitExistingCommits) && (
+          <>
+            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+              Git 提交说明（Commit Message）
+            </label>
+            <input
+              className="input"
+              data-testid="deliver-commit-message"
+              style={{ marginBottom: 8 }}
+              value={m.commitMessage}
+              onChange={(e) =>
+                setModal((prev) => (prev?.kind === "deliver" ? { ...prev, commitMessage: e.target.value } : prev))
+              }
+            />
+          </>
+        )}
+
+        {createPr && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                  推送源分支
+                </label>
+                <input
+                  className="input"
+                  data-testid="deliver-pr-branch"
+                  readOnly={sandboxActive}
+                  value={m.branchName ?? deliveryPreview?.suggestedBranch ?? ""}
+                  onChange={(e) =>
+                    setModal((prev) => (prev?.kind === "deliver" ? { ...prev, branchName: e.target.value } : prev))
+                  }
+                />
+              </div>
+              <div>
+                <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                  目标 Base 分支
+                </label>
+                <input
+                  className="input"
+                  data-testid="deliver-pr-base"
+                  value={m.baseBranch ?? deliveryPreview?.baseBranch ?? "main"}
+                  onChange={(e) =>
+                    setModal((prev) => (prev?.kind === "deliver" ? { ...prev, baseBranch: e.target.value } : prev))
+                  }
+                />
+              </div>
+            </div>
+            <div>
+              <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                GitHub PR 标题
+              </label>
+              <input
+                className="input"
+                data-testid="deliver-pr-title"
+                value={m.prTitle ?? `${detail.state.id}: ${detail.state.title}`}
+                onChange={(e) =>
+                  setModal((prev) => (prev?.kind === "deliver" ? { ...prev, prTitle: e.target.value } : prev))
+                }
+              />
+            </div>
+            {detail.state.github?.issue && (
+              <div className="xs muted">
+                PR 正文将自动附带验证证据、审查结论及 <code>Closes #{detail.state.github.issue.number}</code>。
+              </div>
+            )}
+          </div>
+        )}
+
         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
           交付备注（可选，记录到需求时间线）
         </label>
@@ -1368,10 +1962,10 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="submit-deliver-btn"
-            disabled={busy || m.selectedFiles.length === 0}
+            disabled={busy || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onClick={() => void submitDeliver()}
           >
-            确认提交 Git
+            {createPr ? "提交并创建 GitHub PR" : "确认提交 Git"}
           </button>
         </div>
       </ModalShell>

@@ -5,15 +5,20 @@ import type {
   DeliveryPreview,
   DeliveryRecord,
   DiscussionEntry,
+  OutputLanguage,
   PrivacyMode,
+  ProjectGitHubConfig,
   ProjectMetadata,
   RequirementDetail,
   RequirementDiffView,
+  RequirementGitHubLink,
+  RequirementGitHubPrLink,
   RequirementSummary,
   Stage,
   VerificationRecord,
 } from "../core/types.ts";
 import type { GitObservation } from "../core/git.ts";
+import type { GitHubEnvironmentStatus, ImportedGitHubIssue } from "../core/github.ts";
 import type { SandboxRecord } from "../core/sandbox.ts";
 import type {
   EvolutionPainPoint,
@@ -38,6 +43,8 @@ export interface ProjectInfoResponse {
   project: ProjectMetadata | null;
   root: string;
   bridge: BridgeStatus;
+  effectiveOutputLanguage?: "zh-CN" | "en";
+  remoteRepo?: string | null;
   git: { isGitRepo: boolean; head?: string; dirty?: boolean; fingerprint?: string | null };
 }
 
@@ -56,6 +63,7 @@ export interface HubStateResponse {
   harnesses: HarnessInfo[];
   routing: RoutingConfig;
   customModels: Record<string, string[]>;
+  outputLanguage?: OutputLanguage;
   activeRuns: Array<AgentRunRecord & { requirementId: string }>;
   evolutionOpenCount?: number;
   cooldownCount?: number;
@@ -71,6 +79,7 @@ export interface PlaybookResponse {
 export interface EvolutionSandboxItem extends SandboxRecord {
   stage?: Stage | null;
   canApply?: boolean;
+  github?: RequirementGitHubLink | null;
 }
 
 export interface EvolutionStateResponse {
@@ -164,6 +173,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ harness, model }),
     }),
+  updateHubPreferences: (input: { outputLanguage?: OutputLanguage }) =>
+    requestJson<{ outputLanguage: OutputLanguage }>("/api/hub/preferences", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
   getEvolution: () => requestJson<EvolutionStateResponse>(withProjectParam("/api/hub/evolution")),
   reportPainPoint: (input: {
     source?: PainPointSource;
@@ -176,13 +190,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  promotePainPoint: (id: string, input?: { createSandbox?: boolean }) =>
+  promotePainPoint: (id: string, input?: { createSandbox?: boolean; createGitHubIssue?: boolean }) =>
     requestJson<{
       painPoint: EvolutionPainPoint;
       requirement: RequirementDetail;
       workbenchRoot: string;
       workbenchProjectId: string;
       sandbox: SandboxRecord | null;
+      githubIssueWarning?: string;
     }>(`/api/hub/evolution/${encodeURIComponent(id)}/promote`, {
       method: "POST",
       body: JSON.stringify(input ?? {}),
@@ -201,6 +216,19 @@ export const api = {
       restartRecommended: boolean;
     }>(`/api/hub/evolution/apply/${encodeURIComponent(reqId)}`, {
       method: "POST",
+    }),
+  syncRsiSandboxPr: (reqId: string, input?: { forceCleanup?: boolean }) =>
+    requestJson<{
+      detail: RequirementDetail;
+      pr: RequirementGitHubPrLink;
+      cleanedSandbox: boolean;
+      mainUpdated: boolean;
+      mainSyncReason: string | null;
+      webReloaded: boolean;
+      restartRecommended: boolean;
+    }>(`/api/hub/evolution/sync-pr/${encodeURIComponent(reqId)}`, {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
     }),
   clearModelCooldown: (harness?: string, model?: string) =>
     requestJson<{ telemetry: EvolutionStateResponse["telemetry"] }>("/api/hub/telemetry/clear-cooldown", {
@@ -221,17 +249,40 @@ export const api = {
     }),
 
   getProject: () => requestJson<ProjectInfoResponse>(withProjectParam("/api/project")),
-  initProject: (input: { name?: string; privacyMode: PrivacyMode }) =>
+  initProject: (input: { name?: string; privacyMode: PrivacyMode; outputLanguage?: OutputLanguage }) =>
     requestJson<{ initialized: boolean; project: ProjectMetadata }>(withProjectParam("/api/project/init"), {
       method: "POST",
       body: JSON.stringify(input),
     }),
+  updateProjectSettings: (input: {
+    name?: string;
+    outputLanguage?: OutputLanguage | "inherit" | null;
+    github?: ProjectGitHubConfig | null;
+  }) =>
+    requestJson<{ project: ProjectMetadata }>(withProjectParam("/api/project/settings"), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  getGitHubStatus: () => requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status")),
   listRequirements: (scope: "active" | "done" | "cancelled" | "all") =>
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null; bridge: BridgeStatus }>(
       withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
     ),
-  createRequirement: (input: { goal: string; title?: string; dispatchAgent?: boolean }) =>
-    requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(withProjectParam("/api/requirements"), {
+  createRequirement: (input: { goal: string; title?: string; dispatchAgent?: boolean; createGitHubIssue?: boolean }) =>
+    requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null; githubWarning?: string }>(
+      withProjectParam("/api/requirements"),
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    ),
+  importGitHubIssue: (input: { issueRef: string; dispatchAgent?: boolean }) =>
+    requestJson<{
+      detail: RequirementDetail;
+      dispatch?: DispatchOutcome | null;
+      alreadyExisted: boolean;
+      issue: ImportedGitHubIssue;
+    }>(withProjectParam("/api/requirements/import-issue"), {
       method: "POST",
       body: JSON.stringify(input),
     }),
@@ -338,15 +389,53 @@ export const api = {
     }),
   getDelivery: (id: string) =>
     requestJson<DeliveryPreview>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/delivery`)),
-  deliver: (id: string, input: { files: string[]; commitMessage: string; expectedRevision?: number; note?: string }) =>
+  deliver: (
+    id: string,
+    input: {
+      files: string[];
+      commitMessage: string;
+      expectedRevision?: number;
+      note?: string;
+      createPr?: boolean;
+      branchName?: string;
+      baseBranch?: string;
+      prTitle?: string;
+      prBody?: string;
+    },
+  ) =>
     requestJson<{
       detail: RequirementDetail;
       delivery: DeliveryRecord;
+      pr?: RequirementGitHubPrLink;
+      githubSyncWarning?: string;
       webReloaded: boolean;
       restartRecommended: boolean;
     }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/deliver`), {
       method: "POST",
       body: JSON.stringify(input),
+    }),
+  linkRequirementIssue: (id: string, input?: { issueRef?: string; title?: string; body?: string }) =>
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/issue`), {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
+    }),
+  syncRequirementIssue: (id: string, input?: { comment?: string; state?: "open" | "closed" }) =>
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/sync-issue`), {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
+    }),
+  syncRequirementPr: (id: string, input?: { forceCleanup?: boolean }) =>
+    requestJson<{
+      detail: RequirementDetail;
+      pr: RequirementGitHubPrLink;
+      cleanedSandbox: boolean;
+      mainUpdated: boolean;
+      mainSyncReason: string | null;
+      webReloaded?: boolean;
+      restartRecommended?: boolean;
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/pr-sync`), {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
     }),
   block: (id: string, input: { reason: string; expectedRevision?: number }) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/block`), {

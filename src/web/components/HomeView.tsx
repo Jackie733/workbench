@@ -1,6 +1,6 @@
 import { useLayoutEffect } from "react";
 import { ArrowRight, Plus } from "lucide-react";
-import type { RequirementSummary, Stage } from "../../core/types.ts";
+import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
 import {
   initProjectSubmit,
   openAddProjectModal,
@@ -36,9 +36,11 @@ export function InitCard() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const initName = useUiStore((s) => s.initName);
   const initPrivacy = useUiStore((s) => s.initPrivacy);
+  const initOutputLanguage = useUiStore((s) => s.initOutputLanguage);
   const busy = useUiStore((s) => s.busy);
   const setInitName = useUiStore((s) => s.setInitName);
   const setInitPrivacy = useUiStore((s) => s.setInitPrivacy);
+  const setInitOutputLanguage = useUiStore((s) => s.setInitOutputLanguage);
 
   const { data: project } = useProjectQuery(activeProjectId);
   const rootLabel = project?.root ?? "";
@@ -60,6 +62,23 @@ export function InitCard() {
           placeholder="输入项目名称（默认使用目录名）"
           onChange={(e) => setInitName(e.target.value)}
         />
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <label className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
+          模型文档输出语言偏好
+        </label>
+        <select
+          className="select"
+          id="init-output-language"
+          style={{ width: "100%" }}
+          value={initOutputLanguage}
+          onChange={(e) => setInitOutputLanguage(e.target.value as OutputLanguage | "inherit")}
+        >
+          <option value="inherit">跟随 Hub 全局默认（简体中文）</option>
+          <option value="zh-CN">简体中文 (zh-CN)</option>
+          <option value="en">English (en)</option>
+          <option value="auto">跟随需求输入语言 (auto)</option>
+        </select>
       </div>
       <div className="radio-row">
         <label
@@ -367,6 +386,14 @@ export function HomeView() {
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
                         <span className={`badge ${meta.tone}`}>{meta.label}</span>
+                        {item.github?.issue && (
+                          <span className="badge neutral">Issue #{item.github.issue.number}</span>
+                        )}
+                        {item.github?.pr && (
+                          <span className={`badge ${item.github.pr.state === "merged" ? "success" : "info"}`}>
+                            PR #{item.github.pr.number}
+                          </span>
+                        )}
                         {activeReqRun && (
                           <span className="badge info">
                             <span className="pulse-dot" /> {activeReqRun.harness}/{activeReqRun.model} 执行中

@@ -1,16 +1,25 @@
+import { buildOutputLanguageDirective, type ResolvedOutputLanguage } from "../core/language.ts";
 import type { RequirementDetail } from "../core/types.ts";
 
 export type DispatchAction = "design" | "implement" | "fix";
 
 /** Builds a clear, tool-grounded task prompt for any Coding Agent from current requirement state. */
-export function buildAgentPrompt(detail: RequirementDetail, action: DispatchAction): string {
+export function buildAgentPrompt(
+  detail: RequirementDetail,
+  action: DispatchAction,
+  options: { outputLanguage?: ResolvedOutputLanguage } = {},
+): string {
   const { state, specMarkdown, designMarkdown, validity } = detail;
+  const lang: ResolvedOutputLanguage = options.outputLanguage ?? "zh-CN";
+  const langDirective = buildOutputLanguageDirective(lang, "plan");
   const header = `请处理工作台需求 ${state.id}：${state.title}`;
 
   if (action === "design") {
     const feedback = state.lastFeedback ? `\n人工修改意见：\n${state.lastFeedback}\n` : "";
     return [
       header,
+      "",
+      langDirective,
       "",
       "当前需求目标（spec.md）：",
       specMarkdown.trim(),
@@ -31,6 +40,8 @@ export function buildAgentPrompt(detail: RequirementDetail, action: DispatchActi
     return [
       header,
       "",
+      langDirective,
+      "",
       state.lastFeedback ? `人工反馈意见：\n${state.lastFeedback}\n` : "",
       failed.length > 0 ? `当前未通过或需重跑的验收条件：\n${failed.join("\n")}\n` : "",
       "请执行以下步骤：",
@@ -48,6 +59,8 @@ export function buildAgentPrompt(detail: RequirementDetail, action: DispatchActi
   );
   return [
     header,
+    "",
+    langDirective,
     "",
     `当前阶段：${state.stage} · 轨道：${state.track === "fast_track" ? "快速通道" : "方案已批准"}`,
     criteriaLines.length > 0 ? `\n验收条件：\n${criteriaLines.join("\n")}` : "",

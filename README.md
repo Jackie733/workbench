@@ -91,5 +91,5 @@ bun run typecheck
 ## 运行与安全边界
 
 - **本地数据策略**：业务数据按项目独立存放在各自仓库 `.workbench/` 下（默认写入 `.git/info/exclude`）；全局项目列表与路由策略存放在 `~/.workbench-hub/`。
-- **单向拍板控制**：MCP Server 与 `wb` CLI 不向 Agent 暴露 `approve`、`fast_track` 或 `accept` 接口；零必需验收条件禁止验收通过。
-- **可控子进程与诚实边界**：Hub 调度器为外部 CLI 子进程绑定独立进程组（支持一键强杀无残留）；不修改各外部 CLI 全局认证状态，不自动执行 `git commit`、`git push` 或分支合并。
+- **单向拍板控制**：MCP Server 与 `wb` CLI 不向 Agent 暴露 `approve`、`fast_track`、`accept` 或 PR 推送接口；零必需验收条件禁止验收通过。
+- **可控子进程与诚实边界**：Hub 调度器为外部 CLI 子进程绑定独立进程组（支持一键强杀无残留）；不修改各外部 CLI 全局认证状态，仅在人类验收完成并显式确认后执行受控的 `git commit`、`git push` 与 `gh` Issue/PR 同步。

@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteJson, canonicalRoot, readJsonStrict } from "../core/fs.ts";
-import { WORKBENCH_DIR } from "../core/types.ts";
+import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
+import { WORKBENCH_DIR, type OutputLanguage } from "../core/types.ts";
 import { buildPresetRouting, normalizeRoutingConfig } from "./routing.ts";
 import {
   HARNESS_IDS,
@@ -53,6 +54,7 @@ export function defaultHubConfig(): HubConfig {
     projects: [],
     routing: buildPresetRouting("balanced"),
     customModels: {},
+    outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
   };
 }
 
@@ -95,12 +97,15 @@ export function readHubConfig(): HubConfig {
         ? raw.activeProjectId
         : (projects[0]?.id ?? null);
 
+    const outputLanguage = normalizeOutputLanguage(raw.outputLanguage) ?? DEFAULT_OUTPUT_LANGUAGE;
+
     return {
       schemaVersion: 1,
       activeProjectId: activeId,
       projects,
       routing: normalizeRoutingConfig(raw.routing),
       customModels,
+      outputLanguage,
     };
   } catch {
     return defaultHubConfig();
@@ -191,6 +196,18 @@ export function updateHubRouting(routing: RoutingConfig): HubConfig {
 export function applyHubRoutingPreset(preset: RoutingPreset): HubConfig {
   const config = readHubConfig();
   config.routing = buildPresetRouting(preset);
+  return writeHubConfig(config);
+}
+
+export function updateHubPreferences(patch: { outputLanguage?: OutputLanguage }): HubConfig {
+  const config = readHubConfig();
+  if (patch.outputLanguage !== undefined) {
+    const valid = normalizeOutputLanguage(patch.outputLanguage);
+    if (!valid) {
+      throw new WorkbenchError("invalid_input", `不支持的输出语言配置: ${String(patch.outputLanguage)}`);
+    }
+    config.outputLanguage = valid;
+  }
   return writeHubConfig(config);
 }
 

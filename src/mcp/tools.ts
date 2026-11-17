@@ -1,11 +1,13 @@
-import { getRequirement, getRequirementDiff, listRequirements, propose, updateTasks } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, getRequirementDiff, listRequirements, propose, updateTasks } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import { checkLanguageMismatchWarning, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { STAGES, TASK_STATUSES, type CriterionInput, type Stage, type TaskInput } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
+import { readHubConfig } from "../hub/registry.ts";
 
 export interface McpToolDefinition {
   name: string;
@@ -59,15 +61,15 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "wb_propose",
     description:
-      "Propose or update requirement title, spec.md, acceptance criteria, and/or design.md. Automatically submits for human approval or invalidates stale approval if changed.",
+      "Propose or update requirement title, spec.md, acceptance criteria, and/or design.md. Automatically submits for human approval or invalidates stale approval if changed. Always write human-readable text in the project's configured outputLanguage (default Simplified Chinese zh-CN, visible in wb_get), keeping only code identifiers and shell commands verbatim.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["id"],
       properties: {
         id: { type: "string", pattern: "^REQ-\\d{3,}$", description: "Requirement ID." },
-        title: { type: "string", description: "Updated concise requirement title." },
-        spec: { type: "string", description: "Updated spec.md Markdown (goal & scope)." },
+        title: { type: "string", description: "Updated concise requirement title (in configured outputLanguage)." },
+        spec: { type: "string", description: "Updated spec.md Markdown (goal & scope, in configured outputLanguage)." },
         criteria: {
           type: "array",
           description: "Complete list of acceptance criteria with optional verification commands.",
@@ -77,18 +79,18 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
             required: ["description"],
             properties: {
               id: { type: "string", description: "Stable ID such as AC-1." },
-              description: { type: "string" },
+              description: { type: "string", description: "Human-readable description (in configured outputLanguage)." },
               required: { type: "boolean", description: "Defaults to true." },
               command: { type: "string", description: "Shell command that verifies this criterion." },
             },
           },
         },
-        design: { type: "string", description: "Proposed technical design.md Markdown." },
-        summary: { type: "string", description: "Short timeline summary of this proposal." },
+        design: { type: "string", description: "Proposed technical design.md Markdown (in configured outputLanguage)." },
+        summary: { type: "string", description: "Short timeline summary of this proposal (in configured outputLanguage)." },
         handoffNote: {
           type: "object",
           additionalProperties: false,
-          description: "Optional concise context handoff memo for downstream agents.",
+          description: "Optional concise context handoff memo for downstream agents (in configured outputLanguage).",
           properties: {
             keyDecisions: { type: "array", items: { type: "string" } },
             deadEnds: { type: "array", items: { type: "string" } },
@@ -102,7 +104,7 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "wb_update_tasks",
     description:
-      "Update implementation tasks checklist for a requirement, or submit for human acceptance once all required criteria pass on the current git snapshot.",
+      "Update implementation tasks checklist for a requirement (write task titles and notes in the configured outputLanguage), or submit for human acceptance once all required criteria pass on the current git snapshot.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -225,6 +227,12 @@ export async function executeWorkbenchTool(
       const detail = getRequirement(base, args.id, {
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
+      const projectMeta = getProjectStatus(base).project;
+      const outputLanguage = resolveEffectiveOutputLanguage({
+        projectLanguage: projectMeta?.outputLanguage,
+        hubLanguage: readHubConfig().outputLanguage,
+        contextText: `${detail.state.title}\n${detail.specMarkdown}`,
+      });
       const response: Record<string, unknown> = {
         id: detail.state.id,
         title: detail.state.title,
@@ -232,6 +240,8 @@ export async function executeWorkbenchTool(
         track: detail.state.track,
         revision: detail.state.revision,
         designVersion: detail.state.designVersion,
+        outputLanguage,
+        github: detail.state.github ?? null,
         specMarkdown: detail.specMarkdown,
         designMarkdown: detail.designMarkdown,
         handoffMarkdown: detail.handoffMarkdown,
@@ -334,6 +344,20 @@ export async function executeWorkbenchTool(
         actor: "agent",
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
+      const projectMeta = getProjectStatus(base).project;
+      const outputLanguage = resolveEffectiveOutputLanguage({
+        projectLanguage: projectMeta?.outputLanguage,
+        hubLanguage: readHubConfig().outputLanguage,
+        contextText: `${detail.state.title}\n${detail.specMarkdown}`,
+      });
+      const languageWarning = checkLanguageMismatchWarning(outputLanguage, {
+        title: typeof args.title === "string" ? args.title : undefined,
+        spec: typeof args.spec === "string" ? args.spec : undefined,
+        design: typeof args.design === "string" ? args.design : undefined,
+        criteriaDescriptions: Array.isArray(args.criteria)
+          ? (args.criteria as CriterionInput[]).map((c) => c.description)
+          : undefined,
+      });
       return {
         id: detail.state.id,
         stage: detail.state.stage,
@@ -341,6 +365,8 @@ export async function executeWorkbenchTool(
         revision: detail.state.revision,
         designVersion: detail.state.designVersion,
         criteriaCount: detail.state.criteria.length,
+        outputLanguage,
+        ...(languageWarning ? { languageWarning } : {}),
         approval: detail.validity.approval,
         nextHeadline: detail.validity.banner.headline,
       };

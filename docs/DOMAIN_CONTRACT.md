@@ -55,6 +55,7 @@
 - `projects[]`: 已纳管项目条目 `{ id, name, root, addedAt, lastOpenedAt }`（`root` 必须为经过 `canonicalRoot` 校验的真实目录）。
 - `routing`: `{ activePreset: "balanced" | "sota_first" | "quota_saver", stages: Record<"design" | "implement" | "fix" | "review", StageRouteRule> }`，其中每条 `StageRouteRule` 包含 `{ primary: ModelTarget, fallbacks: ModelTarget[] }`，且 `ModelTarget` 为 `{ harness: HarnessId, model: string, reasoningEffort?: string }`。
 - `customModels`: 用户针对任意 Harness 手动追加的模型标识列表（例如付费 Go/API 模型）。
+- `outputLanguage`: 全局默认计划与审查文档输出语言（`"zh-CN" | "en" | "auto"`，缺省默认为 `"zh-CN"`）。
 
 ---
 
@@ -64,11 +65,11 @@
 
 | 文件 | 核心字段与职责 |
 | :--- | :--- |
-| `project.json` | `schemaVersion`, `projectId`, `name`, `nextNumber`（单调递增需求编号计数器）, `privacyMode`, `createdAt`, `updatedAt`。 |
+| `project.json` | `schemaVersion`, `projectId`, `name`, `nextNumber`（单调递增需求编号计数器）, `privacyMode`, **`outputLanguage?`**（项目级文档输出语言覆盖）, **`github?`**（`repo`, `autoCreateIssue`, `autoSyncIssue`, `defaultBaseBranch`）, `createdAt`, `updatedAt`。 |
 | `items/REQ-xxx/spec.md` | 需求目标、背景与范围的纯 Markdown 文本；可供人类在任何编辑器直接阅读或提交 Git 审查。 |
 | `items/REQ-xxx/design.md` | 当前技术方案 Markdown 文本（`fast_track` 模式下允许为空）。 |
-| `items/REQ-xxx/handoff.md`（v5） | 跨模型交接简报（控制在 1.5k–3k Tokens 预算内），整合契约摘要、关键结论/死胡同、客观 Git 改动、失败证据末尾及未解决讨论。 |
-| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, `createdAt`, `updatedAt`。 |
+| `items/REQ-xxx/handoff.md`（v5） | 跨模型交接简报（控制在 1.5k–3k Tokens 预算内），整合契约摘要、输出语言策略、关键结论/死胡同、客观 Git 改动、失败证据末尾及未解决讨论。 |
+| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `delivery`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, **`github?`**（关联 Issue 与 PR 状态）, `createdAt`, `updatedAt`。 |
 | `items/REQ-xxx/evidence/verify-<id>.json` & `.log` | 不可变验证证据：包含 `id`, `command`, `cwd`, `criterionIds`, `specHash`, `codeSnapshotHash`, `exitCode`, `timedOut`, `durationMs`, `startedAt`, `endedAt`, `passed`, `outputPath`, `outputPreview`, `truncated`。 |
 | `items/REQ-xxx/runs/run-<id>.json` & `.log`（v5） | 主动调度运行记录：`id`, `action` (`ask` \| `design` \| `implement` \| `fix` \| `review`), `harness`, `model`, `reasoningEffort?`, `nativeSessionId?`, `status` (`running` \| `succeeded` \| `failed` \| `cancelled`), `startedAt`, `endedAt`, `exitCode`, `durationMs`, `rateLimited?`, `errorSummary?`, `logPath`。 |
 
@@ -111,8 +112,9 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 - **跨模型切换自动现场同步**：每当切换 Harness 或在上一轮 `failed` / `cancelled` / `rateLimited` 后接力重试时，引擎必须基于磁盘权威状态（`spec.md`、`design.md`、`handoffNote`、最新 `observeGitChanges` 真实代码改动、失败 `evidence/` 摘要与未解决 `discussions[]`）重新生成有界 `handoff.md`，确保即使前一模型崩溃未总结也能精准接续，而不转储原始探索噪音。
 
 ### 3.6 自进化与 RSI 递归防熔断不变量（Self-Evolution & Anti-Recursion，v5.1 新增）
-- **沙箱隔离与合并门禁**：针对 Workbench 自身的痛点转化需求可在 `~/.workbench-hub/evolution/worktrees/<REQ-ID>` 创建独立 Git Worktree 沙箱执行编码与验证；列表/详情/验证必须绑定沙箱工作树快照以防误报过期。**只有完成人类最终验收（`stage === "done"` 且 `acceptance` 快照仍匹配当前沙箱状态）后**，方可执行 `applySandboxToMain` 将改动原子同步回主工作树，并在变更涉及主仓库相同文件时显式报冲突拒绝盲覆写，且严禁路径穿越与符号链接越界。
+- **沙箱隔离与合并/PR 门禁**：针对 Workbench 自身的痛点转化需求可在 `~/.workbench-hub/evolution/worktrees/<REQ-ID>` 创建独立 Git Worktree 沙箱执行编码与验证；列表/详情/验证必须绑定沙箱工作树快照以防误报过期。**只有完成人类最终验收（`stage === "done"` 且 `acceptance` 快照仍匹配）后**，方可执行人工触发的标准化 GitHub PR 交付（在沙箱分支 `rsi/<REQ-ID>` 仅提交选中非 `.workbench/` 文件 → `git push` → `gh pr create`，PR 合并后再执行主干快进并清理沙箱），或作为离线降级执行 `applySandboxToMain` 将改动原子同步回主工作树（且在冲突时拒绝盲覆写，严禁路径穿越与符号链接越界）。
 - **单层递归熔断（`WORKBENCH_RSI_DEPTH=1`）**：在 RSI 沙箱内运行 Subprocess 时强制注入 `WORKBENCH_RSI_DEPTH=1`，且 Hub 后置嗅探器对沙箱需求自动关闭运行异常转工单，杜绝无限自指递归。
+- **输出语言与 GitHub 安全边界**：所有调度 Prompt 与 `handoff.md` 按 `project.outputLanguage -> hub.outputLanguage -> "zh-CN"` 解析并强制注入输出语言指令；GitHub 集成完全复用本机已登录的 `gh` CLI 会话（不持久化 PAT），Issue 导入/同步与 PR 推送均在人工操作入口下执行且经过参数白名单与 `sanitizeOutput` 凭据脱敏。
 - **日志脱敏与有界落盘**：Playbook 经验规则（`deadEnds`、人类 `refine`/已解决批注、打回意见，上限 16KB）及 `inbox.jsonl`（SHA-256 `(category, title, component)` 去重，2MB 上限）均须执行 ANSI 剥离、凭据脱敏与跨进程文件锁原子更新；CLI `wb issue` 与 `wb service` 同样遵循无旁路契约。
 
 ---
@@ -121,4 +123,4 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 
 - **输入输出有界**：单次工具载荷、验证日志、`agentRuns` 实时流缓冲与历史日志保留均设明确上限；所有展示与返回日志均执行 ANSI 控制符剥离与常见凭据脱敏（Bearer Token、API Key、私钥块等）。
 - **子进程隔离与可控终止**：Hub 执行器拉起的所有 CLI Harness 子进程绑定独立进程组（PGID），支持前端点击「终止」及 Hub 优雅退出时一键清理进程树，防止孤儿进程持续消耗账号额度。
-- **诚实边界**：工作台门禁是面向交付流程与多模型协同的工程护栏，通过 Git 快照指纹绑定与独立验证守住事实底线；不擅自更改用户各外部 CLI 的全局账号认证信息，不自动执行 `git commit`、`git push` 或分支合并。
+- **诚实边界**：工作台门禁是面向交付流程与多模型协同的工程护栏，通过 Git 快照指纹绑定与独立验证守住事实底线；不擅自更改用户各外部 CLI 的全局账号认证信息，不向 Agent 暴露任何 `git push`、`gh pr create` 或审批/验收越权接口。

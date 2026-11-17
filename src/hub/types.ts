@@ -1,3 +1,5 @@
+import type { OutputLanguage } from "../core/types.ts";
+
 export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
 
@@ -62,6 +64,7 @@ export interface HubConfig {
   projects: HubProjectEntry[];
   routing: RoutingConfig;
   customModels: Record<string, string[]>;
+  outputLanguage?: OutputLanguage;
 }
 
 export interface DaemonInfo {

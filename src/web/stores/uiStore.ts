@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { OutputLanguage } from "../../core/types.ts";
 import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Scope, type WorkspaceTab } from "../state.ts";
 
 export const DEFAULT_DRAWER_WIDTH = 720;
@@ -27,6 +28,7 @@ export interface UiStoreState {
   activeProjectId: string | null;
   initPrivacy: "local" | "tracked";
   initName: string;
+  initOutputLanguage: OutputLanguage | "inherit";
   scope: Scope;
   layout: LayoutMode;
   query: string;
@@ -55,6 +57,7 @@ export interface UiStoreState {
   setActiveProjectId: (id: string | null) => void;
   setInitPrivacy: (p: "local" | "tracked") => void;
   setInitName: (name: string) => void;
+  setInitOutputLanguage: (lang: OutputLanguage | "inherit") => void;
   setScope: (scope: Scope) => void;
   setLayout: (layout: LayoutMode) => void;
   setQuery: (query: string) => void;
@@ -85,6 +88,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   activeProjectId: null,
   initPrivacy: "local",
   initName: "",
+  initOutputLanguage: "inherit",
   scope: "active",
   layout: "list",
   query: "",
@@ -128,6 +132,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setActiveProjectId: (activeProjectId) => set({ activeProjectId }),
   setInitPrivacy: (initPrivacy) => set({ initPrivacy }),
   setInitName: (initName) => set({ initName }),
+  setInitOutputLanguage: (initOutputLanguage) => set({ initOutputLanguage }),
   setScope: (scope) => set({ scope }),
   setLayout: (layout) => set({ layout }),
   setQuery: (query) => set({ query }),

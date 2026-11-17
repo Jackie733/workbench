@@ -2,10 +2,24 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createRequirement, getRequirement, initProject } from "../core/engine.ts";
+import {
+  createRequirement,
+  getProjectStatus,
+  getRequirement,
+  initProject,
+  linkRequirementGitHubIssue,
+  recordRequirementGitHubSync,
+} from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteBuffer, atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withFileLockSync } from "../core/fs.ts";
-import { observeGitSnapshot } from "../core/git.ts";
+import { fetchAndFastForwardBranch, observeGitSnapshot } from "../core/git.ts";
+import {
+  buildRequirementIssueBody,
+  createGitHubIssue,
+  inspectGitHubEnvironment,
+  viewGitHubPr,
+  type GitHubCommandDeps,
+} from "../core/github.ts";
 import {
   getSandboxForRequirement,
   readSandboxes,
@@ -14,7 +28,7 @@ import {
   writeSandboxes,
   type SandboxRecord,
 } from "../core/sandbox.ts";
-import { isProjectInitialized } from "../core/store.ts";
+import { isProjectInitialized, readRequirementBundle } from "../core/store.ts";
 import { WORKBENCH_DIR, type AgentRunRecord, type CriterionInput, type RequirementDetail } from "../core/types.ts";
 import { assertRequirementId, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
@@ -576,7 +590,18 @@ export async function applySandboxToMain(
     fs.rmSync(item.dest, { force: true });
   }
 
-  // Cleanup worktree and sandbox registry
+  cleanupSandboxWorktree(base, reqId, sandbox);
+
+  const allTouched = [...appliedFiles, ...deleted];
+  const touchesWeb = allTouched.some((f) => f.startsWith("src/web/"));
+  const touchesBackend = allTouched.some(
+    (f) => f.startsWith("src/server/") || f.startsWith("src/hub/") || f.startsWith("src/core/"),
+  );
+  return { appliedFiles, deletedFiles: deleted, touchesWeb, touchesBackend };
+}
+
+function cleanupSandboxWorktree(base: string, reqId: string, sandbox: SandboxRecord): void {
+  const wt = fs.existsSync(sandbox.worktreePath) ? canonicalRoot(sandbox.worktreePath) : sandbox.worktreePath;
   try {
     execFileSync("git", ["-C", base, "worktree", "remove", "--force", wt], { stdio: "ignore" });
   } catch {
@@ -593,13 +618,91 @@ export async function applySandboxToMain(
     delete all[sandboxKey(base, reqId)];
     writeSandboxes(all);
   });
+}
 
-  const allTouched = [...appliedFiles, ...deleted];
-  const touchesWeb = allTouched.some((f) => f.startsWith("src/web/"));
-  const touchesBackend = allTouched.some(
-    (f) => f.startsWith("src/server/") || f.startsWith("src/hub/") || f.startsWith("src/core/"),
+/**
+ * Checks the linked GitHub PR status for an RSI sandbox requirement.
+ * When merged (or force-cleaned after close), safely fast-forwards the clean base branch
+ * and cleans up the isolated worktree + rsi/<REQ-ID> branch.
+ */
+export async function syncRsiSandboxPrAndCleanup(
+  wbRoot: string,
+  reqId: string,
+  options: { forceCleanup?: boolean } = {},
+  deps?: GitHubCommandDeps,
+): Promise<{
+  detail: RequirementDetail;
+  pr: NonNullable<NonNullable<RequirementDetail["state"]["github"]>["pr"]>;
+  cleanedSandbox: boolean;
+  mainUpdated: boolean;
+  mainSyncReason: string | null;
+  touchesWeb: boolean;
+  touchesBackend: boolean;
+}> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const current = getRequirement(base, reqId);
+  const repo = current.state.github?.repo;
+  const existingPr = current.state.github?.pr;
+  if (!repo || !existingPr) {
+    throw new WorkbenchError("not_found", `需求 ${reqId} 尚未创建关联的 GitHub PR`);
+  }
+
+  const latestPr = await viewGitHubPr({ root: base, repo, prNumber: existingPr.number }, deps);
+  const isMerged = latestPr.state === "merged";
+  const shouldCleanup = isMerged || (latestPr.state === "closed" && options.forceCleanup === true);
+
+  let mainUpdated = false;
+  let mainSyncReason: string | null = null;
+  let cleanedSandbox = false;
+
+  if (isMerged) {
+    const ff = await fetchAndFastForwardBranch(base, latestPr.baseBranch || "main", "origin");
+    mainUpdated = ff.updated;
+    mainSyncReason = ff.reason;
+  }
+
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (shouldCleanup && sandbox) {
+    cleanupSandboxWorktree(base, reqId, sandbox);
+    cleanedSandbox = true;
+  }
+
+  const snapAfter = await observeGitSnapshot(cleanedSandbox ? base : (sandbox?.worktreePath ?? base));
+  const detail = await recordRequirementGitHubSync(base, reqId, {
+    prPatch: latestPr,
+    ...(isMerged && current.state.github?.issue ? { issuePatch: { state: "closed" } } : {}),
+    eventKind: "github_pr_synced",
+    summary: isMerged
+      ? `GitHub PR #${latestPr.number} 已合并${cleanedSandbox ? "，已清理隔离沙箱" : ""}`
+      : `同步 GitHub PR #${latestPr.number} 状态：${latestPr.state}`,
+    detail: mainSyncReason ?? latestPr.url,
+    currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
+  });
+
+  const touchedFiles =
+    current.state.delivery?.files ??
+    readRequirementBundle(base, reqId).acceptanceSnapshot?.git.files.map((f) => f.path) ??
+    [];
+  const touchesWeb = touchedFiles.some((f) => f.startsWith("src/web/"));
+  const touchesBackend = touchedFiles.some(
+    (f) =>
+      f.startsWith("src/server/") ||
+      f.startsWith("src/hub/") ||
+      f.startsWith("src/core/") ||
+      f.startsWith("src/cli/") ||
+      f.startsWith("src/mcp/"),
   );
-  return { appliedFiles, deletedFiles: deleted, touchesWeb, touchesBackend };
+
+  return {
+    detail,
+    pr: latestPr,
+    cleanedSandbox,
+    mainUpdated,
+    mainSyncReason,
+    touchesWeb,
+    touchesBackend,
+  };
 }
 
 export async function promotePainPoint(
@@ -607,13 +710,16 @@ export async function promotePainPoint(
   options: {
     workbenchRoot?: string;
     createSandbox?: boolean;
+    createGitHubIssue?: boolean;
   } = {},
+  deps?: GitHubCommandDeps,
 ): Promise<{
   painPoint: EvolutionPainPoint;
   requirement: RequirementDetail;
   workbenchRoot: string;
   workbenchProjectId: string;
   sandbox: SandboxRecord | null;
+  githubIssueWarning?: string;
 }> {
   const initialList = readPainPoints();
   const initialIdx = initialList.findIndex((p) => p.id === painId);
@@ -671,13 +777,46 @@ export async function promotePainPoint(
         ];
 
   const snap = await observeGitSnapshot(wbRoot);
-  const detail = await createRequirement(wbRoot, {
+  let detail = await createRequirement(wbRoot, {
     title: `[RSI] ${pain.title}`.slice(0, 115),
     goal: specGoal,
     criteria,
     track: "plan_first",
     currentCodeSnapshotHash: snap?.fingerprint ?? null,
   });
+
+  let githubIssueWarning: string | undefined;
+  const projectMeta = getProjectStatus(wbRoot).project;
+  const shouldCreateIssue =
+    options.createGitHubIssue === true ||
+    (options.createGitHubIssue !== false && projectMeta?.github?.autoCreateIssue === true);
+  if (shouldCreateIssue) {
+    try {
+      const ghEnv = await inspectGitHubEnvironment(wbRoot, projectMeta?.github, deps);
+      if (!ghEnv.ready || !ghEnv.repo) {
+        githubIssueWarning = ghEnv.reason ?? "GitHub CLI 环境未就绪，已跳过同步创建 Issue";
+      } else {
+        const issue = await createGitHubIssue(
+          {
+            root: wbRoot,
+            repo: ghEnv.repo,
+            title: `[RSI ${detail.state.id}] ${pain.title}`,
+            body: buildRequirementIssueBody(detail),
+            labels: ["workbench-rsi", pain.category],
+          },
+          deps,
+        );
+        detail = await linkRequirementGitHubIssue(wbRoot, detail.state.id, {
+          repo: ghEnv.repo,
+          issue,
+          summary: `从痛点创建并关联 GitHub Issue #${issue.number}`,
+          currentCodeSnapshotHash: snap?.fingerprint ?? null,
+        });
+      }
+    } catch (err) {
+      githubIssueWarning = err instanceof Error ? err.message : String(err);
+    }
+  }
 
   let sandbox: SandboxRecord | null = null;
   if (options.createSandbox !== false && snap?.head) {
@@ -707,5 +846,6 @@ export async function promotePainPoint(
     workbenchRoot: wbRoot,
     workbenchProjectId: registered.id,
     sandbox,
+    ...(githubIssueWarning ? { githubIssueWarning } : {}),
   };
 }

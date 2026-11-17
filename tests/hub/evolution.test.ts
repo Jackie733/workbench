@@ -32,6 +32,9 @@ import { registerHubProject } from "../../src/hub/registry.ts";
 import { buildPresetRouting, detectRateLimitOrQuotaError, resolveRouteCandidates } from "../../src/hub/routing.ts";
 import { clearModelCooldown, isModelCoolingDown, recordModelRunOutcome, summarizeTelemetry } from "../../src/hub/telemetry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { deliverRequirement, updateProjectConfig } from "../../src/core/engine.ts";
+import type { GitHubCommandDeps } from "../../src/core/github.ts";
+import { syncRsiSandboxPrAndCleanup } from "../../src/hub/evolution.ts";
 
 const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
@@ -498,4 +501,194 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     const dismissed = dismissPainPoint(extra!.id);
     expect(dismissed.status).toBe("dismissed");
   });
+
+  test("L4 RSI supports createGitHubIssue (with non-blocking offline warning) and syncRsiSandboxPrAndCleanup on merged PRs", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-rsi-gh-hub-"));
+    const bareRemote = fs.mkdtempSync(path.join(os.tmpdir(), "wb-rsi-gh-bare-"));
+    const wbRepo = fs.mkdtempSync(path.join(os.tmpdir(), "wb-rsi-gh-repo-"));
+    tempDirs.push(hubDir, bareRemote, wbRepo);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    execFileSync("git", ["init", "--bare", "--initial-branch=main"], { cwd: bareRemote, stdio: "ignore" });
+    execFileSync("git", ["init", "-b", "main"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "RSI Bot"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "rsi@example.com"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bareRemote], { cwd: wbRepo, stdio: "ignore" });
+    fs.mkdirSync(path.join(wbRepo, "src/web"), { recursive: true });
+    fs.mkdirSync(path.join(wbRepo, "src/server"), { recursive: true });
+    fs.writeFileSync(path.join(wbRepo, "package.json"), JSON.stringify({ name: "workbench", version: "0.1.0" }, null, 2) + "\n");
+    fs.writeFileSync(path.join(wbRepo, "src/web/theme.ts"), "export const accent = 'blue';\n");
+    fs.writeFileSync(path.join(wbRepo, "src/server/api.ts"), "export const v = 1;\n");
+    execFileSync("git", ["add", "."], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init workbench repo"], { cwd: wbRepo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: wbRepo, stdio: "ignore" });
+
+    await initProject(wbRepo, { name: "workbench-rsi-gh", privacyMode: "local" });
+    await updateProjectConfig(wbRepo, {
+      github: { repo: "Jackie733/workbench", defaultBaseBranch: "main", autoSyncIssue: true },
+    });
+
+    const prs = new Map<
+      number,
+      {
+        number: number;
+        url: string;
+        title: string;
+        headBranch: string;
+        baseBranch: string;
+        state: "OPEN" | "MERGED" | "CLOSED";
+        mergedAt: string | null;
+      }
+    >();
+    let nextIssue = 88;
+    let nextPr = 12;
+    const mockDeps: GitHubCommandDeps = {
+      whichGh: () => "/usr/local/bin/gh",
+      resolveDefaultBaseBranch: async () => "main",
+      runGh: async (_bin, args) => {
+        const [group, sub] = args;
+        if (group === "auth" && sub === "status") {
+          return { code: 0, stdout: "✓ Logged in to github.com account Jackie733\n", stderr: "" };
+        }
+        if (group === "repo" && sub === "view") {
+          return { code: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }), stderr: "" };
+        }
+        if (group === "issue" && sub === "create") {
+          const num = nextIssue++;
+          return { code: 0, stdout: `https://github.com/Jackie733/workbench/issues/${num}\n`, stderr: "" };
+        }
+        if (group === "issue" && sub === "comment") {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (group === "pr" && sub === "list") {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (group === "pr" && sub === "create") {
+          const num = nextPr++;
+          const base = args[args.indexOf("--base") + 1]!;
+          const head = args[args.indexOf("--head") + 1]!;
+          const title = args[args.indexOf("--title") + 1]!;
+          const url = `https://github.com/Jackie733/workbench/pull/${num}`;
+          prs.set(num, { number: num, url, title, headBranch: head, baseBranch: base, state: "OPEN", mergedAt: null });
+          return { code: 0, stdout: `${url}\n`, stderr: "" };
+        }
+        if (group === "pr" && sub === "view") {
+          const pr = prs.get(Number(args[2]));
+          if (!pr) return { code: 1, stdout: "", stderr: "not found" };
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              number: pr.number,
+              url: pr.url,
+              title: pr.title,
+              state: pr.state,
+              mergedAt: pr.mergedAt,
+              baseRefName: pr.baseBranch,
+              headRefName: pr.headBranch,
+            }),
+            stderr: "",
+          };
+        }
+        return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
+      },
+    };
+
+    // 1. Offline failure emits non-blocking githubIssueWarning without aborting promotion
+    const p1 = reportPainPoint({ source: "ui_quick_report", category: "ui_anomaly", title: "按钮对齐偏移" });
+    const promotedOffline = await promotePainPoint(
+      p1!.id,
+      { workbenchRoot: wbRepo, createSandbox: false, createGitHubIssue: true },
+      { whichGh: () => null },
+    );
+    expect(promotedOffline.painPoint.status).toBe("promoted");
+    expect(promotedOffline.requirement.state.id).toBe("REQ-001");
+    expect(promotedOffline.githubIssueWarning).toContain("gh");
+
+    // 2. Successful promotion with GitHub Issue #88 + RSI sandbox worktree -> deliver PR -> merged sync on clean main
+    const p2 = reportPainPoint({ source: "ui_quick_report", category: "ui_anomaly", title: "主题配色同步" });
+    const promotedOnline = await promotePainPoint(
+      p2!.id,
+      { workbenchRoot: wbRepo, createSandbox: true, createGitHubIssue: true },
+      mockDeps,
+    );
+    expect(promotedOnline.githubIssueWarning).toBeUndefined();
+    expect(promotedOnline.requirement.state.github?.issue?.number).toBe(88);
+    expect(promotedOnline.sandbox).not.toBeNull();
+
+    const reqId2 = promotedOnline.requirement.state.id;
+    const wt2 = promotedOnline.sandbox!.worktreePath;
+    fs.writeFileSync(path.join(wt2, "src/web/theme.ts"), "export const accent = 'emerald';\n");
+    await propose(wbRepo, reqId2, { designMarkdown: "# 主题修复方案", actor: "agent" });
+    await approveDesign(wbRepo, reqId2);
+    await runVerification(wbRepo, reqId2, { command: "echo ok", criterionIds: ["AC-1", "AC-2", "AC-3"] });
+    await acceptRequirement(wbRepo, reqId2, {
+      currentCodeSnapshotHash: getRequirement(wbRepo, reqId2).state.verifications[0]!.codeSnapshotHash,
+    });
+
+    const del2 = await deliverRequirement(
+      wbRepo,
+      reqId2,
+      { files: ["src/web/theme.ts"], commitMessage: "fix(ui): emerald accent", createPr: true },
+      mockDeps,
+    );
+    const pr2 = del2.pr!;
+    expect(pr2.number).toBe(12);
+
+    // Simulate remote PR #12 merged into main on bareRemote
+    const rsiSha2 = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/rsi/${reqId2}`], {
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["--git-dir", bareRemote, "update-ref", "refs/heads/main", rsiSha2], { stdio: "ignore" });
+    prs.get(12)!.state = "MERGED";
+    prs.get(12)!.mergedAt = "2026-11-17T12:30:00Z";
+
+    const syncClean = await syncRsiSandboxPrAndCleanup(wbRepo, reqId2, {}, mockDeps);
+    expect(syncClean.pr.state).toBe("merged");
+    expect(syncClean.mainUpdated).toBe(true);
+    expect(syncClean.mainSyncReason).toBeNull();
+    expect(syncClean.cleanedSandbox).toBe(true);
+    expect(syncClean.touchesWeb).toBe(true);
+    expect(getSandboxForRequirement(wbRepo, reqId2)).toBeNull();
+    expect(fs.readFileSync(path.join(wbRepo, "src/web/theme.ts"), "utf8")).toContain("emerald");
+    expect(syncClean.detail.state.github?.issue?.state).toBe("closed");
+
+    // 3. Merged PR cleanup when main has dirty uncommitted edits: preserves local edits & reports mainSyncReason
+    const p3 = reportPainPoint({ source: "agent_friction", category: "harness_bug", title: "服务端热同步提示" });
+    const promoted3 = await promotePainPoint(p3!.id, { workbenchRoot: wbRepo, createSandbox: true }, mockDeps);
+    const reqId3 = promoted3.requirement.state.id;
+    const wt3 = promoted3.sandbox!.worktreePath;
+    fs.writeFileSync(path.join(wt3, "src/server/api.ts"), "export const v = 2;\n");
+    await propose(wbRepo, reqId3, { designMarkdown: "# 后端修复方案", actor: "agent" });
+    await approveDesign(wbRepo, reqId3);
+    await runVerification(wbRepo, reqId3, { command: "echo ok", criterionIds: ["AC-1", "AC-2"] });
+    await acceptRequirement(wbRepo, reqId3, {
+      currentCodeSnapshotHash: getRequirement(wbRepo, reqId3).state.verifications[0]!.codeSnapshotHash,
+    });
+    const del3 = await deliverRequirement(
+      wbRepo,
+      reqId3,
+      { files: ["src/server/api.ts"], commitMessage: "fix(server): v2", createPr: true },
+      mockDeps,
+    );
+    expect(del3.pr!.number).toBe(13);
+
+    const rsiSha3 = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/rsi/${reqId3}`], {
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["--git-dir", bareRemote, "update-ref", "refs/heads/main", rsiSha3], { stdio: "ignore" });
+    prs.get(13)!.state = "MERGED";
+    prs.get(13)!.mergedAt = "2026-11-17T12:45:00Z";
+
+    // Dirty local edit on main must not be overwritten
+    fs.writeFileSync(path.join(wbRepo, "src/web/theme.ts"), "export const accent = 'dirty-local-edit';\n");
+
+    const syncDirty = await syncRsiSandboxPrAndCleanup(wbRepo, reqId3, {}, mockDeps);
+    expect(syncDirty.pr.state).toBe("merged");
+    expect(syncDirty.mainUpdated).toBe(false);
+    expect(syncDirty.mainSyncReason).toBeTruthy();
+    expect(syncDirty.cleanedSandbox).toBe(true);
+    expect(syncDirty.touchesBackend).toBe(true);
+    expect(getSandboxForRequirement(wbRepo, reqId3)).toBeNull();
+    expect(fs.readFileSync(path.join(wbRepo, "src/web/theme.ts"), "utf8")).toContain("dirty-local-edit");
+  }, 15_000);
 });

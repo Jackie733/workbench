@@ -25,11 +25,13 @@ import {
   type AcceptanceSnapshot,
   type AcceptanceSnapshotReference,
   type AgentRunRecord,
+  type OutputLanguage,
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementState,
   type VerificationRecord,
 } from "./types.ts";
+import { normalizeOutputLanguage } from "./language.ts";
 import {
   assertRequirementId,
   isSafeText,
@@ -85,7 +87,7 @@ function ensureLocalGitExclude(base: string): void {
 
 export async function initProject(
   root: string,
-  options: { name?: string; privacyMode?: PrivacyMode } = {},
+  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage } = {},
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
   return withProjectWriteLock(base, () => {
@@ -99,6 +101,11 @@ export async function initProject(
     if (!isSafeText(name, 200)) {
       throw new WorkbenchError("invalid_input", "项目名称无效或过长");
     }
+    const outputLanguage =
+      options.outputLanguage !== undefined ? normalizeOutputLanguage(options.outputLanguage) : undefined;
+    if (options.outputLanguage !== undefined && !outputLanguage) {
+      throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(options.outputLanguage)}`);
+    }
     const now = Date.now();
     const metadata: ProjectMetadata = {
       schemaVersion: SCHEMA_VERSION,
@@ -106,6 +113,7 @@ export async function initProject(
       name,
       nextNumber: 1,
       privacyMode,
+      ...(outputLanguage ? { outputLanguage } : {}),
       createdAt: now,
       updatedAt: now,
     };

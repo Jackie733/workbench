@@ -11,6 +11,8 @@ import workbenchExtension, {
   executeBridgeDispatch,
   resolveDeliveryRejection,
 } from "../../omp/index.ts";
+import type { GitHubCommandDeps } from "../../src/core/github.ts";
+import { reportPainPoint } from "../../src/hub/evolution.ts";
 
 const tempDirs: string[] = [];
 const runningServers: WorkbenchServerHandle[] = [];
@@ -315,4 +317,277 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
       removeServerDiscovery(root, info1.pid);
     }
   });
+
+  test("exposes Hub/project language preferences and GitHub Issue/PR routes via githubDeps", async () => {
+    const origHubDir = process.env.WORKBENCH_HUB_DIR;
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-gh-hub-"));
+    const bareRemote = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-gh-bare-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-gh-repo-"));
+    tempDirs.push(hubDir, bareRemote, root);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    try {
+      execFileSync("git", ["init", "--bare", "--initial-branch=main"], { cwd: bareRemote, stdio: "ignore" });
+      execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.name", "Server Test"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "srv@example.com"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["remote", "add", "origin", bareRemote], { cwd: root, stdio: "ignore" });
+      fs.writeFileSync(path.join(root, "index.ts"), "export const v = 1;\n");
+      execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["push", "-u", "origin", "main"], { cwd: root, stdio: "ignore" });
+
+      const comments: Array<{ issueNumber: number; body: string }> = [];
+      let nextIssue = 101;
+      let nextPr = 20;
+      const deps: GitHubCommandDeps = {
+        whichGh: () => "/usr/local/bin/gh",
+        resolveDefaultBaseBranch: async () => "main",
+        runGh: async (_bin, args, opts) => {
+          const [group, sub] = args;
+          if (group === "auth" && sub === "status") {
+            return { code: 0, stdout: "✓ Logged in to github.com account Jackie733\n", stderr: "" };
+          }
+          if (group === "repo" && sub === "view") {
+            return { code: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }), stderr: "" };
+          }
+          if (group === "issue" && sub === "view") {
+            const num = Number(args[2]);
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                number: num,
+                title: `Issue #${num}: 支持中文计划与 GitHub 集成`,
+                body: "Detailed issue description from GitHub",
+                url: `https://github.com/Jackie733/workbench-demo/issues/${num}`,
+                state: "OPEN",
+                labels: [{ name: "enhancement" }],
+              }),
+              stderr: "",
+            };
+          }
+          if (group === "issue" && sub === "create") {
+            const num = nextIssue++;
+            return { code: 0, stdout: `https://github.com/Jackie733/workbench-demo/issues/${num}\n`, stderr: "" };
+          }
+          if (group === "issue" && sub === "comment") {
+            comments.push({ issueNumber: Number(args[2]), body: opts.stdin ?? "" });
+            return { code: 0, stdout: "", stderr: "" };
+          }
+          if (group === "pr" && sub === "list") {
+            return { code: 0, stdout: "[]", stderr: "" };
+          }
+          if (group === "pr" && sub === "create") {
+            const num = nextPr++;
+            return { code: 0, stdout: `https://github.com/Jackie733/workbench-demo/pull/${num}\n`, stderr: "" };
+          }
+          return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
+        },
+      };
+
+      const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, githubDeps: deps });
+      runningServers.push(server);
+
+      await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({ name: "srv-gh" }) });
+
+      const prefRes = await apiJson(`${server.url}/api/hub/preferences`, {
+        method: "PUT",
+        body: JSON.stringify({ outputLanguage: "en" }),
+      });
+      expect(prefRes.status).toBe(200);
+      expect(prefRes.body.outputLanguage).toBe("en");
+
+      const settingsRes = await apiJson(`${server.url}/api/project/settings`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          outputLanguage: "zh-CN",
+          github: { repo: "Jackie733/workbench-demo", defaultBaseBranch: "main", autoSyncIssue: true },
+        }),
+      });
+      expect(settingsRes.status).toBe(200);
+      expect((settingsRes.body.project as { outputLanguage?: string }).outputLanguage).toBe("zh-CN");
+
+      const statusRes = await apiJson(`${server.url}/api/github/status`);
+      expect(statusRes.status).toBe(200);
+      expect(statusRes.body.ready).toBe(true);
+      expect(statusRes.body.account).toBe("Jackie733");
+      expect(statusRes.body.repo).toBe("Jackie733/workbench-demo");
+
+      const import1 = await apiJson(`${server.url}/api/requirements/import-issue`, {
+        method: "POST",
+        body: JSON.stringify({ issueRef: "#42" }),
+      });
+      expect(import1.status).toBe(201);
+      expect(import1.body.alreadyExisted).toBe(false);
+      const importedId = (import1.body.detail as { state: { id: string } }).state.id;
+
+      const import2 = await apiJson(`${server.url}/api/requirements/import-issue`, {
+        method: "POST",
+        body: JSON.stringify({ issueRef: "42" }),
+      });
+      expect(import2.status).toBe(200);
+      expect(import2.body.alreadyExisted).toBe(true);
+      expect((import2.body.detail as { state: { id: string } }).state.id).toBe(importedId);
+
+      // Create REQ-002 -> link new GitHub Issue -> sync Issue comment -> propose/approve/verify/accept -> deliver PR
+      const createRes = await apiJson(`${server.url}/api/requirements`, {
+        method: "POST",
+        body: JSON.stringify({
+          goal: "服务端 PR 交付联调",
+          criteria: [{ id: "AC-1", description: "检查通过", required: true, command: "echo ok" }],
+        }),
+      });
+      const req2Id = (createRes.body.detail as { state: { id: string } }).state.id;
+
+      const linkRes = await apiJson(`${server.url}/api/requirements/${req2Id}/github/issue`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      expect(linkRes.status).toBe(201);
+      expect((linkRes.body.detail as { state: { github?: { issue?: { number: number } } } }).state.github?.issue?.number).toBe(101);
+
+      const syncIssueRes = await apiJson(`${server.url}/api/requirements/${req2Id}/github/sync-issue`, {
+        method: "POST",
+        body: JSON.stringify({ comment: "需求已关联并进入方案阶段" }),
+      });
+      expect(syncIssueRes.status).toBe(200);
+      expect(comments.some((c) => c.issueNumber === 101 && c.body.includes("需求已关联并进入方案阶段"))).toBe(true);
+
+      await executeWorkbenchTool(root, "wb_propose", { id: req2Id, design: "# PR 方案" });
+      await apiJson(`${server.url}/api/requirements/${req2Id}/approve`, { method: "POST", body: JSON.stringify({}) });
+      fs.writeFileSync(path.join(root, "index.ts"), "export const v = 2;\n");
+      const verifyRes = await apiJson(`${server.url}/api/requirements/${req2Id}/verify`, {
+        method: "POST",
+        body: JSON.stringify({ command: "echo ok", criterionIds: ["AC-1"] }),
+      });
+      expect(verifyRes.status).toBe(200);
+      await apiJson(`${server.url}/api/requirements/${req2Id}/accept`, { method: "POST", body: JSON.stringify({}) });
+
+      const deliverRes = await apiJson(`${server.url}/api/requirements/${req2Id}/deliver`, {
+        method: "POST",
+        body: JSON.stringify({
+          files: ["index.ts"],
+          commitMessage: "feat: deliver server PR",
+          createPr: true,
+        }),
+      });
+      expect(deliverRes.status).toBe(200);
+      expect((deliverRes.body.pr as { number: number }).number).toBe(20);
+      expect((deliverRes.body.detail as { state: { github?: { pr?: { number: number } } } }).state.github?.pr?.number).toBe(20);
+    } finally {
+      if (origHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
+      else process.env.WORKBENCH_HUB_DIR = origHubDir;
+    }
+  }, 15_000);
+
+  test("POST /api/hub/evolution/sync-pr/:id syncs merged RSI PR, updates clean main, and cleans sandbox", async () => {
+    const origHubDir = process.env.WORKBENCH_HUB_DIR;
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-hub-"));
+    const bareRemote = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-bare-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-repo-"));
+    tempDirs.push(hubDir, bareRemote, root);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    try {
+      execFileSync("git", ["init", "--bare", "--initial-branch=main"], { cwd: bareRemote, stdio: "ignore" });
+      execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.name", "RSI Server"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "rsi-srv@example.com"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["remote", "add", "origin", bareRemote], { cwd: root, stdio: "ignore" });
+      fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "workbench", version: "0.1.0" }, null, 2) + "\n");
+      fs.mkdirSync(path.join(root, "src/core"), { recursive: true });
+      fs.writeFileSync(path.join(root, "src/core/flag.ts"), "export const fixed = false;\n");
+      execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
+      execFileSync("git", ["push", "-u", "origin", "main"], { cwd: root, stdio: "ignore" });
+
+      let prState: "OPEN" | "MERGED" = "OPEN";
+      const deps: GitHubCommandDeps = {
+        whichGh: () => "/usr/local/bin/gh",
+        resolveDefaultBaseBranch: async () => "main",
+        runGh: async (_bin, args) => {
+          const [group, sub] = args;
+          if (group === "auth" && sub === "status") {
+            return { code: 0, stdout: "✓ Logged in to github.com account Jackie733\n", stderr: "" };
+          }
+          if (group === "repo" && sub === "view") {
+            return { code: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }), stderr: "" };
+          }
+          if (group === "pr" && sub === "list") return { code: 0, stdout: "[]", stderr: "" };
+          if (group === "pr" && sub === "create") {
+            return { code: 0, stdout: "https://github.com/Jackie733/workbench/pull/31\n", stderr: "" };
+          }
+          if (group === "pr" && sub === "view") {
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                number: 31,
+                url: "https://github.com/Jackie733/workbench/pull/31",
+                title: "RSI fix",
+                state: prState,
+                mergedAt: prState === "MERGED" ? "2026-11-17T13:00:00Z" : null,
+                baseRefName: "main",
+                headRefName: "rsi/REQ-001",
+              }),
+              stderr: "",
+            };
+          }
+          return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
+        },
+      };
+
+      const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, githubDeps: deps });
+      runningServers.push(server);
+
+      await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({ name: "workbench" }) });
+      await apiJson(`${server.url}/api/project/settings`, {
+        method: "PATCH",
+        body: JSON.stringify({ github: { repo: "Jackie733/workbench", defaultBaseBranch: "main" } }),
+      });
+
+      const pain = reportPainPoint({ source: "ui_quick_report", category: "harness_bug", title: "修复核心开关" });
+      const promoRes = await apiJson(`${server.url}/api/hub/evolution/${pain!.id}/promote`, {
+        method: "POST",
+        body: JSON.stringify({ createSandbox: true, createGitHubIssue: false }),
+      });
+      expect(promoRes.status).toBe(201);
+      const reqId = (promoRes.body.requirement as { state: { id: string } }).state.id;
+      const sandboxPath = (promoRes.body.sandbox as { worktreePath: string }).worktreePath;
+
+      fs.writeFileSync(path.join(sandboxPath, "src/core/flag.ts"), "export const fixed = true;\n");
+      await executeWorkbenchTool(root, "wb_propose", { id: reqId, design: "# RSI 修复设计" });
+      await apiJson(`${server.url}/api/requirements/${reqId}/approve`, { method: "POST", body: JSON.stringify({}) });
+      await apiJson(`${server.url}/api/requirements/${reqId}/verify`, {
+        method: "POST",
+        body: JSON.stringify({ command: "echo ok", criterionIds: ["AC-1", "AC-2"] }),
+      });
+      await apiJson(`${server.url}/api/requirements/${reqId}/accept`, { method: "POST", body: JSON.stringify({}) });
+
+      const deliverRes = await apiJson(`${server.url}/api/requirements/${reqId}/deliver`, {
+        method: "POST",
+        body: JSON.stringify({ files: ["src/core/flag.ts"], commitMessage: "fix: toggle flag", createPr: true }),
+      });
+      expect(deliverRes.status).toBe(200);
+      expect((deliverRes.body.pr as { number: number }).number).toBe(31);
+
+      const rsiSha = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/rsi/${reqId}`], {
+        encoding: "utf8",
+      }).trim();
+      execFileSync("git", ["--git-dir", bareRemote, "update-ref", "refs/heads/main", rsiSha], { stdio: "ignore" });
+      prState = "MERGED";
+
+      const syncRes = await apiJson(`${server.url}/api/hub/evolution/sync-pr/${reqId}`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      expect(syncRes.status).toBe(200);
+      expect((syncRes.body.pr as { state: string }).state).toBe("merged");
+      expect(syncRes.body.mainUpdated).toBe(true);
+      expect(syncRes.body.cleanedSandbox).toBe(true);
+      expect(fs.readFileSync(path.join(root, "src/core/flag.ts"), "utf8")).toContain("fixed = true");
+    } finally {
+      if (origHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
+      else process.env.WORKBENCH_HUB_DIR = origHubDir;
+    }
+  }, 15_000);
 });
