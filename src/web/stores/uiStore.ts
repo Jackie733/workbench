@@ -1,10 +1,29 @@
 import { create } from "zustand";
 import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Scope, type WorkspaceTab } from "../state.ts";
 
+export const DEFAULT_DRAWER_WIDTH = 720;
+export const MIN_DRAWER_WIDTH = 320;
+
+function initialDesktopSidebarOpen(): boolean {
+  if (typeof localStorage === "undefined") return true;
+  const saved = localStorage.getItem("wb-sidebar-open");
+  return saved === "false" ? false : true;
+}
+
+function initialDrawerWidth(): number {
+  if (typeof localStorage === "undefined") return DEFAULT_DRAWER_WIDTH;
+  const raw = Number(localStorage.getItem("wb-drawer-width"));
+  if (Number.isFinite(raw) && raw >= MIN_DRAWER_WIDTH) {
+    return Math.round(raw);
+  }
+  return DEFAULT_DRAWER_WIDTH;
+}
+
 export interface UiStoreState {
   theme: "light" | "dark";
   busy: boolean;
   sidebarOpen: boolean;
+  desktopSidebarOpen: boolean;
   activeProjectId: string | null;
   initPrivacy: "local" | "tracked";
   initName: string;
@@ -23,6 +42,7 @@ export interface UiStoreState {
 
   expandedLogs: Record<string, string>;
   drawerOpen: boolean;
+  drawerWidth: number;
   drawerTab: DrawerTab;
   moreMenuOpen: boolean;
   modal: ModalState;
@@ -31,6 +51,7 @@ export interface UiStoreState {
   toggleTheme: () => void;
   setBusy: (busy: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
+  setDesktopSidebarOpen: (open: boolean) => void;
   setActiveProjectId: (id: string | null) => void;
   setInitPrivacy: (p: "local" | "tracked") => void;
   setInitName: (name: string) => void;
@@ -47,6 +68,7 @@ export interface UiStoreState {
   setExpandedLog: (vid: string, log: string | null) => void;
   clearExpandedLogs: () => void;
   setDrawerOpen: (open: boolean) => void;
+  setDrawerWidth: (width: number) => void;
   setDrawerTab: (tab: DrawerTab) => void;
   setMoreMenuOpen: (open: boolean) => void;
   setModal: (modal: ModalState | ((prev: ModalState) => ModalState)) => void;
@@ -59,6 +81,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
   busy: false,
   sidebarOpen: false,
+  desktopSidebarOpen: initialDesktopSidebarOpen(),
   activeProjectId: null,
   initPrivacy: "local",
   initName: "",
@@ -77,6 +100,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
 
   expandedLogs: {},
   drawerOpen: false,
+  drawerWidth: initialDrawerWidth(),
   drawerTab: "discuss",
   moreMenuOpen: false,
   modal: null,
@@ -95,6 +119,12 @@ export const useUiStore = create<UiStoreState>((set) => ({
     }),
   setBusy: (busy) => set({ busy }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
+  setDesktopSidebarOpen: (desktopSidebarOpen) => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("wb-sidebar-open", String(desktopSidebarOpen));
+    }
+    set({ desktopSidebarOpen });
+  },
   setActiveProjectId: (activeProjectId) => set({ activeProjectId }),
   setInitPrivacy: (initPrivacy) => set({ initPrivacy }),
   setInitName: (initName) => set({ initName }),
@@ -117,6 +147,13 @@ export const useUiStore = create<UiStoreState>((set) => ({
     }),
   clearExpandedLogs: () => set({ expandedLogs: {} }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
+  setDrawerWidth: (width) => {
+    const rounded = Math.max(MIN_DRAWER_WIDTH, Math.round(width));
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("wb-drawer-width", String(rounded));
+    }
+    set({ drawerWidth: rounded });
+  },
   setDrawerTab: (drawerTab) => set({ drawerTab }),
   setMoreMenuOpen: (moreMenuOpen) => set({ moreMenuOpen }),
   setModal: (modalOrUpdater) =>

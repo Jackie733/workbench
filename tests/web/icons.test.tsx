@@ -31,7 +31,20 @@ const ALLOWED_GLYPH_LINES: Record<string, RegExp[]> = {
 };
 
 const EXPECTED_LUCIDE = {
-  "Topbar.tsx": ["Menu", "ArrowLeft", "RefreshCw", "Sun", "Moon", "MessageSquare", "Settings"],
+  "Topbar.tsx": [
+    "Menu",
+    "ArrowLeft",
+    "PanelLeftClose",
+    "PanelLeftOpen",
+    "PanelRightClose",
+    "PanelRightOpen",
+    "RefreshCw",
+    "Sun",
+    "Moon",
+    "Settings",
+    "Sparkles",
+    "Zap",
+  ],
   "HubSidebar.tsx": ["Plus", "Settings", "X"],
   "HomeView.tsx": ["ArrowRight", "Plus"],
   "WorkspaceView.tsx": ["Ellipsis", "MessageSquare", "Plus", "Search", "Zap"],

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { api } from "./api.ts";
@@ -162,6 +162,8 @@ function WorkbenchShell() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
+  const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -208,6 +210,14 @@ function WorkbenchShell() {
           pickingElement: false,
           autoPromote: false,
         });
+        return;
+      }
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === "\\") {
+        const ui = useUiStore.getState();
+        if (ui.selectedId) {
+          ev.preventDefault();
+          ui.setDrawerOpen(!ui.drawerOpen);
+        }
       }
     };
 
@@ -230,26 +240,30 @@ function WorkbenchShell() {
 
   return (
     <>
-      <div id="main-root">
-        <div className={`hub-layout ${showSidebar ? "with-sidebar" : ""} ${showDrawer ? "with-drawer" : ""}`}>
+      <div id="main-root" className="app-shell">
+        <Topbar />
+        <div
+          className={`hub-layout ${showSidebar ? "with-sidebar" : ""} ${showSidebar && !desktopSidebarOpen ? "sidebar-collapsed" : ""} ${showDrawer ? "with-drawer" : ""}`}
+        >
           {showSidebar && <HubSidebar />}
-          <div className="main-stage">
-            <div className="shell">
-              <Topbar />
-              {(hubLoading && !hub) || (!noHubProject && projectLoading && !project) ? (
-                <p className="muted">正在加载工作台…</p>
-              ) : noHubProject ? (
-                <EmptyHubCard />
-              ) : !project?.initialized ? (
-                <InitCard />
-              ) : selectedId ? (
-                <WorkspaceView />
-              ) : (
-                <HomeView />
-              )}
+          <div className="hub-workspace" ref={workspaceRef}>
+            <div className="main-stage">
+              <div className="shell">
+                {(hubLoading && !hub) || (!noHubProject && projectLoading && !project) ? (
+                  <p className="muted">正在加载工作台…</p>
+                ) : noHubProject ? (
+                  <EmptyHubCard />
+                ) : !project?.initialized ? (
+                  <InitCard />
+                ) : selectedId ? (
+                  <WorkspaceView />
+                ) : (
+                  <HomeView />
+                )}
+              </div>
             </div>
+            {selectedId && <RightDrawer workspaceRef={workspaceRef} />}
           </div>
-          {selectedId && <RightDrawer />}
         </div>
       </div>
       <div id="modal-root">

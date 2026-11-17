@@ -21,6 +21,11 @@ interface BrowserPage {
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
+  mouse: {
+    move(x: number, y: number, opts?: { steps?: number }): Promise<void>;
+    down(): Promise<void>;
+    up(): Promise<void>;
+  };
   on(ev: string, fn: (...args: any[]) => void): void;
   close(): Promise<void>;
 }
@@ -658,6 +663,124 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(sidebarAfter).toContain("本地项目 (1)");
       expect(sidebarAfter).toContain("ManualRepo");
       expect(sidebarAfter).not.toContain(path.basename(homeDir));
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("Global Header, collapsible left/right sidebars, 720px default drawer, and resizable 50% equal-width split", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-layout-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const repo = initGitRepo();
+    await initProject(repo, { name: "LayoutRepo", privacyMode: "local" });
+    await createRequirement(repo, { goal: "Test global header and resizable sidebars" });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1920, height: 1080 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="app-header"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+
+      // 1. Global Header spans full width above the 3 columns, and drawer button is disabled on HomeView
+      const headerBox = await page.evaluate(() => {
+        const h = document.querySelector('[data-testid="app-header"]')?.getBoundingClientRect();
+        const sb = document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect();
+        const btn = document.querySelector('[data-testid="toggle-drawer-btn"]') as HTMLButtonElement | null;
+        return {
+          headerWidth: h?.width ?? 0,
+          headerBottom: h?.bottom ?? 0,
+          sidebarTop: sb?.top ?? 0,
+          sidebarWidth: sb?.width ?? 0,
+          drawerBtnDisabled: Boolean(btn?.disabled),
+        };
+      });
+      expect(headerBox.headerWidth).toBeGreaterThanOrEqual(1900);
+      expect(headerBox.sidebarTop).toBeGreaterThanOrEqual(headerBox.headerBottom - 1);
+      expect(headerBox.sidebarWidth).toBe(240);
+      expect(headerBox.drawerBtnDisabled).toBe(true);
+
+      // 2. Desktop left sidebar collapses cleanly to 0px and expands back to 240px
+      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("settled")),
+        { timeout: 5000 },
+      );
+      const collapsedSidebarW = await page.evaluate(
+        () => document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect().width ?? -1,
+      );
+      expect(collapsedSidebarW).toBe(0);
+
+      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("desktop-open")),
+        { timeout: 5000 },
+      );
+
+      // 3. Open REQ-001 -> open RightDrawer via Header -> verify 720px default and no X close button inside drawer
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+
+      const initialDrawer = await page.evaluate(() => {
+        const drawer = document.querySelector('[data-testid="right-drawer"]');
+        const headX = drawer?.querySelector('.drawer-head [aria-label="收起右侧栏"]');
+        return {
+          width: Math.round(drawer?.getBoundingClientRect().width ?? 0),
+          hasHeadCloseX: Boolean(headX),
+        };
+      });
+      expect(initialDrawer.width).toBe(720);
+      expect(initialDrawer.hasHeadCloseX).toBe(false);
+
+      // 4. Drag resizer left to reach 50% equal width (840px on 1920px viewport with 240px sidebar)
+      const resizerRect = await page.evaluate(() => {
+        const r = document.querySelector('[data-testid="drawer-resizer"]')?.getBoundingClientRect();
+        return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      });
+      expect(resizerRect).not.toBeNull();
+      await page.mouse.move(resizerRect!.x, resizerRect!.y);
+      await page.mouse.down();
+      await page.mouse.move(resizerRect!.x - 300, resizerRect!.y, { steps: 6 });
+      await page.mouse.up();
+
+      await new Promise((r) => setTimeout(r, 80));
+      const resizedMetrics = await page.evaluate(() => {
+        const ws = document.querySelector(".hub-workspace")?.getBoundingClientRect();
+        const main = document.querySelector(".main-stage")?.getBoundingClientRect();
+        const drawer = document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect();
+        return {
+          wsWidth: Math.round(ws?.width ?? 0),
+          mainWidth: Math.round(main?.width ?? 0),
+          drawerWidth: Math.round(drawer?.width ?? 0),
+          saved: localStorage.getItem("wb-drawer-width"),
+        };
+      });
+      // Clamped at 50% of hub-workspace (1680 * 0.5 = 840), matching main-stage width
+      expect(resizedMetrics.drawerWidth).toBe(Math.floor(resizedMetrics.wsWidth * 0.5));
+      expect(Math.abs(resizedMetrics.drawerWidth - resizedMetrics.mainWidth)).toBeLessThanOrEqual(2);
+      expect(resizedMetrics.saved).toBe(String(resizedMetrics.drawerWidth));
+
+      // 5. Header toggle collapses RightDrawer cleanly
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("settled")),
+        { timeout: 5000 },
+      );
+      const closedDrawerW = await page.evaluate(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? -1,
+      );
+      expect(closedDrawerW).toBe(0);
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
