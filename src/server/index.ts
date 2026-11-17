@@ -821,6 +821,7 @@ export async function startWorkbenchServer(options: {
           mode: body.mode === "refine" ? "refine" : body.mode === "ask" ? "ask" : undefined,
           useFallback: body.useFallback === true,
           timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
+          idleTimeoutMs: typeof body.idleTimeoutMs === "number" ? body.idleTimeoutMs : undefined,
         });
         return jsonResponse(started, 202);
       }

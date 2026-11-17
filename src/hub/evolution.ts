@@ -255,6 +255,7 @@ export function inspectFinishedRunForPainPoints(input: {
   detail: RequirementDetail;
   rawLog: string;
   timedOut?: boolean;
+  timeoutReason?: "idle" | "max_duration" | null;
   isRsiSandbox?: boolean;
 }): EvolutionPainPoint[] {
   if (process.env.WORKBENCH_RSI_DEPTH === "1" || input.isRsiSandbox) return [];
@@ -300,8 +301,10 @@ export function inspectFinishedRunForPainPoints(input: {
     if (item) recorded.push(item);
   }
 
-  // 3. Sniff timeouts & abnormal process crashes
+  // 3. Sniff timeouts (inactivity stalls) & abnormal process crashes.
+  // Reaching the protective max-duration ceiling on very long tasks is expected, not a harness bug.
   const isTimedOut = Boolean(input.timedOut);
+  const isIdleTimeout = isTimedOut && input.timeoutReason !== "max_duration";
   const tail = input.rawLog.slice(-4096);
   const isCrash =
     input.run.status === "failed" &&
@@ -311,7 +314,7 @@ export function inspectFinishedRunForPainPoints(input: {
       input.run.exitCode >= 128 ||
       /\[spawn error\]|segmentation fault|\bsigsegv\b|\bsigabrt\b|\bpanic:|unhandled/i.test(tail));
 
-  if (isTimedOut) {
+  if (isIdleTimeout) {
     const item = reportPainPoint({
       source: "agent_friction",
       category: "harness_bug",

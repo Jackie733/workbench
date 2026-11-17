@@ -15,7 +15,7 @@ import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot } from "../core/git.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { MAX_EVIDENCE_BYTES, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
+import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
 import { inspectFinishedRunForPainPoints, syncRequirementMirrorToSandbox } from "./evolution.ts";
@@ -61,7 +61,10 @@ export interface StartRunInput {
   mode?: "ask" | "refine";
   useFallback?: boolean;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
 }
+
+export type TimeoutReason = "idle" | "max_duration";
 
 interface ActiveJob {
   runId: string;
@@ -73,7 +76,36 @@ interface ActiveJob {
   startedAt: number;
   cancelled: boolean;
   timedOut: boolean;
+  timeoutReason: TimeoutReason | null;
   killTimer?: ReturnType<typeof setTimeout>;
+}
+
+const ACTION_TIMEOUT_DEFAULTS: Record<AgentAction, { idleTimeoutMs: number; maxDurationMs: number }> = {
+  ask: { idleTimeoutMs: 5 * 60_000, maxDurationMs: 20 * 60_000 },
+  design: { idleTimeoutMs: 10 * 60_000, maxDurationMs: 60 * 60_000 },
+  review: { idleTimeoutMs: 10 * 60_000, maxDurationMs: 60 * 60_000 },
+  implement: { idleTimeoutMs: 15 * 60_000, maxDurationMs: 2 * 60 * 60_000 },
+  fix: { idleTimeoutMs: 15 * 60_000, maxDurationMs: 2 * 60 * 60_000 },
+};
+
+/** Resolves sliding inactivity watchdog and protective wall-clock ceiling for a run. */
+export function resolveRunTimeouts(
+  action: AgentAction,
+  overrides: { timeoutMs?: number; idleTimeoutMs?: number } = {},
+): { idleTimeoutMs: number; maxDurationMs: number } {
+  const defaults = ACTION_TIMEOUT_DEFAULTS[action] ?? ACTION_TIMEOUT_DEFAULTS.implement;
+  const maxDurationMs =
+    typeof overrides.timeoutMs === "number" && Number.isFinite(overrides.timeoutMs) && overrides.timeoutMs > 0
+      ? Math.floor(overrides.timeoutMs)
+      : defaults.maxDurationMs;
+  const rawIdle =
+    typeof overrides.idleTimeoutMs === "number" && Number.isFinite(overrides.idleTimeoutMs) && overrides.idleTimeoutMs > 0
+      ? Math.floor(overrides.idleTimeoutMs)
+      : Math.min(defaults.idleTimeoutMs, maxDurationMs);
+  return {
+    idleTimeoutMs: Math.min(rawIdle, maxDurationMs),
+    maxDurationMs,
+  };
 }
 
 export type CustomCommandBuilder = (
@@ -117,21 +149,39 @@ export function buildHarnessCommand(
   switch (target.harness) {
     case "codex": {
       const bin = exe || "codex";
+      const isReadOnly = ctx.action === "ask" || ctx.action === "review";
+      const modelFlags = model && model !== "default" ? ["-m", model] : [];
+      const effortFlags = effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : [];
+
       if (ctx.nativeSessionId && ctx.action !== "review") {
-        const args = ["exec", "resume", ctx.nativeSessionId, ctx.prompt];
-        return { command: bin, args, displayCommand: `${bin} exec resume ${ctx.nativeSessionId}` };
-      }
-      const safetyFlags =
-        ctx.action === "ask" || ctx.action === "review"
-          ? ["-s", "read-only"]
+        // Preserve model, reasoning effort, and bypass/read-only sandbox flags across native resume.
+        const resumeSafetyFlags = isReadOnly
+          ? ["-c", 'sandbox_mode="read-only"']
           : ["--dangerously-bypass-approvals-and-sandbox"];
+        const args = [
+          "exec",
+          "resume",
+          "--skip-git-repo-check",
+          ...modelFlags,
+          ...effortFlags,
+          ...resumeSafetyFlags,
+          ctx.nativeSessionId,
+          ctx.prompt,
+        ];
+        return {
+          command: bin,
+          args,
+          displayCommand: `${bin} exec resume ${ctx.nativeSessionId} (model=${model}${effort ? `, effort=${effort}` : ""})`,
+        };
+      }
+      const safetyFlags = isReadOnly ? ["-s", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"];
       const args = [
         "exec",
         "-C",
         ctx.root,
         "--skip-git-repo-check",
-        ...(model && model !== "default" ? ["-m", model] : []),
-        ...(effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
+        ...modelFlags,
+        ...effortFlags,
         ...safetyFlags,
         ctx.prompt,
       ];
@@ -140,32 +190,40 @@ export function buildHarnessCommand(
 
     case "qodercn": {
       const bin = exe || "qodercn";
+      const isReadOnly = ctx.action === "ask" || ctx.action === "review";
+      // Execution stages skip per-command remote permission checks; read-only stages keep auto mode.
+      const permissionFlags = isReadOnly ? ["--permission-mode", "auto"] : ["--dangerously-skip-permissions"];
       const args = [
         "-w",
         ctx.root,
         "-o",
         "stream-json",
-        "--permission-mode",
-        "auto",
+        ...permissionFlags,
         ...(model && model !== "default" && model !== "Auto" ? ["-m", model] : []),
         ...(effort ? ["--reasoning-effort", effort] : []),
+        ...(ctx.nativeSessionId && ctx.action !== "review" ? ["-r", ctx.nativeSessionId] : []),
         "-p",
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} -p -o stream-json -m ${model}` };
+      return {
+        command: bin,
+        args,
+        displayCommand: `${bin} -p -o stream-json ${permissionFlags.join(" ")} -m ${model}${ctx.nativeSessionId && ctx.action !== "review" ? ` -r ${ctx.nativeSessionId}` : ""}`,
+      };
     }
 
     case "opencode": {
       const bin = exe || "opencode";
       const args = [
         "run",
+        "--standalone",
         "--auto",
         ...(model && model !== "default" ? ["--model", model] : []),
         ...(effort && effort !== "minimal" ? ["--thinking"] : []),
         ...(ctx.nativeSessionId ? ["--session", ctx.nativeSessionId] : []),
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} run --model ${model}` };
+      return { command: bin, args, displayCommand: `${bin} run --standalone --model ${model}` };
     }
 
     case "agy": {
@@ -203,10 +261,45 @@ export function buildHarnessCommand(
   }
 }
 
+function buildCompactResumeContext(detail: RequirementDetail, input: StartRunInput): string {
+  const { state, validity } = detail;
+  const parts: string[] = [
+    `- **当前阶段**：\`${state.stage}\` | **版本**：rev ${state.revision}（当前为同会话原生续接，完整简报已更新至 \`${WORKBENCH_DIR}/items/${state.id}/handoff.md\`，无需重复通读未改动文件）`,
+  ];
+  if (state.tasks.length > 0) {
+    const remaining = state.tasks.filter((t) => t.status !== "done");
+    if (remaining.length > 0) {
+      parts.push("**未完成任务**：");
+      for (const t of remaining) {
+        parts.push(`- [${t.status}] \`${t.id}\` ${t.title}${t.note ? `（${t.note}）` : ""}`);
+      }
+    }
+  }
+  const failedEv = [...validity.verifications].reverse().find((v) => v.effectiveState === "failed");
+  if (failedEv) {
+    parts.push(`- **最新失败验证**：\`${failedEv.record.command}\`（退出码 ${failedEv.record.exitCode}）`);
+  }
+  if (state.lastFeedback) {
+    parts.push(`- **最新打回意见**：${state.lastFeedback}`);
+  }
+  if (input.message?.trim() && input.action !== "ask") {
+    parts.push(`- **本次追加指令**：${input.message.trim()}`);
+  }
+  const pendingNotes = (state.discussions ?? []).filter((d) => !d.resolved);
+  if (pendingNotes.length > 0) {
+    parts.push("**待处理批注/讨论**：");
+    for (const d of pendingNotes.slice(-6)) {
+      parts.push(`- (${d.actor}/${d.mode}) ${d.anchor ? `[${d.anchor}] ` : ""}${d.message}`);
+    }
+  }
+  return parts.join("\n");
+}
+
 export function buildExecutionPrompt(
   detail: RequirementDetail,
   handoffMarkdown: string,
   input: StartRunInput,
+  options: { resumedSession?: boolean } = {},
 ): string {
   const reqId = detail.state.id;
   if (input.action === "ask") {
@@ -219,8 +312,11 @@ export function buildExecutionPrompt(
       input.anchor ? `提问锚点：${input.anchor}` : "",
       `用户问题：${input.message?.trim() || "请解释当前技术方案的核心思路与风险点。"}`,
       "",
-      "参考上下文简报：",
-      handoffMarkdown,
+      ...(options.resumedSession
+        ? [
+            `（同会话续接；如需最新完整上下文请按需查看 ${WORKBENCH_DIR}/items/${reqId}/handoff.md）`,
+          ]
+        : ["参考上下文简报：", handoffMarkdown]),
     ]
       .filter(Boolean)
       .join("\n");
@@ -251,7 +347,7 @@ export function buildExecutionPrompt(
     modeVerb,
     "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。",
     "",
-    handoffMarkdown,
+    options.resumedSession ? buildCompactResumeContext(detail, input) : handoffMarkdown,
   ].join("\n");
 }
 
@@ -347,8 +443,14 @@ function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorRe
       const sessionId = evt.session_id;
       if (evt.type === "system") {
         if (evt.subtype === "init") {
+          const requested = fallbackModel && fallbackModel !== "default" ? fallbackModel : "";
+          const actual = evt.model || fallbackModel;
+          const fallbackNote =
+            requested && requested.toLowerCase() !== "auto" && actual.toLowerCase() === "auto"
+              ? ` ⚠️ 请求模型 ${requested} 不可用，已自动回退为 auto`
+              : "";
           return {
-            displayText: `⚡ Qoder 引擎已就绪 (model: ${evt.model || fallbackModel})\n`,
+            displayText: `⚡ Qoder 引擎已就绪 (model: ${actual}${fallbackNote})\n`,
             replyText: null,
             sessionId,
           };
@@ -561,7 +663,9 @@ export class HubExecutor {
       !prevRun.rateLimited &&
       input.action !== "review";
 
-    const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input);
+    const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
+      resumedSession: Boolean(canResumeSameHarness),
+    });
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
           root: codeRoot,
@@ -628,6 +732,7 @@ export class HubExecutor {
       startedAt,
       cancelled: false,
       timedOut: false,
+      timeoutReason: null,
     };
     this.activeJobs.set(runId, job);
 
@@ -643,11 +748,54 @@ export class HubExecutor {
       at: startedAt,
     });
 
-    const timeoutMs = input.timeoutMs ?? 600_000;
-    const timeoutTimer = setTimeout(() => {
+    const { idleTimeoutMs, maxDurationMs } = resolveRunTimeouts(input.action, {
+      timeoutMs: input.timeoutMs,
+      idleTimeoutMs: input.idleTimeoutMs,
+    });
+    let finalized = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let livenessTimer: ReturnType<typeof setInterval> | undefined;
+
+    const triggerTimeout = (reason: TimeoutReason) => {
+      if (finalized || job.cancelled || job.timedOut) return;
       job.timedOut = true;
+      job.timeoutReason = reason;
       this.killProcessGroup(job);
-    }, timeoutMs);
+    };
+
+    const resetIdleTimer = () => {
+      if (finalized || job.cancelled || job.timedOut) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => triggerTimeout("idle"), idleTimeoutMs);
+    };
+
+    resetIdleTimer();
+    const maxDurationTimer = setTimeout(() => triggerTimeout("max_duration"), maxDurationMs);
+
+    // Keep the watchdog alive while long silent verification/task updates advance state.json.
+    if (idleTimeoutMs >= 10_000) {
+      const stateFile = path.join(base, WORKBENCH_DIR, "items", id, "state.json");
+      let lastStateMtimeMs = 0;
+      try {
+        lastStateMtimeMs = fs.statSync(stateFile).mtimeMs;
+      } catch {
+        lastStateMtimeMs = 0;
+      }
+      const probeIntervalMs = Math.min(60_000, Math.max(5_000, Math.floor(idleTimeoutMs / 3)));
+      livenessTimer = setInterval(() => {
+        if (finalized || job.cancelled || job.timedOut) return;
+        try {
+          const mtime = fs.statSync(stateFile).mtimeMs;
+          if (mtime > lastStateMtimeMs) {
+            lastStateMtimeMs = mtime;
+            resetIdleTimer();
+          }
+        } catch {
+          // Ignore transient stat failures while state.json is atomically replaced.
+        }
+      }, probeIntervalMs);
+      livenessTimer.unref?.();
+    }
 
     const cleanReplyParts: string[] = [];
     let stdoutLineBuf = "";
@@ -677,6 +825,7 @@ export class HubExecutor {
     };
 
     const onStdoutChunk = (buf: Buffer) => {
+      if (buf.length > 0) resetIdleTimer();
       const chunk = buf.toString("utf8");
       if (target.harness !== "qodercn") {
         const cleaned = stripCliNoise(chunk);
@@ -692,6 +841,7 @@ export class HubExecutor {
     };
 
     const onStderrChunk = (buf: Buffer) => {
+      if (buf.length > 0) resetIdleTimer();
       const cleaned = stripCliNoise(buf.toString("utf8"));
       if (cleaned.trim()) emitCleanChunk(cleaned);
     };
@@ -699,11 +849,12 @@ export class HubExecutor {
     child.stdout?.on("data", onStdoutChunk);
     child.stderr?.on("data", onStderrChunk);
 
-    let finalized = false;
     const finalize = async (exitCode: number | null, spawnErr?: string) => {
       if (finalized) return;
       finalized = true;
-      clearTimeout(timeoutTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      clearTimeout(maxDurationTimer);
+      if (livenessTimer) clearInterval(livenessTimer);
       if (job.killTimer) clearTimeout(job.killTimer);
       this.activeJobs.delete(runId);
 
@@ -736,7 +887,9 @@ export class HubExecutor {
       const errorSummary =
         status === "failed"
           ? job.timedOut
-            ? `执行超时（>${Math.round(timeoutMs / 1000)}s），建议拆解任务或切换高速模型重试`
+            ? job.timeoutReason === "max_duration"
+              ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+              : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
             : rateLimited
               ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
               : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
@@ -828,6 +981,7 @@ export class HubExecutor {
             detail: postHandoff.detail,
             rawLog,
             timedOut: job.timedOut,
+            timeoutReason: job.timeoutReason,
             isRsiSandbox: codeRoot !== base,
           });
         }

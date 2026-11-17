@@ -329,6 +329,29 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     });
     expect(sniffed.some((p) => p.category === "cli_ergonomics")).toBe(true);
     expect(sniffed.some((p) => p.category === "harness_bug" && p.title.includes("超时"))).toBe(true);
+
+    // Reaching max_duration protective ceiling does NOT report a false harness_bug pain point
+    const ceilingIgnored = inspectFinishedRunForPainPoints({
+      root: wbRepo,
+      requirementId: sampleDetail.state.id,
+      run: {
+        id: "RUN-CEILING",
+        action: "implement",
+        harness: "codex",
+        model: "gpt-6",
+        status: "failed",
+        startedAt: 1,
+        endedAt: 7200001,
+        exitCode: null,
+        durationMs: 7200000,
+        logPath: "runs/RUN-CEILING.log",
+      },
+      detail: sampleDetail,
+      rawLog: "still working",
+      timedOut: true,
+      timeoutReason: "max_duration",
+    });
+    expect(ceilingIgnored.some((p) => p.category === "harness_bug")).toBe(false);
     const suppressedByRsi = inspectFinishedRunForPainPoints({
       root: wbRepo,
       requirementId: sampleDetail.state.id,

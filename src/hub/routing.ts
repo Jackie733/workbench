@@ -97,10 +97,10 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
     activePreset: "balanced",
     stages: {
       design: {
-        primary: { harness: "codex", model: "gpt-6-astra", reasoningEffort: "medium" },
+        primary: { harness: "codex", model: "gpt-6-astra", reasoningEffort: "low" },
         fallbacks: [
-          { harness: "agy", model: "gemini-4-argon-high", reasoningEffort: "high" },
-          { harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" },
+          { harness: "agy", model: "gemini-4-argon-medium", reasoningEffort: "medium" },
+          { harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "medium" },
           { harness: "qodercn", model: "Qwen4-Max" },
         ],
       },
@@ -117,7 +117,7 @@ export function buildPresetRouting(preset: RoutingPreset): RoutingConfig {
         fallbacks: [
           { harness: "qodercn", model: "DeepSeek-Flash" },
           { harness: "qodercn", model: "Qwen3.8-Flash" },
-          { harness: "codex", model: "gpt-6-astra", reasoningEffort: "medium" },
+          { harness: "codex", model: "gpt-6-astra", reasoningEffort: "low" },
         ],
       },
       review: {

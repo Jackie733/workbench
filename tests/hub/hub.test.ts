@@ -8,7 +8,7 @@ import { getDaemonStatus, startDaemon, stopDaemon } from "../../src/cli/daemon.t
 import { approveDesign, createRequirement, getRequirement, initProject, propose, updateDesign } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { discoverHarnesses } from "../../src/hub/discovery.ts";
-import { buildHarnessCommand, HubExecutor } from "../../src/hub/executor.ts";
+import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
   addCustomModel,
@@ -391,7 +391,7 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(events).toContain("agent.run.started");
     expect(events).toContain("agent.run.finished");
 
-    // 2. Same-harness continuation reuses nativeSessionId!
+    // 2. Same-harness continuation reuses nativeSessionId AND uses compact resume prompt!
     const run2 = await executor.startRun({
       root: repo,
       requirementId: "REQ-001",
@@ -401,6 +401,8 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     });
     await waitForRunFinished(run2.run.id);
     expect(seenCommands[1]).toBe("codex:gpt-6-astra:sess-abc123");
+    expect(seenPrompts[1]).toContain("同会话原生续接");
+    expect(seenPrompts[1]).not.toContain("Do not rewrite git.ts");
 
     // 3. Rate limit detection + fallback retry switches cleanly and injects handoff.md
     const rlRun = await executor.startRun({
@@ -489,6 +491,24 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(codexRead.args).toContain("-s");
     expect(codexRead.args).toContain("read-only");
 
+    const codexResume = buildHarnessCommand(
+      { harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "medium" },
+      { root: repo, action: "implement", prompt: "continue", nativeSessionId: "sess-codex-1", harnesses: [] },
+    );
+    expect(codexResume.args.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(codexResume.args).toContain("-m");
+    expect(codexResume.args).toContain("gpt-6.1-sol");
+    expect(codexResume.args).toContain('model_reasoning_effort="medium"');
+    expect(codexResume.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(codexResume.args).toContain("sess-codex-1");
+
+    const codexAskResume = buildHarnessCommand(
+      { harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "low" },
+      { root: repo, action: "ask", prompt: "why?", nativeSessionId: "sess-codex-1", harnesses: [] },
+    );
+    expect(codexAskResume.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(codexAskResume.args).toContain('sandbox_mode="read-only"');
+
     const qoderCmd = buildHarnessCommand(
       { harness: "qodercn", model: "Qwen3.8-Flash", reasoningEffort: "high" },
       { root: repo, action: "ask", prompt: "explain", harnesses: [] },
@@ -500,6 +520,23 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     expect(qoderCmd.args).toContain("--reasoning-effort");
     expect(qoderCmd.args).toContain("high");
     expect(qoderCmd.args).toContain("-p");
+
+    const qoderImplResume = buildHarnessCommand(
+      { harness: "qodercn", model: "Qwen4-Max" },
+      { root: repo, action: "implement", prompt: "go", nativeSessionId: "q-sess-1", harnesses: [] },
+    );
+    expect(qoderImplResume.args).toContain("--dangerously-skip-permissions");
+    expect(qoderImplResume.args).not.toContain("--permission-mode");
+    expect(qoderImplResume.args).toContain("-r");
+    expect(qoderImplResume.args).toContain("q-sess-1");
+
+    const opencodeCmd = buildHarnessCommand(
+      { harness: "opencode", model: "opencode-go/deepseek-v4.1-flash", reasoningEffort: "medium" },
+      { root: repo, action: "implement", prompt: "do", harnesses: [] },
+    );
+    expect(opencodeCmd.args).toContain("--standalone");
+    expect(opencodeCmd.args).toContain("--auto");
+    expect(opencodeCmd.args).toContain("opencode-go/deepseek-v4.1-flash");
 
     const agyCmd = buildHarnessCommand(
       { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "xhigh" },
@@ -616,5 +653,108 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     } finally {
       process.env = originalEnv;
     }
+  }, { timeout: 15000 });
+
+  test("uses sliding inactivity watchdog and action-tiered ceilings instead of fixed 600s hard timeout", async () => {
+    expect(resolveRunTimeouts("ask")).toEqual({ idleTimeoutMs: 5 * 60_000, maxDurationMs: 20 * 60_000 });
+    expect(resolveRunTimeouts("design")).toEqual({ idleTimeoutMs: 10 * 60_000, maxDurationMs: 60 * 60_000 });
+    expect(resolveRunTimeouts("implement")).toEqual({ idleTimeoutMs: 15 * 60_000, maxDurationMs: 2 * 60 * 60_000 });
+    expect(resolveRunTimeouts("implement", { timeoutMs: 120 })).toEqual({ idleTimeoutMs: 120, maxDurationMs: 120 });
+
+    makeTempHub();
+    const repo = makeGitRepo("watchdog-repo");
+    await initProject(repo, { name: "WatchdogRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Verify sliding inactivity watchdog",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+
+    let mode: "heartbeat" | "stall" | "ceiling" = "heartbeat";
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        { id: "qodercn", label: "QoderCN", subscription: "Qoder", installed: true, executable: "qodercn", models: [], defaultModel: "Qwen4-Max", detectedAt: Date.now() },
+      ],
+      commandBuilder: () => {
+        if (mode === "heartbeat") {
+          // Total duration ~350ms (> 180ms idleTimeoutMs), but emits output every 70ms -> must succeed!
+          return {
+            command: "bash",
+            args: ["-c", "for i in 1 2 3 4 5; do echo tick-$i; sleep 0.07; done"],
+            displayCommand: "mock-heartbeat",
+          };
+        }
+        if (mode === "stall") {
+          return {
+            command: "bash",
+            args: ["-c", "echo started; sleep 5"],
+            displayCommand: "mock-stall",
+          };
+        }
+        return {
+          command: "bash",
+          args: ["-c", "while true; do echo busy; sleep 0.04; done"],
+          displayCommand: "mock-ceiling",
+        };
+      },
+    });
+
+    const waitFinish = (runId: string) =>
+      new Promise<void>((resolve) => {
+        const unsub = executor.subscribe((ev) => {
+          if (ev.type === "agent.run.finished" && ev.runId === runId) {
+            unsub();
+            resolve();
+          }
+        });
+      });
+
+    // 1. Active output keeps sliding watchdog alive beyond idleTimeoutMs
+    mode = "heartbeat";
+    const hb = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "qodercn",
+      model: "Qwen4-Max",
+      idleTimeoutMs: 180,
+      timeoutMs: 3000,
+    });
+    await waitFinish(hb.run.id);
+    const afterHb = getRequirement(repo, "REQ-001").state.agentRuns?.find((r) => r.id === hb.run.id);
+    expect(afterHb?.status).toBe("succeeded");
+
+    // 2. Silent process hits inactivity watchdog
+    mode = "stall";
+    const st = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "qodercn",
+      model: "Qwen4-Max",
+      idleTimeoutMs: 120,
+      timeoutMs: 3000,
+    });
+    await waitFinish(st.run.id);
+    const afterSt = getRequirement(repo, "REQ-001").state.agentRuns?.find((r) => r.id === st.run.id);
+    expect(afterSt?.status).toBe("failed");
+    expect(afterSt?.errorSummary).toContain("连续");
+
+    // 3. Continuously active process hits maxDurationMs ceiling cleanly
+    mode = "ceiling";
+    const ce = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "qodercn",
+      model: "Qwen4-Max",
+      idleTimeoutMs: 500,
+      timeoutMs: 180,
+    });
+    await waitFinish(ce.run.id);
+    const afterCe = getRequirement(repo, "REQ-001").state.agentRuns?.find((r) => r.id === ce.run.id);
+    expect(afterCe?.status).toBe("failed");
+    expect(afterCe?.errorSummary).toContain("安全上限");
   }, { timeout: 15000 });
 });
