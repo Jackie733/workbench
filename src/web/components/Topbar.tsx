@@ -120,7 +120,7 @@ export function Topbar() {
             onClick={() =>
               setModal({
                 kind: "routing",
-                draft: hub?.routing ?? null,
+                draft: null,
                 customHarness: "opencode",
                 customModel: "",
               })

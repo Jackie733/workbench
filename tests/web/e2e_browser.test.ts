@@ -430,6 +430,52 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
+      // Reopen immediately and verify saved preset/effort persisted, then customize model+effort, save, reopen & reload
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      const firstReopen = await page.evaluate(() => ({
+        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
+        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+      }));
+      expect(firstReopen).toEqual({ designModel: "qodercn::DeepSeek-V4-Pro", designEffort: "xhigh" });
+
+      await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
+      await page.select('[data-testid="route-effort-design"]', "high");
+      await page.select('[data-testid="route-select-implement"]', "opencode::opencode-go/my-pro");
+      await page.select('[data-testid="route-effort-implement"]', "medium");
+      await clickReady(page, '[data-testid="save-routing-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      const secondReopen = await page.evaluate(() => ({
+        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
+        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+        implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
+        implementEffort: (document.querySelector('[data-testid="route-effort-implement"]') as HTMLSelectElement)?.value,
+      }));
+      expect(secondReopen).toEqual({
+        designModel: "codex::gpt-6-astra",
+        designEffort: "high",
+        implementModel: "opencode::opencode-go/my-pro",
+        implementEffort: "medium",
+      });
+
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      const afterReload = await page.evaluate(() => ({
+        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
+        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+        implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
+        implementEffort: (document.querySelector('[data-testid="route-effort-implement"]') as HTMLSelectElement)?.value,
+      }));
+      expect(afterReload).toEqual(secondReopen);
+      await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
       // 3. Open REQ-001: test section annotation + Ask mode (read-only Q&A) + direct design editing
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForSelector('[data-testid="stage-stepper"]', { timeout: 5000 });

@@ -150,6 +150,14 @@ export function routedTargetForAction(routing: RoutingConfig | null, action: Age
   return routing.stages[stage]?.primary ?? null;
 }
 
+export function parseRunnerKey(key: string): { harness: string; model: string } | null {
+  const sepIdx = key.indexOf("::");
+  if (sepIdx <= 0) return null;
+  const harness = key.slice(0, sepIdx);
+  const model = key.slice(sepIdx + 2);
+  return harness && model ? { harness, model } : null;
+}
+
 export function activeRunnerChoice(
   selectedRunnerKey: string,
   routing: RoutingConfig | null,
@@ -157,9 +165,9 @@ export function activeRunnerChoice(
   selectedEffort?: ReasoningEffort | "",
 ): { harness?: string; model?: string; effort?: ReasoningEffort } {
   if (selectedRunnerKey && selectedRunnerKey !== "manual_copy") {
-    const [harness, model] = selectedRunnerKey.split("::");
-    if (harness && model) {
-      return { harness, model, ...(selectedEffort ? { effort: selectedEffort } : {}) };
+    const parsed = parseRunnerKey(selectedRunnerKey);
+    if (parsed) {
+      return { harness: parsed.harness, model: parsed.model, ...(selectedEffort ? { effort: selectedEffort } : {}) };
     }
   }
   const primary = routedTargetForAction(routing, action);

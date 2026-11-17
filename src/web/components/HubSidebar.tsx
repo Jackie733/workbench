@@ -106,7 +106,7 @@ export function HubSidebar() {
             data-action="open-routing"
             data-testid="open-routing-btn"
             onClick={() =>
-              setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" })
+              setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" })
             }
           >
             <Icon icon={Settings} size={14} /> 配置
@@ -117,11 +117,11 @@ export function HubSidebar() {
           role="button"
           tabIndex={0}
           onClick={() =>
-            setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" })
+            setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" })
           }
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              setModal({ kind: "routing", draft: routing, customHarness: "opencode", customModel: "" });
+              setModal({ kind: "routing", draft: null, customHarness: "opencode", customModel: "" });
             }
           }}
         >

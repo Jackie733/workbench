@@ -10,7 +10,7 @@ import {
   type RoutingPreset,
   type RoutingStage,
 } from "../../hub/types.ts";
-import { api, setApiProjectScope } from "../api.ts";
+import { api, setApiProjectScope, type HubStateResponse } from "../api.ts";
 import {
   invalidateAllWorkbenchQueries,
   openRequirement,
@@ -27,7 +27,7 @@ import {
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { EFFORT_LABELS, formatDateTime, supportedEffortsForModel } from "../state.ts";
+import { EFFORT_LABELS, formatDateTime, parseRunnerKey, supportedEffortsForModel } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
@@ -295,10 +295,20 @@ export function Modals() {
   if (m.kind === "routing") {
     const cfg = m.draft ?? routing;
 
+    const syncHubStatePatch = async (
+      patch: Partial<Pick<HubStateResponse, "routing" | "customModels" | "harnesses">>,
+    ) => {
+      await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
+      queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
+        prev ? { ...prev, ...patch } : prev,
+      );
+      void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+    };
+
     const refreshHarnesses = async () => {
       const res = await runBusy(() => api.refreshHarnesses());
       if (res) {
-        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+        await syncHubStatePatch({ harnesses: res.harnesses });
         showToast("已刷新本机 CLI 与模型列表");
       }
     };
@@ -306,8 +316,8 @@ export function Modals() {
     const applyPreset = async (preset: RoutingPreset) => {
       const res = await runBusy(() => api.applyPreset(preset));
       if (res) {
+        await syncHubStatePatch({ routing: res.routing, customModels: res.customModels });
         setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: res.routing } : prev));
-        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast(`已应用策略预设：${preset}`);
       }
     };
@@ -320,8 +330,8 @@ export function Modals() {
       }
       const res = await runBusy(() => api.addCustomModel(m.customHarness, modelId));
       if (res) {
+        await syncHubStatePatch({ customModels: res.customModels, harnesses: res.harnesses });
         setModal((prev) => (prev?.kind === "routing" ? { ...prev, customModel: "" } : prev));
-        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast(`已添加模型 ${modelId}`);
       }
     };
@@ -330,8 +340,8 @@ export function Modals() {
       if (!cfg) return;
       const res = await runBusy(() => api.saveRouting(cfg));
       if (res) {
+        await syncHubStatePatch({ routing: res.routing, customModels: res.customModels });
         setModal(null);
-        await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
         showToast("模型路由配置已保存");
       }
     };
@@ -392,8 +402,9 @@ export function Modals() {
                       data-testid={`route-select-${stg}`}
                       value={selectedVal}
                       onChange={(e) => {
-                        const [harness, model] = e.target.value.split("::");
-                        if (!harness || !model || !cfg) return;
+                        const parsed = parseRunnerKey(e.target.value);
+                        if (!parsed || !cfg) return;
+                        const { harness, model } = parsed;
                         const nextEfforts = supportedEffortsForModel(harnesses, harness, model);
                         const keepEffort =
                           rule.primary.reasoningEffort && nextEfforts.includes(rule.primary.reasoningEffort)
