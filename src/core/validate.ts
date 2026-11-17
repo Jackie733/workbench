@@ -1,3 +1,4 @@
+import { normalizeAttachments } from "./attachments.ts";
 import { WorkbenchError } from "./errors.ts";
 import {
   ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
@@ -861,6 +862,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       "agentRuns",
       "reviewReport",
       "github",
+      "attachments",
       "createdAt",
       "updatedAt",
     ],
@@ -924,6 +926,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);
   validateRequirementGitHubLink(raw.github);
+  normalizeAttachments(raw.attachments);
   if (Array.isArray(raw.discussions)) {
     for (const d of raw.discussions) validateDiscussionEntry(d);
   }

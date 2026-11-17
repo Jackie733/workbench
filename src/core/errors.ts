@@ -4,6 +4,7 @@ export type WorkbenchErrorCode =
   | "invalid_path"
   | "symlink_not_allowed"
   | "invalid_input"
+  | "payload_too_large"
   | "not_found"
   | "revision_conflict"
   | "invalid_transition"

@@ -1,6 +1,7 @@
 import type {
   AgentAction,
   AgentRunRecord,
+  AttachmentMeta,
   CriterionInput,
   DeliveryPreview,
   DeliveryRecord,
@@ -124,6 +125,26 @@ export function withProjectParam(url: string, explicitProjectId?: string | null)
   return `${url}${sep}project=${encodeURIComponent(pid)}`;
 }
 
+export function requirementAttachmentUrl(requirementId: string, attachmentId: string): string {
+  return withProjectParam(
+    `/api/requirements/${encodeURIComponent(requirementId)}/attachments/${encodeURIComponent(attachmentId)}`,
+  );
+}
+
+export function evolutionAttachmentUrl(painId: string, attachmentId: string): string {
+  return `/api/hub/evolution/${encodeURIComponent(painId)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
+async function requestForm<T>(url: string, form: FormData): Promise<T> {
+  const resp = await fetch(url, { method: "POST", body: form });
+  const data = (await resp.json()) as Record<string, unknown>;
+  if (!resp.ok) {
+    const err = data.error as { code?: string; message?: string; details?: Record<string, unknown> } | undefined;
+    throw new ApiClientError(err?.code ?? "request_failed", err?.message ?? `HTTP ${resp.status}`, err?.details);
+  }
+  return data as T;
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, {
     ...init,
@@ -173,12 +194,18 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getEvolution: () => requestJson<EvolutionStateResponse>(withProjectParam("/api/hub/evolution")),
+  uploadAttachments: (files: File[]) => {
+    const form = new FormData();
+    for (const file of files) form.append("files", file, file.name);
+    return requestForm<{ attachments: AttachmentMeta[] }>("/api/uploads", form);
+  },
   reportPainPoint: (input: {
     source?: PainPointSource;
     category: PainPointCategory;
     title: string;
     detail?: string;
     context?: PainPointContext;
+    attachmentIds?: string[];
   }) =>
     requestJson<{ painPoint: EvolutionPainPoint | null }>("/api/hub/evolution/report", {
       method: "POST",
@@ -262,7 +289,13 @@ export const api = {
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null; bridge: BridgeStatus }>(
       withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
     ),
-  createRequirement: (input: { goal: string; title?: string; dispatchAgent?: boolean; createGitHubIssue?: boolean }) =>
+  createRequirement: (input: {
+    goal: string;
+    title?: string;
+    dispatchAgent?: boolean;
+    createGitHubIssue?: boolean;
+    attachmentIds?: string[];
+  }) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null; githubWarning?: string }>(
       withProjectParam("/api/requirements"),
       {
@@ -291,6 +324,18 @@ export const api = {
   getDesignHistory: (id: string, version: number) =>
     requestJson<{ version: number; markdown: string }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/history/${version}`),
+    ),
+  addRequirementAttachments: (id: string, input: { attachmentIds: string[]; expectedRevision?: number }) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/attachments`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  deleteRequirementAttachment: (id: string, attachmentId: string) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(
+        `/api/requirements/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,
+      ),
+      { method: "DELETE" },
     ),
   getEvidence: (id: string, verificationId: string) =>
     requestJson<{ record: VerificationRecord; log: string }>(

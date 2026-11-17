@@ -1,5 +1,6 @@
 import type {
   AgentAction,
+  AttachmentMeta,
   CriterionCoverageState,
   EffectiveVerificationState,
   OutputLanguage,
@@ -43,6 +44,7 @@ export type ModalState =
       mode?: "create" | "import_issue";
       issueRef?: string;
       createGitHubIssue?: boolean;
+      attachments?: AttachmentMeta[];
     }
   | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
   | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
@@ -70,6 +72,7 @@ export type ModalState =
       pickingElement: boolean;
       autoPromote: boolean;
       createGitHubIssue?: boolean;
+      attachments?: AttachmentMeta[];
     }
   | { kind: "evolution"; tab: "inbox" | "playbook" | "telemetry"; playbookDraft: string | null }
   | {

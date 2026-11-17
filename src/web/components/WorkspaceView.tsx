@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
-import { api } from "../api.ts";
+import { api, requirementAttachmentUrl } from "../api.ts";
 import {
   cancelRun,
   executeVerify,
@@ -35,6 +35,8 @@ import {
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { AttachmentGallery } from "./AttachmentGallery.tsx";
+import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { COVERAGE_ICONS, Icon, TASK_ICONS } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
@@ -193,6 +195,32 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
 
   const openAnnotate = (anchor: string) => {
     setModal({ kind: "annotate_anchor", anchor, message: "", mode: "refine" });
+  };
+
+  const canEditAttachments = s.acceptance === null && s.stage !== "done";
+  const attachments = s.attachments ?? [];
+
+  const addAttachments = async (metas: Array<{ id: string }>) => {
+    if (metas.length === 0) return;
+    const res = await runBusy(async () => {
+      const out = await api.addRequirementAttachments(s.id, {
+        attachmentIds: metas.map((m) => m.id),
+        expectedRevision: s.revision,
+      });
+      await invalidateAllWorkbenchQueries();
+      return out;
+    });
+    if (res) showToast(`已添加 ${metas.length} 个附件`);
+  };
+
+  const deleteAttachment = async (attId: string) => {
+    if (typeof window !== "undefined" && !window.confirm("确认删除该附件？删除后不可恢复。")) return;
+    const res = await runBusy(async () => {
+      const out = await api.deleteRequirementAttachment(s.id, attId);
+      await invalidateAllWorkbenchQueries();
+      return out;
+    });
+    if (res) showToast("附件已删除");
   };
 
   const saveSpec = async () => {
@@ -436,6 +464,24 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
           </div>
         ) : (
           <MarkdownView markdown={d.specMarkdown} annotatable docLabel="spec.md" onAnnotate={openAnnotate} />
+        )}
+      </div>
+
+      <div className="card" data-testid="requirement-attachments-card">
+        <div className="card-head">
+          <h3>附件（{attachments.length}）</h3>
+          {!canEditAttachments && <span className="badge neutral">已验收冻结</span>}
+        </div>
+        <AttachmentGallery
+          attachments={attachments}
+          urlFor={(attId) => requirementAttachmentUrl(s.id, attId)}
+          onDelete={canEditAttachments ? (attId) => void deleteAttachment(attId) : undefined}
+          emptyText={canEditAttachments ? "暂无附件，可补充截图、日志或复现文件。" : "暂无附件。"}
+        />
+        {canEditAttachments && (
+          <div style={{ marginTop: 10 }}>
+            <AttachmentPicker value={[]} onChange={(metas) => void addAttachments(metas)} disabled={busy} />
+          </div>
         )}
       </div>
 

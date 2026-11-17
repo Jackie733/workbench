@@ -3,6 +3,13 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  attachmentFileName,
+  claimAttachments,
+  formatAttachmentSize,
+  normalizeAttachments,
+  painPointAttachmentsDir,
+} from "../core/attachments.ts";
+import {
   createRequirement,
   getProjectStatus,
   getRequirement,
@@ -29,7 +36,13 @@ import {
   type SandboxRecord,
 } from "../core/sandbox.ts";
 import { isProjectInitialized, readRequirementBundle } from "../core/store.ts";
-import { WORKBENCH_DIR, type AgentRunRecord, type CriterionInput, type RequirementDetail } from "../core/types.ts";
+import {
+  WORKBENCH_DIR,
+  type AgentRunRecord,
+  type AttachmentMeta,
+  type CriterionInput,
+  type RequirementDetail,
+} from "../core/types.ts";
 import { assertRequirementId, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
 
@@ -72,6 +85,8 @@ export interface EvolutionPainPoint {
   occurrences: number;
   status: "open" | "promoted" | "dismissed";
   promotedReqId?: string;
+  /** 可选附件元数据；二进制落盘于 hub 附件目录，JSONL 只存引用。 */
+  attachments?: AttachmentMeta[];
   createdAt: number;
   updatedAt: number;
 }
@@ -171,6 +186,8 @@ export function reportPainPoint(input: {
   title: string;
   detail?: string;
   context?: PainPointContext;
+  /** 暂存区附件 ID；认领到该痛点的 hub 附件目录。 */
+  attachmentIds?: string[];
 }): EvolutionPainPoint | null {
   if (
     process.env.WORKBENCH_RSI_DEPTH === "1" &&
@@ -196,6 +213,15 @@ export function reportPainPoint(input: {
     const existingIdx = list.findIndex((p) => p.fingerprint === fingerprint && p.status === "open");
     if (existingIdx >= 0) {
       const prev = list[existingIdx]!;
+      const prevAttachments = normalizeAttachments(prev.attachments) ?? [];
+      const added =
+        input.attachmentIds && input.attachmentIds.length > 0
+          ? claimAttachments(input.attachmentIds, painPointAttachmentsDir(prev.id), prevAttachments)
+          : [];
+      const mergedAttachments = [...prevAttachments];
+      for (const meta of added) {
+        if (!mergedAttachments.some((m) => m.id === meta.id)) mergedAttachments.push(meta);
+      }
       const mergedDetail =
         detail && !prev.detail.includes(detail.slice(0, 80))
           ? `${prev.detail}${prev.detail ? "\n\n---\n" : ""}${detail}`.slice(0, 4000)
@@ -205,6 +231,7 @@ export function reportPainPoint(input: {
         occurrences: prev.occurrences + 1,
         detail: mergedDetail,
         context: { ...prev.context, ...context },
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         updatedAt: now,
       };
       list[existingIdx] = updated;
@@ -212,8 +239,13 @@ export function reportPainPoint(input: {
       return updated;
     }
 
+    const id = `EVO-${now}-${randomUUID().slice(0, 6)}`;
+    const attachments =
+      input.attachmentIds && input.attachmentIds.length > 0
+        ? claimAttachments(input.attachmentIds, painPointAttachmentsDir(id))
+        : [];
     const created: EvolutionPainPoint = {
-      id: `EVO-${now}-${randomUUID().slice(0, 6)}`,
+      id,
       fingerprint,
       source: input.source,
       category: input.category,
@@ -222,6 +254,7 @@ export function reportPainPoint(input: {
       context,
       occurrences: 1,
       status: "open",
+      ...(attachments.length > 0 ? { attachments } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -393,6 +426,21 @@ export function syncRequirementMirrorToSandbox(
       atomicWriteFile(resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}/${name}`), content);
     }
   }
+
+  // 附件目录按二进制直拷，保证 worktree 内相对路径可读。
+  const srcAttachments = path.join(srcItemDir, "attachments");
+  if (fs.existsSync(srcAttachments) && fs.lstatSync(srcAttachments).isDirectory()) {
+    const dstAttachments = resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}/attachments`);
+    fs.mkdirSync(dstAttachments, { recursive: true });
+    for (const entry of fs.readdirSync(srcAttachments, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const srcFile = path.join(srcAttachments, entry.name);
+      const stat = fs.lstatSync(srcFile);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      atomicWriteBuffer(path.join(dstAttachments, entry.name), fs.readFileSync(srcFile), stat.mode & 0o777);
+    }
+  }
+
   const srcPlaybook = resolveSafePath(base, `${WORKBENCH_DIR}/playbook.md`);
   if (fs.existsSync(srcPlaybook)) {
     atomicWriteFile(resolveSafePath(wt, `${WORKBENCH_DIR}/playbook.md`), readBoundedText(srcPlaybook, 16 * 1024));
@@ -751,6 +799,19 @@ export async function promotePainPoint(
     pain.context.viewport ? `- 视口与主题：\`${pain.context.viewport}\` (${pain.context.theme ?? "default"})` : "",
   ].filter(Boolean);
 
+  const painAttachments = normalizeAttachments(pain.attachments) ?? [];
+  const attachmentLines =
+    painAttachments.length > 0
+      ? [
+          "",
+          "## 附件清单",
+          ...painAttachments.map(
+            (meta) =>
+              `- ${meta.name}（${meta.mimeType}，${formatAttachmentSize(meta.size)}）：attachments/${attachmentFileName(meta)}`,
+          ),
+        ]
+      : [];
+
   const specGoal = [
     `# [RSI 自进化修复] ${pain.title}`,
     "",
@@ -762,6 +823,7 @@ export async function promotePainPoint(
     "",
     "## 预期效果",
     "修复上述工作台问题，补充针对性回归测试，并确保类型检查与全量测试通过。",
+    ...attachmentLines,
   ].join("\n");
 
   const criteria: CriterionInput[] =
@@ -788,6 +850,9 @@ export async function promotePainPoint(
     criteria,
     track: "plan_first",
     currentCodeSnapshotHash: snap?.fingerprint ?? null,
+    ...(painAttachments.length > 0
+      ? { attachmentSource: { dir: painPointAttachmentsDir(pain.id), metas: painAttachments } }
+      : {}),
   });
 
   let githubIssueWarning: string | undefined;

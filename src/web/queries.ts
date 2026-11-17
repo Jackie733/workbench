@@ -568,6 +568,7 @@ export async function submitNewRequirement(
   dispatchAgent: boolean,
   _bridgeConnected: boolean,
   createGitHubIssue?: boolean,
+  attachmentIds: string[] = [],
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
@@ -581,6 +582,7 @@ export async function submitNewRequirement(
       goal,
       dispatchAgent: dispatchAgent && !useCli,
       ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
+      ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
     }),
   );
   if (res) {

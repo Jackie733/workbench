@@ -6,6 +6,7 @@ import type { ServerWebSocket } from "bun";
 import {
   acceptRequirement,
   addDiscussion,
+  addRequirementAttachments,
   approveDesign,
   authorizeFastTrack,
   blockRequirement,
@@ -24,6 +25,7 @@ import {
   listRequirements,
   markDesigning,
   recordRequirementGitHubSync,
+  removeRequirementAttachment,
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
@@ -32,6 +34,14 @@ import {
   updateProjectConfig,
   updateSpec,
 } from "../core/engine.ts";
+import {
+  discardStagedAttachments,
+  normalizeAttachments,
+  painPointAttachmentsDir,
+  readAttachmentForServe,
+  requirementAttachmentsDir,
+  stageUpload,
+} from "../core/attachments.ts";
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
@@ -52,6 +62,7 @@ import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
 import {
   AGENT_ACTIONS,
+  MAX_ATTACHMENT_TOTAL_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
   type CriterionInput,
@@ -133,6 +144,8 @@ function httpStatusForError(code: WorkbenchErrorCode): number {
     case "invalid_path":
     case "symlink_not_allowed":
       return 400;
+    case "payload_too_large":
+      return 413;
     case "not_found":
       return 404;
     case "already_initialized":
@@ -177,6 +190,11 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
     throw new WorkbenchError("invalid_input", "请求体必须是 JSON 对象");
   }
   return parsed;
+}
+
+function readStringArray(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.filter((v): v is string => typeof v === "string");
 }
 
 async function buildWebBundle(webDir: string): Promise<{ html: string; css: string; js: string } | null> {
@@ -493,6 +511,39 @@ export async function startWorkbenchServer(options: {
       return jsonResponse({ ok: true, root: defaultRoot, serverPid: process.pid, hubMode });
     }
 
+    if (method === "POST" && pathname === "/api/uploads") {
+      const contentLength = Number(req.headers.get("content-length") ?? "0");
+      if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_TOTAL_BYTES) {
+        throw new WorkbenchError(
+          "payload_too_large",
+          `附件上传内容超过 ${Math.round(MAX_ATTACHMENT_TOTAL_BYTES / (1024 * 1024))} MB 上限`,
+        );
+      }
+      const contentType = req.headers.get("content-type") ?? "";
+      if (!contentType.toLowerCase().includes("multipart/form-data")) {
+        throw new WorkbenchError("invalid_input", "附件上传必须使用 multipart/form-data");
+      }
+      let form: FormData;
+      try {
+        form = await req.formData();
+      } catch {
+        throw new WorkbenchError("invalid_input", "无法解析上传内容");
+      }
+      const rawFiles = form.getAll("files");
+      const files = rawFiles.filter((v): v is File => typeof v !== "string");
+      if (files.length === 0) {
+        throw new WorkbenchError("invalid_input", "请选择至少一个附件文件");
+      }
+      const inputs = await Promise.all(
+        files.map(async (file) => ({
+          name: file.name,
+          bytes: Buffer.from(await file.arrayBuffer()),
+        })),
+      );
+      const attachments = stageUpload(inputs);
+      return jsonResponse({ attachments }, 201);
+    }
+
     // --- Hub & Global Discovery/Routing Routes ---
     if (method === "GET" && pathname === "/api/hub/state") {
       const [{ cfg, projects }, harnesses] = await Promise.all([buildHubProjectsSnapshot(), executor.getHarnesses(false, !hubMode)]);
@@ -645,9 +696,24 @@ export async function startWorkbenchServer(options: {
           ? (body.category as PainPointCategory)
           : "ui_anomaly";
       const context = isRecord(body.context) ? (body.context as PainPointContext) : {};
-      const painPoint = reportPainPoint({ source, category, title, detail, context });
+      const attachmentIds = readStringArray(body.attachmentIds);
+      const painPoint = reportPainPoint({ source, category, title, detail, context, attachmentIds });
+      if (!painPoint && attachmentIds && attachmentIds.length > 0) {
+        discardStagedAttachments(attachmentIds);
+      }
       broadcastUi({ type: "hub.updated", reason: "evolution.reported", at: Date.now() });
       return jsonResponse({ painPoint }, 201);
+    }
+
+    const evoAttachmentMatch = /^\/api\/hub\/evolution\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname);
+    if (method === "GET" && evoAttachmentMatch) {
+      const painId = decodeURIComponent(evoAttachmentMatch[1]!);
+      const attId = decodeURIComponent(evoAttachmentMatch[2]!);
+      const pain = readPainPoints().find((p) => p.id === painId);
+      if (!pain) throw new WorkbenchError("not_found", "痛点记录不存在");
+      const metas = normalizeAttachments(pain.attachments) ?? [];
+      const served = readAttachmentForServe(painPointAttachmentsDir(painId), attId, metas);
+      return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
     }
 
     const evoPromoteMatch = /^\/api\/hub\/evolution\/([^/]+)\/promote$/.exec(pathname);
@@ -951,12 +1017,14 @@ export async function startWorkbenchServer(options: {
       const title = typeof body.title === "string" ? body.title : undefined;
       const track: Track = body.track === "fast_track" ? "fast_track" : "plan_first";
       const snapshot = await observeGitSnapshot(base);
+      const attachmentIds = readStringArray(body.attachmentIds);
       let detail = await createRequirement(base, {
         goal,
         title,
         criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
         track,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
       });
 
       const projectMeta = getProjectStatus(base).project;
@@ -1013,6 +1081,33 @@ export async function startWorkbenchServer(options: {
         const version = Number(histMatch[1]);
         const markdown = getDesignHistoryVersion(base, id, version);
         return jsonResponse({ version, markdown });
+      }
+
+      const attMatch = /^attachments\/([^/]+)$/.exec(sub);
+      if (method === "GET" && attMatch) {
+        const attId = decodeURIComponent(attMatch[1]!);
+        const state = getRequirement(base, id).state;
+        const metas = normalizeAttachments(state.attachments) ?? [];
+        const served = readAttachmentForServe(requirementAttachmentsDir(base, id), attId, metas);
+        return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
+      }
+
+      if (method === "DELETE" && attMatch) {
+        const attId = decodeURIComponent(attMatch[1]!);
+        const detail = await removeRequirementAttachment(base, id, attId);
+        broadcastUi({ type: "workbench.updated", reason: "attachment.removed", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "POST" && sub === "attachments") {
+        const body = await readBody(req);
+        const attachmentIds = readStringArray(body.attachmentIds) ?? [];
+        const detail = await addRequirementAttachments(base, id, attachmentIds, {
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: null,
+        });
+        broadcastUi({ type: "workbench.updated", reason: "attachment.added", root: base, id, at: Date.now() });
+        return jsonResponse({ detail }, 201);
       }
 
       const evMatch = /^evidence\/([^/]+)$/.exec(sub);

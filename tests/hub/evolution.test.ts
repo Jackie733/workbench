@@ -13,6 +13,7 @@ import {
   listRequirements,
   propose,
 } from "../../src/core/engine.ts";
+import { stageUpload } from "../../src/core/attachments.ts";
 import { resolveProjectRequirementSnapshots } from "../../src/core/git.ts";
 import { distillRequirementToPlaybook, MAX_PLAYBOOK_BYTES, readPlaybook, writePlaybook } from "../../src/core/playbook.ts";
 import { runVerification } from "../../src/core/runner.ts";
@@ -744,4 +745,104 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(getSandboxForRequirement(wbRepo, reqId3)).toBeNull();
     expect(fs.readFileSync(path.join(wbRepo, "src/web/theme.ts"), "utf8")).toContain("dirty-local-edit");
   }, 15_000);
+
+  test("附件贯穿报修合并、转正随迁、沙箱镜像与 Agent 交接简报", async () => {
+    const hub = makeTempHub();
+    const wbRepo = makeGitRepo("attachments");
+    await initProject(wbRepo, { name: "Attachments", privacyMode: "local" });
+
+    const logBytes = Buffer.from("TypeError: cannot read property\n    at Modals.tsx:1200\n".repeat(12));
+    const firstUpload = stageUpload([{ name: "现场报错.log", bytes: logBytes }]);
+    const first = reportPainPoint({
+      source: "ui_quick_report",
+      category: "ui_anomaly",
+      title: "附件报修随迁验证",
+      detail: "附带控制台日志",
+      attachmentIds: [firstUpload[0]!.id],
+    })!;
+    expect(first.attachments).toHaveLength(1);
+    expect(first.attachments![0]!.name).toBe("现场报错.log");
+    const hubAttachment = path.join(
+      hub,
+      "evolution",
+      "attachments",
+      first.id,
+      `${firstUpload[0]!.id}.log`,
+    );
+    expect(fs.existsSync(hubAttachment)).toBe(true);
+
+    const inboxPath = path.join(hub, "evolution", "inbox.jsonl");
+    const inbox = fs.readFileSync(inboxPath, "utf8");
+    expect(inbox).toContain(firstUpload[0]!.id);
+    expect(inbox).not.toContain(logBytes.toString("base64").slice(0, 20));
+    expect(Buffer.byteLength(inbox)).toBeLessThan(4096);
+
+    // 相同指纹合并：附件按 id 去重追加
+    const secondUpload = stageUpload([
+      { name: "复现截图.png", bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    ]);
+    const merged = reportPainPoint({
+      source: "ui_quick_report",
+      category: "ui_anomaly",
+      title: "附件报修随迁验证",
+      detail: "补充截图",
+      attachmentIds: [secondUpload[0]!.id],
+    })!;
+    expect(merged.id).toBe(first.id);
+    expect(merged.occurrences).toBe(2);
+    expect(merged.attachments).toHaveLength(2);
+    expect(new Set(merged.attachments!.map((m) => m.id)).size).toBe(2);
+
+    // 转正：附件复制到新需求、specGoal 列出清单、沙箱镜像同步
+    const promoted = await promotePainPoint(merged.id, { workbenchRoot: wbRepo, createSandbox: true });
+    const reqId = promoted.requirement.state.id;
+    expect(promoted.requirement.state.attachments).toHaveLength(2);
+    expect(promoted.requirement.specMarkdown).toContain("## 附件清单");
+    expect(promoted.requirement.specMarkdown).toContain(`attachments/${firstUpload[0]!.id}.log`);
+    expect(promoted.requirement.specMarkdown).toContain("现场报错.log");
+
+    for (const meta of promoted.requirement.state.attachments!) {
+      const ext = meta.name.split(".").pop()!;
+      const reqFile = path.join(wbRepo, ".workbench", "items", reqId, "attachments", `${meta.id}.${ext}`);
+      expect(fs.existsSync(reqFile)).toBe(true);
+    }
+
+    const wtPath = promoted.sandbox!.worktreePath;
+    expect(
+      fs.existsSync(path.join(wtPath, ".workbench", "items", reqId, "attachments", `${firstUpload[0]!.id}.log`)),
+    ).toBe(true);
+
+    // 痛点历史附件保留，仍可回看
+    const storedPain = readPainPoints().find((p) => p.id === merged.id)!;
+    expect(storedPain.attachments).toHaveLength(2);
+
+    // 交接简报列出附件绝对路径
+    const handoff = await synthesizeHandoffPacket(wbRepo, reqId, { action: "design" });
+    expect(handoff.markdown).toContain("附件清单（可直接读取）");
+    const logAbs = path.join(wtPath, ".workbench", "items", reqId, "attachments", `${firstUpload[0]!.id}.log`);
+    expect(handoff.markdown).toContain(logAbs);
+    expect(handoff.markdown).toContain("现场报错.log");
+    expect(handoff.markdown).toContain("复现截图.png");
+
+    // CLI --attach 冒烟：创建需求与上报痛点均能携带附件
+    const cliAttach = path.join(hub, "cli-attach.log");
+    fs.writeFileSync(cliAttach, "cli attachment payload\n");
+    const createCli = runCli(wbRepo, ["create", "CLI 附件创建冒烟", "--attach", cliAttach]);
+    expect(createCli.status).toBe(0);
+    const createdJson = JSON.parse(createCli.stdout) as { id: string; attachments: unknown[] };
+    expect(createdJson.attachments).toHaveLength(1);
+
+    const issueCli = runCli(wbRepo, [
+      "issue",
+      "CLI 附件报修冒烟",
+      "--category",
+      "cli_ergonomics",
+      "--attach",
+      cliAttach,
+    ]);
+    expect(issueCli.status).toBe(0);
+    const issueJson = JSON.parse(issueCli.stdout) as { id: string; attachments: Array<{ name: string }> };
+    expect(issueJson.attachments).toHaveLength(1);
+    expect(issueJson.attachments[0]!.name).toBe("cli-attach.log");
+  }, 20_000);
 });
