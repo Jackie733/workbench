@@ -602,8 +602,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .banner-runner-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .banner-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
-.tab { border: 0; background: transparent; padding: 9px 14px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+/*
+ * REQ-010: the tab bar is a flex item of the detail column. Because it also owns
+ * horizontal overflow, its automatic minimum size is 0; without an explicit
+ * flex-shrink: 0 it collapses when long tab content adds a vertical scrollbar.
+ * Keep the bar at its natural height and let the tab panel below take the scroll.
+ */
+.tabs { display: flex; flex: 0 0 auto; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
+.tab { flex: 0 0 auto; border: 0; background: transparent; padding: 9px 14px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
