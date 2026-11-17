@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -72,6 +72,13 @@ function runCli(root: string, args: string[]): { status: number; stdout: string;
   });
   return { status: res.status ?? 1, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
+
+beforeEach(() => {
+  // Running inside the RSI agent shell sets WORKBENCH_RSI_DEPTH=1 to prevent
+  // recursive self-evolution. These tests exercise that loop directly, so they
+  // must start from a clean guard state; afterEach restores the caller's value.
+  delete process.env.WORKBENCH_RSI_DEPTH;
+});
 
 afterEach(() => {
   while (servers.length > 0) servers.pop()!.stop();

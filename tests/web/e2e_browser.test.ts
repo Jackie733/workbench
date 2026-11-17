@@ -796,6 +796,110 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("REQ-009: 需求详情固定顶部区域，仅 Tabs 下方内容拥有独立垂直滚动", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "ScrollLayoutRepo", privacyMode: "local" });
+
+    const longSection = Array.from({ length: 80 }, (_, i) =>
+      [
+        `### 第 ${i + 1} 节：长内容用于验证局部滚动`,
+        "",
+        `这是第 ${i + 1} 节正文，重复内容只用于撑高规范与方案页面，以确认需求详情页不会出现全局垂直滚动条。`,
+        "",
+      ].join("\n"),
+    ).join("\n");
+    await createRequirement(repo, {
+      goal: "需求详情页需要固定顶部状态区并让 Tabs 内容独立滚动",
+      criteria: [{ id: "AC-1", description: "局部滚动布局生效", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", {
+      specMarkdown: `# 长规范\n\n${longSection}`,
+      designMarkdown: `# 长技术方案\n\n${longSection}`,
+      actor: "agent",
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="workspace-detail"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector('[data-testid="workspace-tab-scroll"]');
+          return Boolean(el && el.scrollHeight > el.clientHeight + 100);
+        },
+        { timeout: 5000 },
+      );
+
+      const readLayout = () =>
+        page.evaluate(() => {
+          const scroll = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          const pinned = document.querySelector('[data-testid="workspace-pinned"]') as HTMLElement | null;
+          const stepper = document.querySelector('[data-testid="stage-stepper"]') as HTMLElement | null;
+          const tabs = document.querySelector('[data-testid="workspace-tabs"]') as HTMLElement | null;
+          const banner = document.querySelector('[data-testid="action-banner"]') as HTMLElement | null;
+          const root = document.scrollingElement ?? document.documentElement;
+          return {
+            windowScrollY: window.scrollY,
+            documentScrollHeight: root.scrollHeight,
+            documentClientHeight: root.clientHeight,
+            innerHeight: window.innerHeight,
+            scrollTop: scroll?.scrollTop ?? -1,
+            scrollHeight: scroll?.scrollHeight ?? -1,
+            scrollClientHeight: scroll?.clientHeight ?? -1,
+            scrollBottom: scroll?.getBoundingClientRect().bottom ?? -1,
+            pinnedTop: pinned?.getBoundingClientRect().top ?? -1,
+            stepperTop: stepper?.getBoundingClientRect().top ?? -1,
+            tabsTop: tabs?.getBoundingClientRect().top ?? -1,
+            bannerTop: banner?.getBoundingClientRect().top ?? -1,
+          };
+        });
+
+      const before = await readLayout();
+      expect(before.windowScrollY).toBe(0);
+      // 详情页自身不能产生全局垂直滚动条，滚动区域必须位于视口内。
+      expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
+      expect(before.scrollBottom).toBeLessThanOrEqual(before.innerHeight + 1);
+      expect(before.scrollHeight).toBeGreaterThan(before.scrollClientHeight + 100);
+
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+        if (el) el.scrollTop = Math.min(320, el.scrollHeight - el.clientHeight);
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      const after = await readLayout();
+      expect(after.scrollTop).toBeGreaterThan(0);
+      // 滚动 Tabs 内容时，窗口与顶部需求进度/状态/模型执行区域保持不动。
+      expect(after.windowScrollY).toBe(0);
+      expect(after.documentScrollHeight).toBeLessThanOrEqual(after.documentClientHeight + 1);
+      expect(after.pinnedTop).toBe(before.pinnedTop);
+      expect(after.stepperTop).toBe(before.stepperTop);
+      expect(after.bannerTop).toBe(before.bannerTop);
+      expect(after.tabsTop).toBe(before.tabsTop);
+
+      // 切换 Tabs 后局部滚动容器仍然存在且保持独立滚动能力。
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="workspace-tab-scroll"]', { timeout: 5000 });
+      const afterSwitch = await readLayout();
+      expect(afterSwitch.windowScrollY).toBe(0);
+      expect(afterSwitch.documentScrollHeight).toBeLessThanOrEqual(afterSwitch.documentClientHeight + 1);
+      expect(afterSwitch.tabsTop).toBe(before.tabsTop);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
   test("REQ-008: the visible model picker, the /run request, the executor target, and the persisted record agree", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-picker-hub-"));
     tempDirs.push(hubDir);
