@@ -152,6 +152,7 @@ export function buildHarnessCommand(
       const isReadOnly = ctx.action === "ask" || ctx.action === "review";
       const modelFlags = model && model !== "default" ? ["-m", model] : [];
       const effortFlags = effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : [];
+      const summarySelection = `(model=${model}${effort ? `, effort=${effort}` : ""})`;
 
       if (ctx.nativeSessionId && ctx.action !== "review") {
         // Preserve model, reasoning effort, and bypass/read-only sandbox flags across native resume.
@@ -171,7 +172,7 @@ export function buildHarnessCommand(
         return {
           command: bin,
           args,
-          displayCommand: `${bin} exec resume ${ctx.nativeSessionId} (model=${model}${effort ? `, effort=${effort}` : ""})`,
+          displayCommand: `${bin} exec resume ${ctx.nativeSessionId} ${summarySelection}`,
         };
       }
       const safetyFlags = isReadOnly ? ["-s", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"];
@@ -185,7 +186,7 @@ export function buildHarnessCommand(
         ...safetyFlags,
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} exec -C ${ctx.root} ${safetyFlags.join(" ")} (model=${model})` };
+      return { command: bin, args, displayCommand: `${bin} exec -C ${ctx.root} ${safetyFlags.join(" ")} ${summarySelection}` };
     }
 
     case "qodercn": {
