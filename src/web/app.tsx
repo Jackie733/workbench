@@ -240,7 +240,7 @@ function WorkbenchShell() {
 
   return (
     <>
-      <div id="main-root" className="app-shell">
+      <div id="main-root" className={`app-shell ${selectedId ? "detail-mode" : ""}`}>
         <Topbar />
         <div
           className={`hub-layout ${showSidebar ? "with-sidebar" : ""} ${showSidebar && !desktopSidebarOpen ? "sidebar-collapsed" : ""} ${showDrawer ? "with-drawer" : ""}`}

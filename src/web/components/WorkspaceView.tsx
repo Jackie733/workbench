@@ -1088,10 +1088,11 @@ export function WorkspaceView() {
     modelOptions.length > 0 && (s.stage === "implementing" || s.stage === "awaiting_acceptance");
 
   return (
-    <>
-      <StageStepper d={d} running={runningThis} />
+    <div className="workspace-detail" data-testid="workspace-detail">
+      <div className="workspace-pinned" data-testid="workspace-pinned">
+        <StageStepper d={d} running={runningThis} />
 
-      <div className="ws-head">
+        <div className="ws-head">
         <span className="req-id" style={{ fontSize: 14 }}>
           {s.id}
         </span>
@@ -1420,8 +1421,9 @@ export function WorkspaceView() {
       </section>
 
       {activeRun && <LiveAgentBanner run={activeRun} />}
+      </div>
 
-      <div className="tabs">
+      <div className="tabs" data-testid="workspace-tabs">
         <button
           className={`tab ${workspaceTab === "spec" ? "active" : ""}`}
           type="button"
@@ -1448,13 +1450,15 @@ export function WorkspaceView() {
         </button>
       </div>
 
-      {workspaceTab === "spec" ? (
-        <SpecDesignTab d={d} />
-      ) : workspaceTab === "changes" ? (
-        <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
-      ) : (
-        <TimelineRunsTab d={d} />
-      )}
-    </>
+      <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
+        {workspaceTab === "spec" ? (
+          <SpecDesignTab d={d} />
+        ) : workspaceTab === "changes" ? (
+          <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
+        ) : (
+          <TimelineRunsTab d={d} />
+        )}
+      </div>
+    </div>
   );
 }

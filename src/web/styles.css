@@ -218,6 +218,69 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .main-stage { flex: 1; min-width: 0; }
 .shell { max-width: 1080px; margin: 0 auto; padding: 14px 20px 64px; }
 
+/*
+ * REQ-009: requirement detail keeps the page itself fixed. The progress/status/model
+ * execution region stays pinned, and only the tab panel below it owns the vertical
+ * scroll. Home and onboarding views keep their natural window scroll.
+ */
+.app-shell.detail-mode {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.app-shell.detail-mode .hub-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.app-shell.detail-mode .hub-workspace {
+  height: 100%;
+  min-height: 0;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.app-shell.detail-mode .main-stage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell.detail-mode .shell {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+}
+
+.workspace-detail {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.workspace-pinned {
+  flex: 0 0 auto;
+}
+
+.workspace-tab-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 24px;
+  scrollbar-gutter: stable;
+}
+
+
 .drawer-backdrop { display: none; }
 
 .drawer {
