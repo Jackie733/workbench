@@ -634,6 +634,88 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("附件上传：新建需求与报修弹窗均可上传图片并在详情/收集箱中回显", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-att-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const wbRepo = initGitRepo();
+    await initProject(wbRepo, { name: "附件 E2E", privacyMode: "local" });
+    const server = await startWorkbenchServer({ root: wbRepo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const injectFile = async (scopeSelector: string, fileName: string) => {
+      await page.evaluate(
+        (scope: string, name: string) => {
+          const root = document.querySelector(scope) ?? document;
+          const input = root.querySelector('[data-testid="attachment-input"]') as HTMLInputElement | null;
+          if (!input) throw new Error("attachment input not found");
+          const dt = new DataTransfer();
+          dt.items.add(
+            new File([Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])], name, { type: "image/png" }),
+          );
+          input.files = dt.files;
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        scopeSelector,
+        fileName,
+      );
+    };
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 5000 });
+
+      // 新建需求：上传截图并保存草稿，详情页展示缩略图
+      await clickReady(page, '[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 5000 });
+      await page.type('[data-testid="new-req-goal"]', "E2E 附件需求：验证详情页缩略图");
+      await injectFile('[data-testid="new-req-modal"]', "需求截图.png");
+      await page.waitForSelector('[data-testid="attachment-pending-list"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="save-draft-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), { timeout: 8000 });
+      await page.waitForSelector('[data-testid="requirement-attachments-card"]', { timeout: 8000 });
+      await page.waitForSelector('[data-testid="attachment-image"] img', { timeout: 8000 });
+      const imageSrc = await page.evaluate(
+        () => (document.querySelector('[data-testid="attachment-image"] img') as HTMLImageElement | null)?.src ?? "",
+      );
+      expect(imageSrc).toContain("/attachments/");
+
+      // 报修：上传截图后收集箱详情回显
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      await page.type('[data-testid="quick-report-title"]', "E2E 附件报修：收集箱缩略图");
+      await page.type('[data-testid="quick-report-detail"]', "附带一张截图用于复现");
+      await injectFile('[data-testid="quick-report-modal"]', "报修截图.png");
+      await page.waitForSelector('[data-testid="quick-report-modal"] [data-testid="attachment-pending-list"]', {
+        timeout: 5000,
+      });
+      await clickReady(page, '[data-testid="submit-quick-report-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 8000 });
+
+      await clickReady(page, '[data-testid="open-evolution-btn"]');
+      await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Boolean(
+            document.querySelector('[data-testid="evo-pane-inbox"]')?.textContent?.includes("E2E 附件报修：收集箱缩略图"),
+          ),
+        { timeout: 8000 },
+      );
+      await page.waitForSelector('[data-testid="evolution-modal"] [data-testid="attachment-image"] img', {
+        timeout: 8000,
+      });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 40_000);
+
   test("Hub started on home directory shows empty sidebar and onboarding card until a project is manually added", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-empty-hub-"));
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-home-root-"));

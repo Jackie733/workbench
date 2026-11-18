@@ -1,9 +1,11 @@
+import * as path from "node:path";
+import { attachmentFileName, formatAttachmentSize } from "../core/attachments.ts";
 import { getProjectStatus, getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
 import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
+import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "./registry.ts";
 
@@ -106,6 +108,24 @@ export async function synthesizeHandoffPacket(
       const reqTag = item.criterion.required ? "必需" : "参考";
       const cmdTag = item.criterion.command ? ` | 命令: \`${item.criterion.command}\`` : "";
       lines.push(`- ${sym} **${item.criterion.id}** (${reqTag}, ${item.state}): ${item.criterion.description}${cmdTag}`);
+    }
+    lines.push("");
+  }
+
+  if (state.attachments && state.attachments.length > 0) {
+    lines.push("### 附件清单（可直接读取）");
+    lines.push("图片可直接读取查看；日志/文本可 grep，pdf/zip 请按需解压或下载。");
+    for (const meta of state.attachments.slice(0, 8)) {
+      let fileName = `${meta.id}`;
+      try {
+        fileName = attachmentFileName(meta);
+      } catch {
+        // 元数据异常时仍输出可读条目，交由人工排查。
+      }
+      const absPath = path.join(codeRoot, WORKBENCH_DIR, "items", state.id, "attachments", fileName);
+      lines.push(
+        `- ${meta.name}（${meta.mimeType}，${formatAttachmentSize(meta.size)}）：\`${absPath}\``,
+      );
     }
     lines.push("");
   }

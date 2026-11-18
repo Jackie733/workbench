@@ -21,6 +21,13 @@ import {
   inspectGitHubEnvironment,
   type GitHubCommandDeps,
 } from "./github.ts";
+import {
+  claimAttachments,
+  copyAttachments,
+  normalizeAttachments,
+  removeAttachment as removeAttachmentFile,
+  requirementAttachmentsDir,
+} from "./attachments.ts";
 import { normalizeOutputLanguage } from "./language.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
@@ -49,6 +56,7 @@ import {
   type AcceptanceSnapshot,
   type AcceptanceVerificationEvidence,
   type AgentRunRecord,
+  type AttachmentMeta,
   type BaselineSnapshot,
   type CriterionInput,
   type DeliveryCandidateFile,
@@ -428,6 +436,10 @@ export async function createRequirement(
     track?: Track;
     uiRelated?: boolean;
     currentCodeSnapshotHash?: string | null;
+    /** 暂存区附件 ID，创建时认领到 .workbench/items/<REQ>/attachments/ */
+    attachmentIds?: string[];
+    /** 已落盘附件来源（例如痛点转正），创建时复制到新需求目录 */
+    attachmentSource?: { dir: string; metas: AttachmentMeta[] };
   },
 ): Promise<RequirementDetail> {
   const specMarkdown = validateMarkdownContent(input.goal, "spec", false);
@@ -437,6 +449,16 @@ export async function createRequirement(
   const specHash = computeSpecHash(specMarkdown, criteria);
 
   const bundle = await createRequirementFiles(root, (id, now) => {
+    let attachments: AttachmentMeta[] = [];
+    if (input.attachmentIds && input.attachmentIds.length > 0) {
+      attachments = claimAttachments(input.attachmentIds, requirementAttachmentsDir(root, id));
+    } else if (input.attachmentSource && input.attachmentSource.metas.length > 0) {
+      attachments = copyAttachments(
+        input.attachmentSource.dir,
+        input.attachmentSource.metas,
+        requirementAttachmentsDir(root, id),
+      );
+    }
     const state: RequirementState = {
       schemaVersion: SCHEMA_VERSION,
       id,
@@ -453,11 +475,17 @@ export async function createRequirement(
       tasks: [],
       baseline: null,
       verifications: [],
-      timeline: [makeEvent(now, "created", "human", `创建需求 ${id}：${title}`)],
       lastFeedback: null,
       blockedFrom: null,
       blockedReason: null,
       ...(input.uiRelated === true ? { uiRelated: true } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      timeline: [
+        makeEvent(now, "created", "human", `创建需求 ${id}：${title}`),
+        ...(attachments.length > 0
+          ? [makeEvent(now, "attachment_added", "human", `添加 ${attachments.length} 个附件`)]
+          : []),
+      ],
       createdAt: now,
       updatedAt: now,
     };
@@ -465,6 +493,77 @@ export async function createRequirement(
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/** 为已创建的需求补传附件（已最终验收的需求禁止变更）。 */
+export async function addRequirementAttachments(
+  root: string,
+  id: string,
+  attachmentIds: string[],
+  options: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  if (attachmentIds.length === 0) {
+    throw new WorkbenchError("invalid_input", "请先上传附件再添加到需求");
+  }
+  const bundle = await mutateRequirement(root, id, options.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.acceptance !== null || state.stage === "done") {
+      throw new WorkbenchError("invalid_transition", `需求 ${id} 已最终验收，禁止再添加附件`);
+    }
+    const existing = normalizeAttachments(state.attachments) ?? [];
+    const targetDir = requirementAttachmentsDir(root, id);
+    const added = claimAttachments(attachmentIds, targetDir, existing);
+    if (added.length === 0) return { state };
+    return {
+      state: {
+        ...state,
+        attachments: [...existing, ...added],
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "attachment_added",
+            "human",
+            `添加 ${added.length} 个附件：${added.map((a) => a.name).join("、")}`.slice(0, 500),
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+}
+
+/** 删除需求附件（已最终验收的需求禁止变更）。 */
+export async function removeRequirementAttachment(
+  root: string,
+  id: string,
+  attId: string,
+  options: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, options.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.acceptance !== null || state.stage === "done") {
+      throw new WorkbenchError("invalid_transition", `需求 ${id} 已最终验收，禁止删除附件`);
+    }
+    const existing = normalizeAttachments(state.attachments) ?? [];
+    const targetDir = requirementAttachmentsDir(root, id);
+    if (!fs.existsSync(targetDir)) {
+      throw new WorkbenchError("not_found", "附件不存在");
+    }
+    const remaining = removeAttachmentFile(targetDir, attId, existing);
+    const removed = existing.find((m) => m.id === attId);
+    return {
+      state: {
+        ...state,
+        attachments: remaining,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "attachment_removed", "human", `删除附件：${removed?.name ?? attId}`),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
 }
 
 export async function updateSpec(

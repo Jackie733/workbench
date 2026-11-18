@@ -25,7 +25,7 @@ import {
   type RoutingPreset,
   type RoutingStage,
 } from "../../hub/types.ts";
-import { api, setApiProjectScope, type HubStateResponse } from "../api.ts";
+import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse } from "../api.ts";
 import {
   invalidateAllWorkbenchQueries,
   openRequirement,
@@ -47,6 +47,8 @@ import {
 } from "../queries.ts";
 import { EFFORT_LABELS, formatDateTime, parseRunnerKey, supportedEffortsForModel } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { AttachmentGallery } from "./AttachmentGallery.tsx";
+import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
 
@@ -163,6 +165,13 @@ export function Modals() {
                 setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
               }
             />
+            <AttachmentPicker
+              value={m.attachments ?? []}
+              onChange={(attachments) =>
+                setModal((prev) => (prev?.kind === "new_req" ? { ...prev, attachments } : prev))
+              }
+              disabled={busy}
+            />
             <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
               <input
                 type="checkbox"
@@ -190,7 +199,15 @@ export function Modals() {
                 type="button"
                 data-testid="save-draft-btn"
                 disabled={busy}
-                onClick={() => void submitNewRequirement(m.goal, false, bridgeConnected, createIssueChecked)}
+                onClick={() =>
+                  void submitNewRequirement(
+                    m.goal,
+                    false,
+                    bridgeConnected,
+                    createIssueChecked,
+                    (m.attachments ?? []).map((a) => a.id),
+                  )
+                }
               >
                 仅保存草稿
               </button>
@@ -199,7 +216,15 @@ export function Modals() {
                 type="button"
                 data-testid="create-and-dispatch-btn"
                 disabled={busy}
-                onClick={() => void submitNewRequirement(m.goal, true, bridgeConnected, createIssueChecked)}
+                onClick={() =>
+                  void submitNewRequirement(
+                    m.goal,
+                    true,
+                    bridgeConnected,
+                    createIssueChecked,
+                    (m.attachments ?? []).map((a) => a.id),
+                  )
+                }
               >
                 创建并让 Agent 整理方案
               </button>
@@ -1015,12 +1040,14 @@ export function Modals() {
         showToast("请填写问题或改进标题", true);
         return;
       }
+      const attachmentIds = (m.attachments ?? []).map((a) => a.id);
       const res = await runBusy(async () => {
         const rep = await api.reportPainPoint({
           source: "ui_quick_report",
           category: m.category,
           title,
           detail: m.detail.trim() || undefined,
+          ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
           context: {
             projectRoot: project?.root,
             requirementId: selectedId ?? undefined,
@@ -1131,6 +1158,13 @@ export function Modals() {
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, detail: e.target.value } : prev))
           }
+        />
+        <AttachmentPicker
+          value={m.attachments ?? []}
+          onChange={(attachments) =>
+            setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, attachments } : prev))
+          }
+          disabled={busy}
         />
         <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
           <input
@@ -1357,6 +1391,14 @@ export function Modals() {
                           {p.detail && p.detail !== p.title && (
                             <div className="xs muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>
                               {p.detail.slice(0, 260)}
+                            </div>
+                          )}
+                          {p.attachments && p.attachments.length > 0 && (
+                            <div style={{ marginTop: 6 }}>
+                              <AttachmentGallery
+                                attachments={p.attachments}
+                                urlFor={(attId) => evolutionAttachmentUrl(p.id, attId)}
+                              />
                             </div>
                           )}
                         </div>

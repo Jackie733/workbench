@@ -22,6 +22,7 @@
         ├── design.md             # 当前技术方案 (Design) 的 Markdown 正文
         ├── handoff.md            # （v5 新增）高信噪比跨 Harness 上下文交接简报（自动合成 + 人类可预览/补充）
         ├── state.json            # 结构化状态、验收标准、批准记录、任务清单、研讨/批注记录、运行摘要与审查结论、时间线
+        ├── attachments/          # （v5.2 新增）附件二进制文件（<attId>.<ext>，元数据只存 state.json）
         ├── history/              # 历史批准过的 spec/design 快照 (如 design.v1.md)，用于版本对比
         ├── evidence/             # 真实运行的验证输出日志与元数据 (如 verify-<id>.json / .log)
         └── runs/                 # （v5 新增）主动调度的 Harness 执行日志与完整审查文本 (run-<id>.json / .log)
@@ -38,6 +39,7 @@
 
 ```text
 ~/.workbench-hub/
+├── uploads/<attId>/              # 附件暂存区（TTL 24h 惰性清扫，认领后移入正式目录）
 ├── daemon.json                   # 守护进程元数据 (pid, port, url, startedAt, version)
 ├── service.json                  # 用户级原生服务安装记录 (LaunchAgent / systemd --user，权限 0600)
 ├── hub.log                       # 守护进程运行日志（按大小自动轮转截断）
@@ -46,6 +48,7 @@
     ├── inbox.jsonl               # SHA-256 指纹去重的痛点与缺陷收集箱（上限 300 条）
     ├── model-stats.json          # 各 Harness/Model 分阶段胜率、耗时与限流冷却账本
     ├── sandboxes.json            # 活跃 RSI Git Worktree 沙箱登记表（记录分支与分叉基准 HEAD）
+    ├── attachments/<painId>/     # 痛点报修附件二进制（转正时复制到新需求附件目录）
     └── worktrees/<REQ-ID>/       # 针对 workbench 自身演进需求的隔离 Git Worktree 沙箱目录
 ```
 
@@ -69,7 +72,8 @@
 | `items/REQ-xxx/spec.md` | 需求目标、背景与范围的纯 Markdown 文本；可供人类在任何编辑器直接阅读或提交 Git 审查。 |
 | `items/REQ-xxx/design.md` | 当前技术方案 Markdown 文本（`fast_track` 模式下允许为空）。 |
 | `items/REQ-xxx/handoff.md`（v5） | 跨模型交接简报（控制在 1.5k–3k Tokens 预算内），整合契约摘要、输出语言策略、关键结论/死胡同、客观 Git 改动、失败证据末尾及未解决讨论。 |
-| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `delivery`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, **`github?`**（关联 Issue 与 PR 状态）, `createdAt`, `updatedAt`。 |
+| `items/REQ-xxx/state.json` | `schemaVersion`, `id` (`REQ-001`), `title`, `stage`, `track`, `revision` (CAS 整数), `specHash`, `designVersion`, `designHash`, `criteria`, `approval`, `acceptance`, `delivery`, `tasks`, `baseline`, `verifications`, `timeline`, `lastFeedback`, `blockedFrom`, `blockedReason`, **`handoffNote`**（v5）, **`discussions`**（v5）, **`agentRuns`**（v5）, **`reviewReport`**（v5）, **`github?`**（关联 Issue 与 PR 状态）, **`attachments?`**（附件元数据引用）, `createdAt`, `updatedAt`。 |
+| `items/REQ-xxx/attachments/<attId>.<ext>`（v5.2） | 附件二进制独立落盘；`state.attachments` 仅保存 `{ id, name, mimeType, size, sha256, addedAt }`，禁止 base64 内嵌。白名单：图片 `png/jpeg/jpg/gif/webp`，文件 `pdf/txt/md/json/csv/log/zip`；严禁 `svg/html` 与可执行类型。单文件 ≤10MB、单条 ≤8 个、合计 ≤20MB。 |
 | `items/REQ-xxx/evidence/verify-<id>.json` & `.log` | 不可变验证证据：包含 `id`, `command`, `cwd`, `criterionIds`, `specHash`, `codeSnapshotHash`, `exitCode`, `timedOut`, `durationMs`, `startedAt`, `endedAt`, `passed`, `outputPath`, `outputPreview`, `truncated`。 |
 | `items/REQ-xxx/runs/run-<id>.json` & `.log`（v5） | 主动调度运行记录：`id`, `action` (`ask` \| `design` \| `implement` \| `fix` \| `review`), `harness`, `model`, `effectiveModel?`, `modelFallback?`, `reasoningEffort?`, `nativeSessionId?`, `status` (`running` \| `succeeded` \| `failed` \| `cancelled`), `startedAt`, `endedAt`, `exitCode`, `durationMs`, `rateLimited?`, `errorSummary?`, `logPath`。其中 `model` 是请求目标，`effectiveModel` 是 CLI 回报的实际模型，`modelFallback` 表示 CLI 已将请求模型降级。 |
 
@@ -77,6 +81,7 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 - `handoffNote`（或 `null`）：结构化交接备忘 `{ updatedAt, keyDecisions: string[], deadEnds: string[], nextSteps: string[] }`，允许 Agent 在 `wb_propose` / `wb_update_tasks` 时沉淀高价值定位与踩坑警示。
 - `discussions[]`：需求内段落批注与问答讨论流 `{ id, at, actor: "human" | "agent", mode: "ask" | "refine", anchor?: string, harness?: string, model?: string, message: string, resolved?: boolean }`。
 - `agentRuns[]`：记录最近运行摘要 `{ id, action, harness, model, effectiveModel?, modelFallback?, nativeSessionId?, status, startedAt, endedAt, exitCode, durationMs, errorSummary? }`，便于前端重连与同构续接。
+- `attachments?`：附件元数据数组 `{ id, name, mimeType, size, sha256, addedAt }`；二进制位于同需求 `attachments/` 目录。已最终验收（`done` 且 `acceptance` 非空）的需求禁止增删附件（返回 409）；痛点转正时附件复制到新需求，并在交接简报中列出绝对路径。
 - `reviewReport`（或 `null`）：最新一次跨模型审查结果 `{ id, reviewerHarness, reviewerModel, verdict: "pass" | "concern" | "block", summary, markdown, reviewedSpecHash, reviewedCodeSnapshotHash, reviewedAt }`；当 `specHash` 或当前代码快照发生变化时，展示层标记该审查报告已过期（`stale`）提示按需复审。
 
 ---
