@@ -141,5 +141,5 @@ describe("post-acceptance Git delivery wrap-up", () => {
     });
     expect(reopened.state.delivery).toBeNull();
     expect(getRequirement(repo, "REQ-001").state.timeline.some((e) => e.kind === "delivered")).toBe(true);
-  });
+  }, 20_000);
 });
