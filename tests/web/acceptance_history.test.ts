@@ -18,10 +18,10 @@ import type { RequirementDetail, RequirementDiffView, RequirementState } from ".
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { describeEvidenceContext } from "../../src/web/state.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 const CLI_ENTRY = path.resolve(import.meta.dir, "../../src/cli/index.ts");
 
 interface BrowserPage {
@@ -64,13 +64,13 @@ function makeTempHub(): string {
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);
