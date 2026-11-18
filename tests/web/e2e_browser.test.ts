@@ -1007,6 +1007,128 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("REQ-010: 长内容出现滚动条时 Tabs 切换按钮保持完整高度且不被内容遮挡", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "TabsOverlapRepo", privacyMode: "local" });
+
+    const longSection = Array.from({ length: 90 }, (_, i) =>
+      [
+        `### 第 ${i + 1} 节：长文本用于触发 Tabs 内容区滚动`,
+        "",
+        `这是第 ${i + 1} 节正文，重复的段落会把规范与方案页面撑高，以便验证滚动条出现时 Tabs 切换按钮仍然完整可见。`,
+        "",
+      ].join("\n"),
+    ).join("\n");
+    await createRequirement(repo, {
+      goal: "长文本内容下 Tabs 切换按钮不被滚动条遮挡或压缩",
+      criteria: Array.from({ length: 12 }, (_, i) => ({
+        id: `AC-${i + 1}`,
+        description: `验证项 ${i + 1} 用于撑高顶部固定区域`,
+        required: true,
+        command: "echo ok",
+      })),
+    });
+    await propose(repo, "REQ-001", {
+      specMarkdown: `# 长规范\n\n${longSection}`,
+      designMarkdown: `# 长技术方案\n\n${longSection}`,
+      actor: "agent",
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 2514, height: 1348 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="workspace-detail"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () => {
+          const el = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          return Boolean(el && el.scrollHeight > el.clientHeight + 100);
+        },
+        { timeout: 5000 },
+      );
+
+      const readTabs = () =>
+        page.evaluate(() => {
+          const tabs = document.querySelector('[data-testid="workspace-tabs"]') as HTMLElement | null;
+          const scroll = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          const root = document.scrollingElement ?? document.documentElement;
+          const tabsRect = tabs?.getBoundingClientRect();
+          const scrollRect = scroll?.getBoundingClientRect();
+          const buttons = Array.from(tabs?.querySelectorAll("button") ?? []).map((button) => {
+            const rect = button.getBoundingClientRect();
+            const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            return {
+              text: (button.textContent ?? "").trim(),
+              height: rect.height,
+              width: rect.width,
+              top: rect.top,
+              bottom: rect.bottom,
+              fullyInside: Boolean(
+                tabsRect && rect.top >= tabsRect.top - 0.5 && rect.bottom <= tabsRect.bottom + 0.5,
+              ),
+              hittable: hit === button || Boolean(hit?.closest("button") === button),
+            };
+          });
+          return {
+            windowScrollY: window.scrollY,
+            documentScrollHeight: root.scrollHeight,
+            documentClientHeight: root.clientHeight,
+            tabsHeight: tabsRect?.height ?? -1,
+            tabsTop: tabsRect?.top ?? -1,
+            tabsBottom: tabsRect?.bottom ?? -1,
+            scrollTop: scrollRect?.top ?? -1,
+            scrollHeight: scroll?.scrollHeight ?? -1,
+            scrollClientHeight: scroll?.clientHeight ?? -1,
+            buttons,
+          };
+        });
+
+      const before = await readTabs();
+      // 内容区确实出现垂直滚动条，复现「长文本 + 滚动条」现场。
+      expect(before.scrollHeight).toBeGreaterThan(before.scrollClientHeight + 100);
+      expect(before.windowScrollY).toBe(0);
+      expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
+
+      // Tabs 栏不能被内容区挤压成细条，三个按钮必须完整位于栏内且仍可点击。
+      expect(before.buttons.map((b) => b.text)).toEqual(["规范与方案", "变更与验证", "时间线与运行"]);
+      expect(before.tabsHeight).toBeGreaterThan(30);
+      for (const button of before.buttons) {
+        expect(button.height).toBeGreaterThan(30);
+        expect(button.width).toBeGreaterThan(0);
+        expect(button.fullyInside).toBe(true);
+        expect(button.hittable).toBe(true);
+      }
+      // Tabs 栏与下方滚动内容不重叠，滚动条出现在内容区而不是覆盖按钮。
+      expect(before.tabsBottom).toBeLessThanOrEqual(before.scrollTop + 0.5);
+
+      for (const tab of ["tab-changes", "tab-timeline", "tab-spec"] as const) {
+        await page.click(`[data-testid="${tab}"]`);
+        await new Promise((r) => setTimeout(r, 100));
+        const after = await readTabs();
+        expect(after.tabsTop).toBe(before.tabsTop);
+        expect(after.tabsHeight).toBeGreaterThan(30);
+        for (const button of after.buttons) {
+          expect(button.height).toBeGreaterThan(30);
+          expect(button.fullyInside).toBe(true);
+          expect(button.hittable).toBe(true);
+        }
+        expect(after.tabsBottom).toBeLessThanOrEqual(after.scrollTop + 0.5);
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
   test("REQ-008: the visible model picker, the /run request, the executor target, and the persisted record agree", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-picker-hub-"));
     tempDirs.push(hubDir);
