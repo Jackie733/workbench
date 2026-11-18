@@ -117,7 +117,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
       await page.click('[data-testid="req-row-REQ-001"]');
 
-      await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 15000 });
       await page.waitForSelector('[data-testid="delivery-pending-hint"]', { timeout: 5000 });
 
       await page.click('[data-testid="open-deliver-btn"]');

@@ -120,6 +120,14 @@ export interface WorkbenchServerHandle {
   getBridgeStatus(): BridgeStatus;
 }
 
+// 只公开界面与浏览器图标实际使用的四个文件；精确路径映射到 brand 下的固定文件名。
+const BRAND_ASSETS: Record<string, { file: string; contentType: string }> = {
+  "/favicon.svg": { file: "favicon.svg", contentType: "image/svg+xml" },
+  "/favicon.ico": { file: "favicon.ico", contentType: "image/x-icon" },
+  "/apple-touch-icon.png": { file: "apple-touch-icon.png", contentType: "image/png" },
+  "/brand/symbol-compact.svg": { file: "symbol-compact.svg", contentType: "image/svg+xml" },
+};
+
 // Bun 1.3.14 在同进程重复 Bun.build 且相关模块已被运行时加载时会抛出 EBADF/EISDIR，
 // 因此非开发模式下同一 webDir 的初始构建结果在进程内共享；开发模式与显式 reload 仍每次重新构建。
 const initialWebBundles = new Map<string, Promise<{ html: string; css: string; js: string } | null>>();
@@ -1001,6 +1009,32 @@ export async function startWorkbenchServer(options: {
             500,
           );
         }
+      }
+
+      const brandAsset = BRAND_ASSETS[url.pathname];
+      if (brandAsset) {
+        const method = req.method.toUpperCase();
+        if (method !== "GET" && method !== "HEAD") {
+          return new Response("Method Not Allowed", {
+            status: 405,
+            headers: { Allow: "GET, HEAD", "Cache-Control": "no-store" },
+          });
+        }
+        let body: ArrayBuffer;
+        try {
+          const file = fs.readFileSync(path.join(webDir, "brand", brandAsset.file));
+          body = new ArrayBuffer(file.byteLength);
+          new Uint8Array(body).set(file);
+        } catch {
+          return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+        }
+        return new Response(method === "HEAD" ? null : body, {
+          headers: {
+            "Content-Type": brandAsset.contentType,
+            "Content-Length": String(body.byteLength),
+            "Cache-Control": "no-store",
+          },
+        });
       }
 
       if (isDevWeb) {

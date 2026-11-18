@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { KeyRound, Lock } from "lucide-react";
 import { api } from "../api.ts";
+import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 
 export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -48,7 +49,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-          <span className="sb-logo">W</span>
+          <BrandMark />
           <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Workbench 局域网登录</h2>
         </div>
         <p className="muted xs" style={{ margin: "0 0 16px" }}>

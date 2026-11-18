@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 512 512" role="img" aria-label="Workbench favicon"><title>Workbench favicon</title><defs>
+<linearGradient id="slate" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3A4262"/><stop offset="1" stop-color="#1B2037"/></linearGradient>
+<linearGradient id="accent" x1="0" y1="0.12" x2="1" y2="0.85"><stop stop-color="#805CFF"/><stop offset="0.52" stop-color="#746CF9"/><stop offset="1" stop-color="#428DFB"/></linearGradient>
+<linearGradient id="under" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#636A9D"/><stop offset="1" stop-color="#969CC0"/></linearGradient>
+<linearGradient id="tileDark" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#30394F"/><stop offset="0.65" stop-color="#151B2B"/><stop offset="1" stop-color="#101524"/></linearGradient>
+<linearGradient id="tileLight" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#EEF1FA"/></linearGradient>
+</defs><rect x="20" y="20" width="472" height="472" rx="110" fill="url(#tileDark)"/>
+<path d="M 213.10,151.79 Q 256.00,116.00 298.90,151.79 L 379.10,218.71 Q 422.00,254.50 379.10,290.29 L 298.90,357.21 Q 256.00,393.00 213.10,357.21 L 132.90,290.29 Q 90.00,254.50 132.90,218.71 Z" fill="url(#accent)"/>
+<g stroke="#fff" stroke-width="24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+<path d="M256 172 V233 M229 278 L184 309 M283 278 L328 309"/>
+<circle cx="256" cy="269" r="32"/></g>
+<g fill="white"><circle cx="256" cy="168" r="22"/><circle cx="173" cy="315" r="22"/><circle cx="339" cy="315" r="22"/></g></svg>

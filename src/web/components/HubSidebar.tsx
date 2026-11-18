@@ -2,6 +2,7 @@ import { Plus, Settings, X } from "lucide-react";
 import { useCollapsePhase } from "../lib/utils.ts";
 import { openAddProjectModal, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 
 export function HubSidebar() {
@@ -57,7 +58,7 @@ export function HubSidebar() {
         <div className="sidebar-inner">
           <div className="sb-brand mobile-only">
             <div className="sb-brand-title">
-              <span className="sb-logo">W</span>
+              <BrandMark />
               <span>Workbench</span>
             </div>
             <button
