@@ -36,6 +36,16 @@ export interface DiscoveredModel {
   source: "detected" | "builtin";
   supportedEfforts?: ReasoningEffort[];
   defaultEffort?: ReasoningEffort;
+  /** Optional capability metadata enriched from local caches (models.db / models_cache.json) */
+  intelligence?: number;
+  cost?: { input: number; output: number };
+  isFree?: boolean;
+  isLegacy?: boolean;
+  priority?: number;
+  /** True when the model's effort is fixed/locked (e.g. single-effort variant) */
+  effortLocked?: boolean;
+  /** For aggregated family models (e.g. agy), maps reasoningEffort -> underlying CLI variant ID */
+  effortVariants?: Partial<Record<ReasoningEffort, string>>;
 }
 
 export interface HarnessInfo {

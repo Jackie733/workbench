@@ -15,7 +15,7 @@ import {
   activeRunnerChoice,
   collectModelOptions,
   EFFORT_LABELS,
-  supportedEffortsForModel,
+  getModelEffortCapability,
 } from "../../state.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { Icon } from "../Icon.tsx";
@@ -60,10 +60,14 @@ export function ModelRunnerBar({
     return Array.from(groups.values());
   }, [modelOptions]);
 
-  const efforts = useMemo(
-    () => supportedEffortsForModel(harnesses, choice.harness, choice.model),
+  const effortCap = useMemo(
+    () => getModelEffortCapability(harnesses, choice.harness, choice.model),
     [harnesses, choice.harness, choice.model],
   );
+  const efforts = effortCap.efforts;
+  const effectiveDefaultEffort = choice.effort ?? effortCap.defaultEffort;
+  const effortValue =
+    selectedEffort && efforts.includes(selectedEffort) ? selectedEffort : "";
 
   const currentDisplay =
     selectedRunnerKey === "manual_copy"
@@ -215,8 +219,8 @@ export function ModelRunnerBar({
         </PopoverPortal>
       </PopoverRoot>
 
-      {/* Reasoning Effort selector */}
-      {selectedRunnerKey !== "manual_copy" && (
+      {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
+      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (
         <div className="inline-flex items-center gap-1" title="模型推理强度 (Reasoning Effort)">
           <span className="hidden sm:inline-flex items-center text-[var(--muted)]">
             <Icon icon={Gauge} size={14} />
@@ -225,11 +229,11 @@ export function ModelRunnerBar({
             className="select xs font-mono"
             data-field="effort-select"
             data-testid={`${testId}-effort`}
-            value={selectedEffort}
+            value={effortValue}
             onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "")}
           >
             <option value="">
-              默认强度{choice.effort && !selectedEffort ? ` (${choice.effort})` : ""}
+              默认强度{effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}
             </option>
             {efforts.map((eff) => (
               <option key={eff} value={eff}>
@@ -237,6 +241,16 @@ export function ModelRunnerBar({
               </option>
             ))}
           </select>
+        </div>
+      )}
+      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "locked" && (
+        <div
+          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--surface-2,transparent)] text-[11px] font-mono text-[var(--muted)]"
+          data-testid={`${testId}-effort-locked`}
+          title="该模型变体已内置固定推理强度，不可单独覆盖"
+        >
+          <Icon icon={Gauge} size={14} />
+          <span>固定: {effortCap.defaultEffort ?? efforts[0] ?? "内置"}</span>
         </div>
       )}
     </div>

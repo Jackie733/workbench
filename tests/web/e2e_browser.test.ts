@@ -461,7 +461,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
         designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
       }));
-      expect(firstReopen).toEqual({ designModel: "qodercn::DeepSeek-V4-Pro", designEffort: "xhigh" });
+      expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
       await page.select('[data-testid="route-effort-design"]', "high");

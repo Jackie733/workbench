@@ -23,7 +23,7 @@ import { resolveCodeRoot } from "../core/sandbox.ts";
 import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
-import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
+import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
   inspectFinishedRunForPainPoints,
   syncRequirementMirrorToSandbox,
@@ -43,10 +43,11 @@ export interface BuiltCommand {
 }
 
 export interface RunExecutorEvent {
-  type: "agent.run.started" | "agent.run.output" | "agent.run.finished" | "workbench.updated";
+  type: "agent.run.started" | "agent.run.output" | "agent.run.finished" | "workbench.updated" | "hub.updated";
   root: string;
   requirementId: string;
   runId: string;
+  reason?: string;
   action?: AgentAction;
   harness?: string;
   model?: string;
@@ -207,6 +208,12 @@ export function buildHarnessCommand(
     case "qodercn": {
       const bin = exe || "qodercn";
       const isReadOnly = ctx.action === "ask" || ctx.action === "review";
+      const modelInfo = info?.models.find((m) => m.id === model);
+      const effortAllowed =
+        model !== "Auto" &&
+        model !== "Fast" &&
+        (!modelInfo?.supportedEfforts || modelInfo.supportedEfforts.length > 0) &&
+        !modelInfo?.effortLocked;
       // Execution stages skip per-command remote permission checks; read-only stages keep auto mode.
       const permissionFlags = isReadOnly ? ["--permission-mode", "auto"] : ["--dangerously-skip-permissions"];
       const args = [
@@ -216,7 +223,7 @@ export function buildHarnessCommand(
         "stream-json",
         ...permissionFlags,
         ...(model && model !== "default" && model !== "Auto" ? ["-m", model] : []),
-        ...(effort ? ["--reasoning-effort", effort] : []),
+        ...(effort && effortAllowed ? ["--reasoning-effort", effort] : []),
         ...(ctx.nativeSessionId && ctx.action !== "review" ? ["-r", ctx.nativeSessionId] : []),
         "-p",
         ctx.prompt,
@@ -245,21 +252,54 @@ export function buildHarnessCommand(
     case "agy": {
       const bin = exe || "agy";
       const mode = ctx.action === "ask" || ctx.action === "review" ? "plan" : "auto";
-      const agyEffort =
+      const modelInfo =
+        info?.models.find((m) => m.id === model) ??
+        info?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(model));
+      const agyEffortRaw =
         effort && (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max")
           ? effort
           : undefined;
+      let resolvedModel = model;
+      let resolvedEffort = agyEffortRaw;
+      if (modelInfo?.effortVariants) {
+        const targetEff = resolvedEffort ?? modelInfo.defaultEffort;
+        if (targetEff && modelInfo.effortVariants[targetEff]) {
+          resolvedModel = modelInfo.effortVariants[targetEff]!;
+          resolvedEffort =
+            targetEff === "low" || targetEff === "medium" || targetEff === "high" || targetEff === "xhigh" || targetEff === "max"
+              ? targetEff
+              : resolvedEffort;
+        } else if (modelInfo.defaultEffort && modelInfo.effortVariants[modelInfo.defaultEffort]) {
+          resolvedModel = modelInfo.effortVariants[modelInfo.defaultEffort]!;
+        } else {
+          const firstVariant = Object.values(modelInfo.effortVariants)[0];
+          if (firstVariant) resolvedModel = firstVariant;
+        }
+      } else if (modelInfo?.effortLocked) {
+        resolvedEffort =
+          modelInfo.defaultEffort &&
+          (modelInfo.defaultEffort === "low" ||
+            modelInfo.defaultEffort === "medium" ||
+            modelInfo.defaultEffort === "high" ||
+            modelInfo.defaultEffort === "xhigh" ||
+            modelInfo.defaultEffort === "max")
+            ? modelInfo.defaultEffort
+            : undefined;
+      } else if (modelInfo?.supportedEfforts && modelInfo.supportedEfforts.length === 0) {
+        resolvedEffort = undefined;
+      }
+
       const args = [
         "-p",
         ctx.prompt,
         "--mode",
         mode,
         ...(mode === "auto" ? ["--dangerously-skip-permissions"] : []),
-        ...(model && model !== "default" ? ["--model", model] : []),
-        ...(agyEffort ? ["--effort", agyEffort] : []),
+        ...(resolvedModel && resolvedModel !== "default" ? ["--model", resolvedModel] : []),
+        ...(resolvedEffort ? ["--effort", resolvedEffort] : []),
         ...(ctx.nativeSessionId ? ["--conversation", ctx.nativeSessionId] : []),
       ];
-      return { command: bin, args, displayCommand: `${bin} -p --mode ${mode} (model=${model})` };
+      return { command: bin, args, displayCommand: `${bin} -p --mode ${mode} (model=${resolvedModel})` };
     }
 
     case "omp": {
@@ -578,7 +618,11 @@ export class HubExecutor {
   private readonly onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
   private readonly onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
   private readonly nodeId?: string;
+  private readonly hasCustomInitialHarnesses: boolean;
   private cachedHarnesses: HarnessInfo[] | null = null;
+  private cachedHarnessesAt = 0;
+  private cachedCatalogFingerprint = "";
+  private inFlightRefresh: Promise<HarnessInfo[]> | null = null;
 
   constructor(options: {
     cliEntryPath?: string;
@@ -595,8 +639,10 @@ export class HubExecutor {
     this.onTelemetryOutcome = options.onTelemetryOutcome;
     this.onPainPoint = options.onPainPoint;
     this.nodeId = options.nodeId;
+    this.hasCustomInitialHarnesses = Boolean(options.initialHarnesses);
     if (options.initialHarnesses) {
       this.cachedHarnesses = options.initialHarnesses;
+      this.cachedHarnessesAt = Date.now();
     }
   }
 
@@ -615,19 +661,58 @@ export class HubExecutor {
     }
   }
 
+  private harnessesSignature(list: HarnessInfo[] | null): string {
+    if (!list) return "";
+    return list
+      .map((h) => `${h.id}:${h.installed}:${h.models.map((m) => `${m.id}@${m.tier}@${m.supportedEfforts?.join(",") ?? ""}`).join("|")}`)
+      .join(";");
+  }
+
+  private runFullHarnessRefresh(): Promise<HarnessInfo[]> {
+    if (this.inFlightRefresh) return this.inFlightRefresh;
+    const prevSig = this.harnessesSignature(this.cachedHarnesses);
+    this.inFlightRefresh = discoverHarnesses()
+      .then((full) => {
+        this.cachedHarnesses = full;
+        this.cachedHarnessesAt = Date.now();
+        this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
+        if (this.harnessesSignature(full) !== prevSig) {
+          this.emit({
+            type: "hub.updated",
+            reason: "harnesses.refreshed",
+            root: "",
+            requirementId: "",
+            runId: "",
+            at: Date.now(),
+          });
+        }
+        return full;
+      })
+      .finally(() => {
+        this.inFlightRefresh = null;
+      });
+    return this.inFlightRefresh;
+  }
+
   async getHarnesses(forceRefresh = false, quickOnly = false): Promise<HarnessInfo[]> {
+    const HARNESS_REFRESH_TTL_MS = 30 * 60_000;
     if (forceRefresh) {
-      this.cachedHarnesses = await discoverHarnesses();
-      return this.cachedHarnesses;
+      return this.runFullHarnessRefresh();
     }
     if (!this.cachedHarnesses) {
       this.cachedHarnesses = discoverHarnessesQuick();
+      this.cachedHarnessesAt = Date.now();
+      this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
       if (!quickOnly) {
-        void discoverHarnesses()
-          .then((full) => {
-            this.cachedHarnesses = full;
-          })
-          .catch(() => {});
+        void this.runFullHarnessRefresh().catch(() => {});
+      }
+      return this.cachedHarnesses;
+    }
+    if (!quickOnly && !this.hasCustomInitialHarnesses) {
+      const currentFp = getLocalCatalogFingerprint();
+      const expired = Date.now() - this.cachedHarnessesAt > HARNESS_REFRESH_TTL_MS;
+      if (expired || currentFp !== this.cachedCatalogFingerprint) {
+        void this.runFullHarnessRefresh().catch(() => {});
       }
     }
     return this.cachedHarnesses;
