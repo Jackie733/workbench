@@ -5,13 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { approveDesign, createRequirement, initProject, propose, updateTasks } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-const browserEnv = resolveBrowserEnvironment();
-const HAS_BROWSER = browserEnv.ok;
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 const SCREENSHOT_DIR = "/tmp/opencode/req-001-visual";
 
 const DESIGN_MD = [
@@ -169,18 +169,18 @@ async function setup(): Promise<{ server: WorkbenchServerHandle; page: BrowserPa
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) {
+  if (!browserEnv) {
     throw new Error(
-      `Browser prerequisites missing (chromium=${browserEnv.chromePath ?? "not found"}, puppeteer=${browserEnv.puppeteerPath ?? "not found"}); ` +
+      "Browser prerequisites missing (no resolvable Chromium or puppeteer-core); " +
         "REQ-001 browser criteria require real browser execution and must not be skipped.",
     );
   }
-  const mod = (await import(browserEnv.puppeteerPath!)) as {
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: browserEnv.chromePath!,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 20_000);

@@ -692,7 +692,8 @@ export async function startWorkbenchServer(options: {
       if (!(ROUTING_PRESETS as readonly string[]).includes(preset)) {
         throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
       }
-      const cfg = applyHubRoutingPreset(preset as RoutingPreset);
+      const harnesses = await executor.getHarnesses(false);
+      const cfg = applyHubRoutingPreset(preset as RoutingPreset, harnesses);
       nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
       broadcastUi({ type: "hub.updated", reason: "routing.preset", preset, at: Date.now() });
       return jsonResponse({ routing: cfg.routing });

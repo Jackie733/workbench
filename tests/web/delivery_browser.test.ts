@@ -12,11 +12,11 @@ import {
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-const browserEnv = resolveBrowserEnvironment();
-const HAS_BROWSER = browserEnv.ok;
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -58,13 +58,13 @@ function makeTempHub(): string {
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(browserEnv.puppeteerPath!)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: browserEnv.chromePath!,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);

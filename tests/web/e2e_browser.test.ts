@@ -4,14 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
-import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-const browserEnv = resolveBrowserEnvironment();
-const HAS_BROWSER = browserEnv.ok;
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -59,6 +59,24 @@ function initGitRepo(): string {
 async function clickReady(page: BrowserPage, selector: string, timeout = 5000): Promise<void> {
   const readySel = `${selector}:not([disabled])`;
   await page.waitForSelector(readySel, { timeout });
+  // 右下角 Sonner 提示可能短暂遮挡按钮中心；元素已在视口内时等待其真正可命中。
+  // Radix 弹窗/菜单打开时 body 为 pointer-events:none，命中检测不适用，直接放行。
+  await page.waitForFunction(
+    (sel: unknown) => {
+      const el = document.querySelector(String(sel));
+      if (!el) return false;
+      if (getComputedStyle(document.body).pointerEvents === "none") return true;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return true;
+      const hit = document.elementFromPoint(cx, cy);
+      return hit === el || el.contains(hit);
+    },
+    { timeout },
+    readySel,
+  );
   try {
     await page.click(readySel);
   } catch (err) {
@@ -72,13 +90,13 @@ async function clickReady(page: BrowserPage, selector: string, timeout = 5000): 
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(browserEnv.puppeteerPath!)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: browserEnv.chromePath!,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);
@@ -231,6 +249,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="action-approve_and_implement"]', { timeout: 5000 });
 
       // Verify design version diff toggle works
+      // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
+      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 6000 });
       await page.click('[data-action="toggle-design-diff"]');
       await page.waitForSelector(".diff-code", { timeout: 5000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
@@ -461,7 +481,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
         designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
       }));
-      expect(firstReopen).toEqual({ designModel: "qodercn::DeepSeek-V4-Pro", designEffort: "xhigh" });
+      expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
       await page.select('[data-testid="route-effort-design"]', "high");
@@ -1170,7 +1190,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           subscription: "QoderCN",
           installed: true,
           executable: "qodercn",
-          models: [{ id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" }],
+          models: [
+            { id: "Qwen4-Max", tier: "sota", source: "detected" },
+            { id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" },
+          ],
           defaultModel: "DeepSeek-V4-Pro",
           detectedAt: Date.now(),
         },

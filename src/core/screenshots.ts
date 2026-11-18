@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { WorkbenchError } from "./errors.ts";
@@ -105,17 +104,6 @@ export interface ResolvedBrowserEnvironment {
   reason: string | null;
 }
 
-const PLAYWRIGHT_BINARIES: Record<string, string[]> = {
-  chromium: ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"],
-  chromium_headless_shell: [
-    "chrome-headless-shell-linux64/chrome-headless-shell",
-    "chrome-headless-shell-linux/chrome-headless-shell",
-    "chrome-headless-shell-mac-arm64/chrome-headless-shell",
-    "chrome-headless-shell-mac-x64/chrome-headless-shell",
-    "chrome-headless-shell-mac/chrome-headless-shell",
-  ],
-};
-
 function newestChromiumFromPlaywright(): string | null {
   const cacheDir = path.join(os.homedir(), ".cache", "ms-playwright");
   let entries: string[] = [];
@@ -125,12 +113,15 @@ function newestChromiumFromPlaywright(): string | null {
     return null;
   }
   const versions = entries
-    .map((entry) => /^(chromium|chromium_headless_shell)-(\d+)$/.exec(entry))
+    .map((entry) => /^chromium(_headless_shell)?-(\d+)$/.exec(entry))
     .filter((match): match is RegExpExecArray => Boolean(match))
-    .map((match) => ({ dir: match[0], kind: match[1]!, version: Number(match[2]) }))
-    .sort((a, b) => b.version - a.version);
+    .map((match) => ({ dir: match[0], version: Number(match[2]), headlessShell: Boolean(match[1]) }))
+    .sort((a, b) => b.version - a.version || Number(a.headlessShell) - Number(b.headlessShell));
   for (const candidate of versions) {
-    for (const relative of PLAYWRIGHT_BINARIES[candidate.kind] ?? []) {
+    const relatives = candidate.headlessShell
+      ? ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-headless-shell-linux/chrome-headless-shell"]
+      : ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"];
+    for (const relative of relatives) {
       const full = path.join(cacheDir, candidate.dir, relative);
       if (fs.existsSync(full)) return full;
     }
@@ -157,11 +148,6 @@ function chromiumFromPathEnv(): string | null {
 function resolvePuppeteerModule(): string | null {
   const explicit = process.env.WORKBENCH_PUPPETEER_PATH?.trim();
   if (explicit) return explicit;
-  try {
-    return createRequire(import.meta.url).resolve("puppeteer-core");
-  } catch {
-    // Fall through to the global install location.
-  }
   const globalPath = path.join(
     os.homedir(),
     ".bun",
@@ -173,7 +159,12 @@ function resolvePuppeteerModule(): string | null {
     "puppeteer",
     "puppeteer-core.js",
   );
-  return fs.existsSync(globalPath) ? globalPath : null;
+  if (fs.existsSync(globalPath)) return globalPath;
+  try {
+    return Bun.resolveSync("puppeteer-core", path.resolve(import.meta.dir, "../.."));
+  } catch {
+    return null;
+  }
 }
 
 /** Resolves Chromium and puppeteer-core without adding dependencies; explicit env paths are authoritative. */
