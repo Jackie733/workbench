@@ -4,7 +4,6 @@ import { MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentAction } from "../../core/types.ts";
-import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
 
@@ -153,15 +152,5 @@ export function ModalShell({
         </Content>
       </Portal>
     </Root>
-  );
-}
-
-export function ToastBanner() {
-  const toast = useUiStore((s) => s.toast);
-  if (!toast) return null;
-  return (
-    <div className={`toast ${toast.isError ? "error" : ""}`} role="status">
-      {toast.message}
-    </div>
   );
 }

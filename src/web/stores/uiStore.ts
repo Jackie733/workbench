@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { create } from "zustand";
 import type { OutputLanguage } from "../../core/types.ts";
 import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Scope, type WorkspaceTab } from "../state.ts";
@@ -48,7 +49,6 @@ export interface UiStoreState {
   drawerTab: DrawerTab;
   moreMenuOpen: boolean;
   modal: ModalState;
-  toast: { message: string; isError: boolean } | null;
 
   toggleTheme: () => void;
   setBusy: (busy: boolean) => void;
@@ -78,8 +78,6 @@ export interface UiStoreState {
   showToast: (message: string, isError?: boolean) => void;
 }
 
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
-
 export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
   busy: false,
@@ -108,7 +106,6 @@ export const useUiStore = create<UiStoreState>((set) => ({
   drawerTab: "discuss",
   moreMenuOpen: false,
   modal: null,
-  toast: null,
 
   toggleTheme: () =>
     set((s) => {
@@ -166,10 +163,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
       modal: typeof modalOrUpdater === "function" ? modalOrUpdater(s.modal) : modalOrUpdater,
     })),
   showToast: (message, isError = false) => {
-    if (toastTimer) clearTimeout(toastTimer);
-    set({ toast: { message, isError } });
-    toastTimer = setTimeout(() => {
-      set({ toast: null });
-    }, 4000);
+    if (isError) toast.error(message);
+    else toast(message);
   },
 }));
