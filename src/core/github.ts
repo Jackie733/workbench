@@ -349,6 +349,24 @@ export function buildRequirementPrBody(detail: RequirementDetail, note?: string)
       `- **审查器**：\`${rev.reviewerHarness}/${rev.reviewerModel}\` · 结论：**\`${rev.verdict}\`**`,
       `- **摘要**：${sanitizeOutput(rev.summary, 1000).text}`,
     );
+    if (rev.findings && rev.findings.length > 0) {
+      for (const f of rev.findings.slice(0, 10)) {
+        lines.push(`  - [${f.severity}] \`${f.id}\` ${sanitizeOutput(f.title, 260).text}`);
+      }
+    }
+  }
+
+  if (state.acceptance?.overrideReason) {
+    lines.push(
+      "",
+      "## ⚠️ 人工风险放行说明",
+      `- **放行理由**：${sanitizeOutput(state.acceptance.overrideReason, 1000).text}`,
+    );
+    if (state.acceptance.reviewDisposition?.acceptedRisks?.length) {
+      lines.push(
+        `- **已确认接受的审查项**：${state.acceptance.reviewDisposition.acceptedRisks.map((r) => sanitizeOutput(r, 200).text).join("；")}`,
+      );
+    }
   }
 
   if (note?.trim()) {

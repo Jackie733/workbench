@@ -2,9 +2,10 @@ import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
+import type { SandboxDriftInfo } from "../hub/evolution.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
 import type { MessageKey } from "./i18n.ts";
-import { activeRunnerChoice, getModelEffortCapability, type Scope } from "./state.ts";
+import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
 import { useStreamStore } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
@@ -258,12 +259,13 @@ export async function runBusy<T>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
-export function shouldUseCliRunner(): boolean {
+export function shouldUseCliRunner(action?: AgentAction): boolean {
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
-  const { selectedRunnerKey } = useDraftStore.getState();
-  if (selectedRunnerKey === "manual_copy") return false;
-  if (hub?.hubMode) return hub.harnesses.some((h) => h.installed) || selectedRunnerKey !== "";
-  return Boolean(selectedRunnerKey && selectedRunnerKey !== "manual_copy");
+  const draft = useDraftStore.getState();
+  const key = action ? (draft.runnerOverrides[action]?.key ?? "") : draft.selectedRunnerKey;
+  if (key === "manual_copy") return false;
+  if (hub?.hubMode) return hub.harnesses.some((h) => h.installed) || key !== "";
+  return Boolean(key && key !== "manual_copy");
 }
 
 export function handleDispatchOutcome(dispatch: DispatchOutcome | null, fallbackTitle: MessageKey): void {
@@ -305,6 +307,7 @@ export async function openRequirement(id: string): Promise<void> {
   ui.clearExpandedLogs();
   useDraftStore.getState().cancelEditSpec();
   useDraftStore.getState().cancelEditDesign();
+  useDraftStore.getState().clearRunnerOverrides();
   await queryClient.invalidateQueries({ queryKey: queryKeys.requirement(ui.activeProjectId, id) });
 }
 
@@ -371,10 +374,15 @@ export async function triggerActiveRun(
     anchorIds?: string[];
     mode?: "ask" | "refine";
     useFallback?: boolean;
+    runnerActionKey?: AgentAction;
   },
 ): Promise<void> {
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
-  const { selectedRunnerKey, selectedEffort } = useDraftStore.getState();
+  const drafts = useDraftStore.getState().runnerOverrides;
+  const override =
+    opts?.runnerActionKey && drafts[opts.runnerActionKey]?.key ? drafts[opts.runnerActionKey] : drafts[action];
+  const selectedRunnerKey = override?.key ?? "";
+  const selectedEffort = override?.effort ?? "";
   const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, action, selectedEffort);
   const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
   const effectiveEffort =
@@ -430,6 +438,99 @@ export async function captureUiScreenshots(id: string, label?: string) {
   });
 }
 
+export async function dispatchFixFromReview(
+  detail: RequirementDetail,
+  bridgeConnected: boolean,
+  opts?: { selectedFindingIds?: string[] },
+): Promise<void> {
+  const id = detail.state.id;
+  const report = detail.state.reviewReport;
+  const feedback = report
+    ? formatReviewFixFeedback(report, opts?.selectedFindingIds)
+    : "请根据最新跨模型 Code Review 意见定位修复问题，并重跑全量验证。";
+  const useCli = shouldUseCliRunner("fix");
+  const canMoveStage = detail.state.stage === "awaiting_acceptance" || detail.state.stage === "implementing";
+  if (canMoveStage) {
+    const res = await runBusy(() =>
+      api.requestChanges(id, {
+        feedback,
+        expectedRevision: detail.state.revision,
+        dispatchAgent: !useCli && bridgeConnected,
+      }),
+    );
+    if (!res) return;
+    await invalidateAllWorkbenchQueries();
+    if (useCli) {
+      await triggerActiveRun(id, "fix", { message: feedback });
+    } else {
+      handleDispatchOutcome(res.dispatch, "fallback.title.fixReview");
+    }
+    return;
+  }
+  if (useCli) {
+    await triggerActiveRun(id, "fix", { message: feedback });
+  } else {
+    await runBusy(async () => {
+      const out = await api.dispatch(id, { action: "fix" });
+      await invalidateAllWorkbenchQueries();
+      handleDispatchOutcome(out.dispatch, "fallback.title.fixReview");
+      return out;
+    });
+  }
+}
+
+export async function syncSandboxBaseAction(reqId: string): Promise<boolean> {
+  const ui = useUiStore.getState();
+  const res = await runBusy(() => api.syncRsiSandboxBase(reqId));
+  if (!res) return false;
+  await invalidateAllWorkbenchQueries();
+  if (res.upToDate) {
+    ui.showToastKey("toast.sandboxUpToDate", { id: reqId });
+    return true;
+  }
+  if (res.synced) {
+    ui.showToastKey("toast.sandboxSynced", { id: reqId });
+    return true;
+  }
+  ui.showToastKey("toast.sandboxConflicts", { count: res.conflictFiles.length }, true);
+  return false;
+}
+
+export async function dispatchSyncBaseWithAgent(
+  detail: RequirementDetail,
+  drift: SandboxDriftInfo,
+  bridgeConnected: boolean,
+): Promise<void> {
+  const id = detail.state.id;
+  const conflicts = drift.conflictFiles.slice(0, 8).join(", ");
+  const msg =
+    `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标提交 ${drift.mainHead.slice(0, 7)} 共 ${drift.behindCount} 个提交` +
+    (conflicts ? `，重叠冲突文件：${conflicts}` : "") +
+    `。同步主干步骤：\n` +
+    `1. 检查 git status：若存在未提交改动，先 git add -A && git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；\n` +
+    `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
+    `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
+  const useCli = shouldUseCliRunner("fix");
+  if (detail.state.stage === "awaiting_acceptance" || detail.state.stage === "implementing") {
+    const res = await runBusy(() =>
+      api.requestChanges(id, {
+        feedback: msg,
+        expectedRevision: detail.state.revision,
+        dispatchAgent: !useCli && bridgeConnected,
+      }),
+    );
+    if (!res) return;
+    await invalidateAllWorkbenchQueries();
+    if (useCli) {
+      await triggerActiveRun(id, "fix", { message: msg });
+    } else {
+      handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
+    }
+  } else if (useCli) {
+    await triggerActiveRun(id, "fix", { message: msg });
+  }
+}
+
 export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
   const id = detail.state.id;
   const rev = detail.state.revision;
@@ -437,7 +538,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
 
   switch (actionId) {
     case "dispatch_design": {
-      if (shouldUseCliRunner()) {
+      if (shouldUseCliRunner("design")) {
         await triggerActiveRun(id, "design");
         break;
       }
@@ -459,7 +560,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "approve_and_implement": {
-      const useCli = shouldUseCliRunner();
+      const useCli = shouldUseCliRunner("implement");
       const res = await runBusy(() =>
         api.approve(id, {
           expectedRevision: rev,
@@ -478,7 +579,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
     }
     case "fast_track":
     case "authorize_fast_track": {
-      const useCli = shouldUseCliRunner();
+      const useCli = shouldUseCliRunner("implement");
       const res = await runBusy(() =>
         api.fastTrack(id, {
           expectedRevision: rev,
@@ -496,7 +597,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "dispatch_implement": {
-      if (shouldUseCliRunner()) {
+      if (shouldUseCliRunner("implement")) {
         await triggerActiveRun(id, "implement");
         break;
       }
@@ -509,7 +610,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "dispatch_fix": {
-      if (shouldUseCliRunner()) {
+      if (shouldUseCliRunner("fix")) {
         await triggerActiveRun(id, "fix");
         break;
       }
@@ -521,13 +622,39 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       });
       break;
     }
-    case "request_changes":
+    case "dispatch_review": {
+      if (shouldUseCliRunner("review")) {
+        await triggerActiveRun(id, "review");
+        break;
+      }
+      await runBusy(async () => {
+        const out = await api.dispatch(id, { action: "review" });
+        await invalidateAllWorkbenchQueries();
+        handleDispatchOutcome(out.dispatch, "fallback.title.dispatchReview");
+        return out;
+      });
+      break;
+    }
+    case "dispatch_fix_review": {
+      await dispatchFixFromReview(detail, bridgeConnected);
+      break;
+    }
+    case "sync_base": {
+      await syncSandboxBaseAction(id);
+      break;
+    }
+    case "request_changes": {
+      const targetAction: AgentAction =
+        detail.state.stage === "awaiting_approval" || detail.state.stage === "draft" || detail.state.stage === "designing"
+          ? "design"
+          : "fix";
       ui.setModal({
         kind: "feedback",
         feedback: "",
-        dispatchAgent: shouldUseCliRunner() || bridgeConnected,
+        dispatchAgent: shouldUseCliRunner(targetAction) || bridgeConnected,
       });
       break;
+    }
     case "run_all_verifications": {
       const res = await executeVerify(id, { all: true });
       if (res) {
@@ -541,6 +668,22 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "accept": {
+      const report = detail.state.reviewReport;
+      const revState = detail.validity.reviewValidity.effectiveState;
+      const needsOverrideModal =
+        Boolean(report) &&
+        ((revState === "current" && (report!.verdict === "block" || report!.verdict === "concern")) ||
+          (revState === "stale" && report!.verdict === "block"));
+      if (needsOverrideModal && report) {
+        ui.setModal({
+          kind: "accept_override",
+          verdict: revState === "stale" ? "stale" : report.verdict,
+          summary: report.summary,
+          reason: "",
+          acceptedRisks: (report.findings ?? []).map((f) => `[${f.severity}] ${f.id}: ${f.title}`),
+        });
+        break;
+      }
       const res = await runBusy(() => api.accept(id, { expectedRevision: rev }));
       if (res) {
         await invalidateAllWorkbenchQueries();
@@ -636,7 +779,7 @@ export async function submitNewRequirement(
     ui.showToastKey("toast.needGoal", undefined, true);
     return;
   }
-  const useCli = dispatchAgent && shouldUseCliRunner();
+  const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.createRequirement({
       goal,
@@ -683,7 +826,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     ui.showToastKey("toast.needIssueRef", undefined, true);
     return;
   }
-  const useCli = dispatchAgent && shouldUseCliRunner();
+  const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.importGitHubIssue({
       issueRef,
@@ -724,7 +867,11 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     ui.showToastKey("toast.needFeedback", undefined, true);
     return;
   }
-  const useCli = dispatchAgent && shouldUseCliRunner();
+  const targetAction: AgentAction =
+    detail.state.stage === "awaiting_approval" || detail.state.stage === "draft" || detail.state.stage === "designing"
+      ? "design"
+      : "fix";
+  const useCli = dispatchAgent && shouldUseCliRunner(targetAction);
   const res = await runBusy(() =>
     api.requestChanges(detail.state.id, {
       feedback,
@@ -737,13 +884,42 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     await invalidateAllWorkbenchQueries();
     if (dispatchAgent) {
       if (useCli) {
-        await triggerActiveRun(detail.state.id, "design", { message: feedback });
+        await triggerActiveRun(detail.state.id, targetAction, { message: feedback });
       } else {
-        handleDispatchOutcome(res.dispatch, "fallback.title.feedback");
+        handleDispatchOutcome(
+          res.dispatch,
+          targetAction === "design" ? "fallback.title.feedback" : "fallback.title.feedbackFix",
+        );
       }
     } else {
-      ui.showToastKey("toast.changesRecorded");
+      ui.showToastKey("toast.changesRecordedFix");
     }
+  }
+}
+
+export async function submitAcceptOverride(
+  detail: RequirementDetail,
+  verdict: "pass" | "concern" | "block" | "stale" | "missing",
+  reasonRaw: string,
+  acceptedRisks: string[],
+): Promise<void> {
+  const reason = reasonRaw.trim();
+  const ui = useUiStore.getState();
+  if (verdict === "block" && !reason) {
+    ui.showToastKey("toast.acceptOverrideReasonRequired", undefined, true);
+    return;
+  }
+  const res = await runBusy(() =>
+    api.accept(detail.state.id, {
+      expectedRevision: detail.state.revision,
+      overrideReason: reason || "已人工确认并接受当前审查风险",
+      ...(acceptedRisks.length > 0 ? { acceptedRisks } : {}),
+    }),
+  );
+  if (res) {
+    ui.setModal(null);
+    await invalidateAllWorkbenchQueries();
+    ui.showToastKey("toast.acceptOverrideDone", { id: detail.state.id });
   }
 }
 
@@ -834,7 +1010,7 @@ export async function runRefineFromDrawer(reqId: string): Promise<void> {
   draft.setDiscussDraft("");
   draft.setDiscussAnchor(null);
   draft.clearPendingAnnotations();
-  await triggerActiveRun(reqId, "design", { message: summary, anchorIds, mode: "refine" });
+  await triggerActiveRun(reqId, "design", { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
 }
 
 export async function adoptDiscussion(reqId: string, discId: string, message: string): Promise<void> {

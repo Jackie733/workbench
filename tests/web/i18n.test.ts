@@ -296,6 +296,73 @@ describe("status and error messages", () => {
     }
   });
 
+  test("review-gated banners keep stable message refs in both languages", () => {
+    const state = {
+      id: "REQ-001",
+      stage: "implementing",
+      track: "plan_first",
+      designVersion: 1,
+      designHash: "d".repeat(64),
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+      tasks: [],
+      blockedReason: null,
+      lastFeedback: null,
+      reviewReport: {
+        verdict: "block",
+        summary: "Found two blocking issues",
+        findings: [
+          { id: "F-1", severity: "high", title: "issue one" },
+          { id: "F-2", severity: "medium", title: "issue two" },
+        ],
+      },
+    } as unknown as RequirementState;
+    const approval = { valid: true, reason: null };
+    const coverage = {
+      items: [{ criterion: state.criteria[0]!, state: "passed" as const, verificationIds: ["V-1"], reason: null }],
+      requiredTotal: 1,
+      requiredPassed: 1,
+      optionalTotal: 0,
+      optionalPassed: 0,
+    };
+    const gate = { ok: true, blockers: [], blockerRefs: [] };
+    const current = deriveActionBanner(state, approval, coverage, gate, {
+      effectiveState: "current",
+      reason: null,
+    });
+    expect(current.banner.headlineKey).toBe("core.banner.review.block");
+    expect(current.decisionReasonKey).toBe("core.decision.reviewBlock");
+    const enHeadline = translateRef("en", current.banner.headlineKey, current.banner.headline, current.banner.headlineParams);
+    expect(enHeadline).toContain("Cross-model review recommends blocking");
+    expect(enHeadline).toContain("(high 1 / medium 1)");
+    expect(enHeadline).toContain("Found two blocking issues");
+    const zhHeadline = translateRef("zh-CN", current.banner.headlineKey, current.banner.headline, current.banner.headlineParams);
+    expect(zhHeadline).toContain("跨模型审查建议阻塞");
+    expect(zhHeadline).toContain("（高 1 / 中 1）");
+    expect(translateRef("en", current.decisionReasonKey!, current.decisionReason!)).toBe(
+      "Review recommends blocking",
+    );
+    expect(
+      translateRef(
+        "en",
+        current.banner.primaryAction?.labelKey,
+        current.banner.primaryAction?.label ?? "",
+      ),
+    ).toBe("Let the agent fix review findings");
+
+    const stale = deriveActionBanner(state, approval, coverage, gate, {
+      effectiveState: "stale",
+      reason: "审查后工作区代码已有新改动，建议复审",
+      reasonKey: "core.review.staleCode",
+    });
+    expect(stale.banner.headlineKey).toBe("core.banner.review.stale");
+    const staleEn = translateRef("en", stale.banner.headlineKey, stale.banner.headline, stale.banner.headlineParams);
+    expect(staleEn).toContain("cross-model review is stale");
+    expect(staleEn).toContain("Workspace code changed since the review");
+    const staleZh = translateRef("zh-CN", stale.banner.headlineKey, stale.banner.headline, stale.banner.headlineParams);
+    expect(staleZh).toContain("跨模型审查已过期");
+    expect(staleZh).toContain("审查后工作区代码已有新改动");
+  });
+
   test("legacy evidence without message refs stays readable in English", () => {
     const diffView = {
       context: "legacy-unavailable",

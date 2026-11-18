@@ -16,6 +16,13 @@ import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
+function isBlockingDecision(item: RequirementSummary): boolean {
+  if (item.decisionReasonKey) {
+    return item.decisionReasonKey === "core.decision.blocked" || item.decisionReasonKey === "core.decision.reviewBlock";
+  }
+  return item.stage === "blocked";
+}
+
 export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
   const language = useUiStore((s) => s.language);
   const nodeLabel = project.nodeName ?? project.nodeId ?? "remote";
@@ -284,7 +291,12 @@ export function HomeView() {
   const doneCnt = rawItems.filter((i) => i.stage === "done").length;
 
   const visible = filteredItems(rawItems, query, language);
-  const pendingDecisions = rawItems.filter((i) => i.needsDecision);
+  const pendingDecisions = [...rawItems.filter((i) => i.needsDecision)].sort((a, b) => {
+    const aBlock = isBlockingDecision(a) ? 0 : 1;
+    const bBlock = isBlockingDecision(b) ? 0 : 1;
+    if (aBlock !== bBlock) return aBlock - bBlock;
+    return a.updatedAt - b.updatedAt;
+  });
 
   return (
     <div data-testid="home-view">
@@ -380,13 +392,16 @@ export function HomeView() {
                   >
                     {item.title}
                   </span>
-                  <span className="badge warning">
+                  <span className={`badge ${isBlockingDecision(item) ? "danger" : "warning"}`}>
                     {translateRef(
                       language,
                       item.decisionReasonKey,
                       item.decisionReason ?? t(language, "home.decisionFallback"),
                       item.decisionReasonParams,
                     )}
+                  </span>
+                  <span className="muted xs" style={{ flexShrink: 0 }}>
+                    {relativeTime(item.updatedAt, language)}
                   </span>
                 </div>
                 <button className="btn xs" type="button" onClick={() => void openRequirement(item.id)}>

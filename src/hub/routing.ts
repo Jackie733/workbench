@@ -463,7 +463,11 @@ export function normalizeRoutingConfig(raw: unknown): RoutingConfig {
       : defRule.fallbacks;
     stages[stage] = { primary, fallbacks };
   }
-  return { activePreset, stages };
+  return {
+    activePreset,
+    stages,
+    ...(typeof obj.autoReview === "boolean" ? { autoReview: obj.autoReview } : {}),
+  };
 }
 
 function normalizeTargetWithHarnesses(

@@ -36,8 +36,9 @@ export function ModelRunnerBar({
   const harnesses = hub?.harnesses ?? [];
   const routing = hub?.routing ?? null;
 
-  const selectedRunnerKey = useDraftStore((s) => s.selectedRunnerKey);
-  const selectedEffort = useDraftStore((s) => s.selectedEffort);
+  const override = useDraftStore((s) => s.runnerOverrides[stageAction]);
+  const selectedRunnerKey = override?.key ?? "";
+  const selectedEffort = override?.effort ?? "";
   const setSelectedRunnerKey = useDraftStore((s) => s.setSelectedRunnerKey);
   const setSelectedEffort = useDraftStore((s) => s.setSelectedEffort);
 
@@ -100,8 +101,7 @@ export function ModelRunnerBar({
         data-testid={testId}
         value={selectedKey}
         onChange={(e) => {
-          setSelectedRunnerKey(e.target.value);
-          setSelectedEffort("");
+          setSelectedRunnerKey(e.target.value, stageAction);
         }}
       >
         <option value="">
@@ -151,8 +151,7 @@ export function ModelRunnerBar({
                   <Command.Item
                     value="__auto__ 默认路由 自动路由"
                     onSelect={() => {
-                      setSelectedRunnerKey("");
-                      setSelectedEffort("");
+                      setSelectedRunnerKey("", stageAction);
                       setOpen(false);
                     }}
                     className={cn(
@@ -170,8 +169,7 @@ export function ModelRunnerBar({
                     <Command.Item
                       value="manual_copy 仅生成提示词 手动复制"
                       onSelect={() => {
-                        setSelectedRunnerKey("manual_copy");
-                        setSelectedEffort("");
+                        setSelectedRunnerKey("manual_copy", stageAction);
                         setOpen(false);
                       }}
                       className={cn(
@@ -192,8 +190,7 @@ export function ModelRunnerBar({
                         key={o.key}
                         value={`${o.harnessId} ${o.harnessLabel} ${o.modelId} ${o.displayLabel} ${o.provider ?? ""}`}
                         onSelect={() => {
-                          setSelectedRunnerKey(o.key);
-                          setSelectedEffort("");
+                          setSelectedRunnerKey(o.key, stageAction);
                           setOpen(false);
                         }}
                         className={cn(
@@ -232,7 +229,7 @@ export function ModelRunnerBar({
             data-field="effort-select"
             data-testid={`${testId}-effort`}
             value={effortValue}
-            onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "")}
+            onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "", stageAction)}
           >
             <option value="">
               {t(language, "runner.effortDefault")}

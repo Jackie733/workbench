@@ -12,7 +12,9 @@ import {
   propose,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
+import { atomicWriteJson } from "../../src/core/fs.ts";
 import { runVerification } from "../../src/core/runner.ts";
+import type { RequirementState } from "../../src/core/types.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
@@ -1851,6 +1853,36 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     const acceptedSnapshot = await observeGitSnapshot(root);
     await acceptRequirement(root, "REQ-002", { currentCodeSnapshotHash: acceptedSnapshot!.fingerprint });
 
+    // 旧版已验收需求：验收记录缺少快照，用于英文界面下断言历史原文保留。
+    await createRequirement(root, {
+      goal: "旧版验收中文原文",
+      criteria: [{ id: "AC-1", description: "旧版验收条件原文", required: true, command: "echo 旧版历史证据原文" }],
+    });
+    await propose(root, "REQ-003", { designMarkdown: "# 旧版中文方案", actor: "agent" });
+    await approveDesign(root, "REQ-003", { baseline: acceptedSnapshot });
+    await runVerification(root, "REQ-003", { command: "echo 旧版历史证据原文", criterionIds: ["AC-1"] });
+    const legacyDone = await acceptRequirement(root, "REQ-003", {
+      currentCodeSnapshotHash: acceptedSnapshot!.fingerprint,
+    });
+    const legacyState: RequirementState = {
+      ...legacyDone.state,
+      acceptance: {
+        acceptedAt: legacyDone.state.acceptance!.acceptedAt,
+        specHash: legacyDone.state.acceptance!.specHash,
+        codeSnapshotHash: legacyDone.state.acceptance!.codeSnapshotHash,
+        verificationIds: legacyDone.state.acceptance!.verificationIds,
+      },
+    };
+    atomicWriteJson(path.join(root, ".workbench/items/REQ-003/state.json"), legacyState);
+
+    // 实施中需求：用于验证英文界面下截图跳过原因的本地化即时提示。
+    await createRequirement(root, {
+      goal: "截图跳过英文提示",
+      criteria: [{ id: "AC-1", description: "截图提示用例", required: true, command: "echo shot" }],
+    });
+    await propose(root, "REQ-004", { designMarkdown: "# 截图用例方案", actor: "agent" });
+    await approveDesign(root, "REQ-004", { baseline: acceptedSnapshot });
+
     const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, hostname: "0.0.0.0" });
     servers.push(server);
     const { password } = resetAuthPassword(hubDir);
@@ -2055,6 +2087,28 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
       await clickReady(page, '[data-testid="back-home-btn"]');
+      // 7c. 英文界面打开旧版验收记录：界面标题本地化，中文历史命令与输出原文保留。
+      await page.waitForSelector('[data-testid="req-row-REQ-003"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-003"]');
+      await page.waitForSelector('[data-testid="evidence-provenance-banner"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Legacy acceptance record (no diff snapshot)");
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 5000 });
+      const legacyEvidenceText = await bodyText();
+      expect(legacyEvidenceText).toContain("Historical code diff unavailable");
+      expect(legacyEvidenceText).toContain("echo 旧版历史证据原文");
+      expect(legacyEvidenceText).toContain("旧版历史证据原文");
+      await page.click('[data-action="toggle-log"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(
+            document
+              .querySelector(".evidence-log")
+              ?.textContent?.includes("旧版历史证据原文"),
+          ),
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="back-home-btn"]');
       await page.click('[data-action="set-scope"][data-value="active"]');
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
@@ -2109,6 +2163,38 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
+      // 9c. 英文界面下截图跳过原因显示本地化即时提示，且随语言切换更新；历史批次原文不受影响。
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      await page.click('[data-action="set-scope"][data-value="active"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-004"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-004"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      const originalChromePath = process.env.WORKBENCH_CHROME_PATH;
+      process.env.WORKBENCH_CHROME_PATH = "/definitely/missing/chrome";
+      try {
+        await clickReady(page, '[data-testid="screenshot-recapture"]');
+        await page.waitForFunction(
+          () =>
+            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+              "does not exist",
+            ),
+          { timeout: 5000 },
+        );
+        await selectLang("zh-CN");
+        await page.waitForFunction(
+          () =>
+            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+              "指向的浏览器不存在",
+            ),
+          { timeout: 5000 },
+        );
+      } finally {
+        if (originalChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+        else process.env.WORKBENCH_CHROME_PATH = originalChromePath;
+      }
+      await selectLang("en");
+
       // 10. 窄屏仍可使用语言入口；存储不可用时本会话仍可切换。
       await page.setViewport({ width: 375, height: 720 });
       const languageBox = await page.evaluate(() => {
@@ -2142,5 +2228,5 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     } finally {
       await page.close();
     }
-  }, 45_000);
+  }, 60_000);
 });

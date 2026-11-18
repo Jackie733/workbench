@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import {
+  AlertTriangle,
   ArrowUp,
   Check,
   Crosshair,
@@ -34,11 +35,13 @@ import {
   queryClient,
   queryKeys,
   runBusy,
+  submitAcceptOverride,
   submitAnnotation,
   submitFeedback,
   submitImportGitHubIssue,
   submitLifecycle,
   submitNewRequirement,
+  syncSandboxBaseAction,
   useDeliveryQuery,
   useEvolutionQuery,
   useGitHubStatusQuery,
@@ -48,7 +51,7 @@ import {
   useRequirementQuery,
 } from "../queries.ts";
 import { describeClientErrorRef, t, translateRef, type MessageKey } from "../i18n.ts";
-import { effortLabel, formatDateTime, getModelEffortCapability, parseRunnerKey } from "../state.ts";
+import { effortLabel, formatDateTime, formatReviewFixFeedback, getModelEffortCapability, parseRunnerKey } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -807,6 +810,21 @@ export function Modals() {
               </div>
             )}
 
+            {cfg && (
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 12 }}>
+                <input
+                  type="checkbox"
+                  data-testid="routing-auto-review-checkbox"
+                  checked={cfg.autoReview !== false}
+                  onChange={(e) => {
+                    const nextCfg = { ...cfg, autoReview: e.target.checked };
+                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                  }}
+                />
+                <span>Agent 提交验收后自动发起跨模型 Code Review（推荐，减少人工等待）</span>
+              </label>
+            )}
+
             <div className="callout info xs" style={{ margin: "12px 0" }}>
               {t(language, "routing.outputLanguageCallout")}
             </div>
@@ -1043,15 +1061,40 @@ export function Modals() {
   }
 
   if (m.kind === "feedback") {
+    const isDesignStage =
+      detail?.state.stage === "awaiting_approval" ||
+      detail?.state.stage === "draft" ||
+      detail?.state.stage === "designing";
+    const reviewReport = detail?.state.reviewReport;
     return (
-      <ModalShell onClose={close}>
-        <h3>{t(language, "feedback.title")}</h3>
+      <ModalShell onClose={close} testId="feedback-modal">
+        <h3>{isDesignStage ? t(language, "feedback.titleDesign") : t(language, "feedback.titleFix")}</h3>
+        <p className="xs muted" style={{ margin: "0 0 8px" }}>
+          {isDesignStage ? t(language, "feedback.descDesign") : t(language, "feedback.descFix")}
+        </p>
+        {!isDesignStage && reviewReport && (
+          <div style={{ marginBottom: 8 }}>
+            <button
+              className="btn xs"
+              type="button"
+              data-testid="feedback-fill-review-btn"
+              onClick={() => {
+                const snippet = formatReviewFixFeedback(reviewReport);
+                setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: snippet } : prev));
+              }}
+            >
+              {t(language, "feedback.fillReview")}
+            </button>
+          </div>
+        )}
         <textarea
           className="textarea"
           id="feedback-input"
           autoFocus
           value={m.feedback}
-          placeholder={t(language, "feedback.placeholder")}
+          placeholder={
+            isDesignStage ? t(language, "feedback.placeholderDesign") : t(language, "feedback.placeholderFix")
+          }
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: e.target.value } : prev))
           }
@@ -1067,7 +1110,9 @@ export function Modals() {
               )
             }
           />
-          <span>{t(language, "feedback.dispatch")}</span>
+          <span>
+            {isDesignStage ? t(language, "feedback.dispatchDesign") : t(language, "feedback.dispatchFix")}
+          </span>
         </label>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
@@ -1076,10 +1121,72 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
+            data-testid="feedback-submit-btn"
             disabled={busy}
             onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
-            {t(language, "feedback.submit")}
+            {isDesignStage ? t(language, "feedback.submitDesign") : t(language, "feedback.submitFix")}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "accept_override") {
+    const isBlock = m.verdict === "block";
+    const title = isBlock
+      ? t(language, "acceptOverride.titleBlock")
+      : m.verdict === "concern"
+        ? t(language, "acceptOverride.titleConcern")
+        : t(language, "acceptOverride.titleStale");
+    return (
+      <ModalShell onClose={close} testId="accept-override-modal">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Icon icon={AlertTriangle} size={20} />
+          <h3 style={{ margin: 0 }}>{title}</h3>
+        </div>
+        <div className={`callout ${isBlock ? "danger" : "warning"} xs`} style={{ marginBottom: 10 }}>
+          <div>
+            <strong>{t(language, "acceptOverride.summary")}</strong>
+            {m.summary}
+          </div>
+          {m.acceptedRisks.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {m.acceptedRisks.slice(0, 8).map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+          {isBlock ? t(language, "acceptOverride.reasonBlockLabel") : t(language, "acceptOverride.reasonConcernLabel")}
+        </label>
+        <textarea
+          className="textarea"
+          data-testid="accept-override-reason"
+          autoFocus
+          value={m.reason}
+          placeholder={
+            isBlock
+              ? t(language, "acceptOverride.reasonBlockPlaceholder")
+              : t(language, "acceptOverride.reasonConcernPlaceholder")
+          }
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "accept_override" ? { ...prev, reason: e.target.value } : prev))
+          }
+        />
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            {t(language, "acceptOverride.back")}
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="confirm-accept-override-btn"
+            disabled={busy || (isBlock && !m.reason.trim())}
+            onClick={() => detail && void submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks)}
+          >
+            {t(language, "acceptOverride.confirm")}
           </button>
         </div>
       </ModalShell>
@@ -1534,6 +1641,12 @@ export function Modals() {
                                 {t(language, "evo.sandbox", { stage: sandboxItem.stage })}
                               </span>
                             )}
+                            {sandboxItem?.drift && sandboxItem.drift.behindCount > 0 && (
+                              <span className={`badge ${sandboxItem.drift.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                                落后主干 {sandboxItem.drift.behindCount} 提交
+                                {sandboxItem.drift.conflictFiles.length > 0 ? ` · ${sandboxItem.drift.conflictFiles.length} 冲突` : ""}
+                              </span>
+                            )}
                             {sandboxItem?.github?.issue && (
                               <span className="badge info">Issue #{sandboxItem.github.issue.number}</span>
                             )}
@@ -1591,6 +1704,16 @@ export function Modals() {
                               onClick={() => void openWorkbenchReq(p.promotedReqId!)}
                             >
                               <Icon icon={ExternalLink} size={14} /> {t(language, "evo.viewReq")}
+                            </button>
+                          )}
+                          {sandboxItem?.drift?.canAutoSync && p.promotedReqId && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!)}
+                            >
+                              <Icon icon={RefreshCw} size={14} /> 同步主干
                             </button>
                           )}
                           {sandboxItem?.canApply && p.promotedReqId && sandboxItem.github?.pr && (

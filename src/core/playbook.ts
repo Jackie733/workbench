@@ -78,6 +78,17 @@ export async function writePlaybook(
   });
 }
 
+const CONVERSATIONAL_ACK_RE =
+  /^(?:接纳|同意|收到|确认|好的|没问题|按此执行|继续|ok|lgtm)(?:[，,。.!！\s]*(?:请你?|麻烦)?(?:更新|修改|补充)?(?:方案|规范|代码)?)?[。.!！\s]*$/i;
+
+function isNoisyRuleText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 6) return true;
+  if (CONVERSATIONAL_ACK_RE.test(trimmed)) return true;
+  if (/^审查结论[:：]/.test(trimmed)) return true;
+  return false;
+}
+
 export async function distillRequirementToPlaybook(
   root: string,
   detail: RequirementDetail,
@@ -92,7 +103,7 @@ export async function distillRequirementToPlaybook(
   const reqId = detail.state.id;
   for (const deadEnd of detail.state.handoffNote?.deadEnds ?? []) {
     const clean = sanitizeOutput(deadEnd, 512).text.trim().replace(/\s+/g, " ");
-    if (clean.length >= 6) {
+    if (!isNoisyRuleText(clean)) {
       candidates.push(`[避坑 · ${reqId}] ${clean.slice(0, 260)}`);
     }
   }
@@ -100,14 +111,14 @@ export async function distillRequirementToPlaybook(
     if (disc.actor !== "human") continue;
     if (disc.mode !== "refine" && disc.resolved !== true) continue;
     const clean = sanitizeOutput(disc.message, 512).text.trim().replace(/\s+/g, " ");
-    if (clean.length >= 6) {
+    if (!isNoisyRuleText(clean)) {
       const anchor = disc.anchor ? ` · ${sanitizeOutput(disc.anchor, 80).text.trim()}` : "";
       candidates.push(`[批注经验 · ${reqId}${anchor}] ${clean.slice(0, 260)}`);
     }
   }
   const rawFeedback = extra?.feedback ?? detail.state.lastFeedback;
   const feedback = rawFeedback ? sanitizeOutput(rawFeedback, 512).text.trim().replace(/\s+/g, " ") : "";
-  if (feedback && feedback.length >= 6) {
+  if (feedback && !isNoisyRuleText(feedback)) {
     candidates.push(`[人工纠偏 · ${reqId}] ${feedback.slice(0, 260)}`);
   }
 

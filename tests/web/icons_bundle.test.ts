@@ -79,7 +79,9 @@ describe("icon dependency and bundle contract", () => {
 
     // Bundle includes React 19, Zustand, TanStack Query, ReactMarkdown, jsdiff, Radix UI, cmdk, and tree-shaken Lucide icons.
     // Ensure it stays well below adding the un-tree-shaken Lucide catalog on top.
-    expect(app.raw).toBeLessThan(2_600_000);
+    // 2026-11 threshold raised from 2.6MB after mainline review-flow/RSI features and the bilingual catalog grew the app;
+    // the un-tree-shaken catalog baseline (fixture raw ≈ 1.52MB) remains the real guard.
+    expect(app.raw).toBeLessThan(2_700_000);
     expect(app.gzip).toBeLessThan(550_000);
   });
 

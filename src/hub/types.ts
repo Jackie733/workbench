@@ -26,6 +26,8 @@ export interface StageRouteRule {
 export interface RoutingConfig {
   activePreset: RoutingPreset;
   stages: Record<RoutingStage, StageRouteRule>;
+  /** Automatically dispatch cross-model review after agent submits readyForAcceptance (defaults to true). */
+  autoReview?: boolean;
 }
 
 export interface DiscoveredModel {

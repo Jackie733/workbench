@@ -1,7 +1,7 @@
 import { buildOutputLanguageDirective, type ResolvedOutputLanguage } from "../core/language.ts";
 import type { RequirementDetail } from "../core/types.ts";
 
-export type DispatchAction = "design" | "implement" | "fix";
+export type DispatchAction = "design" | "implement" | "fix" | "review";
 
 /** Builds a clear, tool-grounded task prompt for any Coding Agent from current requirement state. */
 export function buildAgentPrompt(
@@ -11,8 +11,20 @@ export function buildAgentPrompt(
 ): string {
   const { state, specMarkdown, designMarkdown, validity } = detail;
   const lang: ResolvedOutputLanguage = options.outputLanguage ?? "zh-CN";
-  const langDirective = buildOutputLanguageDirective(lang, "plan");
+  const langDirective = buildOutputLanguageDirective(lang, action === "review" ? "review" : "plan");
   const header = `请处理工作台需求 ${state.id}：${state.title}`;
+
+  if (action === "review") {
+    return [
+      `请作为独立代码审查者对工作台需求 ${state.id}（${state.title}）执行只读 Code Review。`,
+      "",
+      langDirective,
+      "",
+      "请执行以下步骤（严禁修改代码或批准/验收）：",
+      `1. 调用 wb_get({ id: "${state.id}", includeDiff: true }) 检查需求规范、验收证据与 Git Diff。`,
+      "2. 在工作台或通过 `wb review` 提交结构化审查结论（pass / concern / block）。",
+    ].join("\n");
+  }
 
   if (action === "design") {
     const feedback = state.lastFeedback ? `\n人工修改意见：\n${state.lastFeedback}\n` : "";
@@ -37,16 +49,25 @@ export function buildAgentPrompt(
     const failed = validity.coverage.items
       .filter((item) => item.state === "failed" || item.state === "stale" || item.state === "unverified")
       .map((item) => `- ${item.criterion.id}: ${item.criterion.description} [${item.state}${item.reason ? `：${item.reason}` : ""}]`);
+    const reviewNote =
+      state.reviewReport && state.reviewReport.verdict !== "pass"
+        ? `最新跨模型 Code Review（${state.reviewReport.verdict}）：\n${state.reviewReport.summary}\n${
+            state.reviewReport.findings?.length
+              ? state.reviewReport.findings.map((f) => `- [${f.severity}] ${f.id}: ${f.title}`).join("\n")
+              : ""
+          }\n`
+        : "";
     return [
       header,
       "",
       langDirective,
       "",
+      reviewNote,
       state.lastFeedback ? `人工反馈意见：\n${state.lastFeedback}\n` : "",
       failed.length > 0 ? `当前未通过或需重跑的验收条件：\n${failed.join("\n")}\n` : "",
       "请执行以下步骤：",
-      `1. 调用 wb_get({ id: "${state.id}", includeDiff: true }) 查看最新状态、错误详情与代码改动。`,
-      "2. 修复代码或补充测试，并通过 wb_verify 运行真实测试命令，确保全部必需验收条件通过。",
+      `1. 调用 wb_get({ id: "${state.id}", includeDiff: true }) 查看最新状态、审查问题、错误详情与代码改动。`,
+      "2. 逐条修复问题并补充必要回归测试，通过 wb_verify 运行真实测试命令，确保全部必需验收条件通过。",
       `3. 更新任务清单并在全部验证通过后调用 wb_update_tasks({ id: "${state.id}", readyForAcceptance: true }) 提交验收。`,
     ]
       .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))

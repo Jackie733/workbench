@@ -20,12 +20,22 @@ import {
   type ResolvedOutputLanguage,
 } from "../core/language.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
+import {
+  MAX_EVIDENCE_BYTES,
+  WORKBENCH_DIR,
+  type AgentAction,
+  type AgentRunRecord,
+  type OutputLanguage,
+  type RequirementDetail,
+  type ReviewFinding,
+  type ReviewVerdict,
+} from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
   inspectFinishedRunForPainPoints,
+  reconcileRsiSandboxBaseline,
   syncRequirementMirrorToSandbox,
   type EvolutionPainPoint,
   type PainPointReportInput,
@@ -340,6 +350,17 @@ function buildCompactResumeContext(
   if (failedEv) {
     parts.push(`- **最新失败验证**：\`${failedEv.record.command}\`（退出码 ${failedEv.record.exitCode}）`);
   }
+  if (state.reviewReport && (state.reviewReport.verdict !== "pass" || input.action === "fix")) {
+    const rev = state.reviewReport;
+    parts.push(
+      `- **最新跨模型审查（${rev.verdict} / ${validity.reviewValidity.effectiveState}）**：${rev.summary}`,
+    );
+    if (rev.findings && rev.findings.length > 0) {
+      for (const f of rev.findings.slice(0, 10)) {
+        parts.push(`  - [${f.severity}] \`${f.id}\` ${f.title}`);
+      }
+    }
+  }
   if (state.lastFeedback) {
     parts.push(`- **最新打回意见**：${state.lastFeedback}`);
   }
@@ -395,22 +416,26 @@ export function buildExecutionPrompt(
       `请你作为独立的代码与交付审查者（Cross-Model Reviewer），审查工作台需求 ${reqId}（${detail.state.title}）。`,
       "重要约束：",
       "- 严禁修改仓库业务代码或调用 wb propose / wb tasks；只读检查 Git Diff、测试证据与 Spec 一致性。",
+      "- 注：若当前处于只读沙箱且需要可写临时目录的浏览器/Puppeteer 用例因 EROFS 无法启动，请直接核验 `.workbench/items/" + reqId + "/evidence/` 既有真实运行日志并执行 `tsc --noEmit` 与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
       buildOutputLanguageDirective(lang, "review"),
-      "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下：",
+      "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下（`findings` 为可选结构化问题列表，有具体问题时建议填写以便前端逐条定位修复）：",
       lang === "en"
-        ? '```json\n{"verdict":"pass"|"concern"|"block","summary":"One-sentence core review summary in English"}\n```'
-        : '```json\n{"verdict":"pass"|"concern"|"block","summary":"用简体中文写出的一句话核心审查结论"}\n```',
+        ? '```json\n{"verdict":"pass"|"concern"|"block","summary":"One-sentence core review summary in English","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"Short issue title","criterionIds":["AC-1"],"files":["src/path.ts:10"],"suggestion":"Concrete fix"}]}\n```'
+        : '```json\n{"verdict":"pass"|"concern"|"block","summary":"用简体中文写出的一句话核心审查结论","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"简明问题描述","criterionIds":["AC-1"],"files":["src/path.ts:10"],"suggestion":"具体修复建议"}]}\n```',
       "",
       "审查范围与交接简报（包含需求契约、验收状态与当前 Git 现场）：",
       handoffMarkdown,
     ].join("\n");
   }
 
+  const hasReviewToFix = Boolean(detail.state.reviewReport && detail.state.reviewReport.verdict !== "pass");
   const modeVerb =
     input.action === "design"
-      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案，并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
+      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，例如若已有全量 \`bun test\`，仅在需独立隔离时保留子集测试以节省验证耗时），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
       : input.action === "fix"
-        ? `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+        ? hasReviewToFix || Boolean(detail.state.lastFeedback)
+          ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+          : `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
         : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
 
   const boundaryGuard =
@@ -435,20 +460,70 @@ export function buildExecutionPrompt(
   ].join("\n");
 }
 
+function parseReviewFindings(rawFindings: unknown): ReviewFinding[] | undefined {
+  if (!Array.isArray(rawFindings) || rawFindings.length === 0) return undefined;
+  const out: ReviewFinding[] = [];
+  for (let idx = 0; idx < rawFindings.length && out.length < 50; idx++) {
+    const item = rawFindings[idx];
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const rawTitle = typeof obj.title === "string" ? sanitizeOutput(obj.title.trim(), 380).text.trim() : "";
+    if (!rawTitle) continue;
+    const sev = obj.severity === "high" || obj.severity === "medium" || obj.severity === "low" ? obj.severity : "medium";
+    const id =
+      typeof obj.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(obj.id.trim())
+        ? obj.id.trim()
+        : `F-${out.length + 1}`;
+    const detail =
+      typeof obj.detail === "string" && obj.detail.trim()
+        ? sanitizeOutput(obj.detail.trim(), 1800).text.trim()
+        : undefined;
+    const suggestion =
+      typeof obj.suggestion === "string" && obj.suggestion.trim()
+        ? sanitizeOutput(obj.suggestion.trim(), 1400).text.trim()
+        : undefined;
+    const criterionIds = Array.isArray(obj.criterionIds)
+      ? obj.criterionIds
+          .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(c.trim()))
+          .map((c) => c.trim())
+          .slice(0, 16)
+      : undefined;
+    const files = Array.isArray(obj.files)
+      ? obj.files
+          .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+          .map((f) => sanitizeOutput(f.trim(), 480).text.trim())
+          .filter(Boolean)
+          .slice(0, 16)
+      : undefined;
+    out.push({
+      id,
+      severity: sev,
+      title: rawTitle,
+      ...(detail ? { detail } : {}),
+      ...(criterionIds && criterionIds.length > 0 ? { criterionIds } : {}),
+      ...(files && files.length > 0 ? { files } : {}),
+      ...(suggestion ? { suggestion } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function parseReviewOutput(
   rawOutput: string,
-): { verdict: ReviewVerdict; summary: string; markdown: string } | null {
+): { verdict: ReviewVerdict; summary: string; markdown: string; findings?: ReviewFinding[] } | null {
   const clean = sanitizeOutput(rawOutput, 256 * 1024).text.trim();
   if (!clean) return null;
   const jsonBlocks = Array.from(clean.matchAll(/```json\s*([\s\S]*?)```/gi));
   for (let i = jsonBlocks.length - 1; i >= 0; i--) {
     try {
-      const parsed = JSON.parse(jsonBlocks[i]![1]!) as { verdict?: string; summary?: string };
+      const parsed = JSON.parse(jsonBlocks[i]![1]!) as { verdict?: string; summary?: string; findings?: unknown };
       if (parsed.verdict === "pass" || parsed.verdict === "concern" || parsed.verdict === "block") {
+        const findings = parseReviewFindings(parsed.findings);
         return {
           verdict: parsed.verdict,
           summary: parsed.summary?.trim() || `审查结论：${parsed.verdict}`,
           markdown: clean,
+          ...(findings ? { findings } : {}),
         };
       }
     } catch {
@@ -1067,8 +1142,21 @@ export class HubExecutor {
       const reviewParseFailed = status === "succeeded" && input.action === "review" && parsedReview === null;
       if (reviewParseFailed) status = "failed";
 
-      const invalidSessionTokens = new Set(["string", "number", "boolean", "undefined", "null", "object", "unknown", "default"]);
-      const sessMatches = Array.from(rawLog.matchAll(/session[_ -]?id[:=]\s*["']?([A-Za-z0-9._-]{6,64})["']?/gi));
+      const invalidSessionTokens = new Set([
+        "string",
+        "number",
+        "boolean",
+        "undefined",
+        "null",
+        "object",
+        "unknown",
+        "default",
+        "canresumesameharness",
+      ]);
+      // Only accept line-anchored CLI header lines like `session id: <uuid>` rather than arbitrary grep/code output.
+      const sessMatches = Array.from(
+        rawLog.matchAll(/^(?:session id|session_id)\s*:\s*["']?([0-9a-f]{8}-[0-9a-f-]{27}|[A-Za-z0-9][A-Za-z0-9._-]{7,63})["']?\s*$/gim),
+      );
       let matchedSessionId: string | undefined;
       for (let i = sessMatches.length - 1; i >= 0; i--) {
         const cand = sessMatches[i]![1]!;
@@ -1112,7 +1200,11 @@ export class HubExecutor {
         // Telemetry write failure must not abort run finalization.
       }
 
+      let postRunDetail: RequirementDetail | null = null;
       try {
+        if (codeRoot !== base) {
+          await reconcileRsiSandboxBaseline(base, id).catch(() => null);
+        }
         const snap = await observeGitSnapshot(codeRoot);
         const latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
 
@@ -1140,6 +1232,7 @@ export class HubExecutor {
             verdict: parsedReview.verdict,
             summary: parsedReview.summary,
             markdown: parsedReview.markdown,
+            ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
             reviewedSpecHash: latestReq.state.specHash,
             reviewedCodeSnapshotHash: snap.fingerprint,
           });
@@ -1167,6 +1260,7 @@ export class HubExecutor {
           rawLog,
           snap?.fingerprint ?? null,
         );
+        postRunDetail = finishedDetail;
 
         const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
         const postHandoff = await synthesizeHandoffPacket(base, id, {
@@ -1222,6 +1316,43 @@ export class HubExecutor {
         runId,
         at: endedAt,
       });
+
+      // Auto-trigger cross-model review once implement/fix succeeds and submits for acceptance.
+      if (
+        status === "succeeded" &&
+        (input.action === "implement" || input.action === "fix") &&
+        postRunDetail &&
+        postRunDetail.state.stage === "awaiting_acceptance" &&
+        postRunDetail.validity.acceptanceGate.ok &&
+        postRunDetail.validity.reviewValidity.effectiveState !== "current"
+      ) {
+        try {
+          const latestPrefs = this.getHubPreferences?.();
+          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
+          if (latestRouting.autoReview !== false) {
+            const availHarnesses = await this.getHarnesses(false);
+            const reviewTarget = resolveRouteCandidates(latestRouting, availHarnesses, "review")[0];
+            const canAutoRun =
+              Boolean(reviewTarget) &&
+              (availHarnesses.some((h) => h.id === reviewTarget!.harness && h.installed) ||
+                Boolean(this.commandBuilder));
+            const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
+            if (canAutoRun && !alreadyRunning) {
+              void this.startRun({
+                root: base,
+                requirementId: id,
+                action: "review",
+              }).catch((err) => {
+                console.error(
+                  `[workbench] auto-review failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
+            }
+          }
+        } catch {
+          // Never crash finalize if auto-review dispatch encounters a routing error.
+        }
+      }
     };
 
     child.on("error", (err) => {

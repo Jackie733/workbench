@@ -8,9 +8,9 @@ import { resolveCodeRoot } from "./sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
 import { isSafeText, sanitizeOutput } from "./validate.ts";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 300_000;
 const MIN_TIMEOUT_MS = 500;
-const MAX_TIMEOUT_MS = 300_000;
+const MAX_TIMEOUT_MS = 900_000;
 const PREVIEW_MAX_BYTES = 4096;
 
 export interface RunVerificationInput {
