@@ -1,8 +1,16 @@
 import { create } from "zustand";
+import type { AgentAction } from "../../core/types.ts";
 import type { ReasoningEffort } from "../../hub/types.ts";
 import type { CriterionDraft, PendingAnnotation } from "../state.ts";
 
+export interface RunnerOverride {
+  key: string;
+  effort: ReasoningEffort | "";
+}
+
 export interface DraftStoreState {
+  /** Per-action runner overrides prevent an implement/ask pick from bleeding into review/design/fix. */
+  runnerOverrides: Partial<Record<AgentAction, RunnerOverride>>;
   selectedRunnerKey: string;
   selectedEffort: ReasoningEffort | "";
 
@@ -18,8 +26,9 @@ export interface DraftStoreState {
   discussAnchor: string | null;
   pendingAnnotations: PendingAnnotation[];
 
-  setSelectedRunnerKey: (key: string) => void;
-  setSelectedEffort: (effort: ReasoningEffort | "") => void;
+  setSelectedRunnerKey: (key: string, action?: AgentAction) => void;
+  setSelectedEffort: (effort: ReasoningEffort | "", action?: AgentAction) => void;
+  clearRunnerOverrides: () => void;
   startEditSpec: (title: string, body: string, criteria: CriterionDraft[]) => void;
   cancelEditSpec: () => void;
   setSpecDraftTitle: (title: string) => void;
@@ -38,6 +47,7 @@ export interface DraftStoreState {
 }
 
 export const useDraftStore = create<DraftStoreState>((set) => ({
+  runnerOverrides: {},
   selectedRunnerKey: "",
   selectedEffort: "",
 
@@ -53,8 +63,31 @@ export const useDraftStore = create<DraftStoreState>((set) => ({
   discussAnchor: null,
   pendingAnnotations: [],
 
-  setSelectedRunnerKey: (selectedRunnerKey) => set({ selectedRunnerKey }),
-  setSelectedEffort: (selectedEffort) => set({ selectedEffort }),
+  setSelectedRunnerKey: (selectedRunnerKey, action) =>
+    set((s) =>
+      action
+        ? {
+            selectedRunnerKey,
+            runnerOverrides: {
+              ...s.runnerOverrides,
+              [action]: { key: selectedRunnerKey, effort: "" },
+            },
+          }
+        : { selectedRunnerKey },
+    ),
+  setSelectedEffort: (selectedEffort, action) =>
+    set((s) =>
+      action
+        ? {
+            selectedEffort,
+            runnerOverrides: {
+              ...s.runnerOverrides,
+              [action]: { key: s.runnerOverrides[action]?.key ?? "", effort: selectedEffort },
+            },
+          }
+        : { selectedEffort },
+    ),
+  clearRunnerOverrides: () => set({ runnerOverrides: {}, selectedRunnerKey: "", selectedEffort: "" }),
 
   startEditSpec: (specDraftTitle, specDraftBody, specDraftCriteria) =>
     set({ editingSpec: true, specDraftTitle, specDraftBody, specDraftCriteria }),

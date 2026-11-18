@@ -16,6 +16,7 @@ import {
   initProject,
   linkRequirementGitHubIssue,
   recordRequirementGitHubSync,
+  syncRequirementBaseline,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteBuffer, atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withFileLockSync } from "../core/fs.ts";
@@ -503,6 +504,319 @@ function splitNullStrings(buf: Buffer): string[] {
   return buf.toString("utf8").split("\0").filter(Boolean);
 }
 
+function isGitAncestor(repoDir: string, ancestor: string, descendant: string): boolean {
+  if (!ancestor || !descendant) return false;
+  try {
+    execFileSync("git", ["-C", repoDir, "merge-base", "--is-ancestor", ancestor, descendant], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasInProgressMergeOrRebase(wt: string): boolean {
+  for (const marker of ["MERGE_HEAD", "rebase-merge", "rebase-apply"]) {
+    try {
+      const p = execFileSync("git", ["-C", wt, "rev-parse", "--git-path", marker], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      const abs = path.isAbsolute(p) ? p : path.resolve(wt, p);
+      if (fs.existsSync(abs)) return true;
+    } catch {
+      // Ignore marker check errors on bare/unavailable git paths.
+    }
+  }
+  return false;
+}
+
+function resolveEffectiveSandboxBaseRef(base: string, wt: string, sandbox: SandboxRecord, mainHead?: string | null): string {
+  let baseRef = sandbox.baseHead ?? "";
+  try {
+    const mergeBase = execFileSync("git", ["-C", wt, "merge-base", mainHead || "HEAD", sandbox.branch], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (mergeBase && /^[0-9a-f]{7,64}$/i.test(mergeBase)) {
+      if (!baseRef) {
+        baseRef = mergeBase;
+      } else if (mergeBase !== baseRef && isGitAncestor(base, baseRef, mergeBase)) {
+        baseRef = mergeBase;
+      }
+    }
+  } catch {
+    if (!baseRef) {
+      try {
+        baseRef = execFileSync("git", ["-C", base, "merge-base", "HEAD", sandbox.branch], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+      } catch {
+        baseRef = "";
+      }
+    }
+  }
+  return baseRef;
+}
+
+/**
+ * Reconciles `sandbox.baseHead` and `state.baseline.head` when the agent merges or rebases
+ * main commits directly inside an isolated RSI worktree.
+ */
+export async function reconcileRsiSandboxBaseline(
+  wbRoot: string,
+  reqId: string,
+): Promise<RequirementDetail | null> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) return null;
+  const wt = canonicalRoot(sandbox.worktreePath);
+  if (hasInProgressMergeOrRebase(wt)) return null;
+
+  let mainHead = "";
+  let wtHead = "";
+  try {
+    mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+
+  const effectiveBase = resolveEffectiveSandboxBaseRef(base, wt, sandbox, mainHead);
+  if (!effectiveBase) return null;
+  if (!isGitAncestor(base, effectiveBase, mainHead) || !isGitAncestor(wt, effectiveBase, wtHead)) {
+    return null;
+  }
+
+  const detail = getRequirement(base, reqId);
+  const sandboxNeedsUpdate =
+    sandbox.baseHead !== effectiveBase && (!sandbox.baseHead || isGitAncestor(base, sandbox.baseHead, effectiveBase));
+  const canSyncState = detail.state.stage !== "done" && detail.state.stage !== "cancelled";
+  const stateBaseHead = detail.state.baseline?.head ?? null;
+  const stateNeedsUpdate =
+    canSyncState &&
+    stateBaseHead !== effectiveBase &&
+    (stateBaseHead ? isGitAncestor(base, stateBaseHead, effectiveBase) : sandboxNeedsUpdate);
+
+  if (!sandboxNeedsUpdate && !stateNeedsUpdate) return null;
+
+  if (sandboxNeedsUpdate) {
+    withSandboxLockSync(() => {
+      const all = readSandboxes();
+      const key = sandboxKey(base, reqId);
+      if (all[key]) {
+        all[key] = { ...all[key]!, baseHead: effectiveBase };
+        writeSandboxes(all);
+      }
+    });
+  }
+
+  if (stateNeedsUpdate) {
+    const snapAfter = await observeGitSnapshot(wt);
+    const updated = await syncRequirementBaseline(base, reqId, {
+      baselineHead: effectiveBase,
+      baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
+      dirty: snapAfter?.dirty ?? false,
+      preserveStage: true,
+      summary: `检测到沙箱分支已合并主干提交，基线自动推进至 ${effectiveBase.slice(0, 7)}`,
+      currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
+    });
+    syncRequirementMirrorToSandbox(base, reqId, wt);
+    return updated;
+  }
+
+  return detail;
+}
+
+export interface SandboxDriftInfo {
+  requirementId: string;
+  branch: string;
+  baseHead: string;
+  mainHead: string;
+  behindCount: number;
+  aheadCount: number;
+  mainDirty: boolean;
+  conflictFiles: string[];
+  canAutoSync: boolean;
+}
+
+/** Inspects whether an isolated RSI worktree has fallen behind main or has overlapping modified files. */
+export async function inspectRsiSandboxDrift(wbRoot: string, reqId: string): Promise<SandboxDriftInfo | null> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) return null;
+  const wt = canonicalRoot(sandbox.worktreePath);
+
+  let mainHead = "";
+  let wtHead = "";
+  try {
+    mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+
+  const effectiveBase = resolveEffectiveSandboxBaseRef(base, wt, sandbox, mainHead) || wtHead;
+  let behindCount = 0;
+  let aheadCount = 0;
+  try {
+    behindCount = Number(
+      execFileSync("git", ["-C", base, "rev-list", "--count", `${effectiveBase}..${mainHead}`], {
+        encoding: "utf8",
+      }).trim(),
+    ) || 0;
+  } catch {
+    behindCount = 0;
+  }
+  try {
+    aheadCount = Number(
+      execFileSync("git", ["-C", wt, "rev-list", "--count", `${effectiveBase}..HEAD`], {
+        encoding: "utf8",
+      }).trim(),
+    ) || 0;
+  } catch {
+    aheadCount = 0;
+  }
+
+  const wtFiles = new Set<string>([
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", wt, "diff", "--name-only", "-z", "--no-renames", effectiveBase,
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ),
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", wt, "ls-files", "--others", "-z", "--exclude-standard",
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ).filter((s) => s !== "node_modules" && !s.startsWith("node_modules/")),
+  ]);
+
+  const mainFiles = new Set<string>([
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", base, "diff", "--name-only", "-z", "--no-renames", effectiveBase,
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ),
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", base, "ls-files", "--others", "-z", "--exclude-standard",
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ),
+  ]);
+
+  const mainDirty =
+    execFileSync("git", ["-C", base, "status", "--porcelain", "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench"], {
+      encoding: "utf8",
+    }).trim().length > 0;
+
+  const conflictFiles = Array.from(wtFiles).filter((f) => mainFiles.has(f)).sort();
+  return {
+    requirementId: reqId,
+    branch: sandbox.branch,
+    baseHead: effectiveBase,
+    mainHead,
+    behindCount,
+    aheadCount,
+    mainDirty,
+    conflictFiles,
+    canAutoSync: behindCount > 0 && conflictFiles.length === 0,
+  };
+}
+
+/**
+ * Safely fast-forwards/merges an isolated RSI sandbox worktree to current main HEAD
+ * when there are no overlapping file conflicts, preserving all uncommitted WIP edits.
+ */
+export async function syncRsiSandboxBase(
+  wbRoot: string,
+  reqId: string,
+): Promise<{
+  synced: boolean;
+  upToDate: boolean;
+  conflictFiles: string[];
+  drift: SandboxDriftInfo;
+  detail: RequirementDetail;
+}> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+  const drift = await inspectRsiSandboxDrift(base, reqId);
+  if (!drift) {
+    throw new WorkbenchError("execution_failed", "无法检查沙箱基线状态");
+  }
+  if (drift.behindCount === 0) {
+    const wtSnap = await observeGitSnapshot(wt);
+    const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+    return { synced: true, upToDate: true, conflictFiles: [], drift, detail };
+  }
+  if (drift.conflictFiles.length > 0) {
+    const wtSnap = await observeGitSnapshot(wt);
+    const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+    return { synced: false, upToDate: false, conflictFiles: drift.conflictFiles, drift, detail };
+  }
+
+  const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (drift.aheadCount === 0) {
+    // Two-way read-tree merge preserves all uncommitted WIP edits & untracked files while updating base files.
+    execFileSync("git", ["-C", wt, "read-tree", "-m", "-u", wtHead, drift.mainHead], { stdio: "pipe" });
+    execFileSync("git", ["-C", wt, "reset", "--soft", drift.mainHead], { stdio: "pipe" });
+  } else {
+    const wtDirty =
+      execFileSync("git", ["-C", wt, "status", "--porcelain", "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench"], {
+        encoding: "utf8",
+      }).trim().length > 0;
+    if (wtDirty) {
+      throw new WorkbenchError(
+        "revision_conflict",
+        "沙箱分支已有独立提交且存在未提交改动，请先提交或使用 Agent 协助合并主干",
+      );
+    }
+    try {
+      execFileSync("git", ["-C", wt, "merge", "--no-edit", drift.mainHead], { stdio: "pipe" });
+    } catch {
+      try {
+        execFileSync("git", ["-C", wt, "merge", "--abort"], { stdio: "ignore" });
+      } catch {
+        // Ignore abort cleanup error.
+      }
+      throw new WorkbenchError("revision_conflict", "合并主干时产生 Git 冲突，请派发 Agent 处理冲突");
+    }
+  }
+
+  withSandboxLockSync(() => {
+    const all = readSandboxes();
+    const key = sandboxKey(base, reqId);
+    if (all[key]) {
+      all[key] = { ...all[key]!, baseHead: drift.mainHead };
+      writeSandboxes(all);
+    }
+  });
+
+  const snapAfter = await observeGitSnapshot(wt);
+  const detail = await syncRequirementBaseline(base, reqId, {
+    baselineHead: drift.mainHead,
+    baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
+    dirty: snapAfter?.dirty ?? false,
+    summary: `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并，请复跑验证）`,
+    currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
+  });
+  syncRequirementMirrorToSandbox(base, reqId, wt);
+  const nextDrift = (await inspectRsiSandboxDrift(base, reqId)) ?? { ...drift, behindCount: 0, baseHead: drift.mainHead, canAutoSync: false };
+  return { synced: true, upToDate: false, conflictFiles: [], drift: nextDrift, detail };
+}
+
 export async function applySandboxToMain(
   wbRoot: string,
   reqId: string,
@@ -536,14 +850,7 @@ export async function applySandboxToMain(
   }
 
   // Determine the fork commit (never diff blindly against moved main HEAD)
-  let baseRef = sandbox.baseHead;
-  if (!baseRef || !/^[0-9a-f]{7,64}$/i.test(baseRef)) {
-    try {
-      baseRef = execFileSync("git", ["-C", base, "merge-base", "HEAD", sandbox.branch], { encoding: "utf8" }).trim();
-    } catch {
-      baseRef = "";
-    }
-  }
+  let baseRef = resolveEffectiveSandboxBaseRef(base, wt, sandbox);
   if (!baseRef) {
     const mainSnap = await observeGitSnapshot(base);
     if (!mainSnap?.head) {

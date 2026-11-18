@@ -20,6 +20,7 @@ import {
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
   OUTPUT_LANGUAGES,
+  REVIEW_FINDING_SEVERITIES,
   REVIEW_VERDICTS,
   SCHEMA_VERSION,
   STAGES,
@@ -53,6 +54,9 @@ import {
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
   type RequirementState,
+  type ReviewDisposition,
+  type ReviewFinding,
+  type ReviewFindingSeverity,
   type ReviewReport,
   type ReviewVerdict,
   type ScreenshotBatch,
@@ -375,10 +379,32 @@ function validateAcceptanceSnapshotReference(raw: unknown): AcceptanceSnapshotRe
   return raw as unknown as AcceptanceSnapshotReference;
 }
 
+function validateReviewDisposition(raw: unknown): ReviewDisposition | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance.reviewDisposition 字段无效");
+  assertAllowedKeys(raw, ["reviewId", "verdict", "effectiveState", "acceptedRisks"], "acceptance.reviewDisposition");
+  if (
+    (raw.reviewId !== undefined && (typeof raw.reviewId !== "string" || !TOKEN_ID_RE.test(raw.reviewId))) ||
+    (raw.verdict !== undefined && !REVIEW_VERDICTS.includes(raw.verdict as ReviewVerdict)) ||
+    !["current", "stale", "missing"].includes(String(raw.effectiveState)) ||
+    (raw.acceptedRisks !== undefined &&
+      (!Array.isArray(raw.acceptedRisks) ||
+        raw.acceptedRisks.length > 50 ||
+        raw.acceptedRisks.some((r) => !isSafeText(r, 1000))))
+  ) {
+    throw new WorkbenchError("corrupt_record", "acceptance.reviewDisposition 记录损坏");
+  }
+  return raw as unknown as ReviewDisposition;
+}
+
 function validateAcceptance(raw: unknown): AcceptanceRecord | null {
   if (raw === null) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance 字段无效");
-  assertAllowedKeys(raw, ["acceptedAt", "specHash", "codeSnapshotHash", "verificationIds", "note", "snapshot"], "acceptance");
+  assertAllowedKeys(
+    raw,
+    ["acceptedAt", "specHash", "codeSnapshotHash", "verificationIds", "note", "overrideReason", "reviewDisposition", "snapshot"],
+    "acceptance",
+  );
   if (
     !isSafeInt(raw.acceptedAt, 0) ||
     typeof raw.specHash !== "string" ||
@@ -386,10 +412,13 @@ function validateAcceptance(raw: unknown): AcceptanceRecord | null {
     typeof raw.codeSnapshotHash !== "string" ||
     !SHA256_RE.test(raw.codeSnapshotHash) ||
     !Array.isArray(raw.verificationIds) ||
-    raw.verificationIds.some((id) => typeof id !== "string" || !TOKEN_ID_RE.test(id))
+    raw.verificationIds.some((id) => typeof id !== "string" || !TOKEN_ID_RE.test(id)) ||
+    (raw.note !== undefined && !isSafeText(raw.note, MAX_REASON_CHARS, true)) ||
+    (raw.overrideReason !== undefined && !isSafeText(raw.overrideReason, MAX_REASON_CHARS, true))
   ) {
     throw new WorkbenchError("corrupt_record", "acceptance 记录损坏");
   }
+  validateReviewDisposition(raw.reviewDisposition);
   validateAcceptanceSnapshotReference(raw.snapshot);
   return raw as unknown as AcceptanceRecord;
 }
@@ -817,6 +846,30 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
   return raw as unknown as AgentRunRecord;
 }
 
+function validateReviewFinding(raw: unknown): ReviewFinding {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "reviewReport.findings 项无效");
+  assertAllowedKeys(raw, ["id", "severity", "title", "detail", "criterionIds", "files", "suggestion"], "reviewReport.finding");
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    !REVIEW_FINDING_SEVERITIES.includes(raw.severity as ReviewFindingSeverity) ||
+    !isSafeText(raw.title, 400) ||
+    (raw.detail !== undefined && !isSafeText(raw.detail, 2000, true)) ||
+    (raw.suggestion !== undefined && !isSafeText(raw.suggestion, 1500, true)) ||
+    (raw.criterionIds !== undefined &&
+      (!Array.isArray(raw.criterionIds) ||
+        raw.criterionIds.length > 32 ||
+        raw.criterionIds.some((cid) => typeof cid !== "string" || !TOKEN_ID_RE.test(cid)))) ||
+    (raw.files !== undefined &&
+      (!Array.isArray(raw.files) ||
+        raw.files.length > 32 ||
+        raw.files.some((f) => !isSafeText(f, 512))))
+  ) {
+    throw new WorkbenchError("corrupt_record", "reviewReport.findings 记录损坏");
+  }
+  return raw as unknown as ReviewFinding;
+}
+
 function validateReviewReport(raw: unknown): ReviewReport | null {
   if (raw === null || raw === undefined) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "reviewReport 字段无效");
@@ -829,6 +882,7 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
       "verdict",
       "summary",
       "markdown",
+      "findings",
       "reviewedSpecHash",
       "reviewedCodeSnapshotHash",
       "reviewedAt",
@@ -843,6 +897,7 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     !REVIEW_VERDICTS.includes(raw.verdict as ReviewVerdict) ||
     !isSafeText(raw.summary, 2000) ||
     !isSafeText(raw.markdown, 64 * 1024) ||
+    (raw.findings !== undefined && (!Array.isArray(raw.findings) || raw.findings.length > 50)) ||
     typeof raw.reviewedSpecHash !== "string" ||
     !SHA256_RE.test(raw.reviewedSpecHash) ||
     typeof raw.reviewedCodeSnapshotHash !== "string" ||
@@ -850,6 +905,9 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     !isSafeInt(raw.reviewedAt, 0)
   ) {
     throw new WorkbenchError("corrupt_record", "reviewReport 记录损坏");
+  }
+  if (Array.isArray(raw.findings)) {
+    for (const f of raw.findings) validateReviewFinding(f);
   }
   return raw as unknown as ReviewReport;
 }

@@ -30,16 +30,19 @@ import { isRecord } from "../core/validate.ts";
 import {
   applySandboxToMain,
   dismissPainPoint,
+  inspectRsiSandboxDrift,
   PAIN_POINT_CATEGORIES,
   PAIN_POINT_SOURCES,
   promotePainPoint,
   readPainPoints,
   reportPainPoint,
   resolveWorkbenchRepoRoot,
+  syncRsiSandboxBase,
   syncRsiSandboxPrAndCleanup,
   type PainPointCategory,
   type PainPointContext,
   type PainPointSource,
+  type SandboxDriftInfo,
 } from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
 import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
@@ -709,22 +712,26 @@ export async function startWorkbenchServer(options: {
         cfg.projects[0];
       const currentPlaybookRoot = activeProj && isLocalNodeId(activeProj.nodeId) ? activeProj.root : hubMode ? null : defaultRoot;
       const wbProjectId = cfg.projects.find((p) => isLocalNodeId(p.nodeId) && p.root === wbRoot)?.id ?? null;
-      const sandboxes = Object.values(readSandboxes()).map((sb) => {
-        let stage: Stage | null = null;
-        let canApply = false;
-        let github: RequirementDetail["state"]["github"] = null;
-        try {
-          if (fs.existsSync(sb.worktreePath)) {
-            const detail = getRequirement(sb.projectRoot, sb.requirementId);
-            stage = detail.state.stage;
-            canApply = detail.state.stage === "done" && detail.state.acceptance !== null;
-            github = detail.state.github ?? null;
+      const sandboxes = await Promise.all(
+        Object.values(readSandboxes()).map(async (sb) => {
+          let stage: Stage | null = null;
+          let canApply = false;
+          let github: RequirementDetail["state"]["github"] = null;
+          let drift: SandboxDriftInfo | null = null;
+          try {
+            if (fs.existsSync(sb.worktreePath)) {
+              const detail = getRequirement(sb.projectRoot, sb.requirementId);
+              stage = detail.state.stage;
+              canApply = detail.state.stage === "done" && detail.state.acceptance !== null;
+              github = detail.state.github ?? null;
+              drift = await inspectRsiSandboxDrift(sb.projectRoot, sb.requirementId).catch(() => null);
+            }
+          } catch {
+            // Ignore stale or inaccessible requirement state.
           }
-        } catch {
-          // Ignore stale or inaccessible requirement state.
-        }
-        return { ...sb, stage, canApply, github };
-      });
+          return { ...sb, stage, canApply, github, ...(drift ? { drift } : {}) };
+        }),
+      );
       return jsonResponse({
         painPoints: readPainPoints(),
         telemetry: summarizeTelemetry(),
@@ -817,6 +824,16 @@ export async function startWorkbenchServer(options: {
         webReloaded: reloadRes.reloaded,
         restartRecommended: applied.touchesBackend,
       });
+    }
+
+    const evoSyncBaseMatch = /^\/api\/hub\/evolution\/sync-base\/(REQ-\d{3,})$/.exec(pathname);
+    if (method === "POST" && evoSyncBaseMatch) {
+      const reqId = evoSyncBaseMatch[1]!;
+      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
+      const res = await syncRsiSandboxBase(wbRoot, reqId);
+      broadcastUi({ type: "hub.updated", reason: "evolution.base_synced", reqId, at: Date.now() });
+      broadcastUi({ type: "workbench.updated", reason: "sandbox.base_synced", root: wbRoot, id: reqId, at: Date.now() });
+      return jsonResponse(res);
     }
 
     const evoSyncPrMatch = /^\/api\/hub\/evolution\/sync-pr\/(REQ-\d{3,})$/.exec(pathname);

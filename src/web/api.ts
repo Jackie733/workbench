@@ -27,6 +27,7 @@ import type {
   PainPointCategory,
   PainPointContext,
   PainPointSource,
+  SandboxDriftInfo,
 } from "../hub/evolution.ts";
 import type { ModelStageStats } from "../hub/telemetry.ts";
 import type {
@@ -85,6 +86,7 @@ export interface EvolutionSandboxItem extends SandboxRecord {
   stage?: Stage | null;
   canApply?: boolean;
   github?: RequirementGitHubLink | null;
+  drift?: SandboxDriftInfo | null;
 }
 
 export interface EvolutionStateResponse {
@@ -269,6 +271,16 @@ export const api = {
     }>(`/api/hub/evolution/apply/${encodeURIComponent(reqId)}`, {
       method: "POST",
     }),
+  syncRsiSandboxBase: (reqId: string) =>
+    requestJson<{
+      synced: boolean;
+      upToDate: boolean;
+      conflictFiles: string[];
+      drift: SandboxDriftInfo;
+      detail: RequirementDetail;
+    }>(`/api/hub/evolution/sync-base/${encodeURIComponent(reqId)}`, {
+      method: "POST",
+    }),
   syncRsiSandboxPr: (reqId: string, input?: { forceCleanup?: boolean }) =>
     requestJson<{
       detail: RequirementDetail;
@@ -345,7 +357,13 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getRequirement: (id: string) =>
-    requestJson<{ detail: RequirementDetail; bridge: BridgeStatus; codeSnapshotHash: string | null; sandbox?: SandboxRecord | null }>(
+    requestJson<{
+      detail: RequirementDetail;
+      bridge: BridgeStatus;
+      codeSnapshotHash: string | null;
+      sandbox?: SandboxRecord | null;
+      sandboxDrift?: SandboxDriftInfo | null;
+    }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}`),
     ),
   getDiff: (id: string, options: { live?: boolean } = {}) =>
@@ -457,7 +475,7 @@ export const api = {
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/verify`),
       { method: "POST", body: JSON.stringify(input) },
     ),
-  accept: (id: string, input: { expectedRevision?: number; note?: string }) =>
+  accept: (id: string, input: { expectedRevision?: number; note?: string; overrideReason?: string; acceptedRisks?: string[] }) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`), {
       method: "POST",
       body: JSON.stringify(input),

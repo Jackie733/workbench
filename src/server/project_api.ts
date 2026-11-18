@@ -67,7 +67,12 @@ import {
   type Track,
 } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
-import { syncRsiSandboxPrAndCleanup } from "../hub/evolution.ts";
+import {
+  inspectRsiSandboxDrift,
+  reconcileRsiSandboxBaseline,
+  syncRequirementMirrorToSandbox,
+  syncRsiSandboxPrAndCleanup,
+} from "../hub/evolution.ts";
 import type { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
 import { REASONING_EFFORTS, type ReasoningEffort } from "../hub/types.ts";
@@ -561,13 +566,22 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       if (method === "GET" && sub === "") {
         const codeRoot = resolveCodeRoot(base, id);
         const snapshot = await observeGitSnapshot(codeRoot);
-        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        const sandbox = getSandboxForRequirement(base, id);
+        let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        let sandbox = getSandboxForRequirement(base, id);
+        if (sandbox && detail.state.stage !== "done" && detail.state.stage !== "cancelled") {
+          const reconciled = await reconcileRsiSandboxBaseline(base, id).catch(() => null);
+          if (reconciled) {
+            detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+            sandbox = getSandboxForRequirement(base, id);
+          }
+        }
+        const sandboxDrift = sandbox ? await inspectRsiSandboxDrift(base, id).catch(() => null) : null;
         return jsonResponse({
           detail,
           bridge: bridgeStatus,
           codeSnapshotHash: snapshot?.fingerprint ?? null,
           sandbox,
+          ...(sandboxDrift ? { sandboxDrift } : {}),
         });
       }
 
@@ -789,15 +803,16 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
 
       if (method === "POST" && sub === "request-changes") {
         const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
         const detail = await requestChanges(base, id, {
           feedback: typeof body.feedback === "string" ? body.feedback : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        await distillRequirementToPlaybook(base, detail, {
-          feedback: typeof body.feedback === "string" ? body.feedback : undefined,
-        }).catch(() => {});
+        if (codeRoot !== base) {
+          syncRequirementMirrorToSandbox(base, id, codeRoot);
+        }
         let dispatch: DispatchOutcome | null = null;
         if (body.dispatchAgent === true) {
           const action: DispatchAction = detail.state.stage === "designing" ? "design" : "fix";
@@ -844,6 +859,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           note: typeof body.note === "string" ? body.note : undefined,
+          overrideReason: typeof body.overrideReason === "string" ? body.overrideReason : undefined,
+          acceptedRisks: readStringArray(body.acceptedRisks),
         });
         await distillRequirementToPlaybook(base, detail).catch(() => {});
         const projectMeta = getProjectStatus(base).project;
@@ -1064,7 +1081,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
 
       if (method === "POST" && sub === "dispatch") {
         const body = await readBody(req);
-        const action = (body.action === "implement" || body.action === "fix" ? body.action : "design") as DispatchAction;
+        const action = (
+          body.action === "implement" || body.action === "fix" || body.action === "review" ? body.action : "design"
+        ) as DispatchAction;
         const mode = body.mode === "prefill" ? "prefill" : "send";
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });

@@ -803,6 +803,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .card.review-card.success { border-left-color: var(--success); }
 .card.review-card.warning { border-left-color: var(--warning); }
 .card.review-card.danger { border-left-color: var(--danger); }
+.review-findings-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.review-finding-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); cursor: pointer; }
+.review-finding-item input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .card-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
 

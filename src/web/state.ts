@@ -8,6 +8,7 @@ import type {
   RequirementDetail,
   RequirementDiffView,
   RequirementSummary,
+  ReviewReport,
   ReviewVerdict,
   Stage,
   TaskStatus,
@@ -47,6 +48,13 @@ export type ModalState =
       attachments?: AttachmentMeta[];
     }
   | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
+  | {
+      kind: "accept_override";
+      verdict: ReviewVerdict | "stale" | "missing";
+      summary: string;
+      reason: string;
+      acceptedRisks: string[];
+    }
   | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
   | { kind: "prompt_fallback"; title: string; subtitle: string; prompt: string }
   | {
@@ -271,11 +279,36 @@ export function progressDetail(item: RequirementSummary): string {
 
 export function defaultActionForRequirement(d: RequirementDetail): AgentAction {
   const act = d.validity.banner.primaryAction?.id;
-  if (act === "dispatch_fix") return "fix";
+  if (act === "dispatch_fix" || act === "dispatch_fix_review") return "fix";
+  if (act === "dispatch_review") return "review";
   if (act === "dispatch_implement" || act === "approve_and_implement") return "implement";
   if (d.state.stage === "awaiting_acceptance" || d.validity.acceptanceGate.ok) return "review";
   if (d.state.stage === "implementing") return "implement";
   return "design";
+}
+
+export function formatReviewFixFeedback(report: ReviewReport, selectedFindingIds?: string[]): string {
+  const lines: string[] = [
+    `请根据跨模型 Code Review（${report.reviewerHarness}/${report.reviewerModel} · ${report.verdict}）的问题进行修复：`,
+    `核心结论：${report.summary}`,
+  ];
+  const findings = report.findings ?? [];
+  const chosen =
+    selectedFindingIds && selectedFindingIds.length > 0
+      ? findings.filter((f) => selectedFindingIds.includes(f.id))
+      : findings;
+  if (chosen.length > 0) {
+    lines.push("", "待修复审查项：");
+    for (const f of chosen) {
+      const crit = f.criterionIds?.length ? ` [${f.criterionIds.join(", ")}]` : "";
+      const files = f.files?.length ? ` (${f.files.join(", ")})` : "";
+      lines.push(`- [${f.severity}] ${f.id} ${f.title}${crit}${files}`);
+      if (f.suggestion) lines.push(`  修复建议：${f.suggestion}`);
+    }
+  } else if (report.markdown.trim()) {
+    lines.push("", "审查详情摘要：", report.markdown.trim().slice(0, 1400));
+  }
+  return lines.join("\n").slice(0, 1950);
 }
 
 export function routedTargetForAction(routing: RoutingConfig | null, action: AgentAction): ModelTarget | null {

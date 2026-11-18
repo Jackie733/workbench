@@ -119,12 +119,23 @@ export interface ApprovalRecord {
   note?: string;
 }
 
+export interface ReviewDisposition {
+  reviewId?: string;
+  verdict?: ReviewVerdict;
+  effectiveState: "current" | "stale" | "missing";
+  acceptedRisks?: string[];
+}
+
 export interface AcceptanceRecord {
   acceptedAt: number;
   specHash: string;
   codeSnapshotHash: string;
   verificationIds: string[];
   note?: string;
+  /** Optional human reason when accepting over a blocking/concern/stale/unreviewed state. */
+  overrideReason?: string;
+  /** Snapshot of review status and accepted risk items at acceptance time. */
+  reviewDisposition?: ReviewDisposition;
   /** Reference to the immutable evidence artifact captured at acceptance; absent on legacy records. */
   snapshot?: AcceptanceSnapshotReference | null;
 }
@@ -409,6 +420,19 @@ export interface AgentRunRecord {
   logPath: string;
 }
 
+export const REVIEW_FINDING_SEVERITIES = ["high", "medium", "low"] as const;
+export type ReviewFindingSeverity = (typeof REVIEW_FINDING_SEVERITIES)[number];
+
+export interface ReviewFinding {
+  id: string;
+  severity: ReviewFindingSeverity;
+  title: string;
+  detail?: string;
+  criterionIds?: string[];
+  files?: string[];
+  suggestion?: string;
+}
+
 export interface ReviewReport {
   id: string;
   reviewerHarness: string;
@@ -416,6 +440,7 @@ export interface ReviewReport {
   verdict: ReviewVerdict;
   summary: string;
   markdown: string;
+  findings?: ReviewFinding[];
   reviewedSpecHash: string;
   reviewedCodeSnapshotHash: string;
   reviewedAt: number;
@@ -586,6 +611,9 @@ export type ActionId =
   | "dispatch_implement"
   | "run_all_verifications"
   | "dispatch_fix"
+  | "dispatch_review"
+  | "dispatch_fix_review"
+  | "sync_base"
   | "accept"
   | "unblock"
   | "reopen";

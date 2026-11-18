@@ -76,6 +76,8 @@ import {
   type RequirementGitHubPrLink,
   type RequirementState,
   type RequirementSummary,
+  type ReviewDisposition,
+  type ReviewFinding,
   type ReviewReport,
   type ReviewVerdict,
   type ScreenshotBatch,
@@ -1220,6 +1222,8 @@ export async function acceptRequirement(
     currentCodeSnapshotHash: string | null;
     expectedRevision?: number;
     note?: string;
+    overrideReason?: string;
+    acceptedRisks?: string[];
   },
 ): Promise<RequirementDetail> {
   if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
@@ -1251,6 +1255,20 @@ export async function acceptRequirement(
       "acceptance_gate_failed",
       `验收门禁未通过：${preValidity.acceptanceGate.blockers.join("；")}`,
       { blockers: preValidity.acceptanceGate.blockers },
+    );
+  }
+  const overrideReason = input.overrideReason?.trim()
+    ? normalizeReason(input.overrideReason, "忽略审查阻塞/接受风险说明")
+    : undefined;
+  if (
+    preValidity.reviewValidity.effectiveState === "current" &&
+    preBundle.state.reviewReport?.verdict === "block" &&
+    !overrideReason
+  ) {
+    throw new WorkbenchError(
+      "acceptance_gate_failed",
+      "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
+      { reviewVerdict: "block" },
     );
   }
 
@@ -1306,6 +1324,17 @@ export async function acceptRequirement(
         { blockers: validity.acceptanceGate.blockers },
       );
     }
+    if (
+      validity.reviewValidity.effectiveState === "current" &&
+      state.reviewReport?.verdict === "block" &&
+      !overrideReason
+    ) {
+      throw new WorkbenchError(
+        "acceptance_gate_failed",
+        "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
+        { reviewVerdict: "block" },
+      );
+    }
 
     if (gitObs.isGitRepo) {
       const postSnap = await observeGitSnapshot(codeRoot);
@@ -1322,6 +1351,29 @@ export async function acceptRequirement(
       .map((v) => v.record.id);
     const passingSet = new Set(passingIds);
     const note = input.note?.trim() ? normalizeReason(input.note, "验收备注") : undefined;
+    const acceptedRisks = Array.isArray(input.acceptedRisks)
+      ? input.acceptedRisks
+          .filter((r): r is string => typeof r === "string")
+          .map((r) => sanitizeOutput(r.trim(), 900).text.trim())
+          .filter(Boolean)
+          .slice(0, 50)
+      : undefined;
+    const reviewDisposition: ReviewDisposition | undefined =
+      state.reviewReport || overrideReason
+        ? {
+            ...(state.reviewReport
+              ? { reviewId: state.reviewReport.id, verdict: state.reviewReport.verdict }
+              : {}),
+            effectiveState: validity.reviewValidity.effectiveState,
+            ...(acceptedRisks && acceptedRisks.length > 0 ? { acceptedRisks } : {}),
+          }
+        : undefined;
+    const timelineDetailParts = [
+      overrideReason ? `放行/风险接受理由：${overrideReason}` : "",
+      acceptedRisks && acceptedRisks.length > 0 ? `已接受风险项（${acceptedRisks.length}）：${acceptedRisks.join("；")}` : "",
+      note ?? "",
+    ].filter(Boolean);
+    const timelineDetail = timelineDetailParts.length > 0 ? timelineDetailParts.join("\n") : undefined;
     const { items: frozenVerifications, omittedCount } = selectSnapshotVerifications(
       validity.verifications,
       passingSet,
@@ -1393,6 +1445,8 @@ export async function acceptRequirement(
           codeSnapshotHash: snapshotHash,
           verificationIds: passingIds,
           ...(note ? { note } : {}),
+          ...(overrideReason ? { overrideReason } : {}),
+          ...(reviewDisposition ? { reviewDisposition } : {}),
         },
         timeline: appendTimeline(
           state.timeline,
@@ -1400,8 +1454,10 @@ export async function acceptRequirement(
             now,
             "accepted",
             "human",
-            `人工验收通过（覆盖 ${validity.coverage.requiredPassed}/${validity.coverage.requiredTotal} 项必需条件）`,
-            note,
+            overrideReason
+              ? `人工带理由验收通过（覆盖 ${validity.coverage.requiredPassed}/${validity.coverage.requiredTotal} 项必需条件 · 已记录风险放行）`
+              : `人工验收通过（覆盖 ${validity.coverage.requiredPassed}/${validity.coverage.requiredTotal} 项必需条件）`,
+            timelineDetail,
           ),
         ),
       },
@@ -2188,6 +2244,7 @@ export async function recordReviewReport(
     verdict: ReviewVerdict;
     summary: string;
     markdown: string;
+    findings?: ReviewFinding[];
     reviewedSpecHash: string;
     reviewedCodeSnapshotHash: string;
   },
@@ -2195,6 +2252,36 @@ export async function recordReviewReport(
   if (!REVIEW_VERDICTS.includes(input.verdict)) {
     throw new WorkbenchError("invalid_input", `无效的审查结论: ${String(input.verdict)}`);
   }
+  const cleanFindings =
+    Array.isArray(input.findings) && input.findings.length > 0
+      ? input.findings.slice(0, 50).map((f, idx) => ({
+          id: typeof f.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(f.id) ? f.id : `F-${idx + 1}`,
+          severity: f.severity === "high" || f.severity === "medium" || f.severity === "low" ? f.severity : "medium",
+          title: sanitizeOutput(String(f.title ?? "").trim(), 380).text.trim() || `问题 ${idx + 1}`,
+          ...(typeof f.detail === "string" && f.detail.trim()
+            ? { detail: sanitizeOutput(f.detail.trim(), 1800).text.trim() }
+            : {}),
+          ...(Array.isArray(f.criterionIds) && f.criterionIds.length > 0
+            ? {
+                criterionIds: f.criterionIds
+                  .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(c))
+                  .slice(0, 16),
+              }
+            : {}),
+          ...(Array.isArray(f.files) && f.files.length > 0
+            ? {
+                files: f.files
+                  .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+                  .map((p) => sanitizeOutput(p.trim(), 480).text.trim())
+                  .filter(Boolean)
+                  .slice(0, 16),
+              }
+            : {}),
+          ...(typeof f.suggestion === "string" && f.suggestion.trim()
+            ? { suggestion: sanitizeOutput(f.suggestion.trim(), 1400).text.trim() }
+            : {}),
+        }))
+      : undefined;
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
     const report: ReviewReport = {
@@ -2204,6 +2291,7 @@ export async function recordReviewReport(
       verdict: input.verdict,
       summary: input.summary.trim().slice(0, 1800) || "已完成独立代码审查",
       markdown: input.markdown.trim().slice(0, 60 * 1024) || input.summary.trim(),
+      ...(cleanFindings && cleanFindings.length > 0 ? { findings: cleanFindings } : {}),
       reviewedSpecHash: input.reviewedSpecHash,
       reviewedCodeSnapshotHash: input.reviewedCodeSnapshotHash,
       reviewedAt: now,
@@ -2241,4 +2329,49 @@ export async function saveHandoffMarkdown(
     state: current.state,
   }));
   return toDetail(bundle, currentCodeSnapshotHash ?? null);
+}
+
+/** Updates requirement baseline HEAD/fingerprint after syncing an isolated sandbox branch to main. */
+export async function syncRequirementBaseline(
+  root: string,
+  id: string,
+  input: {
+    baselineHead: string;
+    baselineFingerprint: string;
+    dirty: boolean;
+    preserveStage?: boolean;
+    summary?: string;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled") {
+      throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能刷新基线`);
+    }
+    const nextStage: Stage =
+      !input.preserveStage && state.stage === "awaiting_acceptance" ? "implementing" : state.stage;
+    return {
+      state: {
+        ...state,
+        stage: nextStage,
+        baseline: {
+          head: input.baselineHead,
+          fingerprint: input.baselineFingerprint,
+          dirty: input.dirty,
+          capturedAt: now,
+        },
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "tasks_updated",
+            "system",
+            input.summary ?? `已同步主干基线至 ${input.baselineHead.slice(0, 7)}（需在新基线上复跑验证）`,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? input.baselineFingerprint);
 }

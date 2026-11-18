@@ -6,12 +6,27 @@ import {
   Root as DropdownRoot,
   Trigger as DropdownTrigger,
 } from "@radix-ui/react-dropdown-menu";
-import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Ellipsis,
+  GitBranch,
+  GitPullRequest,
+  Link2,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  Search,
+  Wrench,
+  Zap,
+} from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, ScreenshotBatch, Stage } from "../../core/types.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
 import {
   captureUiScreenshots,
   cancelRun,
+  dispatchFixFromReview,
+  dispatchSyncBaseWithAgent,
   executeVerify,
   handleBannerAction,
   invalidateAllWorkbenchQueries,
@@ -20,6 +35,7 @@ import {
   queryClient,
   queryKeys,
   runBusy,
+  syncSandboxBaseAction,
   toggleVerificationLog,
   triggerActiveRun,
   useDeliveryQuery,
@@ -169,7 +185,7 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
   );
 }
 
-function SpecDesignTab({ d }: { d: RequirementDetail }) {
+function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
   const busy = useUiStore((s) => s.busy);
   const designViewVersion = useUiStore((s) => s.designViewVersion);
   const designComparePrev = useUiStore((s) => s.designComparePrev);
@@ -200,6 +216,19 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
   const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
   const revValid = validity.reviewValidity;
+  const findings = review?.findings ?? [];
+
+  const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>(() =>
+    findings.filter((f) => f.severity !== "low").map((f) => f.id),
+  );
+  useEffect(() => {
+    const next = (review?.findings ?? []).filter((f) => f.severity !== "low").map((f) => f.id);
+    setSelectedFindingIds(next.length > 0 ? next : (review?.findings ?? []).map((f) => f.id));
+  }, [review?.id]);
+
+  const toggleFinding = (fid: string) => {
+    setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
+  };
 
   const openAnnotate = (anchor: string) => {
     setModal({ kind: "annotate_anchor", anchor, message: "", mode: "refine" });
@@ -301,17 +330,102 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
                 {review.reviewerHarness} · {review.reviewerModel}
               </span>
             </div>
-            <button
-              className="btn xs"
-              type="button"
-              disabled={busy}
-              onClick={() => void triggerActiveRun(s.id, "review")}
-            >
-              <Icon icon={Search} size={14} /> 重新审查
-            </button>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && review.verdict !== "pass" && (
+                <>
+                  <button
+                    className="btn primary xs"
+                    type="button"
+                    data-testid="review-fix-btn"
+                    disabled={busy}
+                    onClick={() =>
+                      void dispatchFixFromReview(d, bridgeConnected, {
+                        selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
+                      })
+                    }
+                  >
+                    <Icon icon={Wrench} size={14} />{" "}
+                    {findings.length > 0 && selectedFindingIds.length > 0
+                      ? `按选中的 ${selectedFindingIds.length} 项修复`
+                      : "按审查意见修复"}
+                  </button>
+                  <button
+                    className="btn xs"
+                    type="button"
+                    data-testid="review-reject-btn"
+                    disabled={busy}
+                    onClick={() => void handleBannerAction(d, "request_changes", bridgeConnected)}
+                  >
+                    打回修改…
+                  </button>
+                  {validity.acceptanceGate.ok && (
+                    <button
+                      className="btn xs"
+                      type="button"
+                      data-testid="review-override-accept-btn"
+                      disabled={busy}
+                      onClick={() => void handleBannerAction(d, "accept", bridgeConnected)}
+                    >
+                      <Icon icon={Check} size={14} /> {review.verdict === "block" ? "忽略阻塞并验收…" : "接受风险并验收…"}
+                    </button>
+                  )}
+                </>
+              )}
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="review-rerun-btn"
+                disabled={busy}
+                onClick={() => void triggerActiveRun(s.id, "review")}
+              >
+                <Icon icon={Search} size={14} /> 重新审查
+              </button>
+            </div>
           </div>
-          <div style={{ fontWeight: 500, marginBottom: 6 }}>{review.summary}</div>
-          <details>
+          <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
+
+          {findings.length > 0 && (
+            <div className="review-findings-list" data-testid="review-findings-list">
+              {findings.map((f) => {
+                const checked = selectedFindingIds.includes(f.id);
+                const sevTone = f.severity === "high" ? "danger" : f.severity === "medium" ? "warning" : "neutral";
+                const sevLabel = f.severity === "high" ? "高" : f.severity === "medium" ? "中" : "低";
+                return (
+                  <label key={f.id} className="review-finding-item">
+                    {s.stage !== "done" && review.verdict !== "pass" && (
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleFinding(f.id)}
+                      />
+                    )}
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span className={`badge ${sevTone}`}>{sevLabel}</span>
+                        <code className="xs">{f.id}</code>
+                        <strong style={{ fontSize: 13 }}>{f.title}</strong>
+                        {f.criterionIds && f.criterionIds.length > 0 && (
+                          <span className="badge info">{f.criterionIds.join(", ")}</span>
+                        )}
+                      </div>
+                      {f.files && f.files.length > 0 && (
+                        <div className="muted xs" style={{ marginTop: 2 }}>
+                          文件：{f.files.join(" · ")}
+                        </div>
+                      )}
+                      {f.suggestion && (
+                        <div className="muted xs" style={{ marginTop: 2 }}>
+                          建议：{f.suggestion}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          <details open={review.verdict !== "pass" && revValid.effectiveState === "current"}>
             <summary className="xs muted" style={{ cursor: "pointer" }}>
               展开完整审查意见
             </summary>
@@ -881,7 +995,10 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
   const [manualCriteria, setManualCriteria] = useState("");
   const [showLiveComparison, setShowLiveComparison] = useState(false);
 
+  const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
   const { state: s, validity } = d;
+  const review = s.reviewReport;
+  const revValid = validity.reviewValidity;
   const isDone = s.stage === "done";
   const isTerminal = isDone || s.stage === "cancelled";
   const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true, false);
@@ -918,6 +1035,49 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
 
   return (
     <>
+      {review && !isDone && (review.verdict !== "pass" || revValid.effectiveState === "stale") && (
+        <div
+          className={`callout ${revValid.effectiveState === "stale" ? "warning" : VERDICT_META[review.verdict].tone}`}
+          data-testid="changes-review-callout"
+          style={{ marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+        >
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+              <Icon icon={AlertTriangle} size={14} />
+              <strong>
+                {revValid.effectiveState === "stale"
+                  ? "跨模型 Code Review 已过期"
+                  : `跨模型 Code Review（${VERDICT_META[review.verdict].label}）`}
+              </strong>
+              <span className="xs muted">
+                {review.reviewerHarness}/{review.reviewerModel}
+              </span>
+            </div>
+            <div className="xs">{review.summary}</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {revValid.effectiveState === "current" && review.verdict !== "pass" && (
+              <button
+                className="btn primary xs"
+                type="button"
+                disabled={busy}
+                onClick={() => void dispatchFixFromReview(d, bridgeConnected)}
+              >
+                <Icon icon={Wrench} size={14} /> 按审查意见修复
+              </button>
+            )}
+            <button
+              className="btn xs"
+              type="button"
+              disabled={busy}
+              onClick={() => setWorkspaceTab("spec")}
+            >
+              查看完整审查
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="card">
         <div className="card-head">
           <h3>
@@ -1544,6 +1704,71 @@ export function WorkspaceView() {
         </div>
       )}
 
+      {reqData?.sandbox &&
+        reqData.sandboxDrift &&
+        s.stage !== "done" &&
+        s.stage !== "cancelled" &&
+        (reqData.sandboxDrift.behindCount > 0 || reqData.sandboxDrift.conflictFiles.length > 0) && (
+          <div
+            className={`callout ${reqData.sandboxDrift.conflictFiles.length > 0 ? "danger" : "warning"}`}
+            data-testid="sandbox-drift-callout"
+            style={{
+              marginBottom: 14,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 10,
+              flexWrap: "wrap",
+            }}
+          >
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <Icon icon={GitBranch} size={14} />
+                <strong>
+                  沙箱分支 <code>{reqData.sandboxDrift.branch}</code> 落后主干 {reqData.sandboxDrift.behindCount} 个提交
+                </strong>
+                {reqData.sandboxDrift.conflictFiles.length > 0 && (
+                  <span className="badge danger">{reqData.sandboxDrift.conflictFiles.length} 个文件重叠冲突</span>
+                )}
+              </div>
+              {reqData.sandboxDrift.conflictFiles.length > 0 ? (
+                <div className="xs" style={{ marginTop: 4 }}>
+                  主干与沙箱均修改了：{reqData.sandboxDrift.conflictFiles.slice(0, 6).join("、")}
+                  {reqData.sandboxDrift.conflictFiles.length > 6 ? "…" : ""}。交付前需合并主干并解决冲突。
+                </div>
+              ) : (
+                <div className="xs muted" style={{ marginTop: 4 }}>
+                  无重叠文件冲突，可安全同步主干最新提交并在新基线上复跑验证。
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {reqData.sandboxDrift.canAutoSync && (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="sync-sandbox-base-btn"
+                  disabled={busy || runningThis}
+                  onClick={() => void syncSandboxBaseAction(s.id)}
+                >
+                  <Icon icon={RefreshCw} size={14} /> 一键同步主干
+                </button>
+              )}
+              {reqData.sandboxDrift.conflictFiles.length > 0 && (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="agent-sync-sandbox-btn"
+                  disabled={busy || runningThis}
+                  onClick={() => void dispatchSyncBaseWithAgent(d, reqData.sandboxDrift!, bridgeConnected)}
+                >
+                  <Icon icon={Wrench} size={14} /> 让 Agent 同步主干并解决冲突
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
       <section className={`banner ${banner.tone}`} data-testid="action-banner">
         <div>
           <div className="banner-text">{banner.headline}</div>
@@ -1714,7 +1939,7 @@ export function WorkspaceView() {
 
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (
-          <SpecDesignTab d={d} />
+          <SpecDesignTab d={d} bridgeConnected={bridgeConnected} />
         ) : workspaceTab === "changes" ? (
           <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
         ) : (

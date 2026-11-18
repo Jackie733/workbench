@@ -161,11 +161,103 @@ export function evaluateAcceptanceGate(
   return { ok: blockers.length === 0, blockers };
 }
 
+function deriveReadyAcceptanceBanner(
+  state: RequirementState,
+  coverage: CriteriaCoverage,
+  reviewValidity: ReviewValidity,
+  hasVerifyCommands: boolean,
+): { banner: ActionBanner; needsDecision: boolean; decisionReason: string | null } {
+  const report = state.reviewReport;
+  const rerunVerify = hasVerifyCommands ? [{ id: "run_all_verifications" as const, label: "重跑验证" }] : [];
+
+  if (reviewValidity.effectiveState === "current" && report) {
+    if (report.verdict === "block") {
+      const highCnt = (report.findings ?? []).filter((f) => f.severity === "high").length;
+      const medCnt = (report.findings ?? []).filter((f) => f.severity === "medium").length;
+      const countTag =
+        highCnt > 0 || medCnt > 0 ? `（高 ${highCnt} / 中 ${medCnt}）` : "";
+      return {
+        needsDecision: true,
+        decisionReason: "审查建议阻塞",
+        banner: {
+          headline: `跨模型审查建议阻塞${countTag}：${report.summary}`,
+          tone: "danger",
+          primaryAction: { id: "dispatch_fix_review", label: "让 Agent 按审查意见修复" },
+          secondaryActions: [
+            { id: "dispatch_review", label: "重新审查" },
+            { id: "request_changes", label: "打回修改…" },
+            { id: "accept", label: "忽略阻塞并验收…" },
+          ],
+        },
+      };
+    }
+    if (report.verdict === "concern") {
+      return {
+        needsDecision: true,
+        decisionReason: "审查有关注点",
+        banner: {
+          headline: `跨模型审查存在关注点：${report.summary}`,
+          tone: "warning",
+          primaryAction: { id: "dispatch_fix_review", label: "按审查意见修复" },
+          secondaryActions: [
+            { id: "accept", label: "接受风险并验收…" },
+            { id: "dispatch_review", label: "重新审查" },
+            { id: "request_changes", label: "打回修改…" },
+          ],
+        },
+      };
+    }
+    return {
+      needsDecision: true,
+      decisionReason: "待最终验收",
+      banner: {
+        headline: `验证与跨模型审查均已通过（${coverage.requiredPassed}/${coverage.requiredTotal}），可进行最终验收`,
+        tone: "success",
+        primaryAction: { id: "accept", label: "验收通过" },
+        secondaryActions: [{ id: "request_changes", label: "打回修改…" }, ...rerunVerify],
+      },
+    };
+  }
+
+  if (reviewValidity.effectiveState === "stale") {
+    return {
+      needsDecision: true,
+      decisionReason: "审查已过期",
+      banner: {
+        headline: `验证已通过（${coverage.requiredPassed}/${coverage.requiredTotal}），但跨模型审查已过期（${reviewValidity.reason ?? "代码或规范已变化"}）`,
+        tone: "warning",
+        primaryAction: { id: "dispatch_review", label: "重新跨模型审查" },
+        secondaryActions: [
+          { id: "accept", label: "跳过复审直接验收" },
+          { id: "request_changes", label: "打回修改…" },
+          ...rerunVerify,
+        ],
+      },
+    };
+  }
+
+  return {
+    needsDecision: true,
+    decisionReason: "待审查/验收",
+    banner: {
+      headline: `所有必需验收条件已通过验证（${coverage.requiredPassed}/${coverage.requiredTotal}），建议先发起跨模型审查`,
+      tone: "info",
+      primaryAction: { id: "dispatch_review", label: "发起跨模型审查" },
+      secondaryActions: [
+        { id: "accept", label: "跳过审查直接验收" },
+        { id: "request_changes", label: "打回修改…" },
+        ...rerunVerify,
+      ],
+    },
+  };
+}
+
 export function deriveActionBanner(
   state: RequirementState,
   approval: ApprovalStatus,
   coverage: CriteriaCoverage,
   gate: AcceptanceGate,
+  reviewValidity: ReviewValidity = evaluateReviewReport(state, null),
 ): { banner: ActionBanner; needsDecision: boolean; decisionReason: string | null } {
   const hasVerifyCommands = state.criteria.some((c) => Boolean(c.command));
   const doneTasks = state.tasks.filter((t) => t.status === "done").length;
@@ -230,19 +322,7 @@ export function deriveActionBanner(
       const failedCount = coverage.items.filter((i) => i.state === "failed").length;
       const staleCount = coverage.items.filter((i) => i.state === "stale").length;
       if (gate.ok) {
-        return {
-          needsDecision: true,
-          decisionReason: "验证已全绿，可验收",
-          banner: {
-            headline: `所有必需验收条件已通过验证（${coverage.requiredPassed}/${coverage.requiredTotal}），可进行最终验收`,
-            tone: "success",
-            primaryAction: { id: "accept", label: "验收通过" },
-            secondaryActions: [
-              ...(hasVerifyCommands ? [{ id: "run_all_verifications" as const, label: "重新运行验证" }] : []),
-              { id: "request_changes", label: "打回修改…" },
-            ],
-          },
-        };
+        return deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
       }
       if (failedCount > 0) {
         return {
@@ -285,20 +365,12 @@ export function deriveActionBanner(
     }
 
     case "awaiting_acceptance":
-      return {
-        needsDecision: true,
-        decisionReason: "待最终验收",
-        banner: gate.ok
-          ? {
-              headline: `所有必需条件已通过验证（${coverage.requiredPassed}/${coverage.requiredTotal}），请审阅 Diff 与证据`,
-              tone: "success",
-              primaryAction: { id: "accept", label: "验收通过" },
-              secondaryActions: [
-                { id: "request_changes", label: "打回修改…" },
-                ...(hasVerifyCommands ? [{ id: "run_all_verifications" as const, label: "重跑验证" }] : []),
-              ],
-            }
-          : {
+      return gate.ok
+        ? deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands)
+        : {
+            needsDecision: true,
+            decisionReason: "待最终验收",
+            banner: {
               headline: `尚未满足验收条件：${gate.blockers[0] ?? "请先完成验证"}`,
               tone: "warning",
               primaryAction: hasVerifyCommands
@@ -306,7 +378,7 @@ export function deriveActionBanner(
                 : { id: "dispatch_fix", label: "让 Agent 补充验证" },
               secondaryActions: [{ id: "request_changes", label: "打回修改…" }],
             },
-      };
+          };
 
     case "blocked":
       return {
@@ -530,7 +602,7 @@ export function evaluateRequirement(
         optionalPassed: snap.coverage.filter((i) => !i.criterion.required && i.state === "passed").length,
       };
       const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
-      const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+      const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate, reviewValidity);
       const provenance: EvidenceProvenance = {
         context: "accepted",
         coverageSource: "snapshot",
@@ -570,7 +642,7 @@ export function evaluateRequirement(
     const verifications = evaluateLegacyDoneVerifications(state);
     const { coverage, coverageSource, coverageReason } = evaluateLegacyDoneCoverage(state, verifications);
     const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
-    const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+    const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate, reviewValidity);
     const diffReason =
       options.acceptanceSnapshotReason ??
       (snapStatus === "available"
@@ -616,7 +688,7 @@ export function evaluateRequirement(
   const verifications = evaluateVerifications(state, currentCodeSnapshotHash);
   const coverage = evaluateCriteriaCoverage(state, verifications);
   const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
-  const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate);
+  const { banner, needsDecision, decisionReason } = deriveActionBanner(state, approval, coverage, acceptanceGate, reviewValidity);
   const evidenceContext: EvidenceContext = "live";
   return {
     approval,

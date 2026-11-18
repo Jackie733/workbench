@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import {
+  AlertTriangle,
   ArrowUp,
   Check,
   Crosshair,
@@ -34,11 +35,13 @@ import {
   queryClient,
   queryKeys,
   runBusy,
+  submitAcceptOverride,
   submitAnnotation,
   submitFeedback,
   submitImportGitHubIssue,
   submitLifecycle,
   submitNewRequirement,
+  syncSandboxBaseAction,
   useDeliveryQuery,
   useEvolutionQuery,
   useGitHubStatusQuery,
@@ -47,7 +50,7 @@ import {
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { EFFORT_LABELS, formatDateTime, getModelEffortCapability, parseRunnerKey } from "../state.ts";
+import { EFFORT_LABELS, formatDateTime, formatReviewFixFeedback, getModelEffortCapability, parseRunnerKey } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -779,6 +782,21 @@ export function Modals() {
               </div>
             )}
 
+            {cfg && (
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 12 }}>
+                <input
+                  type="checkbox"
+                  data-testid="routing-auto-review-checkbox"
+                  checked={cfg.autoReview !== false}
+                  onChange={(e) => {
+                    const nextCfg = { ...cfg, autoReview: e.target.checked };
+                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                  }}
+                />
+                <span>Agent 提交验收后自动发起跨模型 Code Review（推荐，减少人工等待）</span>
+              </label>
+            )}
+
             <div className="callout info xs" style={{ margin: "12px 0" }}>
               所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
             </div>
@@ -1013,15 +1031,44 @@ export function Modals() {
   }
 
   if (m.kind === "feedback") {
+    const isDesignStage =
+      detail?.state.stage === "awaiting_approval" ||
+      detail?.state.stage === "draft" ||
+      detail?.state.stage === "designing";
+    const reviewReport = detail?.state.reviewReport;
     return (
-      <ModalShell onClose={close}>
-        <h3>提出修改意见</h3>
+      <ModalShell onClose={close} testId="feedback-modal">
+        <h3>{isDesignStage ? "退回修订方案" : "打回修改并修复问题"}</h3>
+        <p className="xs muted" style={{ margin: "0 0 8px" }}>
+          {isDesignStage
+            ? "提交后将保留在设计阶段，可同步派发给模型修订技术方案。"
+            : "提交后将退回实施阶段（保留已有方案批准，无需重新批准方案），并可同步派发给模型修复。"}
+        </p>
+        {!isDesignStage && reviewReport && (
+          <div style={{ marginBottom: 8 }}>
+            <button
+              className="btn xs"
+              type="button"
+              data-testid="feedback-fill-review-btn"
+              onClick={() => {
+                const snippet = formatReviewFixFeedback(reviewReport);
+                setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: snippet } : prev));
+              }}
+            >
+              填入当前 Code Review 问题
+            </button>
+          </div>
+        )}
         <textarea
           className="textarea"
           id="feedback-input"
           autoFocus
           value={m.feedback}
-          placeholder="清晰写下需要调整的规范、方案或修复问题…"
+          placeholder={
+            isDesignStage
+              ? "清晰写下需要调整的规范、方案或验收条件…"
+              : "清晰写下需要修复的问题、回归测试要求或审查意见…"
+          }
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: e.target.value } : prev))
           }
@@ -1037,7 +1084,11 @@ export function Modals() {
               )
             }
           />
-          <span>退回后同步投递修改指令给当前模型 / 终端会话</span>
+          <span>
+            {isDesignStage
+              ? "退回后同步派发「修订方案 (design)」给模型"
+              : "退回后同步派发「修复代码 (fix)」给模型"}
+          </span>
         </label>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
@@ -1046,10 +1097,65 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
+            data-testid="feedback-submit-btn"
             disabled={busy}
             onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
-            确认退回修改
+            {isDesignStage ? "确认退回修订" : "确认打回修复"}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "accept_override") {
+    const isBlock = m.verdict === "block";
+    return (
+      <ModalShell onClose={close} testId="accept-override-modal">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Icon icon={AlertTriangle} size={20} />
+          <h3 style={{ margin: 0 }}>
+            {isBlock ? "确认忽略审查阻塞并验收" : m.verdict === "concern" ? "确认接受审查关注点并验收" : "确认跳过复审并验收"}
+          </h3>
+        </div>
+        <div className={`callout ${isBlock ? "danger" : "warning"} xs`} style={{ marginBottom: 10 }}>
+          <div>
+            <strong>审查摘要：</strong>
+            {m.summary}
+          </div>
+          {m.acceptedRisks.length > 0 && (
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {m.acceptedRisks.slice(0, 8).map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+          {isBlock ? "忽略阻塞并继续验收的原因（必填，将写入验收快照与 PR 说明）：" : "接受风险备注（选填，将记录在时间线与 PR 说明中）："}
+        </label>
+        <textarea
+          className="textarea"
+          data-testid="accept-override-reason"
+          autoFocus
+          value={m.reason}
+          placeholder={isBlock ? "请说明为什么该阻塞项可忽略或后续再处理…" : "可说明接受关注点的原因或后续追踪计划…"}
+          onChange={(e) =>
+            setModal((prev) => (prev?.kind === "accept_override" ? { ...prev, reason: e.target.value } : prev))
+          }
+        />
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            返回处理审查意见
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="confirm-accept-override-btn"
+            disabled={busy || (isBlock && !m.reason.trim())}
+            onClick={() => detail && void submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks)}
+          >
+            确认验收通过
           </button>
         </div>
       </ModalShell>
@@ -1473,6 +1579,12 @@ export function Modals() {
                             {sandboxItem?.stage && sandboxItem.stage !== "done" && (
                               <span className="badge">沙箱 {sandboxItem.stage}</span>
                             )}
+                            {sandboxItem?.drift && sandboxItem.drift.behindCount > 0 && (
+                              <span className={`badge ${sandboxItem.drift.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                                落后主干 {sandboxItem.drift.behindCount} 提交
+                                {sandboxItem.drift.conflictFiles.length > 0 ? ` · ${sandboxItem.drift.conflictFiles.length} 冲突` : ""}
+                              </span>
+                            )}
                             {sandboxItem?.github?.issue && (
                               <span className="badge info">Issue #{sandboxItem.github.issue.number}</span>
                             )}
@@ -1530,6 +1642,16 @@ export function Modals() {
                               onClick={() => void openWorkbenchReq(p.promotedReqId!)}
                             >
                               <Icon icon={ExternalLink} size={14} /> 查看需求
+                            </button>
+                          )}
+                          {sandboxItem?.drift?.canAutoSync && p.promotedReqId && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!)}
+                            >
+                              <Icon icon={RefreshCw} size={14} /> 同步主干
                             </button>
                           )}
                           {sandboxItem?.canApply && p.promotedReqId && sandboxItem.github?.pr && (

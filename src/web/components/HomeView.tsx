@@ -258,7 +258,12 @@ export function HomeView() {
   const doneCnt = rawItems.filter((i) => i.stage === "done").length;
 
   const visible = filteredItems(rawItems, query);
-  const pendingDecisions = rawItems.filter((i) => i.needsDecision);
+  const pendingDecisions = [...rawItems.filter((i) => i.needsDecision)].sort((a, b) => {
+    const aBlock = (a.decisionReason ?? "").includes("阻塞") ? 0 : 1;
+    const bBlock = (b.decisionReason ?? "").includes("阻塞") ? 0 : 1;
+    if (aBlock !== bBlock) return aBlock - bBlock;
+    return a.updatedAt - b.updatedAt;
+  });
 
   return (
     <div data-testid="home-view">
@@ -350,7 +355,12 @@ export function HomeView() {
                   >
                     {item.title}
                   </span>
-                  <span className="badge warning">{item.decisionReason ?? "待确认"}</span>
+                  <span className={`badge ${(item.decisionReason ?? "").includes("阻塞") ? "danger" : "warning"}`}>
+                    {item.decisionReason ?? "待确认"}
+                  </span>
+                  <span className="muted xs" style={{ flexShrink: 0 }}>
+                    {relativeTime(item.updatedAt)}
+                  </span>
                 </div>
                 <button className="btn xs" type="button" onClick={() => void openRequirement(item.id)}>
                   去处理 <Icon icon={ArrowRight} size={14} />
