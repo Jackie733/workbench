@@ -19,6 +19,7 @@ import {
   useWorkbenchWsSync,
 } from "./queries.ts";
 import { useUiStore } from "./stores/uiStore.ts";
+import { applyDocumentLanguage, t } from "./i18n.ts";
 
 function describePickedElement(el: HTMLElement): { selector: string; snippet: string } {
   const testId = el.getAttribute("data-testid");
@@ -48,6 +49,7 @@ function describePickedElement(el: HTMLElement): { selector: string; snippet: st
 function DomElementPicker() {
   const modal = useUiStore((s) => s.modal);
   const setModal = useUiStore((s) => s.setModal);
+  const language = useUiStore((s) => s.language);
   const active = modal?.kind === "quick_report" && modal.pickingElement;
   const [hoverRect, setHoverRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [hoverLabel, setHoverLabel] = useState<string>("");
@@ -85,7 +87,7 @@ function DomElementPicker() {
               detail:
                 prev.detail.trim() || !snippet
                   ? prev.detail
-                  : `命中元素「${snippet}」(${selector})`,
+                  : t(useUiStore.getState().language, "picker.hit", { snippet, selector }),
             }
           : prev,
       );
@@ -148,7 +150,11 @@ function DomElementPicker() {
           fontSize: 13,
         }}
       >
-        <span>点击页面任意元素作为问题定位锚点{hoverLabel ? `：${hoverLabel}` : ""}</span>
+        <span>
+          {hoverLabel
+            ? t(language, "picker.bannerTarget", { selector: hoverLabel })
+            : t(language, "picker.banner")}
+        </span>
         <button
           type="button"
           className="btn xs"
@@ -157,7 +163,7 @@ function DomElementPicker() {
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, pickingElement: false } : prev))
           }
         >
-          取消 (Esc)
+          {t(language, "picker.cancel")}
         </button>
       </div>
     </>
@@ -167,6 +173,7 @@ function DomElementPicker() {
 function WorkbenchShell() {
   useWorkbenchWsSync(true);
   const theme = useUiStore((s) => s.theme);
+  const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
@@ -176,6 +183,10 @@ function WorkbenchShell() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    applyDocumentLanguage(language);
+  }, [language]);
 
   useEffect(() => {
     const reportedErrors = new Set<string>();
@@ -200,11 +211,19 @@ function WorkbenchShell() {
     };
 
     const onError = (ev: ErrorEvent) => {
-      reportRuntimeError(`前端运行时异常: ${ev.message || "Unknown error"}`, ev.error?.stack ?? `${ev.filename}:${ev.lineno}`);
+      const lang = useUiStore.getState().language;
+      reportRuntimeError(
+        t(lang, "runtime.errorTitle", { message: ev.message || t(lang, "runtime.unknownError") }),
+        ev.error?.stack ?? `${ev.filename}:${ev.lineno}`,
+      );
     };
     const onRejection = (ev: PromiseRejectionEvent) => {
-      const msg = ev.reason instanceof Error ? ev.reason.message : String(ev.reason ?? "Promise rejection");
-      reportRuntimeError(`前端未捕获异步异常: ${msg}`, ev.reason instanceof Error ? (ev.reason.stack ?? msg) : msg);
+      const lang = useUiStore.getState().language;
+      const msg = ev.reason instanceof Error ? ev.reason.message : String(ev.reason ?? t(lang, "runtime.rejection"));
+      reportRuntimeError(
+        t(lang, "runtime.rejectionTitle", { message: msg }),
+        ev.reason instanceof Error ? (ev.reason.stack ?? msg) : msg,
+      );
     };
     const onKeyDown = (ev: KeyboardEvent) => {
       if (ev.altKey && ev.key.toLowerCase() === "r") {
@@ -261,7 +280,7 @@ function WorkbenchShell() {
             <div className="main-stage">
               <div className="shell">
                 {(hubLoading && !hub) || (!noHubProject && !remoteOffline && projectLoading && !project) ? (
-                  <p className="muted">正在加载工作台…</p>
+                  <p className="muted">{t(language, "app.loading")}</p>
                 ) : noHubProject ? (
                   <EmptyHubCard />
                 ) : remoteOffline && activeSummary ? (
@@ -292,9 +311,14 @@ function WorkbenchShell() {
 
 function AuthGate() {
   const theme = useUiStore((s) => s.theme);
+  const language = useUiStore((s) => s.language);
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    applyDocumentLanguage(language);
+  }, [language]);
 
   useEffect(() => {
     const onUnauthorized = () => {
@@ -309,7 +333,7 @@ function AuthGate() {
   if (isLoading && !auth) {
     return (
       <div className="shell" style={{ paddingTop: 48 }}>
-        <p className="muted">正在检查工作台访问状态…</p>
+        <p className="muted">{t(language, "app.authChecking")}</p>
       </div>
     );
   }
@@ -327,6 +351,7 @@ function AuthGate() {
   return <WorkbenchShell />;
 }
 
+applyDocumentLanguage(useUiStore.getState().language);
 const rootEl = document.getElementById("app");
 if (rootEl) {
   createRoot(rootEl).render(

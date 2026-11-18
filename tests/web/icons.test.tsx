@@ -182,7 +182,9 @@ describe("application icon inventory", () => {
     }
     const primitives = read("src/web/components/Primitives.tsx");
     const modelBar = read("src/web/components/ui/ModelRunnerBar.tsx");
-    expect(modelBar).toContain("仅生成提示词 (手动复制)");
+    const i18n = read("src/web/i18n.ts");
+    expect(modelBar).toContain('"runner.manual"');
+    expect(i18n).toContain("仅生成提示词 (手动复制)");
     expect(primitives).not.toContain("📋");
     expect(modelBar).not.toContain("📋");
   });
@@ -190,7 +192,8 @@ describe("application icon inventory", () => {
   test("preserves documented text/prose exceptions", () => {
     const workspace = read("src/web/components/WorkspaceView.tsx");
     expect(workspace).toContain("+{f.additions}/-{f.deletions}");
-    expect(workspace).toContain("对比 v${activeVer - 1} → v${activeVer}");
+    expect(workspace).toContain('"spec.compare"');
+    expect(read("src/web/i18n.ts")).toContain("对比 v{prev} → v{curr}");
     const sidebar = read("src/web/components/HubSidebar.tsx");
     expect(sidebar).toContain('<span className="sb-logo">W</span>');
     const renderSource = read("src/web/render.ts");

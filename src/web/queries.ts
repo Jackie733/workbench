@@ -3,6 +3,7 @@ import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
+import { describeClientError, type MessageKey } from "./i18n.ts";
 import { activeRunnerChoice, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
 import { useStreamStore } from "./stores/streamStore.ts";
@@ -191,17 +192,25 @@ export function useWorkbenchWsSync(enabled = true): void {
           const model = typeof ev.model === "string" ? ev.model : "";
           const ui = useUiStore.getState();
           if (status === "succeeded") {
-            const fallbackNote =
-              ev.modelFallback === true
-                ? `；请求模型未生效，实际由 ${String(ev.effectiveModel ?? "auto")} 执行`
-                : "";
-            ui.showToast(`${reqId} 执行完成 (${model})${fallbackNote}`);
+            if (ev.modelFallback === true) {
+              ui.showToastKey("toast.runSucceededFallback", {
+                id: reqId,
+                model,
+                effective: String(ev.effectiveModel ?? "auto"),
+              });
+            } else {
+              ui.showToastKey("toast.runSucceeded", { id: reqId, model });
+            }
           } else if (status === "cancelled") {
-            ui.showToast(`${reqId} 已终止执行`);
+            ui.showToastKey("toast.runCancelled", { id: reqId });
           } else if (ev.rateLimited) {
-            ui.showToast(`${reqId} 模型额度受限，可在右侧抽屉点击「备援模型接力」`, true);
+            ui.showToastKey("toast.runRateLimited", { id: reqId }, true);
           } else {
-            ui.showToast(`${reqId} 执行失败：${String(ev.errorSummary ?? "请查看控制台日志")}`, true);
+            ui.showToastKey(
+              "toast.runFailed",
+              { id: reqId, error: String(ev.errorSummary ?? "unknown") },
+              true,
+            );
           }
         }
         void queryClient.invalidateQueries({ queryKey: ["requirement"] });
@@ -214,9 +223,9 @@ export function useWorkbenchWsSync(enabled = true): void {
       if (type === "workbench.reload_ui") {
         const tag = document.activeElement?.tagName;
         if (tag === "TEXTAREA" || tag === "INPUT") {
-          useUiStore.getState().showToast("工作台前端已热编译更新，完成输入后刷新页面即可生效");
+          useUiStore.getState().showToastKey("toast.reloadPending");
         } else {
-          useUiStore.getState().showToast("工作台前端已更新，正在热刷新…");
+          useUiStore.getState().showToastKey("toast.reloadNow");
           setTimeout(() => window.location.reload(), 180);
         }
         return;
@@ -238,11 +247,11 @@ export async function runBusy<T>(fn: () => Promise<T>): Promise<T | null> {
     return await fn();
   } catch (err) {
     if (err instanceof ApiClientError && err.code === "revision_conflict") {
-      ui.showToast(`${err.message}（已为你刷新最新内容）`, true);
+      ui.showToastKey("toast.revisionConflict", undefined, true);
       await invalidateAllWorkbenchQueries();
       return null;
     }
-    ui.showToast(err instanceof Error ? err.message : "操作失败", true);
+    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
     return null;
   } finally {
     useUiStore.getState().setBusy(false);
@@ -257,24 +266,29 @@ export function shouldUseCliRunner(): boolean {
   return Boolean(selectedRunnerKey && selectedRunnerKey !== "manual_copy");
 }
 
-export function handleDispatchOutcome(dispatch: DispatchOutcome | null, fallbackTitle: string): void {
+export function handleDispatchOutcome(dispatch: DispatchOutcome | null, fallbackTitle: MessageKey): void {
   if (!dispatch) return;
   const ui = useUiStore.getState();
   if (dispatch.delivered && dispatch.status === "submitted") {
-    ui.showToast("已将任务指令发送给当前 omp 会话");
+    ui.showToastKey("toast.dispatchSubmitted");
     return;
   }
   if (dispatch.delivered && dispatch.status === "prefilled") {
-    ui.showToast("已将任务指令预填到 omp 输入框");
+    ui.showToastKey("toast.dispatchPrefilled");
     return;
   }
-  const subtitle =
+  const subtitleKey =
     dispatch.reason === "draft_conflict"
-      ? "检测到 omp 输入框已有未发送草稿，为防覆盖未自动写入，请复制下方指令："
+      ? "fallback.subtitle.draft"
       : dispatch.reason === "source_busy"
-        ? "当前 omp 会话正在执行其他任务，请复制下方指令或稍后重试："
-        : "当前未连接实时 omp 会话，请复制下方指令或使用上方模型选择器后台自动执行：";
-  ui.setModal({ kind: "prompt_fallback", title: fallbackTitle, subtitle, prompt: dispatch.prompt });
+        ? "fallback.subtitle.busy"
+        : "fallback.subtitle.offline";
+  ui.setModal({
+    kind: "prompt_fallback",
+    titleKey: fallbackTitle,
+    subtitleKey,
+    prompt: dispatch.prompt,
+  });
 }
 
 export async function openRequirement(id: string): Promise<void> {
@@ -338,7 +352,7 @@ export async function openAddProjectModal(preferredNodeId?: string): Promise<voi
     });
   } catch (err) {
     ui.setModal({ kind: "add_project", nodeId, browse: null, pathInput: "", nameInput: "", initPrivacy: "local" });
-    ui.showToast(err instanceof Error ? err.message : "读取目录失败", true);
+    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
   }
 }
 
@@ -382,7 +396,10 @@ export async function triggerActiveRun(
     useStreamStore.getState().setRunStarted({ ...res.run, requirementId: reqId });
     ui.setDrawerOpen(true);
     ui.setDrawerTab(action === "ask" ? "discuss" : "console");
-    ui.showToast(`${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""} 启动执行 (${action})…`);
+    ui.showToastKey("toast.runStarted", {
+      target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
+      action,
+    });
     await queryClient.invalidateQueries({ queryKey: ["requirement"] });
     await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
   }
@@ -420,7 +437,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       await runBusy(async () => {
         const out = await api.dispatch(id, { action: "design" });
         await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "发送给 Agent 整理方案");
+        handleDispatchOutcome(out.dispatch, "fallback.title.design");
         return out;
       });
       break;
@@ -430,7 +447,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       const res = await runBusy(() => api.approve(id, { expectedRevision: rev, dispatchAgent: false }));
       if (res) {
         await invalidateAllWorkbenchQueries();
-        ui.showToast(`${id} 方案已批准`);
+        ui.showToastKey("toast.approved", { id });
       }
       break;
     }
@@ -447,7 +464,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
         if (useCli) {
           await triggerActiveRun(id, "implement");
         } else {
-          handleDispatchOutcome(res.dispatch, "批准并开始实施");
+          handleDispatchOutcome(res.dispatch, "fallback.title.approve");
         }
       }
       break;
@@ -466,7 +483,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
         if (useCli) {
           await triggerActiveRun(id, "implement");
         } else {
-          handleDispatchOutcome(res.dispatch, "授权直接实施 (Fast-Track)");
+          handleDispatchOutcome(res.dispatch, "fallback.title.fastTrack");
         }
       }
       break;
@@ -479,7 +496,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       await runBusy(async () => {
         const out = await api.dispatch(id, { action: "implement" });
         await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "开始实施指令");
+        handleDispatchOutcome(out.dispatch, "fallback.title.implement");
         return out;
       });
       break;
@@ -492,7 +509,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       await runBusy(async () => {
         const out = await api.dispatch(id, { action: "fix" });
         await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "修复失败项指令");
+        handleDispatchOutcome(out.dispatch, "fallback.title.fix");
         return out;
       });
       break;
@@ -508,7 +525,11 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       const res = await executeVerify(id, { all: true });
       if (res) {
         const passed = res.runs.filter((r) => r.passed).length;
-        ui.showToast(`验证执行完成：${passed}/${res.runs.length} 条命令通过`, passed < res.runs.length);
+        ui.showToastKey(
+          "toast.verifyDone",
+          { passed, total: res.runs.length },
+          passed < res.runs.length,
+        );
       }
       break;
     }
@@ -516,7 +537,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       const res = await runBusy(() => api.accept(id, { expectedRevision: rev }));
       if (res) {
         await invalidateAllWorkbenchQueries();
-        ui.showToast(`${id} 已验收完成`);
+        ui.showToastKey("toast.accepted", { id });
       }
       break;
     }
@@ -524,7 +545,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       const res = await runBusy(() => api.unblock(id, { expectedRevision: rev }));
       if (res) {
         await invalidateAllWorkbenchQueries();
-        ui.showToast("已解除阻塞");
+        ui.showToastKey("toast.unblocked");
       }
       break;
     }
@@ -555,7 +576,7 @@ export async function toggleVerificationLog(reqId: string, vid: string): Promise
     const res = await api.getEvidence(reqId, vid);
     ui.setExpandedLog(vid, res.log);
   } catch (err) {
-    ui.showToast(err instanceof Error ? err.message : "读取日志失败", true);
+    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
   }
 }
 
@@ -577,7 +598,7 @@ export async function openRunConsole(reqId: string, runId: string): Promise<void
 
 export async function cancelRun(reqId: string, runId: string): Promise<void> {
   await api.cancelAgentRun(reqId, runId);
-  useUiStore.getState().showToast("已发送终止指令");
+  useUiStore.getState().showToastKey("toast.cancelled");
 }
 
 export async function initProjectSubmit(): Promise<void> {
@@ -591,7 +612,7 @@ export async function initProjectSubmit(): Promise<void> {
   );
   if (res) {
     await invalidateAllWorkbenchQueries();
-    ui.showToast("工作台初始化完成");
+    ui.showToastKey("toast.initialized");
   }
 }
 
@@ -605,7 +626,7 @@ export async function submitNewRequirement(
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
   if (!goal) {
-    ui.showToast("请先输入需求描述", true);
+    ui.showToastKey("toast.needGoal", undefined, true);
     return;
   }
   const useCli = dispatchAgent && shouldUseCliRunner();
@@ -623,17 +644,27 @@ export async function submitNewRequirement(
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
     if (res.githubWarning) {
-      ui.showToast(`需求 ${res.detail.state.id} 已创建（GitHub Issue 未同步：${res.githubWarning}）`, true);
+      ui.showToastKey(
+        "toast.createdWithIssueWarn",
+        { id: res.detail.state.id, warning: res.githubWarning },
+        true,
+      );
     }
     if (dispatchAgent) {
       if (useCli) {
         await triggerActiveRun(res.detail.state.id, "design");
       } else {
-        handleDispatchOutcome(res.dispatch, "新建需求并发送给 Agent");
+        handleDispatchOutcome(res.dispatch, "fallback.title.newReq");
       }
     } else if (!res.githubWarning) {
-      const issueTag = res.detail.state.github?.issue ? `（已同步 Issue #${res.detail.state.github.issue.number}）` : "";
-      ui.showToast(`已创建需求 ${res.detail.state.id}${issueTag}`);
+      if (res.detail.state.github?.issue) {
+        ui.showToastKey("toast.createdIssue", {
+          id: res.detail.state.id,
+          number: res.detail.state.github.issue.number,
+        });
+      } else {
+        ui.showToastKey("toast.created", { id: res.detail.state.id });
+      }
     }
   }
 }
@@ -642,7 +673,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
   const issueRef = issueRefRaw.trim();
   const ui = useUiStore.getState();
   if (!issueRef) {
-    ui.showToast("请输入 GitHub Issue 编号或 URL", true);
+    ui.showToastKey("toast.needIssueRef", undefined, true);
     return;
   }
   const useCli = dispatchAgent && shouldUseCliRunner();
@@ -658,17 +689,23 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
     if (res.alreadyExisted) {
-      ui.showToast(`Issue #${res.issue.number} 已关联至现有需求 ${res.detail.state.id}`);
+      ui.showToastKey("toast.issueLinkedExisting", {
+        number: res.issue.number,
+        id: res.detail.state.id,
+      });
       return;
     }
     if (dispatchAgent) {
       if (useCli) {
         await triggerActiveRun(res.detail.state.id, "design");
       } else {
-        handleDispatchOutcome(res.dispatch ?? null, "导入 Issue 并发送给 Agent");
+        handleDispatchOutcome(res.dispatch ?? null, "fallback.title.import");
       }
     } else {
-      ui.showToast(`已从 Issue #${res.issue.number} 创建需求 ${res.detail.state.id}`);
+      ui.showToastKey("toast.createdFromIssue", {
+        number: res.issue.number,
+        id: res.detail.state.id,
+      });
     }
   }
 }
@@ -677,7 +714,7 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
   const feedback = feedbackRaw.trim();
   const ui = useUiStore.getState();
   if (!feedback) {
-    ui.showToast("请填写修改建议", true);
+    ui.showToastKey("toast.needFeedback", undefined, true);
     return;
   }
   const useCli = dispatchAgent && shouldUseCliRunner();
@@ -695,10 +732,10 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
       if (useCli) {
         await triggerActiveRun(detail.state.id, "design", { message: feedback });
       } else {
-        handleDispatchOutcome(res.dispatch, "要求修订方案指令");
+        handleDispatchOutcome(res.dispatch, "fallback.title.feedback");
       }
     } else {
-      ui.showToast("已退回修订并记录反馈");
+      ui.showToastKey("toast.changesRecorded");
     }
   }
 }
@@ -711,7 +748,7 @@ export async function submitLifecycle(
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
   if (!reason) {
-    ui.showToast("请填写原因", true);
+    ui.showToastKey("toast.needReason", undefined, true);
     return;
   }
   const res = await runBusy(async () => {
@@ -722,7 +759,7 @@ export async function submitLifecycle(
   if (res) {
     ui.setModal(null);
     await invalidateAllWorkbenchQueries();
-    ui.showToast("需求状态已更新");
+    ui.showToastKey("toast.lifecycleUpdated");
   }
 }
 
@@ -736,7 +773,7 @@ export async function submitAnnotation(
   const ui = useUiStore.getState();
   const draft = useDraftStore.getState();
   if (!msg) {
-    ui.showToast("请输入批注或问题内容", true);
+    ui.showToastKey("toast.needAnnotation", undefined, true);
     return;
   }
   if (mode === "ask") {
@@ -751,7 +788,7 @@ export async function submitAnnotation(
       ui.setModal(null);
       ui.setDrawerOpen(true);
       ui.setDrawerTab("discuss");
-      ui.showToast("批注已加入待发送列表，可在右侧统一「采纳批注并让 Agent 修订」");
+      ui.showToastKey("toast.annotationQueued");
       await queryClient.invalidateQueries({ queryKey: ["requirement"] });
     }
   }
@@ -762,7 +799,7 @@ export async function runAskFromDrawer(reqId: string): Promise<void> {
   const ui = useUiStore.getState();
   const msg = draft.discussDraft.trim();
   if (!msg) {
-    ui.showToast("请先输入要探讨的问题", true);
+    ui.showToastKey("toast.needQuestion", undefined, true);
     return;
   }
   const anchor = draft.discussAnchor ?? undefined;
@@ -784,7 +821,7 @@ export async function runRefineFromDrawer(reqId: string): Promise<void> {
           .join("\n")}`
       : "");
   if (!summary) {
-    ui.showToast("请输入修订要求或先添加章节批注", true);
+    ui.showToastKey("toast.needRefine", undefined, true);
     return;
   }
   draft.setDiscussDraft("");

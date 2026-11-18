@@ -2,6 +2,7 @@ import { useLayoutEffect } from "react";
 import { ArrowRight, Plus, RefreshCw, WifiOff } from "lucide-react";
 import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
 import type { HubProjectSummary } from "../api.ts";
+import { t, translateRef } from "../i18n.ts";
 import {
   initProjectSubmit,
   invalidateAllWorkbenchQueries,
@@ -16,18 +17,29 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
-  const nodeLabel = project.nodeName ?? project.nodeId ?? "远程节点";
+  const language = useUiStore((s) => s.language);
+  const nodeLabel = project.nodeName ?? project.nodeId ?? "remote";
   return (
     <div className="empty-card" data-testid="remote-node-offline-card">
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
         <Icon icon={WifiOff} size={20} />
-        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>远程节点当前离线：{nodeLabel}</h2>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
+          {t(language, "remote.title", { node: nodeLabel })}
+        </h2>
       </div>
       <p className="muted" style={{ margin: "0 0 12px" }}>
-        项目 <strong>{project.name}</strong>（<code>{project.root}</code>）位于远程节点 <strong>{nodeLabel}</strong>，当前未连接到本机 Hub。
+        {t(language, "remote.descPrefix")}
+        <strong>{project.name}</strong>
+        {t(language, "remote.descMiddle")}
+        <code>{project.root}</code>
+        {t(language, "remote.descMid2")}
+        <strong>{nodeLabel}</strong>
+        {t(language, "remote.descSuffix")}
       </p>
       <div className="callout info xs" style={{ marginBottom: 14 }}>
-        请在 <strong>{nodeLabel}</strong> 终端执行以下命令启动后台桥接服务：
+        {t(language, "remote.hintPrefix")}
+        <strong>{nodeLabel}</strong>
+        {t(language, "remote.hintMiddle")}
         <pre style={{ margin: "6px 0 0", fontFamily: "var(--mono)", fontSize: 12 }}>wb node start</pre>
       </div>
       <button
@@ -36,18 +48,19 @@ export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary 
         data-testid="remote-node-refresh-btn"
         onClick={() => void invalidateAllWorkbenchQueries()}
       >
-        <Icon icon={RefreshCw} size={14} /> 刷新连接状态
+        <Icon icon={RefreshCw} size={14} /> {t(language, "remote.refresh")}
       </button>
     </div>
   );
 }
 
 export function EmptyHubCard() {
+  const language = useUiStore((s) => s.language);
   return (
     <div className="empty-card" data-testid="empty-hub-card">
-      <h2 style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>尚未添加本地项目</h2>
+      <h2 style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>{t(language, "hub.emptyTitle")}</h2>
       <p className="muted" style={{ margin: "0 0 16px" }}>
-        在左侧栏点击「添加」或下方按钮选择一个本地 Git 仓库或项目目录，即可开始管理需求、技术方案与自动化验证。
+        {t(language, "hub.emptyDesc")}
       </p>
       <button
         className="btn primary"
@@ -55,13 +68,14 @@ export function EmptyHubCard() {
         data-testid="empty-hub-add-btn"
         onClick={() => void openAddProjectModal()}
       >
-        <Icon icon={Plus} size={16} /> 添加本地项目
+        <Icon icon={Plus} size={16} /> {t(language, "hub.addLocal")}
       </button>
     </div>
   );
 }
 
 export function InitCard() {
+  const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const initName = useUiStore((s) => s.initName);
   const initPrivacy = useUiStore((s) => s.initPrivacy);
@@ -76,25 +90,29 @@ export function InitCard() {
 
   return (
     <div className="init-card" data-testid="init-card">
-      <h2>初始化项目工作台</h2>
+      <h2>{t(language, "init.title")}</h2>
       <p className="muted" style={{ margin: "0 0 14px" }}>
-        将在项目目录 <code>{rootLabel}</code> 建立轻量级 <code>.workbench/</code> 目录，用于保存可读规范（Markdown）、方案历史与验证证据。
+        {t(language, "init.descPrefix")}
+        <code>{rootLabel}</code>
+        {t(language, "init.descMiddle")}
+        <code>.workbench/</code>
+        {t(language, "init.descSuffix")}
       </p>
       <div style={{ marginBottom: 12 }}>
         <label className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
-          项目名称
+          {t(language, "init.nameLabel")}
         </label>
         <input
           className="input"
           id="init-name"
           value={initName}
-          placeholder="输入项目名称（默认使用目录名）"
+          placeholder={t(language, "init.namePlaceholder")}
           onChange={(e) => setInitName(e.target.value)}
         />
       </div>
       <div style={{ marginBottom: 12 }}>
         <label className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
-          模型文档输出语言偏好
+          {t(language, "init.outputLanguageLabel")}
         </label>
         <select
           className="select"
@@ -103,10 +121,10 @@ export function InitCard() {
           value={initOutputLanguage}
           onChange={(e) => setInitOutputLanguage(e.target.value as OutputLanguage | "inherit")}
         >
-          <option value="inherit">跟随 Hub 全局默认（简体中文）</option>
-          <option value="zh-CN">简体中文 (zh-CN)</option>
-          <option value="en">English (en)</option>
-          <option value="auto">跟随需求输入语言 (auto)</option>
+          <option value="inherit">{t(language, "init.langInherit")}</option>
+          <option value="zh-CN">{t(language, "init.langZh")}</option>
+          <option value="en">{t(language, "init.langEn")}</option>
+          <option value="auto">{t(language, "init.langAuto")}</option>
         </select>
       </div>
       <div className="radio-row">
@@ -116,9 +134,11 @@ export function InitCard() {
         >
           <input type="radio" name="privacy" checked={initPrivacy === "local"} readOnly />
           <div>
-            <strong>仅本机跟踪（推荐）</strong>
+            <strong>{t(language, "init.localTitle")}</strong>
             <div className="muted" style={{ fontSize: 12 }}>
-              自动写入 <code>.git/info/exclude</code>，不打扰团队代码库。
+              {t(language, "init.localDescPrefix")}
+              <code>.git/info/exclude</code>
+              {t(language, "init.localDescSuffix")}
             </div>
           </div>
         </label>
@@ -128,9 +148,9 @@ export function InitCard() {
         >
           <input type="radio" name="privacy" checked={initPrivacy === "tracked"} readOnly />
           <div>
-            <strong>随仓库 Git 跟踪</strong>
+            <strong>{t(language, "init.trackedTitle")}</strong>
             <div className="muted" style={{ fontSize: 12 }}>
-              将规范与方案版本纳入仓库历史，适合多人协同审阅。
+              {t(language, "init.trackedDesc")}
             </div>
           </div>
         </label>
@@ -143,18 +163,23 @@ export function InitCard() {
         disabled={busy}
         onClick={() => void initProjectSubmit()}
       >
-        立即初始化
+        {t(language, "init.submit")}
       </button>
     </div>
   );
 }
 
 function RequirementBoard({ items }: { items: RequirementSummary[] }) {
+  const language = useUiStore((s) => s.language);
   const cols: Array<{ key: string; title: string; stages: Stage[] }> = [
-    { key: "prep", title: "准备中", stages: ["draft", "designing", "awaiting_approval"] },
-    { key: "doing", title: "执行中", stages: ["implementing"] },
-    { key: "accept", title: "待验收", stages: ["awaiting_acceptance"] },
-    { key: "done", title: "已完成", stages: ["done"] },
+    {
+      key: "prep",
+      title: t(language, "board.preparing"),
+      stages: ["draft", "designing", "awaiting_approval"],
+    },
+    { key: "doing", title: t(language, "board.doing"), stages: ["implementing"] },
+    { key: "accept", title: t(language, "board.accepting"), stages: ["awaiting_acceptance"] },
+    { key: "done", title: t(language, "board.completed"), stages: ["done"] },
   ];
   const blockedItems = items.filter((i) => i.stage === "blocked");
 
@@ -162,7 +187,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
     <>
       {blockedItems.length > 0 && (
         <div className="callout danger" style={{ marginBottom: 14 }}>
-          <strong>存在 {blockedItems.length} 项受阻需求：</strong>
+          <strong>{t(language, "board.blocked", { count: blockedItems.length })}</strong>
           {blockedItems.map((b) => (
             <button
               key={b.id}
@@ -186,12 +211,12 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
               </div>
               {list.length === 0 ? (
                 <div className="muted" style={{ fontSize: 12, padding: "8px 2px" }}>
-                  暂无需求
+                  {t(language, "board.empty")}
                 </div>
               ) : (
                 list.map((item) => {
                   const meta = STAGE_META[item.stage];
-                  const detail = progressDetail(item);
+                  const detail = progressDetail(item, language);
                   return (
                     <div
                       key={item.id}
@@ -210,7 +235,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                     >
                       <div className="board-card-top">
                         <span className="req-id">{item.id}</span>
-                        <span className={`badge ${meta.tone}`}>{meta.label}</span>
+                        <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
                       </div>
                       <div style={{ fontWeight: 500, fontSize: 13.5, marginBottom: 6 }}>{item.title}</div>
                       {detail && (
@@ -231,6 +256,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
 }
 
 export function HomeView() {
+  const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const scope = useUiStore((s) => s.scope);
   const layout = useUiStore((s) => s.layout);
@@ -257,22 +283,22 @@ export function HomeView() {
   const decisionCnt = rawItems.filter((i) => i.needsDecision).length;
   const doneCnt = rawItems.filter((i) => i.stage === "done").length;
 
-  const visible = filteredItems(rawItems, query);
+  const visible = filteredItems(rawItems, query, language);
   const pendingDecisions = rawItems.filter((i) => i.needsDecision);
 
   return (
     <div data-testid="home-view">
       <div className="mission-stats">
         <div className="stat-pill">
-          <span className="muted xs">活跃需求</span>
+          <span className="muted xs">{t(language, "home.active")}</span>
           <strong>{activeCnt}</strong>
         </div>
         <div className={`stat-pill ${decisionCnt > 0 ? "warn" : ""}`}>
-          <span className="muted xs">待拍板</span>
+          <span className="muted xs">{t(language, "home.decisions")}</span>
           <strong>{decisionCnt}</strong>
         </div>
         <div className="stat-pill">
-          <span className="muted xs">已完成</span>
+          <span className="muted xs">{t(language, "home.done")}</span>
           <strong>{doneCnt}</strong>
         </div>
       </div>
@@ -284,7 +310,7 @@ export function HomeView() {
           data-testid="search-input"
           type="search"
           value={query}
-          placeholder="搜索需求编号、标题或进度…"
+          placeholder={t(language, "home.searchPlaceholder")}
           onChange={(e) => setQuery(e.target.value)}
         />
         <div className="segmented" role="tablist" data-testid="scope-tabs">
@@ -297,7 +323,11 @@ export function HomeView() {
               data-value={sc}
               onClick={() => setScope(sc)}
             >
-              {sc === "active" ? "活跃" : sc === "done" ? "已完成" : "全部"}
+              {sc === "active"
+                ? t(language, "home.scope.active")
+                : sc === "done"
+                  ? t(language, "home.scope.done")
+                  : t(language, "home.scope.all")}
             </button>
           ))}
         </div>
@@ -309,7 +339,7 @@ export function HomeView() {
             data-value="list"
             onClick={() => setLayout("list")}
           >
-            列表
+            {t(language, "home.layout.list")}
           </button>
           <button
             type="button"
@@ -318,7 +348,7 @@ export function HomeView() {
             data-value="board"
             onClick={() => setLayout("board")}
           >
-            看板
+            {t(language, "home.layout.board")}
           </button>
         </div>
         <button
@@ -328,14 +358,14 @@ export function HomeView() {
           data-testid="new-req-btn"
           onClick={() => setModal({ kind: "new_req", goal: "" })}
         >
-          <Icon icon={Plus} size={14} /> 新建需求
+          <Icon icon={Plus} size={14} /> {t(language, "home.newRequirement")}
         </button>
       </div>
 
       <div id="home-content">
         {pendingDecisions.length > 0 && !query.trim() && (
           <section className="decision-box" data-testid="decision-box">
-            <h2>待你拍板 ({pendingDecisions.length})</h2>
+            <h2>{t(language, "home.decisionBox", { count: pendingDecisions.length })}</h2>
             {pendingDecisions.map((item) => (
               <div key={item.id} className="decision-row">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -350,10 +380,17 @@ export function HomeView() {
                   >
                     {item.title}
                   </span>
-                  <span className="badge warning">{item.decisionReason ?? "待确认"}</span>
+                  <span className="badge warning">
+                    {translateRef(
+                      language,
+                      item.decisionReasonKey,
+                      item.decisionReason ?? t(language, "home.decisionFallback"),
+                      item.decisionReasonParams,
+                    )}
+                  </span>
                 </div>
                 <button className="btn xs" type="button" onClick={() => void openRequirement(item.id)}>
-                  去处理 <Icon icon={ArrowRight} size={14} />
+                  {t(language, "home.goto")} <Icon icon={ArrowRight} size={14} />
                 </button>
               </div>
             ))}
@@ -363,9 +400,9 @@ export function HomeView() {
         <div id="home-body">
           {rawItems.length === 0 ? (
             <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
-              <p style={{ margin: "0 0 8px", fontWeight: 500 }}>还没有需求</p>
+              <p style={{ margin: "0 0 8px", fontWeight: 500 }}>{t(language, "home.emptyTitle")}</p>
               <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}>
-                用一句话描述你想实现或修复的内容，工作台会自动组织规范、方案、验证与代码对比。
+                {t(language, "home.emptyDesc")}
               </p>
               <button
                 className="btn primary"
@@ -374,13 +411,13 @@ export function HomeView() {
                 data-testid="empty-new-req-btn"
                 onClick={() => setModal({ kind: "new_req", goal: "" })}
               >
-                <Icon icon={Plus} size={14} /> 新建第一条需求
+                <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
               </button>
             </div>
           ) : visible.length === 0 ? (
             <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
               <p className="muted" style={{ margin: "0 0 12px" }}>
-                没有匹配“{query}”的需求
+                {t(language, "home.noMatch", { query })}
               </p>
               <button
                 className="btn"
@@ -388,14 +425,14 @@ export function HomeView() {
                 data-action="clear-search"
                 onClick={() => setQuery("")}
               >
-                清除搜索
+                {t(language, "home.clearSearch")}
               </button>
             </div>
           ) : layout === "list" ? (
             <div className="req-list" data-testid="req-list">
               {visible.map((item) => {
                 const meta = STAGE_META[item.stage];
-                const detail = progressDetail(item);
+                const detail = progressDetail(item, language);
                 const activeReqRun = Object.values(activeRuns).find(
                   (r) =>
                     r.requirementId === item.id &&
@@ -422,7 +459,7 @@ export function HomeView() {
                     <div data-testid={`req-card-${item.id}`}>
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
-                        <span className={`badge ${meta.tone}`}>{meta.label}</span>
+                        <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
                         {item.github?.issue && (
                           <span className="badge neutral">Issue #{item.github.issue.number}</span>
                         )}
@@ -433,13 +470,17 @@ export function HomeView() {
                         )}
                         {activeReqRun && (
                           <span className="badge info">
-                            <span className="pulse-dot" /> {activeReqRun.harness}/{activeReqRun.model} 执行中
+                            <span className="pulse-dot" />{" "}
+                            {t(language, "home.running", {
+                              harness: activeReqRun.harness,
+                              model: activeReqRun.model,
+                            })}
                           </span>
                         )}
                         {detail && <span>{detail}</span>}
                       </div>
                     </div>
-                    <span className="req-time">{relativeTime(item.updatedAt)}</span>
+                    <span className="req-time">{relativeTime(item.updatedAt, language)}</span>
                   </div>
                 );
               })}

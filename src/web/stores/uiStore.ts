@@ -1,5 +1,13 @@
 import { create } from "zustand";
 import type { OutputLanguage } from "../../core/types.ts";
+import {
+  applyDocumentLanguage,
+  persistUiLanguage,
+  readStoredUiLanguage,
+  type MessageKey,
+  type MessageParams,
+  type UiLanguage,
+} from "../i18n.ts";
 import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Scope, type WorkspaceTab } from "../state.ts";
 
 export const DEFAULT_DRAWER_WIDTH = 720;
@@ -20,8 +28,16 @@ function initialDrawerWidth(): number {
   return DEFAULT_DRAWER_WIDTH;
 }
 
+export interface UiToast {
+  messageKey: MessageKey | null;
+  params?: MessageParams;
+  message: string;
+  isError: boolean;
+}
+
 export interface UiStoreState {
   theme: "light" | "dark";
+  language: UiLanguage;
   busy: boolean;
   sidebarOpen: boolean;
   desktopSidebarOpen: boolean;
@@ -48,9 +64,10 @@ export interface UiStoreState {
   drawerTab: DrawerTab;
   moreMenuOpen: boolean;
   modal: ModalState;
-  toast: { message: string; isError: boolean } | null;
+  toast: UiToast | null;
 
   toggleTheme: () => void;
+  setLanguage: (language: UiLanguage) => void;
   setBusy: (busy: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setDesktopSidebarOpen: (open: boolean) => void;
@@ -76,12 +93,14 @@ export interface UiStoreState {
   setMoreMenuOpen: (open: boolean) => void;
   setModal: (modal: ModalState | ((prev: ModalState) => ModalState)) => void;
   showToast: (message: string, isError?: boolean) => void;
+  showToastKey: (key: MessageKey, params?: MessageParams, isError?: boolean) => void;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
+  language: readStoredUiLanguage(),
   busy: false,
   sidebarOpen: false,
   desktopSidebarOpen: initialDesktopSidebarOpen(),
@@ -121,6 +140,11 @@ export const useUiStore = create<UiStoreState>((set) => ({
       }
       return { theme: next };
     }),
+  setLanguage: (language) => {
+    set({ language });
+    applyDocumentLanguage(language);
+    persistUiLanguage(language);
+  },
   setBusy: (busy) => set({ busy }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setDesktopSidebarOpen: (desktopSidebarOpen) => {
@@ -167,7 +191,14 @@ export const useUiStore = create<UiStoreState>((set) => ({
     })),
   showToast: (message, isError = false) => {
     if (toastTimer) clearTimeout(toastTimer);
-    set({ toast: { message, isError } });
+    set({ toast: { messageKey: null, message, isError } });
+    toastTimer = setTimeout(() => {
+      set({ toast: null });
+    }, 4000);
+  },
+  showToastKey: (key, params, isError = false) => {
+    if (toastTimer) clearTimeout(toastTimer);
+    set({ toast: { messageKey: key, params, message: "", isError } });
     toastTimer = setTimeout(() => {
       set({ toast: null });
     }, 4000);

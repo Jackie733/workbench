@@ -1,10 +1,12 @@
 import { Plus, Settings, X } from "lucide-react";
+import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import { openAddProjectModal, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export function HubSidebar() {
+  const language = useUiStore((s) => s.language);
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
   const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -36,10 +38,10 @@ export function HubSidebar() {
 
   const presetLabel =
     routing?.activePreset === "sota_first"
-      ? "SOTA 优先"
+      ? t(language, "preset.sota_first")
       : routing?.activePreset === "quota_saver"
-        ? "极致省流"
-        : "性价比均衡";
+        ? t(language, "preset.quota_saver")
+        : t(language, "preset.balanced");
 
   return (
     <>
@@ -63,8 +65,8 @@ export function HubSidebar() {
             <button
               className="btn ghost xs sb-close-btn"
               type="button"
-              title="收起侧边栏"
-              aria-label="收起侧边栏"
+              title={t(language, "sidebar.collapse")}
+              aria-label={t(language, "sidebar.collapse")}
               onClick={() => setSidebarOpen(false)}
             >
               <Icon icon={X} />
@@ -73,22 +75,26 @@ export function HubSidebar() {
 
           <div className="sb-section">
             <div className="sb-head">
-              <span>{hasMultiNode ? `项目 (${projects.length})` : `本地项目 (${projects.length})`}</span>
+              <span>
+                {t(language, hasMultiNode ? "sidebar.projects" : "sidebar.localProjects", {
+                  count: projects.length,
+                })}
+              </span>
               <button
                 className="btn ghost xs"
                 type="button"
                 data-action="open-add-project"
                 data-testid="add-project-btn"
-                title="添加或初始化项目"
+                title={t(language, "sidebar.addTitle")}
                 onClick={() => void openAddProjectModal(activeNodeId)}
               >
-                <Icon icon={Plus} size={14} /> 添加
+                <Icon icon={Plus} size={14} /> {t(language, "sidebar.add")}
               </button>
             </div>
             <div className="sb-list" data-testid="hub-project-list">
               {projects.length === 0 ? (
                 <div className="muted xs" style={{ padding: "6px 8px" }}>
-                  暂无纳管项目
+                  {t(language, "sidebar.empty")}
                 </div>
               ) : (
                 projects.map((p) => {
@@ -116,19 +122,19 @@ export function HubSidebar() {
                       </div>
                       <div className="sb-item-badges">
                         {isRemote && (
-                          <span className="sb-badge" title={`节点: ${p.nodeName ?? p.nodeId}`}>
+                          <span className="sb-badge" title={t(language, "sidebar.nodeTitle", { node: p.nodeName ?? p.nodeId ?? "" })}>
                             {p.nodeName ?? p.nodeId}
                           </span>
                         )}
                         {p.decisionCount > 0 && (
-                          <span className="sb-badge warn" title="待拍板">
+                          <span className="sb-badge warn" title={t(language, "sidebar.decisionTitle")}>
                             {p.decisionCount}
                           </span>
                         )}
                         {offline ? (
-                          <span className="sb-badge muted">离线</span>
+                          <span className="sb-badge muted">{t(language, "common.offline")}</span>
                         ) : !p.initialized ? (
-                          <span className="sb-badge muted">未初始化</span>
+                          <span className="sb-badge muted">{t(language, "sidebar.uninitialized")}</span>
                         ) : p.activeCount > 0 ? (
                           <span className="sb-badge">{p.activeCount}</span>
                         ) : null}
@@ -143,7 +149,12 @@ export function HubSidebar() {
           {remoteNodes.length > 0 && (
             <div className="sb-section">
               <div className="sb-head">
-                <span>设备节点 ({nodes.filter((n) => n.connected).length}/{nodes.length})</span>
+                <span>
+                  {t(language, "sidebar.nodes", {
+                    connected: nodes.filter((n) => n.connected).length,
+                    total: nodes.length,
+                  })}
+                </span>
               </div>
               <div className="sb-harnesses" data-testid="hub-nodes-list">
                 {nodes.map((n) => (
@@ -152,7 +163,9 @@ export function HubSidebar() {
                     <span className="sb-harness-name" style={{ fontFamily: "var(--sans)" }}>
                       {n.name}
                     </span>
-                    <span className="muted xs">{n.connected ? "在线" : "离线"}</span>
+                    <span className="muted xs">
+                      {n.connected ? t(language, "common.online") : t(language, "common.offline")}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -162,7 +175,7 @@ export function HubSidebar() {
           <div className="sb-section sb-section-bottom">
             <div className="sb-head">
               <span>
-                算力与模型路由
+                {t(language, "sidebar.routing")}
                 {hasMultiNode && activeNode ? ` · ${activeNode.name}` : ""}
               </span>
               <button
@@ -174,7 +187,7 @@ export function HubSidebar() {
                   setModal({ kind: "routing", draft: null })
                 }
               >
-                <Icon icon={Settings} size={14} /> 配置
+                <Icon icon={Settings} size={14} /> {t(language, "sidebar.configure")}
               </button>
             </div>
             <div
@@ -190,7 +203,7 @@ export function HubSidebar() {
                 }
               }}
             >
-              <span className="muted xs">当前策略</span>
+              <span className="muted xs">{t(language, "sidebar.currentPolicy")}</span>
               <span className="badge info">{presetLabel}</span>
             </div>
             <div className="sb-harnesses">
@@ -198,7 +211,15 @@ export function HubSidebar() {
                 <div key={h.id} className="sb-harness-row" title={h.subscription}>
                   <span className={`dot ${h.installed ? "online" : ""}`} />
                   <span className="sb-harness-name">{h.id}</span>
-                  <span className="muted xs">{h.installed ? `${h.models.length} 模型` : "未安装"}</span>
+                  <span className="muted xs">
+                    {h.installed
+                      ? t(
+                          language,
+                          h.models.length === 1 ? "sidebar.modelCountOne" : "sidebar.modelCountOther",
+                          { count: h.models.length },
+                        )
+                      : t(language, "common.uninstalled")}
+                  </span>
                 </div>
               ))}
             </div>

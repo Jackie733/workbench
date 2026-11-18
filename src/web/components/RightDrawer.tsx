@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
+import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
   adoptDiscussion,
@@ -30,6 +31,7 @@ function clampDrawerWidth(width: number, maxWidth: number): number {
 }
 
 export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDivElement | null> }) {
+  const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
@@ -236,11 +238,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
             role="separator"
             tabIndex={0}
             aria-orientation="vertical"
-            aria-label="调整右侧边栏宽度"
+            aria-label={t(language, "drawer.resizeAria")}
             aria-valuemin={MIN_DRAWER_WIDTH}
             aria-valuemax={maxWidth}
             aria-valuenow={effectiveWidth}
-            title="拖动调整宽度（双击切换等宽 / 默认）"
+            title={t(language, "drawer.resizeTitle")}
             data-testid="drawer-resizer"
             onPointerDown={handleResizePointerDown}
             onDoubleClick={handleResizeDoubleClick}
@@ -262,7 +264,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     data-testid="drawer-tab-discuss"
                     onClick={() => setDrawerTab("discuss")}
                   >
-                    <Icon icon={MessageSquare} size={14} /> 研讨与批注
+                    <Icon icon={MessageSquare} size={14} /> {t(language, "drawer.tab.discuss")}
                     {pendingAnnotations.length > 0 ? ` (${pendingAnnotations.length})` : ""}
                   </button>
                   <button
@@ -273,8 +275,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     data-testid="drawer-tab-console"
                     onClick={() => setDrawerTab("console")}
                   >
-                    <Icon icon={Terminal} size={14} /> 执行终端
-                    {activeRun && <span className="pulse-dot" role="img" aria-label="执行中" />}
+                    <Icon icon={Terminal} size={14} /> {t(language, "drawer.tab.console")}
+                    {activeRun && (
+                      <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />
+                    )}
                   </button>
                 </div>
               </div>
@@ -284,13 +288,13 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                   {pendingAnnotations.length > 0 && (
                     <div className="annot-queue" data-testid="pending-annotations">
                       <div className="annot-queue-head">
-                        <strong>待提交批注 ({pendingAnnotations.length})</strong>
+                        <strong>{t(language, "drawer.pending", { count: pendingAnnotations.length })}</strong>
                         <button
                           className="btn ghost xs"
                           type="button"
                           onClick={() => clearPendingAnnotations()}
                         >
-                          清空
+                          {t(language, "common.clear")}
                         </button>
                       </div>
                       {pendingAnnotations.map((a) => (
@@ -304,7 +308,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <button
                             className="btn ghost xs"
                             type="button"
-                            aria-label="移除此批注"
+                            aria-label={t(language, "drawer.removeAnnotation")}
                             onClick={() => removePendingAnnotation(a.id)}
                           >
                             <Icon icon={X} size={14} />
@@ -317,7 +321,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                   <div className="discuss-thread" data-testid="discuss-thread" ref={threadRef}>
                     {discussions.length === 0 && !activeRun ? (
                       <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                        针对方案有疑问或不满意之处？可悬停正文段落点「批注」，或在下方直接向任意模型提问探讨（不会擅自改写方案）。
+                        {t(language, "drawer.discussEmpty")}
                       </div>
                     ) : (
                       discussions.map((item) => (
@@ -325,17 +329,21 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <div className="discuss-meta">
                             <span>
                               {item.actor === "human"
-                                ? "我"
+                                ? t(language, "drawer.me")
                                 : `${item.harness ?? "Agent"}${item.model ? ` · ${item.model}` : ""}`}
                             </span>
                             <span className={`badge ${item.mode === "ask" ? "info" : "warning"}`}>
-                              {item.mode === "ask" ? "探讨" : item.resolved ? "已落实" : "批注"}
+                              {item.mode === "ask"
+                                ? t(language, "drawer.mode.ask")
+                                : item.resolved
+                                  ? t(language, "drawer.mode.resolved")
+                                  : t(language, "drawer.mode.annotate")}
                             </span>
-                            <span className="muted xs">{formatDateTime(item.at)}</span>
+                            <span className="muted xs">{formatDateTime(item.at, language)}</span>
                           </div>
                           {item.anchor && (
                             <div className="xs muted" style={{ marginBottom: 4 }}>
-                              锚点：{item.anchor}
+                              {t(language, "drawer.anchor", { anchor: item.anchor })}
                             </div>
                           )}
                           <MarkdownView markdown={item.message} className="md-body xs" />
@@ -346,7 +354,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 type="button"
                                 onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                               >
-                                采纳此回复并更新方案
+                                {t(language, "drawer.adopt")}
                               </button>
                             </div>
                           )}
@@ -362,11 +370,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             <Icon icon={Zap} size={14} /> {activeRun.harness} · {activeRun.model}
                           </span>
                           <span className="badge info">
-                            流式输出中 · <LiveTimer startedAt={activeRun.startedAt} />
+                            {t(language, "drawer.streaming")} · <LiveTimer startedAt={activeRun.startedAt} />
                           </span>
                         </div>
                         <pre className="discuss-stream-pre" data-testid="discuss-stream-output">
-                          {streamText.trim() || "正在连接模型并分析上下文…"}
+                          {streamText.trim() || t(language, "drawer.connecting")}
                         </pre>
                       </div>
                     )}
@@ -375,11 +383,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                   <div className="drawer-composer">
                     {discussAnchor && (
                       <div className="xs muted" style={{ marginBottom: 4 }}>
-                        锚点：<strong>{discussAnchor}</strong>{" "}
+                        {t(language, "drawer.anchor", { anchor: discussAnchor })}{" "}
                         <button
                           className="btn ghost xs"
                           type="button"
-                          aria-label="清除锚点"
+                          aria-label={t(language, "drawer.clearAnchor")}
                           onClick={() => setDiscussAnchor(null)}
                         >
                           <Icon icon={X} size={14} />
@@ -395,7 +403,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       data-testid="discuss-input"
                       rows={3}
                       value={discussDraft}
-                      placeholder="向选定模型提问探讨（Ask），或写下修改要求让 Agent 修订方案…"
+                      placeholder={t(language, "drawer.placeholder")}
                       onChange={(e) => setDiscussDraft(e.target.value)}
                     />
                     <div className="drawer-composer-actions">
@@ -407,7 +415,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         disabled={busy || Boolean(activeRun)}
                         onClick={() => void runAskFromDrawer(d.state.id)}
                       >
-                        <Icon icon={Lightbulb} size={14} /> 仅提问探讨
+                        <Icon icon={Lightbulb} size={14} /> {t(language, "drawer.ask")}
                       </button>
                       <button
                         className="btn primary"
@@ -417,7 +425,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         disabled={busy || Boolean(activeRun)}
                         onClick={() => void runRefineFromDrawer(d.state.id)}
                       >
-                        <Icon icon={Pencil} size={14} /> 让 Agent 修订
+                        <Icon icon={Pencil} size={14} /> {t(language, "drawer.refine")}
                       </button>
                     </div>
                   </div>
@@ -432,7 +440,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       data-testid="view-handoff-btn"
                       onClick={() => void openHandoff(d.state.id)}
                     >
-                      <Icon icon={FileText} size={14} /> 交接简报 handoff.md
+                      <Icon icon={FileText} size={14} /> {t(language, "drawer.handoff")}
                     </button>
                     {runs.length > 0 && (
                       <select
@@ -443,7 +451,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         {runs.map((r) => (
                           <option key={r.id} value={r.id}>
                             {r.action} · {r.harness}/{r.model}
-                            {r.modelFallback && r.effectiveModel ? ` → 实际 ${r.effectiveModel}` : ""} ({r.status})
+                            {r.modelFallback && r.effectiveModel
+                              ? ` → ${t(language, "drawer.actual", { model: r.effectiveModel })}`
+                              : ""}{" "}
+                            ({r.status})
                           </option>
                         ))}
                       </select>
@@ -464,19 +475,19 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             }`}
                           >
                             {currentRun.status === "running"
-                              ? "执行中"
+                              ? t(language, "drawer.status.running")
                               : currentRun.status === "succeeded"
-                                ? "已完成"
+                                ? t(language, "drawer.status.succeeded")
                                 : currentRun.status === "cancelled"
-                                  ? "已终止"
-                                  : "失败"}
+                                  ? t(language, "drawer.status.cancelled")
+                                  : t(language, "drawer.status.failed")}
                           </span>
                           <span className="xs" style={{ marginLeft: 6 }}>
                             <strong>{currentRun.harness}</strong> · {currentRun.model}
                           </span>
                           {currentRun.modelFallback && currentRun.effectiveModel && (
                             <span className="badge warning xs" style={{ marginLeft: 6 }}>
-                              降级·实际 {currentRun.effectiveModel}
+                              {t(language, "drawer.degraded", { model: currentRun.effectiveModel })}
                             </span>
                           )}
                         </div>
@@ -489,7 +500,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               data-testid="cancel-run-btn"
                               onClick={() => void cancelRun(d.state.id, currentRun.id)}
                             >
-                              终止任务
+                              {t(language, "drawer.stop")}
                             </button>
                           ) : currentRun.status === "failed" || currentRun.rateLimited ? (
                             <button
@@ -498,7 +509,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               data-testid="retry-fallback-btn"
                               onClick={() => void triggerActiveRun(d.state.id, currentRun.action, { useFallback: true })}
                             >
-                              切换备援模型重试
+                              {t(language, "drawer.retryFallback")}
                             </button>
                           ) : null}
                         </div>
@@ -509,12 +520,12 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         </div>
                       )}
                       <pre className="console-log" data-testid="console-log-output" ref={consolePreRef}>
-                        {liveText || "等待终端输出…"}
+                        {liveText || t(language, "drawer.waiting")}
                       </pre>
                     </>
                   ) : (
                     <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                      尚未通过调度器触发 Agent 执行。可在主横幅选择模型后点击「后台执行」。
+                      {t(language, "drawer.consoleEmpty")}
                     </div>
                   )}
                 </div>

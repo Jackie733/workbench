@@ -1,4 +1,5 @@
 import { diffLines } from "diff";
+import { t, type UiLanguage } from "./i18n.ts";
 
 export function escapeHtml(input: string): string {
   return input
@@ -40,19 +41,23 @@ function renderInline(raw: string): string {
 export interface MarkdownRenderOptions {
   annotatable?: boolean;
   docLabel?: string;
+  language?: UiLanguage;
 }
 
 /** Renders GitHub-Flavored Markdown safely to HTML without external runtime libraries. */
 export function renderMarkdown(markdown: string, options: MarkdownRenderOptions = {}): string {
   const normalized = markdown.replace(/\r\n/g, "\n").trim();
-  if (!normalized) return `<p class="muted">（暂无内容）</p>`;
+  const language = options.language ?? "zh-CN";
+  if (!normalized) return `<p class="muted">${t(language, "md.empty")}</p>`;
   const annotatable = options.annotatable === true;
   const docLabel = options.docLabel ?? "doc";
   const wrapHeading = (level: number, rawHeading: string) => {
     const inner = renderInline(rawHeading);
     if (!annotatable) return `<h${level}>${inner}</h${level}>`;
     const anchor = `${docLabel}#${rawHeading.trim().slice(0, 60)}`;
-    return `<div class="md-annot-row"><h${level}>${inner}</h${level}><button class="btn ghost xs md-annot-btn" type="button" data-action="annotate-anchor" data-anchor="${escapeHtml(anchor)}" title="对此段提问或批注"><span class="md-annot-icon" data-icon-slot="annotate" aria-hidden="true"></span>批注</button></div>`;
+    const annotateTitle = escapeHtml(t(language, "md.annotateTitle"));
+    const annotateLabel = escapeHtml(t(language, "md.annotate"));
+    return `<div class="md-annot-row"><h${level}>${inner}</h${level}><button class="btn ghost xs md-annot-btn" type="button" data-action="annotate-anchor" data-anchor="${escapeHtml(anchor)}" title="${annotateTitle}" aria-label="${annotateTitle}"><span class="md-annot-icon" data-icon-slot="annotate" aria-hidden="true"></span>${annotateLabel}</button></div>`;
   };
 
   const lines = normalized.split("\n");

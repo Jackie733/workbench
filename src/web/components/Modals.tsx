@@ -47,33 +47,36 @@ import {
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { EFFORT_LABELS, formatDateTime, parseRunnerKey, supportedEffortsForModel } from "../state.ts";
+import { describeClientError, t, translateRef, type MessageKey } from "../i18n.ts";
+import { effortLabel, formatDateTime, parseRunnerKey, supportedEffortsForModel } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
 
-const STAGE_LABEL: Record<RoutingStage, string> = {
-  design: "规划与方案设计 (design)",
-  implement: "编码实现 (implement)",
-  fix: "失败诊断与修复 (fix)",
-  review: "交付前交叉审查 (review)",
+const STAGE_LABEL_KEYS: Record<RoutingStage, MessageKey> = {
+  design: "routing.stage.design",
+  implement: "routing.stage.implement",
+  fix: "routing.stage.fix",
+  review: "routing.stage.review",
 };
 
-const PRESET_INFO: Array<{ id: RoutingPreset; name: string; desc: string }> = [
-  { id: "balanced", name: "性价比均衡 (推荐)", desc: "规划与审查用强推理模型把关，高频编码交给大额度主力，质量与成本兼顾" },
-  { id: "sota_first", name: "SOTA 攻坚优先", desc: "四个阶段全线优先最强推理模型，追求质量上限，额度消耗最高" },
-  { id: "quota_saver", name: "极致省流保额", desc: "优先使用免费与高性价比模型，最大限度保留付费旗舰额度" },
+const PRESET_KEYS: Array<{ id: RoutingPreset; nameKey: MessageKey; descKey: MessageKey }> = [
+  { id: "balanced", nameKey: "preset.balanced.name", descKey: "preset.balanced.desc" },
+  { id: "sota_first", nameKey: "preset.sota_first.name", descKey: "preset.sota_first.desc" },
+  { id: "quota_saver", nameKey: "preset.quota_saver.name", descKey: "preset.quota_saver.desc" },
 ];
 
 export function Modals() {
+  const language = useUiStore((s) => s.language);
   const m = useUiStore((s) => s.modal);
   const busy = useUiStore((s) => s.busy);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const setModal = useUiStore((s) => s.setModal);
   const showToast = useUiStore((s) => s.showToast);
+  const showToastKey = useUiStore((s) => s.showToastKey);
   const setActiveProjectId = useUiStore((s) => s.setActiveProjectId);
   const setSelectedId = useUiStore((s) => s.setSelectedId);
   const setSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
@@ -120,8 +123,8 @@ export function Modals() {
     return (
       <ModalShell onClose={close} testId="new-req-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>新建需求</h3>
-          <div className="segmented" role="tablist" aria-label="新建需求方式">
+          <h3 style={{ margin: 0 }}>{t(language, "newReq.title")}</h3>
+          <div className="segmented" role="tablist" aria-label={t(language, "newReq.modeAria")}>
             <button
               type="button"
               role="tab"
@@ -132,7 +135,7 @@ export function Modals() {
                 setModal((prev) => (prev?.kind === "new_req" ? { ...prev, mode: "create" } : prev))
               }
             >
-              直接描述
+              {t(language, "newReq.modeCreate")}
             </button>
             <button
               type="button"
@@ -146,7 +149,7 @@ export function Modals() {
                 )
               }
             >
-              从 GitHub Issue 导入
+              {t(language, "newReq.modeImport")}
             </button>
           </div>
         </div>
@@ -154,7 +157,7 @@ export function Modals() {
         {mode === "create" ? (
           <>
             <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
-              你想实现或修复什么？
+              {t(language, "newReq.goalLabel")}
             </label>
             <textarea
               className="textarea"
@@ -162,7 +165,7 @@ export function Modals() {
               data-testid="new-req-goal"
               autoFocus
               value={m.goal}
-              placeholder="用一句话描述需求目标，细节与验收标准可交给 Agent 整理…"
+              placeholder={t(language, "newReq.goalPlaceholder")}
               onChange={(e) =>
                 setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
               }
@@ -187,14 +190,14 @@ export function Modals() {
                 }
               />
               <span>
-                同步在 GitHub 创建 Issue
+                {t(language, "newReq.syncIssue")}
                 {githubStatus?.repo ? ` (${githubStatus.repo})` : ""}
                 {githubStatus && !githubStatus.ready ? ` — ${githubStatus.reason}` : ""}
               </span>
             </label>
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                取消
+                {t(language, "common.cancel")}
               </button>
               <button
                 className="btn"
@@ -211,7 +214,7 @@ export function Modals() {
                   )
                 }
               >
-                仅保存草稿
+                {t(language, "newReq.saveDraft")}
               </button>
               <button
                 className="btn primary"
@@ -228,14 +231,16 @@ export function Modals() {
                   )
                 }
               >
-                创建并让 Agent 整理方案
+                {t(language, "newReq.createDispatch")}
               </button>
             </div>
           </>
         ) : (
           <>
             <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
-              GitHub Issue 编号或完整 URL{githubStatus?.repo ? `（默认仓库 ${githubStatus.repo}）` : ""}
+              {githubStatus?.repo
+                ? t(language, "newReq.importLabelRepo", { repo: githubStatus.repo })
+                : t(language, "newReq.importLabel")}
             </label>
             <input
               className="input"
@@ -243,7 +248,7 @@ export function Modals() {
               data-testid="import-issue-ref"
               autoFocus
               value={m.issueRef ?? ""}
-              placeholder="例如 #42、42 或 https://github.com/owner/repo/issues/42"
+              placeholder={t(language, "newReq.importPlaceholder")}
               onChange={(e) =>
                 setModal((prev) => (prev?.kind === "new_req" ? { ...prev, issueRef: e.target.value } : prev))
               }
@@ -255,7 +260,7 @@ export function Modals() {
             )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                取消
+                {t(language, "common.cancel")}
               </button>
               <button
                 className="btn"
@@ -264,7 +269,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", false)}
               >
-                仅导入草稿
+                {t(language, "newReq.importDraft")}
               </button>
               <button
                 className="btn primary"
@@ -273,7 +278,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", true)}
               >
-                导入并让 Agent 整理方案
+                {t(language, "newReq.importDispatch")}
               </button>
             </div>
           </>
@@ -304,14 +309,14 @@ export function Modals() {
             ? { ...prev, nodeId: targetNode, browse: null, pathInput: "" }
             : prev,
         );
-        showToast(err instanceof Error ? err.message : "无法打开目录", true);
+        showToast(describeClientError(useUiStore.getState().language, err), true);
       }
     };
 
     const submitAddProject = async () => {
       const rootPath = m.pathInput.trim();
       if (!rootPath) {
-        showToast("请输入或选择项目目录路径", true);
+        showToastKey("addProject.enterPath", undefined, true);
         return;
       }
       const res = await runBusy(async () => {
@@ -331,14 +336,14 @@ export function Modals() {
       });
       if (res) {
         await invalidateAllWorkbenchQueries();
-        showToast(`已切换到项目 ${res.project.name}`);
+        showToastKey("addProject.switched", { name: res.project.name });
       }
     };
 
     return (
       <ModalShell onClose={close} wide testId="add-project-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>添加或切换项目目录</h3>
+          <h3 style={{ margin: 0 }}>{t(language, "addProject.title")}</h3>
           <button
             className="btn ghost xs"
             type="button"
@@ -347,16 +352,16 @@ export function Modals() {
               setModal((prev) => (prev?.kind === "add_project" ? { ...prev, showNodeHelp: !prev.showNodeHelp } : prev))
             }
           >
-            {m.showNodeHelp ? "收起 WSL2 接入指引" : "+ 如何接入 Windows WSL2？"}
+            {m.showNodeHelp ? t(language, "addProject.helpClose") : t(language, "addProject.helpOpen")}
           </button>
         </div>
 
         {(connectedNodes.length > 1 || selectedNodeId !== "local") && (
           <div style={{ marginBottom: 10 }}>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              项目所在设备节点
+              {t(language, "addProject.nodeLabel")}
             </label>
-            <div className="segmented" role="tablist" aria-label="选择设备节点" data-testid="add-project-node-tabs">
+            <div className="segmented" role="tablist" aria-label={t(language, "addProject.nodeAria")} data-testid="add-project-node-tabs">
               {connectedNodes.map((n) => (
                 <button
                   key={n.nodeId}
@@ -377,22 +382,24 @@ export function Modals() {
         {m.showNodeHelp && (
           <div className="callout info xs" style={{ marginBottom: 10 }} data-testid="node-connect-guide">
             <div>
-              <strong>将 Windows WSL2 中的工作项目挂载到此 Web UI（平时零负载，按需执行）：</strong>
+              <strong>{t(language, "addProject.helpTitle")}</strong>
             </div>
             <div style={{ marginTop: 4 }}>
-              在 Windows WSL2 终端运行一次以下命令，即可在上方切换选择 WSL2 目录：
+              {t(language, "addProject.helpDesc")}
             </div>
             <pre style={{ margin: "6px 0 0", fontFamily: "var(--mono)", fontSize: 11.5, whiteSpace: "pre-wrap" }}>
-              {`wb node install --hub ${originHint} --token <访问密码> --id wsl-work --name "Windows WSL2"`}
+              {`wb node install --hub ${originHint} --token <${t(language, "addProject.installToken")}> --id wsl-work --name "Windows WSL2"`}
             </pre>
             <div className="muted" style={{ marginTop: 4 }}>
-              注：访问密码可在当前主控机执行 <code>wb service password</code> 查看或重置。
+              {t(language, "addProject.helpNotePrefix")}
+              <code>wb service password</code>
+              {t(language, "addProject.helpNoteSuffix")}
             </div>
           </div>
         )}
 
         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-          项目根目录路径（支持手动输入或下方点击浏览）
+          {t(language, "addProject.pathLabel")}
         </label>
         <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
           <input
@@ -412,7 +419,7 @@ export function Modals() {
             data-testid="browse-go-btn"
             onClick={() => void browseDir(m.pathInput)}
           >
-            打开目录
+            {t(language, "addProject.open")}
           </button>
         </div>
         <div className="browse-box" data-testid="fs-browse-list">
@@ -422,18 +429,20 @@ export function Modals() {
                 <span className="xs muted">{browse.currentPath}</span>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   {browse.isGitRepo ? (
-                    <span className="badge success">Git 仓库</span>
+                    <span className="badge success">{t(language, "addProject.gitRepo")}</span>
                   ) : (
-                    <span className="badge neutral">普通目录</span>
+                    <span className="badge neutral">{t(language, "addProject.plainDir")}</span>
                   )}
-                  {browse.workbenchInitialized && <span className="badge info">已初始化</span>}
+                  {browse.workbenchInitialized && (
+                    <span className="badge info">{t(language, "addProject.initialized")}</span>
+                  )}
                   {browse.parentPath && (
                     <button
                       className="btn ghost xs"
                       type="button"
                       onClick={() => void browseDir(browse.parentPath!)}
                     >
-                      <Icon icon={ArrowUp} size={14} /> 上级目录
+                      <Icon icon={ArrowUp} size={14} /> {t(language, "addProject.parent")}
                     </button>
                   )}
                 </div>
@@ -441,7 +450,7 @@ export function Modals() {
               <div className="browse-entries">
                 {browse.entries.length === 0 ? (
                   <div className="muted xs" style={{ padding: 10 }}>
-                    无子目录
+                    {t(language, "addProject.noSubdirs")}
                   </div>
                 ) : (
                   browse.entries.map((e) => (
@@ -460,20 +469,20 @@ export function Modals() {
             </>
           ) : (
             <div className="muted xs" style={{ padding: 12 }}>
-              正在读取本地目录…
+              {t(language, "addProject.loading")}
             </div>
           )}
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
           <div style={{ flex: 1, minWidth: 180 }}>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              显示名称（可选）
+              {t(language, "addProject.nameLabel")}
             </label>
             <input
               className="input"
               id="add-project-name"
               value={m.nameInput}
-              placeholder="默认取文件夹名"
+              placeholder={t(language, "addProject.namePlaceholder")}
               onChange={(e) =>
                 setModal((prev) => (prev?.kind === "add_project" ? { ...prev, nameInput: e.target.value } : prev))
               }
@@ -481,7 +490,7 @@ export function Modals() {
           </div>
           <div style={{ flex: 1, minWidth: 180 }}>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              .workbench/ 初始化策略
+              {t(language, "addProject.privacyLabel")}
             </label>
             <select
               className="select"
@@ -496,15 +505,15 @@ export function Modals() {
                 )
               }
             >
-              <option value="local">自动初始化（仅本机 .git/info/exclude）</option>
-              <option value="tracked">自动初始化（随仓库 Git 跟踪）</option>
-              <option value="none">仅加入列表，稍后手动初始化</option>
+              <option value="local">{t(language, "addProject.privacyLocal")}</option>
+              <option value="tracked">{t(language, "addProject.privacyTracked")}</option>
+              <option value="none">{t(language, "addProject.privacyNone")}</option>
             </select>
           </div>
         </div>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -513,7 +522,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => void submitAddProject()}
           >
-            添加并切换到此项目
+            {t(language, "addProject.submit")}
           </button>
         </div>
       </ModalShell>
@@ -547,8 +556,8 @@ export function Modals() {
       const res = await runBusy(() => api.refreshHarnesses(targetNodeId));
       if (res) {
         await syncHubStatePatch({ harnesses: res.harnesses });
-        const nodeLabel = hub?.nodes?.find((n) => n.nodeId === targetNodeId)?.name ?? "本机";
-        showToast(`已刷新 ${nodeLabel} CLI 与模型列表`);
+        const nodeLabel = hub?.nodes?.find((n) => n.nodeId === targetNodeId)?.name ?? t(useUiStore.getState().language, "common.localNode");
+        showToastKey("routing.refreshedModels", { node: nodeLabel });
       }
     };
 
@@ -557,7 +566,7 @@ export function Modals() {
       if (res) {
         await syncHubStatePatch({ routing: res.routing });
         setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: res.routing } : prev));
-        showToast(`已应用策略预设：${preset}`);
+        showToastKey("routing.presetApplied", { preset });
       }
     };
 
@@ -571,7 +580,7 @@ export function Modals() {
       if (res) {
         await syncHubStatePatch({ routing: res.routingRes.routing, outputLanguage: res.prefRes.outputLanguage });
         setModal(null);
-        showToast("全局设置已保存");
+        showToastKey("routing.savedGlobal");
       }
     };
 
@@ -590,16 +599,16 @@ export function Modals() {
       if (out) {
         await invalidateAllWorkbenchQueries();
         setModal(null);
-        showToast("项目设置已保存");
+        showToastKey("routing.savedProject");
       }
     };
 
     return (
       <ModalShell onClose={close} wide testId="routing-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>工作台设置</h3>
+          <h3 style={{ margin: 0 }}>{t(language, "routing.title")}</h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <div className="segmented" role="tablist" aria-label="设置作用域">
+            <div className="segmented" role="tablist" aria-label={t(language, "routing.scopeAria")}>
               <button
                 type="button"
                 role="tab"
@@ -608,7 +617,7 @@ export function Modals() {
                 data-testid="settings-tab-global"
                 onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "global" } : prev))}
               >
-                <Icon icon={Globe} size={14} /> 全局设置
+                <Icon icon={Globe} size={14} /> {t(language, "routing.global")}
               </button>
               <button
                 type="button"
@@ -618,7 +627,7 @@ export function Modals() {
                 data-testid="settings-tab-project"
                 onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "project" } : prev))}
               >
-                <Icon icon={Folder} size={14} /> 项目设置
+                <Icon icon={Folder} size={14} /> {t(language, "routing.project")}
               </button>
             </div>
             {tab === "global" && (
@@ -629,7 +638,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void refreshHarnesses()}
               >
-                <Icon icon={RefreshCw} size={14} /> 重新探测本机模型
+                <Icon icon={RefreshCw} size={14} /> {t(language, "routing.refreshHarnesses")}
               </button>
             )}
           </div>
@@ -638,7 +647,7 @@ export function Modals() {
         {tab === "global" ? (
           <div data-testid="settings-pane-global">
             <div className="preset-grid" data-testid="routing-presets">
-              {PRESET_INFO.map((p) => (
+              {PRESET_KEYS.map((p) => (
                 <button
                   key={p.id}
                   className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
@@ -646,9 +655,9 @@ export function Modals() {
                   data-testid={`preset-${p.id}`}
                   onClick={() => void applyPreset(p.id)}
                 >
-                  <strong>{p.name}</strong>
+                  <strong>{t(language, p.nameKey)}</strong>
                   <div className="xs muted" style={{ marginTop: 4 }}>
-                    {p.desc}
+                    {t(language, p.descKey)}
                   </div>
                 </button>
               ))}
@@ -667,9 +676,13 @@ export function Modals() {
                   return (
                     <div key={stg} className="routing-row">
                       <div className="min-w-0">
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>{STAGE_LABEL[stg]}</div>
+                        <div style={{ fontWeight: 600, fontSize: 13 }}>{t(language, STAGE_LABEL_KEYS[stg])}</div>
                         <div className="xs muted truncate">
-                          备援：{rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") || "无"}
+                          {t(language, "routing.fallbacks", {
+                            list:
+                              rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") ||
+                              t(language, "common.none"),
+                          })}
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
@@ -709,13 +722,16 @@ export function Modals() {
                             </option>
                           )}
                           {harnesses.map((h) => (
-                            <optgroup key={h.id} label={`${h.label} (${h.installed ? h.subscription : "未安装"})`}>
+                            <optgroup
+                              key={h.id}
+                              label={`${h.label} (${h.installed ? h.subscription : t(language, "common.uninstalled")})`}
+                            >
                               {h.models.map((mod) => {
                                 const val = `${h.id}::${mod.id}`;
                                 return (
                                   <option key={val} value={val}>
                                     {h.id} · {mod.id}
-                                    {mod.source === "builtin" ? " · 未验证" : ""}
+                                    {mod.source === "builtin" ? ` · ${t(language, "routing.unverified")}` : ""}
                                   </option>
                                 );
                               })}
@@ -725,7 +741,7 @@ export function Modals() {
                         <select
                           className="select font-mono w-[135px]"
                           data-testid={`route-effort-${stg}`}
-                          title="该阶段推理强度 (Reasoning Effort)"
+                          title={t(language, "routing.effortTitle")}
                           value={rule.primary.reasoningEffort ?? ""}
                           onChange={(e) => {
                             const eff = e.target.value as ReasoningEffort | "";
@@ -742,10 +758,10 @@ export function Modals() {
                             setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
                           }}
                         >
-                          <option value="">默认强度</option>
+                          <option value="">{t(language, "routing.defaultEffort")}</option>
                           {efforts.map((eff) => (
                             <option key={eff} value={eff}>
-                              {EFFORT_LABELS[eff] ?? eff}
+                              {effortLabel(language, eff)}
                             </option>
                           ))}
                         </select>
@@ -757,12 +773,12 @@ export function Modals() {
             )}
 
             <div className="callout info xs" style={{ margin: "12px 0" }}>
-              所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
+              {t(language, "routing.outputLanguageCallout")}
             </div>
 
             <div>
               <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                Hub 全局默认输出语言（对所有项目生效）
+                {t(language, "routing.hubLangLabel")}
               </label>
               <select
                 className="select"
@@ -775,15 +791,15 @@ export function Modals() {
                   )
                 }
               >
-                <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
-                <option value="en">English (en)</option>
-                <option value="auto">跟随需求输入语言 (auto)</option>
+                <option value="zh-CN">{t(language, "routing.langZhDefault")}</option>
+                <option value="en">{t(language, "init.langEn")}</option>
+                <option value="auto">{t(language, "routing.langAuto")}</option>
               </select>
             </div>
 
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                取消
+                {t(language, "common.cancel")}
               </button>
               <button
                 className="btn primary"
@@ -792,7 +808,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void saveGlobal()}
               >
-                保存全局设置
+                {t(language, "routing.saveGlobal")}
               </button>
             </div>
           </div>
@@ -800,14 +816,14 @@ export function Modals() {
           <div data-testid="settings-pane-project">
             {noHubProject || !project?.initialized ? (
               <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                请先添加并初始化一个本地项目，再配置项目级设置。
+                {t(language, "routing.projectEmpty")}
               </div>
             ) : (
               <>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   <div>
                     <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                      当前项目（{project.project?.name}）输出语言覆盖
+                      {t(language, "routing.projectLangLabel", { name: project.project?.name ?? "" })}
                     </label>
                     <select
                       className="select"
@@ -822,28 +838,30 @@ export function Modals() {
                         )
                       }
                     >
-                      <option value="inherit">继承 Hub 全局设置（当前：{savedHubLang}）</option>
-                      <option value="zh-CN">简体中文 (zh-CN)</option>
-                      <option value="en">English (en)</option>
-                      <option value="auto">跟随需求输入语言 (auto)</option>
+                      <option value="inherit">
+                        {t(language, "routing.inheritHub", { lang: savedHubLang })}
+                      </option>
+                      <option value="zh-CN">{t(language, "init.langZh")}</option>
+                      <option value="en">{t(language, "init.langEn")}</option>
+                      <option value="auto">{t(language, "routing.langAuto")}</option>
                     </select>
                   </div>
 
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                      <strong style={{ fontSize: 13 }}>当前项目 GitHub 集成设置</strong>
+                      <strong style={{ fontSize: 13 }}>{t(language, "routing.ghTitle")}</strong>
                       {githubStatus && (
                         <span className={`badge ${githubStatus.ready ? "success" : "warning"}`}>
                           {githubStatus.ready
-                            ? `gh 已就绪 (${githubStatus.account ?? "authenticated"})`
-                            : githubStatus.reason ?? "未就绪"}
+                            ? t(language, "routing.ghReady", { account: githubStatus.account ?? "authenticated" })
+                            : (githubStatus.reason ?? t(language, "routing.ghNotReady"))}
                         </span>
                       )}
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 8, marginBottom: 8 }}>
                       <div>
                         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                          GitHub 仓库（owner/repo，留空自动识别 origin）
+                          {t(language, "routing.ghRepoLabel")}
                         </label>
                         <input
                           className="input"
@@ -859,7 +877,7 @@ export function Modals() {
                       </div>
                       <div>
                         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                          PR 默认 Base 分支
+                          {t(language, "routing.ghBaseLabel")}
                         </label>
                         <input
                           className="input"
@@ -885,7 +903,7 @@ export function Modals() {
                           )
                         }
                       />
-                      <span>新建需求或痛点转化需求时自动在 GitHub 创建对应 Issue</span>
+                      <span>{t(language, "routing.ghAutoCreate")}</span>
                     </label>
                     <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
                       <input
@@ -898,14 +916,14 @@ export function Modals() {
                           )
                         }
                       />
-                      <span>验收通过与创建 PR 时自动向已关联 GitHub Issue 同步评论进展</span>
+                      <span>{t(language, "routing.ghAutoSync")}</span>
                     </label>
                   </div>
                 </div>
 
                 <div className="modal-actions">
                   <button className="btn" type="button" onClick={close}>
-                    取消
+                    {t(language, "common.cancel")}
                   </button>
                   <button
                     className="btn primary"
@@ -914,7 +932,7 @@ export function Modals() {
                     disabled={busy}
                     onClick={() => void saveProject()}
                   >
-                    保存项目设置
+                    {t(language, "routing.saveProject")}
                   </button>
                 </div>
               </>
@@ -928,9 +946,9 @@ export function Modals() {
   if (m.kind === "annotate_anchor") {
     return (
       <ModalShell onClose={close} testId="annotate-modal">
-        <h3>段落批注与提问</h3>
+        <h3>{t(language, "annotate.title")}</h3>
         <div className="xs muted" style={{ marginBottom: 8 }}>
-          锚点位置：<span className="badge info">{m.anchor}</span>
+          {t(language, "annotate.anchor", { anchor: m.anchor })}
         </div>
         <textarea
           className="textarea"
@@ -938,7 +956,7 @@ export function Modals() {
           data-testid="annotate-msg"
           autoFocus
           value={m.message}
-          placeholder="输入对该段落的疑问（仅探讨）或修改意见（将汇总至待提交批注列表）…"
+          placeholder={t(language, "annotate.placeholder")}
           onChange={(e) =>
             setModal((prev) =>
               prev?.kind === "annotate_anchor" ? { ...prev, message: e.target.value } : prev,
@@ -947,7 +965,7 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn"
@@ -955,7 +973,7 @@ export function Modals() {
             data-testid="annotate-ask-btn"
             onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "ask")}
           >
-            <Icon icon={Lightbulb} size={14} /> 加入并立即提问
+            <Icon icon={Lightbulb} size={14} /> {t(language, "annotate.ask")}
           </button>
           <button
             className="btn primary"
@@ -963,7 +981,7 @@ export function Modals() {
             data-testid="annotate-queue-btn"
             onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "refine")}
           >
-            <Icon icon={Pencil} size={14} /> 加入待修订批注
+            <Icon icon={Pencil} size={14} /> {t(language, "annotate.queue")}
           </button>
         </div>
       </ModalShell>
@@ -973,16 +991,16 @@ export function Modals() {
   if (m.kind === "handoff_preview") {
     return (
       <ModalShell onClose={close} wide testId="handoff-modal">
-        <h3>跨模型上下文交接简报（handoff.md）</h3>
+        <h3>{t(language, "handoff.title")}</h3>
         <p className="xs muted" style={{ margin: "0 0 10px" }}>
-          切换 Harness 或异常重跑时，工作台自动合成以下高信噪比现场简报喂给下一个模型（不含冗长探索废话）：
+          {t(language, "handoff.desc")}
         </p>
         <div className="handoff-preview-box">
           <MarkdownView markdown={m.markdown} />
         </div>
         <div className="modal-actions">
           <button className="btn primary" type="button" onClick={close}>
-            关闭
+            {t(language, "common.close")}
           </button>
         </div>
       </ModalShell>
@@ -992,13 +1010,13 @@ export function Modals() {
   if (m.kind === "feedback") {
     return (
       <ModalShell onClose={close}>
-        <h3>提出修改意见</h3>
+        <h3>{t(language, "feedback.title")}</h3>
         <textarea
           className="textarea"
           id="feedback-input"
           autoFocus
           value={m.feedback}
-          placeholder="清晰写下需要调整的规范、方案或修复问题…"
+          placeholder={t(language, "feedback.placeholder")}
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: e.target.value } : prev))
           }
@@ -1014,11 +1032,11 @@ export function Modals() {
               )
             }
           />
-          <span>退回后同步投递修改指令给当前模型 / 终端会话</span>
+          <span>{t(language, "feedback.dispatch")}</span>
         </label>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1026,7 +1044,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
-            确认退回修改
+            {t(language, "feedback.submit")}
           </button>
         </div>
       </ModalShell>
@@ -1034,7 +1052,12 @@ export function Modals() {
   }
 
   if (m.kind === "lifecycle") {
-    const title = m.action === "block" ? "标记需求阻塞" : m.action === "cancel" ? "取消需求" : "重新打开需求";
+    const title =
+      m.action === "block"
+        ? t(language, "lifecycle.blockTitle")
+        : m.action === "cancel"
+          ? t(language, "lifecycle.cancelTitle")
+          : t(language, "lifecycle.reopenTitle");
     return (
       <ModalShell onClose={close}>
         <h3>{title}</h3>
@@ -1043,14 +1066,14 @@ export function Modals() {
           id="lifecycle-reason"
           autoFocus
           value={m.reason}
-          placeholder="请说明原因…"
+          placeholder={t(language, "lifecycle.reasonPlaceholder")}
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, reason: e.target.value } : prev))
           }
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1058,7 +1081,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => detail && void submitLifecycle(detail, m.action, m.reason)}
           >
-            确认
+            {t(language, "common.confirm")}
           </button>
         </div>
       </ModalShell>
@@ -1069,18 +1092,18 @@ export function Modals() {
     const copyPrompt = async () => {
       try {
         await navigator.clipboard.writeText(m.prompt);
-        showToast("已复制到剪贴板");
+        showToastKey("fallback.copied");
       } catch {
         fallbackAreaRef.current?.select();
-        showToast("请按 Ctrl+C 复制选中文本");
+        showToastKey("fallback.copyHint");
       }
     };
 
     return (
       <ModalShell onClose={close} testId="prompt-fallback-modal">
-        <h3>{m.title}</h3>
+        <h3>{t(language, m.titleKey, m.titleParams)}</h3>
         <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
-          {m.subtitle}
+          {t(language, m.subtitleKey, m.subtitleParams)}
         </p>
         <textarea
           ref={fallbackAreaRef}
@@ -1092,10 +1115,10 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" data-action="close-modal" onClick={close}>
-            关闭
+            {t(language, "common.close")}
           </button>
           <button className="btn primary" type="button" onClick={() => void copyPrompt()}>
-            复制指令
+            {t(language, "fallback.copy")}
           </button>
         </div>
       </ModalShell>
@@ -1108,7 +1131,7 @@ export function Modals() {
     const submitQuickReport = async () => {
       const title = m.title.trim();
       if (!title) {
-        showToast("请填写问题或改进标题", true);
+        showToastKey("report.needTitle", undefined, true);
         return;
       }
       const attachmentIds = (m.attachments ?? []).map((a) => a.id);
@@ -1150,13 +1173,13 @@ export function Modals() {
           setApiProjectScope(res.promoted.projectId);
           setActiveProjectId(res.promoted.projectId);
           await openRequirement(res.promoted.id);
-          showToast(
-            res.promoted.warning
-              ? `已建单并创建沙箱需求 ${res.promoted.id}（Issue 未同步：${res.promoted.warning}）`
-              : `已建单并创建沙箱需求 ${res.promoted.id}`,
-          );
+          if (res.promoted.warning) {
+            showToastKey("report.promotedWarn", { id: res.promoted.id, warning: res.promoted.warning }, true);
+          } else {
+            showToastKey("report.promoted", { id: res.promoted.id });
+          }
         } else {
-          showToast("已记录到自进化痛点收集箱");
+          showToastKey("report.recorded");
         }
       }
     };
@@ -1165,12 +1188,12 @@ export function Modals() {
       <ModalShell onClose={close} testId="quick-report-modal">
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <Icon icon={Zap} size={20} />
-          <h3 style={{ margin: 0 }}>随手报修与自进化反馈</h3>
+          <h3 style={{ margin: 0 }}>{t(language, "report.title")}</h3>
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
           <select
             className="select"
-            aria-label="问题分类"
+            aria-label={t(language, "report.categoryAria")}
             data-testid="quick-report-category"
             value={m.category}
             onChange={(e) =>
@@ -1181,18 +1204,18 @@ export function Modals() {
               )
             }
           >
-            <option value="ui_anomaly">UI 异常 / 布局交互问题</option>
-            <option value="cli_ergonomics">CLI / Agent 工具摩擦</option>
-            <option value="harness_bug">Harness / 模型调度异常</option>
-            <option value="feature_gap">工作台新能力建议</option>
+            <option value="ui_anomaly">{t(language, "report.cat.ui_anomaly")}</option>
+            <option value="cli_ergonomics">{t(language, "report.cat.cli_ergonomics")}</option>
+            <option value="harness_bug">{t(language, "report.cat.harness_bug")}</option>
+            <option value="feature_gap">{t(language, "report.cat.feature_gap")}</option>
           </select>
           <input
             className="input"
-            aria-label="关联区域或元素选择器"
+            aria-label={t(language, "report.selectorAria")}
             style={{ flex: 1, minWidth: 160 }}
             data-testid="quick-report-selector"
             value={m.domSelector}
-            placeholder="关联区域/元素选择器（可选）"
+            placeholder={t(language, "report.selectorPlaceholder")}
             onChange={(e) =>
               setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, domSelector: e.target.value } : prev))
             }
@@ -1201,32 +1224,32 @@ export function Modals() {
             className="btn xs"
             type="button"
             data-testid="pick-element-btn"
-            title="从当前页面点选元素定位问题区域"
+            title={t(language, "report.pickTitle")}
             onClick={() =>
               setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, pickingElement: true } : prev))
             }
           >
-            <Icon icon={Crosshair} size={14} /> 点选元素
+            <Icon icon={Crosshair} size={14} /> {t(language, "report.pick")}
           </button>
         </div>
         <input
           className="input"
-          aria-label="痛点标题"
+          aria-label={t(language, "report.titleAria")}
           data-testid="quick-report-title"
           autoFocus
           style={{ marginBottom: 8 }}
           value={m.title}
-          placeholder="一句话描述痛点或异常（例如：移动端侧边栏按钮遮挡标题）"
+          placeholder={t(language, "report.titlePlaceholder")}
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, title: e.target.value } : prev))
           }
         />
         <textarea
           className="textarea"
-          aria-label="详细描述"
+          aria-label={t(language, "report.detailAria")}
           data-testid="quick-report-detail"
           value={m.detail}
-          placeholder="补充复现步骤或期望表现（将自动附带当前项目、需求与视口上下文）…"
+          placeholder={t(language, "report.detailPlaceholder")}
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, detail: e.target.value } : prev))
           }
@@ -1250,7 +1273,7 @@ export function Modals() {
               )
             }
           />
-          <span>立即转化为 Workbench 仓库标准需求并创建隔离 Worktree 沙箱</span>
+          <span>{t(language, "report.autoPromote")}</span>
         </label>
         {m.autoPromote && (
           <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6, marginLeft: 20, fontSize: 12.5 }}>
@@ -1264,12 +1287,12 @@ export function Modals() {
                 )
               }
             />
-            <span>同步在 GitHub 创建对应 Issue</span>
+            <span>{t(language, "report.createIssue")}</span>
           </label>
         )}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1278,7 +1301,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => void submitQuickReport()}
           >
-            提交反馈
+            {t(language, "report.submit")}
           </button>
         </div>
       </ModalShell>
@@ -1309,7 +1332,10 @@ export function Modals() {
       const out = await runBusy(() => api.promotePainPoint(painId, { createSandbox: true }));
       if (out) {
         await invalidateAllWorkbenchQueries();
-        showToast(`已创建自进化需求 ${out.requirement.state.id}${out.sandbox ? "（已启用沙箱隔离）" : ""}`);
+        showToastKey(
+          out.sandbox ? "evo.createdSandbox" : "evo.created",
+          { id: out.requirement.state.id },
+        );
         await openWorkbenchReq(out.requirement.state.id, out.workbenchProjectId);
       }
     };
@@ -1318,7 +1344,7 @@ export function Modals() {
       const out = await runBusy(() => api.dismissPainPoint(painId));
       if (out) {
         await invalidateAllWorkbenchQueries();
-        showToast("已忽略该痛点");
+        showToastKey("evo.dismissed");
       }
     };
 
@@ -1326,11 +1352,11 @@ export function Modals() {
       const out = await runBusy(() => api.applyRsiSandbox(reqId));
       if (out) {
         await invalidateAllWorkbenchQueries();
-        showToast(
-          out.webReloaded
-            ? `已应用 ${reqId} 改动并热重载前端`
-            : `已应用 ${reqId} 改动（${out.appliedFiles.length} 个文件）`,
-        );
+        if (out.webReloaded) {
+          showToastKey("evo.appliedReload", { id: reqId });
+        } else {
+          showToastKey("evo.applied", { id: reqId, count: out.appliedFiles.length });
+        }
       }
     };
 
@@ -1338,11 +1364,14 @@ export function Modals() {
       const out = await runBusy(() => api.syncRsiSandboxPr(reqId));
       if (out) {
         await invalidateAllWorkbenchQueries();
-        showToast(
-          out.pr.state === "merged"
-            ? `PR #${out.pr.number} 已合并${out.cleanedSandbox ? "并清理沙箱" : ""}`
-            : `PR #${out.pr.number} 当前状态：${out.pr.state}`,
-        );
+        if (out.pr.state === "merged") {
+          showToastKey(
+            out.cleanedSandbox ? "toast.prMergedClean" : "toast.prMerged",
+            { num: out.pr.number },
+          );
+        } else {
+          showToastKey("toast.prStatus", { num: out.pr.number, state: out.pr.state });
+        }
       }
     };
 
@@ -1351,7 +1380,7 @@ export function Modals() {
       if (out) {
         setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
         await invalidateAllWorkbenchQueries();
-        showToast(`已保存项目经验法则（${out.rules.length} 条）`);
+        showToastKey("evo.savedPlaybook", { count: out.rules.length });
       }
     };
 
@@ -1360,7 +1389,11 @@ export function Modals() {
       if (out) {
         setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
         await invalidateAllWorkbenchQueries();
-        showToast(out.added > 0 ? `已从历史需求提炼 ${out.added} 条新经验` : "暂无新的可提炼经验");
+        if (out.added > 0) {
+          showToastKey("evo.distilled", { count: out.added });
+        } else {
+          showToastKey("evo.nothingDistilled");
+        }
       }
     };
 
@@ -1369,9 +1402,9 @@ export function Modals() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Icon icon={Sparkles} size={20} />
-            <h3 style={{ margin: 0 }}>自进化与 RSI 中心</h3>
+            <h3 style={{ margin: 0 }}>{t(language, "evo.title")}</h3>
           </div>
-          <div className="segmented" role="tablist" aria-label="自进化功能视图">
+          <div className="segmented" role="tablist" aria-label={t(language, "evo.tabsAria")}>
             <button
               type="button"
               role="tab"
@@ -1380,7 +1413,7 @@ export function Modals() {
               data-testid="evo-tab-inbox"
               onClick={() => setModal({ ...m, tab: "inbox" })}
             >
-              痛点收集箱 ({painPoints.filter((p) => p.status === "open").length})
+              {t(language, "evo.tab.inbox", { count: painPoints.filter((p) => p.status === "open").length })}
             </button>
             <button
               type="button"
@@ -1390,7 +1423,9 @@ export function Modals() {
               data-testid="evo-tab-playbook"
               onClick={() => setModal({ ...m, tab: "playbook", playbookDraft: null })}
             >
-              项目经验库 ({playbookData?.rules.length ?? evolutionData?.playbook.rules.length ?? 0})
+              {t(language, "evo.tab.playbook", {
+                count: playbookData?.rules.length ?? evolutionData?.playbook.rules.length ?? 0,
+              })}
             </button>
             <button
               type="button"
@@ -1400,7 +1435,7 @@ export function Modals() {
               data-testid="evo-tab-telemetry"
               onClick={() => setModal({ ...m, tab: "telemetry" })}
             >
-              模型遥测 ({telemetry.entries.length})
+              {t(language, "evo.tab.telemetry", { count: telemetry.entries.length })}
             </button>
           </div>
         </div>
@@ -1409,7 +1444,9 @@ export function Modals() {
           <div role="tabpanel" data-testid="evo-pane-inbox">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
               <span className="xs muted">
-                自动嗅探运行死胡同、CLI 参数摩擦与前端异常；也可通过右上角「报修」或 CLI <code>wb issue</code> 上报。
+                {t(language, "evo.inboxHintPrefix")}
+                <code>wb issue</code>
+                {t(language, "evo.inboxHintSuffix")}
               </span>
               <button
                 className="btn xs"
@@ -1426,12 +1463,12 @@ export function Modals() {
                   })
                 }
               >
-                <Icon icon={Zap} size={14} /> 新增痛点
+                <Icon icon={Zap} size={14} /> {t(language, "evo.addPain")}
               </button>
             </div>
             {painPoints.length === 0 ? (
               <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                暂无记录的工作台痛点。
+                {t(language, "evo.inboxEmpty")}
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: "52vh", overflowY: "auto" }}>
@@ -1443,12 +1480,24 @@ export function Modals() {
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
                             <span className={`badge ${p.status === "open" ? "warning" : p.status === "promoted" ? "info" : "neutral"}`}>
-                              {p.status === "open" ? "待处理" : p.status === "promoted" ? `已转 ${p.promotedReqId}` : "已忽略"}
+                              {p.status === "open"
+                                ? t(language, "evo.status.open")
+                                : p.status === "promoted"
+                                  ? t(language, "evo.status.promoted", { id: p.promotedReqId ?? "" })
+                                  : t(language, "evo.status.dismissed")}
                             </span>
-                            <span className="badge">{p.category}</span>
-                            {p.occurrences > 1 && <span className="badge info">发生 {p.occurrences} 次</span>}
+                            <span className="badge">
+                              {translateRef(language, `report.cat.${p.category}`, p.category)}
+                            </span>
+                            {p.occurrences > 1 && (
+                              <span className="badge info">
+                                {t(language, "evo.occurrences", { count: p.occurrences })}
+                              </span>
+                            )}
                             {sandboxItem?.stage && sandboxItem.stage !== "done" && (
-                              <span className="badge">沙箱 {sandboxItem.stage}</span>
+                              <span className="badge">
+                                {t(language, "evo.sandbox", { stage: sandboxItem.stage })}
+                              </span>
                             )}
                             {sandboxItem?.github?.issue && (
                               <span className="badge info">Issue #{sandboxItem.github.issue.number}</span>
@@ -1458,7 +1507,7 @@ export function Modals() {
                                 PR #{sandboxItem.github.pr.number} · {sandboxItem.github.pr.state}
                               </span>
                             )}
-                            <span className="xs muted">{formatDateTime(p.updatedAt)}</span>
+                            <span className="xs muted">{formatDateTime(p.updatedAt, language)}</span>
                           </div>
                           <div style={{ fontWeight: 600 }}>{p.title}</div>
                           {p.detail && p.detail !== p.title && (
@@ -1485,7 +1534,7 @@ export function Modals() {
                                 disabled={busy}
                                 onClick={() => void handlePromote(p.id)}
                               >
-                                <Icon icon={Flame} size={14} /> 转为需求并建沙箱
+                                <Icon icon={Flame} size={14} /> {t(language, "evo.promote")}
                               </button>
                               <button
                                 className="btn ghost xs"
@@ -1494,7 +1543,7 @@ export function Modals() {
                                 disabled={busy}
                                 onClick={() => void handleDismiss(p.id)}
                               >
-                                <Icon icon={Trash2} size={14} /> 忽略
+                                <Icon icon={Trash2} size={14} /> {t(language, "evo.dismiss")}
                               </button>
                             </>
                           )}
@@ -1506,7 +1555,7 @@ export function Modals() {
                               disabled={busy}
                               onClick={() => void openWorkbenchReq(p.promotedReqId!)}
                             >
-                              <Icon icon={ExternalLink} size={14} /> 查看需求
+                              <Icon icon={ExternalLink} size={14} /> {t(language, "evo.viewReq")}
                             </button>
                           )}
                           {sandboxItem?.canApply && p.promotedReqId && sandboxItem.github?.pr && (
@@ -1517,7 +1566,7 @@ export function Modals() {
                               disabled={busy}
                               onClick={() => void handleSyncSandboxPr(p.promotedReqId!)}
                             >
-                              <Icon icon={RefreshCw} size={14} /> 同步 PR 并清理沙箱
+                              <Icon icon={RefreshCw} size={14} /> {t(language, "evo.syncPr")}
                             </button>
                           )}
                           {sandboxItem?.canApply && p.promotedReqId && (
@@ -1528,7 +1577,7 @@ export function Modals() {
                               disabled={busy}
                               onClick={() => void handleApplySandbox(p.promotedReqId!)}
                             >
-                              <Icon icon={Check} size={14} /> 应用沙箱改动
+                              <Icon icon={Check} size={14} /> {t(language, "evo.applySandbox")}
                             </button>
                           )}
                         </div>
@@ -1545,13 +1594,15 @@ export function Modals() {
           <div role="tabpanel" data-testid="evo-pane-playbook">
             {noHubProject ? (
               <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                请先添加并选择一个本地项目，再管理项目经验库。
+                {t(language, "evo.playbookNoProject")}
               </div>
             ) : (
               <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
                   <span className="xs muted">
-                    保存于当前项目 <code>.workbench/playbook.md</code>，每次执行 Agent 时自动注入交接简报。
+                    {t(language, "evo.playbookHintPrefix")}
+                    <code>.workbench/playbook.md</code>
+                    {t(language, "evo.playbookHintSuffix")}
                   </span>
                   <button
                     className="btn xs"
@@ -1560,16 +1611,16 @@ export function Modals() {
                     disabled={busy}
                     onClick={() => void handleDistillPlaybook()}
                   >
-                    <Icon icon={RefreshCw} size={14} /> 从历史需求提炼
+                    <Icon icon={RefreshCw} size={14} /> {t(language, "evo.distill")}
                   </button>
                 </div>
                 <textarea
                   className="textarea"
-                  aria-label="项目经验法则 Playbook Markdown"
+                  aria-label={t(language, "evo.playbookAria")}
                   data-testid="playbook-editor"
                   style={{ minHeight: 240, fontFamily: "var(--mono)", fontSize: 12.5 }}
                   value={currentPlaybook}
-                  placeholder="- [避坑] 在此记录项目级工程规范与踩坑经验…"
+                  placeholder={t(language, "evo.playbookPlaceholder")}
                   onChange={(e) =>
                     setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: e.target.value } : prev))
                   }
@@ -1582,7 +1633,7 @@ export function Modals() {
                     disabled={busy}
                     onClick={() => void handleSavePlaybook()}
                   >
-                    保存经验法则
+                    {t(language, "evo.savePlaybook")}
                   </button>
                 </div>
               </>
@@ -1594,7 +1645,7 @@ export function Modals() {
           <div role="tabpanel" data-testid="evo-pane-telemetry">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
               <span className="xs muted">
-                自动追踪各模型在不同阶段的胜率与平均耗时；触发真实限流将进入 15 分钟自动冷却并跳过。
+                {t(language, "evo.telemetryHint")}
               </span>
               <div style={{ display: "flex", gap: 6 }}>
                 {telemetry.activeCooldowns.length > 0 && (
@@ -1607,11 +1658,11 @@ export function Modals() {
                       const out = await runBusy(() => api.clearModelCooldown());
                       if (out) {
                         await invalidateAllWorkbenchQueries();
-                        showToast("已清除所有模型限流冷却");
+                        showToastKey("evo.clearedCooldowns");
                       }
                     }}
                   >
-                    清除冷却 ({telemetry.activeCooldowns.length})
+                    {t(language, "evo.clearCooldown", { count: telemetry.activeCooldowns.length })}
                   </button>
                 )}
                 <button
@@ -1621,16 +1672,16 @@ export function Modals() {
                   disabled={busy}
                   onClick={async () => {
                     const out = await runBusy(() => api.reloadWebBundle());
-                    if (out?.reloaded) showToast("前端 Bundle 已重新编译并推送热刷新");
+                    if (out?.reloaded) showToastKey("evo.reloadedWeb");
                   }}
                 >
-                  <Icon icon={RefreshCw} size={14} /> 热重建前端
+                  <Icon icon={RefreshCw} size={14} /> {t(language, "evo.reloadWeb")}
                 </button>
               </div>
             </div>
             {telemetry.entries.length === 0 ? (
               <div className="empty-card xs muted" style={{ textAlign: "center" }}>
-                暂无模型执行遥测记录。
+                {t(language, "evo.telemetryEmpty")}
               </div>
             ) : (
               <div style={{ maxHeight: "48vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1645,17 +1696,22 @@ export function Modals() {
                       <div>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>
                           {e.harness} · {e.model} <span className="badge">{e.action}</span>{" "}
-                          {cooling && <span className="badge warning">冷却中</span>}
+                          {cooling && <span className="badge warning">{t(language, "evo.cooling")}</span>}
                         </div>
                         <div className="xs muted">
-                          总执行 {e.totalRuns} 次 · 平均耗时 {(e.avgDurationMs / 1000).toFixed(1)}s
-                          {e.timedOutRuns > 0 ? ` · 超时 ${e.timedOutRuns}` : ""}
-                          {e.rateLimitedRuns > 0 ? ` · 限流 ${e.rateLimitedRuns}` : ""}
-                          {e.degradedRuns > 0 ? ` · 降级 ${e.degradedRuns}` : ""}
+                          {t(language, "evo.telemetryStats", {
+                            total: e.totalRuns,
+                            avg: (e.avgDurationMs / 1000).toFixed(1),
+                          })}
+                          {e.timedOutRuns > 0 ? t(language, "evo.timeouts", { count: e.timedOutRuns }) : ""}
+                          {e.rateLimitedRuns > 0
+                            ? t(language, "evo.rateLimited", { count: e.rateLimitedRuns })
+                            : ""}
+                          {e.degradedRuns > 0 ? t(language, "evo.degraded", { count: e.degradedRuns }) : ""}
                         </div>
                       </div>
                       <span className={`badge ${rate >= 70 ? "success" : rate >= 40 ? "warning" : "danger"}`}>
-                        成功率 {rate}%
+                        {t(language, "evo.successRate", { rate })}
                       </span>
                     </div>
                   );
@@ -1667,7 +1723,7 @@ export function Modals() {
 
         <div className="modal-actions">
           <button className="btn" type="button" data-action="close-modal" onClick={close}>
-            关闭
+            {t(language, "common.close")}
           </button>
         </div>
       </ModalShell>
@@ -1677,7 +1733,7 @@ export function Modals() {
   if (m.kind === "link_issue") {
     const submitLinkIssue = async () => {
       if (m.mode === "link" && !m.issueRef.trim()) {
-        showToast("请输入 GitHub Issue 编号或 URL", true);
+        showToastKey("linkIssue.needRef", undefined, true);
         return;
       }
       const res = await runBusy(() =>
@@ -1690,47 +1746,51 @@ export function Modals() {
         setModal(null);
         await invalidateAllWorkbenchQueries();
         const num = res.detail.state.github?.issue?.number;
-        showToast(num ? `已关联 GitHub Issue #${num}` : "已关联 GitHub Issue");
+        if (num) showToastKey("linkIssue.linkedNum", { num });
+        else showToastKey("linkIssue.linked");
       }
     };
 
     return (
       <ModalShell onClose={close} testId="link-issue-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>关联 GitHub Issue</h3>
+          <h3 style={{ margin: 0 }}>{t(language, "linkIssue.title")}</h3>
           <div className="segmented" role="tablist">
             <button
               type="button"
               className={m.mode === "create" ? "active" : ""}
               onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "create" } : prev))}
             >
-              新建并关联 Issue
+              {t(language, "linkIssue.modeCreate")}
             </button>
             <button
               type="button"
               className={m.mode === "link" ? "active" : ""}
               onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "link" } : prev))}
             >
-              绑定已有 Issue
+              {t(language, "linkIssue.modeLink")}
             </button>
           </div>
         </div>
         {m.mode === "create" ? (
           <div className="callout info xs">
-            将根据当前需求 <strong>{m.requirementId}</strong> 的标题、目标正文与验收条件在 GitHub 仓库
-            {githubStatus?.repo ? ` (${githubStatus.repo}) ` : " "}创建新 Issue 并双向绑定。
+            {t(language, "linkIssue.createDescPrefix")}
+            <strong>{m.requirementId}</strong>
+            {t(language, "linkIssue.createDescMiddle")}
+            {githubStatus?.repo ? ` (${githubStatus.repo}) ` : " "}
+            {t(language, "linkIssue.createDescSuffix")}
           </div>
         ) : (
           <>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              GitHub Issue 编号或完整 URL
+              {t(language, "linkIssue.refLabel")}
             </label>
             <input
               className="input"
               data-testid="link-issue-ref-input"
               autoFocus
               value={m.issueRef}
-              placeholder="例如 #42 或 https://github.com/owner/repo/issues/42"
+              placeholder={t(language, "linkIssue.refPlaceholder")}
               onChange={(e) =>
                 setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, issueRef: e.target.value } : prev))
               }
@@ -1744,7 +1804,7 @@ export function Modals() {
         )}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1753,7 +1813,8 @@ export function Modals() {
             disabled={busy || (githubStatus !== undefined && !githubStatus.ready)}
             onClick={() => void submitLinkIssue()}
           >
-            <Icon icon={Link2} size={14} /> {m.mode === "create" ? "创建并绑定" : "绑定 Issue"}
+            <Icon icon={Link2} size={14} />{" "}
+            {m.mode === "create" ? t(language, "linkIssue.submitCreate") : t(language, "linkIssue.submitLink")}
           </button>
         </div>
       </ModalShell>
@@ -1790,12 +1851,12 @@ export function Modals() {
     const submitDeliver = async () => {
       const files = m.selectedFiles.filter((f) => candidates.some((c) => c.path === f));
       if (files.length === 0 && !canSubmitExistingCommits) {
-        showToast("请至少选择 1 个要纳入提交的文件", true);
+        showToastKey("deliver.needFiles", undefined, true);
         return;
       }
       const msg = m.commitMessage.trim();
       if (files.length > 0 && !msg) {
-        showToast("请填写 Git 提交说明", true);
+        showToastKey("deliver.needMessage", undefined, true);
         return;
       }
       const res = await runBusy(() =>
@@ -1818,18 +1879,23 @@ export function Modals() {
         setModal(null);
         await invalidateAllWorkbenchQueries();
         if (res.pr) {
-          showToast(
-            res.githubSyncWarning
-              ? `已创建 PR #${res.pr.number}（Issue 同步警告：${res.githubSyncWarning}）`
-              : `已推送分支并创建 PR #${res.pr.number}`,
-          );
+          if (res.githubSyncWarning) {
+            showToastKey(
+              "deliver.prCreatedWarn",
+              { num: res.pr.number, warning: res.githubSyncWarning },
+              true,
+            );
+          } else {
+            showToastKey("deliver.prCreated", { num: res.pr.number });
+          }
         } else {
-          showToast(
+          showToastKey(
             res.restartRecommended
-              ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）；检测到服务端变更，建议执行 wb restart 重启生效`
+              ? "deliver.committedRestart"
               : res.webReloaded
-                ? `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）并热刷新前端`
-                : `已提交交付 ${res.delivery.shortHash}（${res.delivery.files.length} 个文件）`,
+                ? "deliver.committedReload"
+                : "deliver.committed",
+            { hash: res.delivery.shortHash, count: res.delivery.files.length },
           );
         }
       }
@@ -1838,16 +1904,18 @@ export function Modals() {
     return (
       <ModalShell onClose={close} testId="deliver-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>{createPr ? "标准化交付 · 提交并创建 GitHub PR" : "交付收尾 · 提交代码到 Git"}</h3>
+          <h3 style={{ margin: 0 }}>
+            {createPr ? t(language, "deliver.titlePr") : t(language, "deliver.titleLocal")}
+          </h3>
           {!sandboxActive && (
-            <div className="segmented" role="tablist" aria-label="交付方式">
+            <div className="segmented" role="tablist" aria-label={t(language, "deliver.modeAria")}>
               <button
                 type="button"
                 className={!createPr ? "active" : ""}
                 data-testid="deliver-mode-local"
                 onClick={() => setModal((prev) => (prev?.kind === "deliver" ? { ...prev, createPr: false } : prev))}
               >
-                仅本地提交
+                {t(language, "deliver.modeLocal")}
               </button>
               <button
                 type="button"
@@ -1856,35 +1924,40 @@ export function Modals() {
                 disabled={!prAvailable}
                 onClick={() => setModal((prev) => (prev?.kind === "deliver" ? { ...prev, createPr: true } : prev))}
               >
-                <Icon icon={GitPullRequest} size={14} /> 推送并提 PR
+                <Icon icon={GitPullRequest} size={14} /> {t(language, "deliver.modePr")}
               </button>
             </div>
           )}
         </div>
         <div className="muted xs" style={{ marginBottom: 10 }}>
-          目标需求：<strong>{detail.state.id}</strong> · 当前分支：
+          {t(language, "deliver.targetPrefix")}
+          <strong>{detail.state.id}</strong>
+          {t(language, "deliver.targetMiddle")}
           <code>{deliveryPreview?.branch ?? "HEAD"}</code>
-          {deliveryPreview?.githubRepo ? ` · 仓库 ${deliveryPreview.githubRepo}` : ""}
-          {!createPr && " · 仅提交你勾选的文件，不会自动推送远程或覆盖其他暂存改动。"}
+          {deliveryPreview?.githubRepo ? t(language, "deliver.repo", { repo: deliveryPreview.githubRepo }) : ""}
+          {!createPr && t(language, "deliver.localNote")}
         </div>
 
         {(candidates.length > 0 || !canSubmitExistingCommits) && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 8, flexWrap: "wrap" }}>
               <strong style={{ fontSize: 13 }}>
-                选择纳入本次提交的文件（已选 {m.selectedFiles.length}/{candidates.length}）
+                {t(language, "deliver.selectFiles", {
+                  selected: m.selectedFiles.length,
+                  total: candidates.length,
+                })}
               </strong>
               <div style={{ display: "flex", gap: 6 }}>
                 {candidates.some((c) => c.inAcceptedSnapshot) && (
                   <button className="btn xs" type="button" onClick={() => selectPreset("accepted")}>
-                    仅选本次验收文件
+                    {t(language, "deliver.selectAccepted")}
                   </button>
                 )}
                 <button className="btn xs" type="button" onClick={() => selectPreset("all")}>
-                  全选
+                  {t(language, "deliver.selectAll")}
                 </button>
                 <button className="btn xs" type="button" onClick={() => selectPreset("none")}>
-                  清空
+                  {t(language, "deliver.clear")}
                 </button>
               </div>
             </div>
@@ -1902,7 +1975,7 @@ export function Modals() {
               }}
             >
               {candidates.length === 0 ? (
-                <div className="muted xs">当前工作区无未提交文件。</div>
+                <div className="muted xs">{t(language, "deliver.noChanges")}</div>
               ) : (
                 candidates.map((c) => (
                   <label
@@ -1921,7 +1994,9 @@ export function Modals() {
                     <span className="badge neutral">{c.status}</span>
                     {deliveryPreview && deliveryPreview.acceptedSnapshotFileCount > 0 && (
                       <span className={`badge ${c.inAcceptedSnapshot ? "success" : "warning"}`}>
-                        {c.inAcceptedSnapshot ? "本次验收" : "工作区其他"}
+                        {c.inAcceptedSnapshot
+                          ? t(language, "deliver.acceptedBadge")
+                          : t(language, "deliver.otherBadge")}
                       </span>
                     )}
                   </label>
@@ -1933,14 +2008,16 @@ export function Modals() {
 
         {canSubmitExistingCommits && (
           <div className="callout info xs" style={{ marginBottom: 10 }}>
-            当前分支已有 <strong>{deliveryPreview?.aheadCommitsCount}</strong> 个先行提交且工作区干净，将直接推送现有提交至远端并创建 PR。
+            {t(language, "deliver.existingCommitsPrefix")}
+            <strong>{deliveryPreview?.aheadCommitsCount}</strong>
+            {t(language, "deliver.existingCommitsSuffix")}
           </div>
         )}
 
         {(candidates.length > 0 || !canSubmitExistingCommits) && (
           <>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              Git 提交说明（Commit Message）
+              {t(language, "deliver.commitLabel")}
             </label>
             <input
               className="input"
@@ -1959,7 +2036,7 @@ export function Modals() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
                 <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                  推送源分支
+                  {t(language, "deliver.branchLabel")}
                 </label>
                 <input
                   className="input"
@@ -1973,7 +2050,7 @@ export function Modals() {
               </div>
               <div>
                 <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                  目标 Base 分支
+                  {t(language, "deliver.baseLabel")}
                 </label>
                 <input
                   className="input"
@@ -1987,7 +2064,7 @@ export function Modals() {
             </div>
             <div>
               <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                GitHub PR 标题
+                {t(language, "deliver.prTitleLabel")}
               </label>
               <input
                 className="input"
@@ -2000,27 +2077,29 @@ export function Modals() {
             </div>
             {detail.state.github?.issue && (
               <div className="xs muted">
-                PR 正文将自动附带验证证据、审查结论及 <code>Closes #{detail.state.github.issue.number}</code>。
+                {t(language, "deliver.prBodyNotePrefix")}
+                <code>Closes #{detail.state.github.issue.number}</code>
+                {t(language, "deliver.prBodyNoteSuffix")}
               </div>
             )}
           </div>
         )}
 
         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-          交付备注（可选，记录到需求时间线）
+          {t(language, "deliver.noteLabel")}
         </label>
         <input
           className="input"
           data-testid="deliver-note"
           value={m.note}
-          placeholder="例如：合并至 main，准备开启下一条需求…"
+          placeholder={t(language, "deliver.notePlaceholder")}
           onChange={(e) =>
             setModal((prev) => (prev?.kind === "deliver" ? { ...prev, note: e.target.value } : prev))
           }
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            取消
+            {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -2029,7 +2108,7 @@ export function Modals() {
             disabled={busy || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onClick={() => void submitDeliver()}
           >
-            {createPr ? "提交并创建 GitHub PR" : "确认提交 Git"}
+            {createPr ? t(language, "deliver.submitPr") : t(language, "deliver.submitLocal")}
           </button>
         </div>
       </ModalShell>
@@ -2038,11 +2117,11 @@ export function Modals() {
 
   return (
     <ModalShell onClose={close}>
-      <h3>调试信息</h3>
+      <h3>{t(language, "debug.title")}</h3>
       <pre className="evidence-log">{m.text}</pre>
       <div className="modal-actions">
         <button className="btn primary" type="button" onClick={close}>
-          关闭
+          {t(language, "common.close")}
         </button>
       </div>
     </ModalShell>

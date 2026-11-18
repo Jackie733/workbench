@@ -8,10 +8,9 @@ import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { resetAuthPassword } from "../../src/server/auth.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
+import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_env.ts";
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -1443,4 +1442,201 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 30_000);
+
+  test("REQ-003: bilingual interface keeps session, project, requirement, draft, and document language", async () => {
+    const root = initGitRepo();
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-i18n-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+    await initProject(root, { name: "BilingualRepo", privacyMode: "local", outputLanguage: "en" });
+    await createRequirement(root, {
+      goal: "中文需求正文保留测试",
+      criteria: [{ id: "AC-1", description: "中文验收条件原文", required: true, command: "echo ok" }],
+    });
+    await propose(root, "REQ-001", { designMarkdown: "# 中文方案标题\n\n方案正文原文保留。", actor: "agent" });
+
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, hostname: "0.0.0.0" });
+    servers.push(server);
+    const { password } = resetAuthPassword(hubDir);
+    const lanUrl = `http://${os.hostname()}:${server.port}`;
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const readLang = () => page.evaluate(() => document.documentElement.lang);
+    const readTitle = () => page.evaluate(() => document.title);
+    const bodyText = () => page.evaluate(() => document.body.innerText);
+    const selectLang = async (lang: string) => {
+      await page.select('[data-testid="ui-language-select"]', lang);
+      await page.waitForFunction(
+        (expected) => document.documentElement.lang === (expected as string),
+        { timeout: 5000 },
+        lang,
+      );
+    };
+    const clickModalAction = (testId: string, label: string) =>
+      page.evaluate(
+        (tid: string, text: string) => {
+          const buttons = Array.from(
+            document.querySelectorAll(`[data-testid="${tid}"] .modal-actions button`),
+          ) as HTMLButtonElement[];
+          const target = buttons.find((b) => (b.textContent ?? "").includes(text));
+          if (!target) throw new Error(`modal action not found: ${text}`);
+          target.click();
+        },
+        testId,
+        label,
+      );
+    const readDocumentLanguages = () =>
+      page.evaluate(async () => {
+        const hub = (await (await fetch("/api/hub/state")).json()) as { outputLanguage?: string };
+        const project = (await (await fetch("/api/project")).json()) as {
+          project?: { outputLanguage?: string } | null;
+        };
+        return { hub: hub.outputLanguage ?? null, project: project.project?.outputLanguage ?? null };
+      });
+
+    try {
+      await page.setViewport({ width: 1280, height: 860 });
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+
+      // 1. 默认简体中文（登录门禁前）。
+      expect(await readLang()).toBe("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+      await page.waitForSelector('[data-testid="login-view"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("登录工作台");
+      expect(
+        await page.evaluate(() =>
+          document.querySelector('[data-testid="ui-language-select"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("切换界面语言");
+
+      // 2. 登录前切换英文并即时生效。
+      await selectLang("en");
+      expect(await readTitle()).toContain("Spec & Verification");
+      expect(await bodyText()).toContain("Sign in");
+      expect(
+        await page.evaluate(() =>
+          document.querySelector('[data-testid="ui-language-select"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("Switch interface language");
+
+      // 3. 登录后仍为英文，并记录模型文档语言设置（应与界面语言相互独立）。
+      await page.type('[data-testid="login-password-input"]', password);
+      await clickReady(page, '[data-testid="login-submit-btn"]');
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("New requirement");
+      const docLanguagesBefore = await readDocumentLanguages();
+      expect(docLanguagesBefore.project).toBe("en");
+
+      // 4. 英文界面下保留中文需求正文，并渲染英文状态横幅/验证反馈/批注控件。
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-banner"]', { timeout: 5000 });
+      const workspaceText = await bodyText();
+      expect(workspaceText).toContain("中文需求正文保留测试");
+      expect(workspaceText).toContain("中文验收条件原文");
+      expect(workspaceText).toContain("中文方案标题");
+      expect(workspaceText).toContain("submitted design v1");
+      expect(workspaceText).toContain("Verification has not run yet");
+      expect(workspaceText).toContain("Annotate");
+      expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
+        "Awaiting approval",
+      );
+
+      // 5. 编辑草稿在切换语言后保留，当前需求与视图不丢失。
+      await clickReady(page, '[data-testid="start-edit-design-btn"]');
+      await page.type('[data-testid="design-body-input"]', "\n未提交的设计草稿保留");
+      await selectLang("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+      expect(await bodyText()).toContain("Agent 已提交技术方案 v1");
+      expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
+        "待批准",
+      );
+      const draftValue = await page.evaluate(
+        () => (document.querySelector('[data-testid="design-body-input"]') as HTMLTextAreaElement | null)?.value ?? "",
+      );
+      expect(draftValue).toContain("未提交的设计草稿保留");
+      expect(await page.evaluate(() => document.querySelector(".app-req-id")?.textContent)).toBe("REQ-001");
+
+      // 6. 切回英文后刷新：偏好持久化，界面与标题恢复英文。
+      await selectLang("en");
+      expect(await page.evaluate(() => localStorage.getItem("wb-ui-language"))).toBe("en");
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await readLang()).toBe("en");
+      expect(await readTitle()).toContain("Spec & Verification");
+
+      // 7. 非法偏好回退简体中文。
+      await page.evaluate(() => localStorage.setItem("wb-ui-language", "fr"));
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await readLang()).toBe("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+
+      // 8. 设置与报修弹窗随界面语言呈现，模型文档语言保持不变。
+      await selectLang("en");
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Workspace settings");
+      await page.click('[data-testid="settings-tab-project"]');
+      expect(
+        await page.evaluate(
+          () => (document.querySelector('[data-testid="project-output-language-select"]') as HTMLSelectElement | null)?.value,
+        ),
+      ).toBe("en");
+      await clickModalAction("routing-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Quick report & self-evolution feedback");
+      expect(await bodyText()).toContain("UI anomaly / layout interaction");
+      await clickModalAction("quick-report-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
+      expect(await readDocumentLanguages()).toEqual(docLanguagesBefore);
+
+      // 9. 客户端错误反馈在英文界面下本地化。
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      await clickReady(page, '[data-testid="manual-verify-btn"]');
+      await page.waitForFunction(
+        () => (document.querySelector(".toast")?.textContent ?? "").includes("Enter a verification command first"),
+        { timeout: 5000 },
+      );
+
+      // 10. 窄屏仍可使用语言入口；存储不可用时本会话仍可切换。
+      await page.setViewport({ width: 375, height: 720 });
+      const languageBox = await page.evaluate(() => {
+        const sel = document.querySelector('[data-testid="ui-language-select"]');
+        const rect = sel?.getBoundingClientRect();
+        return { width: rect?.width ?? 0, overflow: document.documentElement.scrollWidth > window.innerWidth };
+      });
+      expect(languageBox.width).toBeGreaterThan(0);
+      expect(languageBox.overflow).toBe(false);
+      await page.evaluate(() => {
+        const proto = Storage.prototype;
+        (proto as unknown as Record<string, unknown>).__origGet = proto.getItem;
+        (proto as unknown as Record<string, unknown>).__origSet = proto.setItem;
+        proto.getItem = () => {
+          throw new Error("storage blocked");
+        };
+        proto.setItem = () => {
+          throw new Error("storage blocked");
+        };
+      });
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 5000 });
+      expect(await bodyText()).toContain("变更与验证");
+      await page.evaluate(() => {
+        const proto = Storage.prototype as unknown as Record<string, unknown>;
+        proto.getItem = proto.__origGet as typeof Storage.prototype.getItem;
+        proto.setItem = proto.__origSet as typeof Storage.prototype.setItem;
+      });
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 45_000);
 });

@@ -150,30 +150,45 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
   };
 }
 
-function buildProgressText(state: RequirementState, requiredTotal: number, requiredPassed: number): string {
+function buildProgressText(
+  state: RequirementState,
+  requiredTotal: number,
+  requiredPassed: number,
+): { text: string; key: string; params?: Record<string, string | number> } {
   const tasksTotal = state.tasks.length;
   const tasksDone = state.tasks.filter((t) => t.status === "done").length;
   switch (state.stage) {
     case "draft":
-      return "草稿";
+      return { text: "草稿", key: "progress.draft" };
     case "designing":
-      return "方案起草中";
+      return { text: "方案起草中", key: "progress.designing" };
     case "awaiting_approval":
-      return state.designVersion > 0 ? `方案 v${state.designVersion} 待批准` : "规范变更待确认";
+      return state.designVersion > 0
+        ? {
+            text: `方案 v${state.designVersion} 待批准`,
+            key: "progress.awaitingApprovalDesign",
+            params: { version: state.designVersion },
+          }
+        : { text: "规范变更待确认", key: "progress.specChanged" };
     case "implementing": {
       const parts: string[] = [];
       parts.push(tasksTotal > 0 ? `任务 ${tasksDone}/${tasksTotal}` : "实施中");
       if (requiredTotal > 0) parts.push(`验证 ${requiredPassed}/${requiredTotal}`);
-      return parts.join(" · ");
+      const key = tasksTotal > 0 ? "progress.implementingTasks" : "progress.implementing";
+      return { text: parts.join(" · "), key, params: { done: tasksDone, total: tasksTotal, passed: requiredPassed, required: requiredTotal } };
     }
     case "awaiting_acceptance":
-      return `待验收 · 验证 ${requiredPassed}/${requiredTotal}`;
+      return {
+        text: `待验收 · 验证 ${requiredPassed}/${requiredTotal}`,
+        key: "progress.awaitingAcceptance",
+        params: { passed: requiredPassed, total: requiredTotal },
+      };
     case "done":
-      return "已完成";
+      return { text: "已完成", key: "progress.done" };
     case "blocked":
-      return `已阻塞 · ${state.blockedReason ?? "未记录原因"}`;
+      return { text: `已阻塞 · ${state.blockedReason ?? "未记录原因"}`, key: "progress.blocked" };
     case "cancelled":
-      return "已取消";
+      return { text: "已取消", key: "progress.cancelled" };
   }
 }
 
@@ -184,6 +199,7 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
     acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
   });
+  const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
   return {
     id: state.id,
     title: state.title,
@@ -198,8 +214,12 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     tasksDone: state.tasks.filter((t) => t.status === "done").length,
     needsDecision: validity.needsDecision,
     decisionReason: validity.decisionReason,
+    ...(validity.decisionReasonKey ? { decisionReasonKey: validity.decisionReasonKey } : {}),
+    ...(validity.decisionReasonParams ? { decisionReasonParams: validity.decisionReasonParams } : {}),
     blockedReason: state.blockedReason,
-    progressText: buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed),
+    progressText: progress.text,
+    progressKey: progress.key,
+    ...(progress.params ? { progressParams: progress.params } : {}),
     ...(state.github ? { github: state.github } : {}),
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
@@ -1179,6 +1199,8 @@ export async function getRequirementDiff(
         snapshotId: snap.id,
         snapshotCapturedAt: snap.capturedAt,
         scopeNote: snap.git.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : WORKTREE_SCOPE_NOTE,
+        scopeNoteKey:
+          snap.git.filesScope === "baseline-relative" ? "evidence.scope.baseline" : "evidence.scope.worktree",
         observation: obs,
       };
     }
@@ -1188,6 +1210,7 @@ export async function getRequirementDiff(
       reason:
         bundle.acceptanceSnapshotReason ??
         "历史验收记录未固化代码差异快照，无法从当前工作区回溯",
+      ...(bundle.acceptanceSnapshotReason ? {} : { reasonKey: "core.diff.noSnapshot" }),
       acceptedAt: state.acceptance?.acceptedAt ?? null,
       snapshotId: state.acceptance?.snapshot?.id ?? null,
       snapshotCapturedAt: state.acceptance?.snapshot?.capturedAt ?? null,
@@ -1209,6 +1232,11 @@ export async function getRequirementDiff(
     snapshotId: null,
     snapshotCapturedAt: null,
     scopeNote: changes.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : changes.filesScope === "worktree" ? WORKTREE_SCOPE_NOTE : null,
+    ...(changes.filesScope === "baseline-relative"
+      ? { scopeNoteKey: "evidence.scope.baseline" }
+      : changes.filesScope === "worktree"
+        ? { scopeNoteKey: "evidence.scope.worktree" }
+        : {}),
     observation: changes,
   };
 }

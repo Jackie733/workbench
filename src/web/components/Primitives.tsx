@@ -4,9 +4,28 @@ import { MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentAction } from "../../core/types.ts";
+import { t, type UiLanguage } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
+
+export function UiLanguageSelect({ className = "" }: { className?: string }) {
+  const language = useUiStore((s) => s.language);
+  const setLanguage = useUiStore((s) => s.setLanguage);
+  return (
+    <select
+      className={`select xs ui-language-select ${className}`.trim()}
+      data-testid="ui-language-select"
+      aria-label={t(language, "app.languageSwitch")}
+      title={t(language, "app.languageSwitch")}
+      value={language}
+      onChange={(e) => setLanguage(e.target.value as UiLanguage)}
+    >
+      <option value="zh-CN">简体中文</option>
+      <option value="en">English</option>
+    </select>
+  );
+}
 
 export function LiveTimer({ startedAt }: { startedAt: number }) {
   const [now, setNow] = React.useState(() => Date.now());
@@ -46,11 +65,12 @@ export function MarkdownView({
   onAnnotate?: (anchor: string) => void;
   className?: string;
 }) {
+  const language = useUiStore((s) => s.language);
   const normalized = markdown.trim();
   if (!normalized) {
     return (
       <div className={className}>
-        <p className="muted">（暂无内容）</p>
+        <p className="muted">{t(language, "md.empty")}</p>
       </div>
     );
   }
@@ -68,13 +88,14 @@ export function MarkdownView({
             type="button"
             data-action="annotate-anchor"
             data-anchor={anchor}
-            title="对此段提问或批注"
+            title={t(language, "md.annotateTitle")}
+            aria-label={t(language, "md.annotateTitle")}
             onClick={() => onAnnotate?.(anchor)}
           >
             <span className="md-annot-icon" data-icon-slot="annotate" aria-hidden="true">
               <Icon icon={MessageSquare} size={14} />
             </span>
-            批注
+            {t(language, "md.annotate")}
           </button>
         </div>
       );
@@ -132,6 +153,7 @@ export function ModalShell({
   testId?: string;
   children: React.ReactNode;
 }) {
+  const language = useUiStore((s) => s.language);
   return (
     <Root
       open
@@ -148,7 +170,7 @@ export function ModalShell({
           onEscapeKeyDown={onClose}
           onPointerDownOutside={onClose}
         >
-          <Title className="sr-only">Dialog</Title>
+          <Title className="sr-only">{t(language, "app.dialogTitle")}</Title>
           {children}
         </Content>
       </Portal>
@@ -158,10 +180,12 @@ export function ModalShell({
 
 export function ToastBanner() {
   const toast = useUiStore((s) => s.toast);
+  const language = useUiStore((s) => s.language);
   if (!toast) return null;
+  const text = toast.messageKey ? t(language, toast.messageKey, toast.params) : toast.message;
   return (
     <div className={`toast ${toast.isError ? "error" : ""}`} role="status">
-      {toast.message}
+      {text}
     </div>
   );
 }
