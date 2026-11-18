@@ -1467,6 +1467,203 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("REQ-004: 执行终端适配亮暗主题、折叠次要上下文、切换结构/原始视图并自动加载历史 Run 日志", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-console-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const repo = initGitRepo();
+    await initProject(repo, { name: "ConsoleRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "优化执行终端主题与结构化输出",
+      criteria: [{ id: "AC-1", description: "测试通过", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# 方案\n结构化终端输出。",
+      actor: "agent",
+    });
+
+    const richOutputScript = [
+      "cat <<'EOF'",
+      "OpenAI Codex v0.114.0 (research preview)",
+      "--------",
+      "workdir: /repo",
+      "model: gpt-6-astra",
+      "--------",
+      "user",
+      "请接力执行工作台需求 REQ-001",
+      "SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED",
+      "hook: SessionStart",
+      "hook: UserPromptSubmit",
+      "thinking",
+      "先分析终端渲染层次",
+      "SECRET_THINKING_LINE_2",
+      "exec",
+      "/bin/bash -lc 'ls' in /repo succeeded in 12ms:",
+      "line-1",
+      "line-2",
+      "line-3",
+      "line-4",
+      "line-5",
+      "line-6",
+      "line-7",
+      "codex",
+      "核心回复：终端渲染已完成。",
+      "[spawn error] 模拟错误告警",
+      "EOF",
+    ].join("\n");
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex CLI",
+          subscription: "ChatGPT Plus",
+          installed: true,
+          executable: "codex",
+          models: [{ id: "gpt-6-astra", tier: "sota", source: "detected" }],
+          defaultModel: "gpt-6-astra",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => ({
+        command: "bash",
+        args: ["-c", richOutputScript],
+        displayCommand: "codex exec -C /repo (model=gpt-6-astra)",
+      }),
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, executor });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-approve_only"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="action-approve_only"]');
+      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 5000 });
+
+      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")) &&
+          !document.querySelector('[data-testid="live-agent-banner"]'),
+        { timeout: 8000 },
+      );
+
+      // 1. 浅色与深色主题下的背景与文本对比适配
+      const lightColors = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="console-log-output"]')!;
+        const cs = getComputedStyle(el);
+        return {
+          theme: document.documentElement.getAttribute("data-theme"),
+          bg: cs.backgroundColor,
+          color: cs.color,
+        };
+      });
+      expect(lightColors.bg).toBe("rgb(248, 250, 252)");
+      expect(lightColors.color).toBe("rgb(30, 41, 59)");
+
+      await clickReady(page, '[data-action="toggle-theme"]');
+      const darkColors = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="console-log-output"]')!;
+        const cs = getComputedStyle(el);
+        return {
+          theme: document.documentElement.getAttribute("data-theme"),
+          bg: cs.backgroundColor,
+          color: cs.color,
+        };
+      });
+      expect(darkColors.theme).toBe("dark");
+      expect(darkColors.bg).toBe("rgb(15, 19, 26)");
+      expect(darkColors.color).toBe("rgb(226, 232, 240)");
+
+      // 2. 次要区块默认折叠，主要回复与错误告警默认展开
+      const initialState = await page.evaluate(() => {
+        const out = document.querySelector('[data-testid="console-log-output"]')?.textContent ?? "";
+        const foldStates = Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).map((el) => ({
+          testid: el.getAttribute("data-testid"),
+          expanded: el.getAttribute("aria-expanded"),
+        }));
+        return { out, foldStates };
+      });
+      expect(initialState.out).toContain("核心回复：终端渲染已完成");
+      expect(initialState.out).toContain("[spawn error] 模拟错误告警");
+      expect(initialState.out).not.toContain("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED");
+      expect(initialState.out).not.toContain("SECRET_THINKING_LINE_2");
+      for (const f of initialState.foldStates) {
+        expect(f.expanded).toBe("false");
+      }
+
+      // 3. 单独展开提示词折叠块，并验证一键展开全部 / 收起次要
+      await clickReady(page, '[data-testid="console-fold-prompt_context"]');
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="console-fold-prompt_context"]')?.getAttribute("aria-expanded") === "true" &&
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED")),
+        { timeout: 3000 },
+      );
+
+      await clickReady(page, '[data-testid="console-toggle-secondary-btn"]');
+      const allExpanded = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).every(
+          (el) => el.getAttribute("aria-expanded") === "true",
+        ),
+      );
+      expect(allExpanded).toBe(true);
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="console-log-output"]')?.textContent ?? ""),
+      ).toContain("SECRET_THINKING_LINE_2");
+
+      await clickReady(page, '[data-testid="console-toggle-secondary-btn"]');
+      const allCollapsed = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).every(
+          (el) => el.getAttribute("aria-expanded") === "false",
+        ),
+      );
+      expect(allCollapsed).toBe(true);
+
+      // 4. 切换原始输出与结构视图
+      await clickReady(page, '[data-testid="console-mode-raw"]');
+      await page.waitForSelector('[data-testid="console-raw-pre"]', { timeout: 3000 });
+      const rawText = await page.evaluate(() => document.querySelector('[data-testid="console-raw-pre"]')?.textContent ?? "");
+      expect(rawText).toContain("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED");
+      expect(rawText).toContain("hook: SessionStart");
+
+      await clickReady(page, '[data-testid="console-mode-structured"]');
+      await page.waitForSelector('[data-testid="console-blocks"]', { timeout: 3000 });
+
+      // 5. 页面刷新后重新进入需求并切到「执行终端」页签，自动加载历史 Run 日志
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
+      const drawerHidden = await page.evaluate(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("aria-hidden") === "true",
+      );
+      if (drawerHidden) {
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      }
+      await clickReady(page, '[data-testid="drawer-tab-console"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")),
+        { timeout: 5000 },
+      );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
   test("REQ-005: 「更多」下拉菜单宽度随内容自适应且菜单项整行填满", async () => {
     const repo = initGitRepo();
     await initProject(repo, { name: "MenuWidthRepo", privacyMode: "local" });
