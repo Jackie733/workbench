@@ -18,6 +18,11 @@ export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
 export const MAX_DISCUSSIONS = 200;
 export const MAX_AGENT_RUNS = 30;
+export const MAX_SCREENSHOT_BATCHES = 5;
+export const MAX_SCREENSHOTS_PER_BATCH = 12;
+export const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
+export const MAX_SCREENSHOT_TOTAL_MS = 90_000;
+export const MAX_SCREENSHOT_NAV_MS = 15_000;
 export const MAX_TITLE_CHARS = 120;
 export const MAX_REASON_CHARS = 2000;
 
@@ -251,6 +256,8 @@ export interface AcceptanceSnapshot {
   verifications: AcceptanceVerificationEvidence[];
   omittedVerificationCount: number;
   git: AcceptanceGitEvidence;
+  /** Frozen screenshot metadata captured for this requirement; image bytes stay in screenshots/. */
+  screenshots?: ScreenshotBatch[];
   contentDigest: string;
 }
 
@@ -318,6 +325,7 @@ export type TimelineEventKind =
   | "changes_requested"
   | "tasks_updated"
   | "verified"
+  | "screenshots_captured"
   | "submitted_for_acceptance"
   | "accepted"
   | "delivered"
@@ -413,6 +421,42 @@ export interface ReviewReport {
   reviewedAt: number;
 }
 
+export type ScreenshotTrigger = "auto_submit" | "manual";
+export type ScreenshotBatchStatus = "captured" | "partial" | "skipped";
+
+export interface ScreenshotShot {
+  /** Stable shot ID such as S-<ts>-<uuid8>. */
+  id: string;
+  label: string;
+  urlPath: string;
+  viewport: string;
+  theme: "light" | "dark";
+  /** Requirement-relative PNG path such as screenshots/shot-<id>.png. */
+  path: string;
+  sha256: string;
+  sizeBytes: number;
+}
+
+export interface ScreenshotBatch {
+  id: string;
+  createdAt: number;
+  trigger: ScreenshotTrigger;
+  actor: "agent" | "human" | "system";
+  specHash: string;
+  codeSnapshotHash: string;
+  status: ScreenshotBatchStatus;
+  skipReason: string | null;
+  shots: ScreenshotShot[];
+  durationMs: number;
+}
+
+export interface ScreenshotCaptureResult {
+  status: ScreenshotBatchStatus;
+  batchId: string | null;
+  reason: string | null;
+  batch: ScreenshotBatch | null;
+}
+
 export interface TimelineEvent {
   id: string;
   at: number;
@@ -443,6 +487,10 @@ export interface RequirementState {
   lastFeedback: string | null;
   blockedFrom: Stage | null;
   blockedReason: string | null;
+  /** Explicit marker for UI-facing requirements; also used by source-driven pain point promotion. */
+  uiRelated?: boolean;
+  /** Bounded screenshot evidence batches, newest last; at most MAX_SCREENSHOT_BATCHES. */
+  screenshotBatches?: ScreenshotBatch[];
   handoffNote?: HandoffNote | null;
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
@@ -601,4 +649,6 @@ export interface RequirementDetail {
   handoffMarkdown: string;
   designHistoryVersions: number[];
   validity: ValidityReport;
+  /** Frozen acceptance artifact when available; lets the UI render immutable screenshot history. */
+  acceptanceSnapshot?: AcceptanceSnapshot | null;
 }

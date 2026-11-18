@@ -78,6 +78,8 @@ import {
   type RequirementSummary,
   type ReviewReport,
   type ReviewVerdict,
+  type ScreenshotBatch,
+  type ScreenshotCaptureResult,
   type Stage,
   type TaskInput,
   type TimelineEvent,
@@ -98,6 +100,7 @@ import {
   validateGitHubRepoSlug,
   validateMarkdownContent,
   validateProjectMetadata,
+  validateScreenshotBatch,
   validateVerificationRecord,
 } from "./validate.ts";
 import {
@@ -143,6 +146,7 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
       acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
       acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
     }),
+    acceptanceSnapshot: bundle.acceptanceSnapshot,
   };
 }
 
@@ -430,6 +434,7 @@ export async function createRequirement(
     title?: string;
     criteria?: CriterionInput[];
     track?: Track;
+    uiRelated?: boolean;
     currentCodeSnapshotHash?: string | null;
     /** 暂存区附件 ID，创建时认领到 .workbench/items/<REQ>/attachments/ */
     attachmentIds?: string[];
@@ -473,6 +478,7 @@ export async function createRequirement(
       lastFeedback: null,
       blockedFrom: null,
       blockedReason: null,
+      ...(input.uiRelated === true ? { uiRelated: true } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       timeline: [
         makeEvent(now, "created", "human", `创建需求 ${id}：${title}`),
@@ -1023,6 +1029,66 @@ export async function recordVerification(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? record.codeSnapshotHash);
 }
 
+export async function isUiRelatedRequirement(state: RequirementState, codeRoot: string): Promise<boolean> {
+  if (state.uiRelated === true) return true;
+  try {
+    const observed = await observeGitChanges(codeRoot, { sinceHead: state.baseline?.head ?? null });
+    return observed.files.some((file) => file.path.startsWith("src/web/"));
+  } catch {
+    // Git observation is best effort: an unreadable repo should not block acceptance.
+    return false;
+  }
+}
+
+export async function recordScreenshotBatch(
+  root: string,
+  id: string,
+  input: {
+    batch: ScreenshotBatch;
+    files?: Array<{ shotId: string; bytes: Buffer }>;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const batch = validateScreenshotBatch(input.batch);
+  const files = input.files ?? [];
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled") {
+      throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能记录新的截图证据`);
+    }
+    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+      throw new WorkbenchError(
+        "approval_required",
+        `当前阶段（${state.stage}）不能记录截图证据；仅实施阶段或待验收阶段允许采集`,
+      );
+    }
+    const existing = state.screenshotBatches ?? [];
+    if (existing.some((item) => item.id === batch.id)) {
+      throw new WorkbenchError("invalid_input", `截图批次 ID 已存在: ${batch.id}`);
+    }
+    const nextBatches = [...existing, batch];
+    const summary =
+      batch.status === "skipped"
+        ? `已记录截图采集跳过：${batch.skipReason ?? "浏览器环境不可用"}`
+        : batch.status === "partial"
+          ? `截图证据部分完成（${batch.shots.length} 张），存在跳过项`
+          : `已采集 UI 截图证据（${batch.shots.length} 张）`;
+    return {
+      screenshotWrite: { batch, files },
+      state: {
+        ...state,
+        screenshotBatches: nextBatches,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "screenshots_captured", batch.actor, summary, batch.skipReason ?? undefined),
+        ),
+      },
+    };
+  });
+
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? batch.codeSnapshotHash);
+}
+
 function selectSnapshotVerifications(
   evaluated: ReturnType<typeof evaluateRequirement>["verifications"],
   selectedIds: Set<string>,
@@ -1289,6 +1355,14 @@ export async function acceptRequirement(
         omittedFiles: frozenOmitted.omittedFiles,
         capturedAt: gitObs.capturedAt,
       },
+      ...(state.screenshotBatches && state.screenshotBatches.length > 0
+        ? {
+            screenshots: state.screenshotBatches.map((batch) => ({
+              ...batch,
+              shots: batch.shots.map((shot) => ({ ...shot })),
+            })),
+          }
+        : {}),
       contentDigest: "0".repeat(64),
     };
 

@@ -3,10 +3,12 @@ import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { WorkbenchError } from "./errors.ts";
 import {
+  atomicWriteBuffer,
   atomicWriteFile,
   atomicWriteJson,
   canonicalRoot,
   listDirSafe,
+  readBoundedBuffer,
   readBoundedText,
   readJsonStrict,
   resolveSafePath,
@@ -17,6 +19,8 @@ import {
   MAX_EVIDENCE_BYTES,
   MAX_HANDOFF_BYTES,
   MAX_ACCEPTANCE_SNAPSHOT_BYTES,
+  MAX_SCREENSHOT_BATCHES,
+  MAX_SCREENSHOT_BYTES,
   MAX_SPEC_BYTES,
   MAX_STATE_BYTES,
   SCHEMA_VERSION,
@@ -29,6 +33,8 @@ import {
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementState,
+  type ScreenshotBatch,
+  type ScreenshotShot,
   type VerificationRecord,
 } from "./types.ts";
 import { normalizeOutputLanguage } from "./language.ts";
@@ -41,6 +47,8 @@ import {
   validateMarkdownContent,
   validateProjectMetadata,
   validateRequirementState,
+  validateScreenshotBatch,
+  validateScreenshotShot,
   validateVerificationRecord,
 } from "./validate.ts";
 
@@ -214,6 +222,18 @@ function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAc
     if (parsed.capturedAt !== ref.capturedAt || parsed.contentDigest !== ref.contentDigest) {
       return { snapshot: null, status: "corrupt", reason: "验收证据与验收引用记录不一致" };
     }
+    for (const batch of parsed.screenshots ?? []) {
+      for (const shot of batch.shots) {
+        const shotPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${state.id}/${shot.path}`);
+        if (!fs.existsSync(shotPath)) {
+          return {
+            snapshot: null,
+            status: "missing",
+            reason: `验收快照引用的截图文件缺失: ${shot.id}`,
+          };
+        }
+      }
+    }
     return { snapshot: parsed, status: "available", reason: null };
   } catch (error) {
     const message = error instanceof WorkbenchError ? error.message : "验收证据文件无法解析";
@@ -287,6 +307,32 @@ export function readVerificationEvidence(
   const record = validateVerificationRecord(readJsonStrict<unknown>(jsonPath, 128 * 1024));
   const log = fs.existsSync(logPath) ? readBoundedText(logPath, MAX_EVIDENCE_BYTES) : "";
   return { record, log };
+}
+
+export function readRequirementScreenshot(
+  root: string,
+  id: string,
+  shotId: string,
+): { batch: ScreenshotBatch; shot: ScreenshotShot; bytes: Buffer } {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  if (typeof shotId !== "string" || !/^S-[A-Za-z0-9-]{1,64}$/.test(shotId)) {
+    throw new WorkbenchError("invalid_input", `无效的截图 ID: ${String(shotId)}`);
+  }
+  const bundle = readRequirementBundle(base, id);
+  for (const batch of bundle.state.screenshotBatches ?? []) {
+    const shot = batch.shots.find((item) => item.id === shotId);
+    if (!shot) continue;
+    const validated = validateScreenshotShot(shot);
+    const expectedRel = `screenshots/shot-${validated.id}.png`;
+    if (validated.path !== expectedRel) {
+      throw new WorkbenchError("corrupt_record", "截图路径与截图 ID 不一致");
+    }
+    const filePath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/${expectedRel}`);
+    const bytes = readBoundedBuffer(filePath, MAX_SCREENSHOT_BYTES);
+    return { batch, shot: validated, bytes };
+  }
+  throw new WorkbenchError("not_found", `未找到截图 ${shotId}`);
 }
 
 export function readAgentRun(
@@ -364,6 +410,8 @@ export interface RequirementMutationResult {
   snapshotSpecRevision?: number;
   evidenceWrite?: { record: VerificationRecord; rawLog: string };
   runWrite?: { record: AgentRunRecord; rawLog?: string };
+  /** Screenshot batch metadata plus PNG bytes; written before the new state is published. */
+  screenshotWrite?: { batch: ScreenshotBatch; files: Array<{ shotId: string; bytes: Buffer }> };
   /** Immutable acceptance artifact; written before the new state is published. */
   acceptanceSnapshotWrite?: { snapshot: AcceptanceSnapshot };
 }
@@ -397,9 +445,57 @@ export async function mutateRequirement(
       revision: bundle.state.revision + 1,
       updatedAt: now,
     };
-    validateRequirementState(nextState, id);
-
     const itemRel = `${WORKBENCH_DIR}/items/${id}`;
+
+    let stateForWrite = nextState;
+    let screenshotFiles: Array<{ relPath: string; bytes: Buffer }> = [];
+    let removedScreenshotPaths: string[] = [];
+    if (result.screenshotWrite) {
+      const batch = validateScreenshotBatch(result.screenshotWrite.batch);
+      const existingBatches = bundle.state.screenshotBatches ?? [];
+      if (existingBatches.some((item) => item.id === batch.id)) {
+        throw new WorkbenchError("invalid_input", `截图批次 ID 已存在: ${batch.id}`);
+      }
+      const existingShotIds = new Set(existingBatches.flatMap((item) => item.shots.map((shot) => shot.id)));
+      for (const shot of batch.shots) {
+        if (existingShotIds.has(shot.id)) {
+          throw new WorkbenchError("invalid_input", `截图 ID 已存在: ${shot.id}`);
+        }
+      }
+      const currentBatches = nextState.screenshotBatches ?? [];
+      const nextBatches = currentBatches.some((item) => item.id === batch.id)
+        ? currentBatches
+        : [...currentBatches, batch];
+      const overflow = Math.max(0, nextBatches.length - MAX_SCREENSHOT_BATCHES);
+      const dropped = nextBatches.slice(0, overflow);
+      const kept = nextBatches.slice(overflow);
+      const keptShotPaths = new Set(kept.flatMap((item) => item.shots.map((shot) => shot.path)));
+      removedScreenshotPaths = dropped
+        .flatMap((item) => item.shots.map((shot) => shot.path))
+        .filter((shotPath) => !keptShotPaths.has(shotPath));
+      stateForWrite = { ...nextState, screenshotBatches: kept };
+
+      const shotById = new Map(batch.shots.map((shot) => [shot.id, shot]));
+      const written = new Set<string>();
+      for (const file of result.screenshotWrite.files) {
+        const shot = shotById.get(file.shotId);
+        if (!shot) {
+          throw new WorkbenchError("invalid_input", `截图文件引用了批次中不存在的截图: ${file.shotId}`);
+        }
+        if (written.has(shot.id)) {
+          throw new WorkbenchError("invalid_input", `截图文件重复写入: ${shot.id}`);
+        }
+        written.add(shot.id);
+        if (file.bytes.length !== shot.sizeBytes) {
+          throw new WorkbenchError("invalid_input", `截图 ${shot.id} 的字节数与元数据不一致`);
+        }
+        if (file.bytes.length > MAX_SCREENSHOT_BYTES) {
+          throw new WorkbenchError("invalid_input", `截图 ${shot.id} 超出单张大小上限`);
+        }
+        screenshotFiles.push({ relPath: shot.path, bytes: file.bytes });
+      }
+    }
+    validateRequirementState(stateForWrite, id);
     const nextSpec = result.specMarkdown ?? bundle.specMarkdown;
     const nextDesign = result.designMarkdown ?? bundle.designMarkdown;
     const nextHandoff = result.handoffMarkdown ?? bundle.handoffMarkdown;
@@ -425,6 +521,26 @@ export async function mutateRequirement(
       atomicWriteJson(jsonPath, record);
     }
 
+    if (screenshotFiles.length > 0) {
+      for (const file of screenshotFiles) {
+        const targetPath = resolveSafePath(base, `${itemRel}/${file.relPath}`);
+        if (fs.existsSync(targetPath)) {
+          throw new WorkbenchError("invalid_input", `截图文件已存在: ${file.relPath}`);
+        }
+        atomicWriteBuffer(targetPath, file.bytes);
+      }
+    }
+    if (removedScreenshotPaths.length > 0) {
+      for (const relPath of removedScreenshotPaths) {
+        const targetPath = resolveSafePath(base, `${itemRel}/${relPath}`);
+        try {
+          fs.rmSync(targetPath, { force: true });
+        } catch {
+          // Old evidence cleanup is best effort; metadata trimming remains authoritative.
+        }
+      }
+    }
+
     if (result.specMarkdown !== undefined) {
       atomicWriteFile(resolveSafePath(base, `${itemRel}/spec.md`), result.specMarkdown);
     }
@@ -447,7 +563,7 @@ export async function mutateRequirement(
       }
     }
 
-    let publishedState = nextState;
+    let publishedState = stateForWrite;
     let sealedSnapshot: AcceptanceSnapshot | null = null;
     if (result.acceptanceSnapshotWrite) {
       const snapshot = sealAcceptanceSnapshot(result.acceptanceSnapshotWrite.snapshot);
@@ -473,7 +589,7 @@ export async function mutateRequirement(
         sizeBytes: bytes,
       };
       publishedState = {
-        ...nextState,
+        ...stateForWrite,
         acceptance: { ...nextState.acceptance, snapshot: reference },
       };
       validateRequirementState(publishedState, id);

@@ -374,6 +374,15 @@ export async function executeVerify(id: string, body: Parameters<typeof api.veri
   });
 }
 
+export async function captureUiScreenshots(id: string, label?: string) {
+  return runBusy(async () => {
+    const out = await api.captureScreenshots(id, label);
+    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+    await queryClient.invalidateQueries({ queryKey: ["requirements"] });
+    return out;
+  });
+}
+
 export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
   const id = detail.state.id;
   const rev = detail.state.revision;

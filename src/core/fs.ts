@@ -106,6 +106,48 @@ export function readBoundedText(filePath: string, maxBytes: number): string {
   }
 }
 
+/** Reads a regular non-symlink binary file within maxBytes. */
+export function readBoundedBuffer(filePath: string, maxBytes: number): Buffer {
+  let lstat: fs.Stats;
+  try {
+    lstat = fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new WorkbenchError("not_found", `文件不存在: ${path.basename(filePath)}`);
+    }
+    throw error;
+  }
+  if (lstat.isSymbolicLink()) {
+    throw new WorkbenchError("symlink_not_allowed", `不允许读取符号链接: ${filePath}`);
+  }
+  if (!lstat.isFile()) {
+    throw new WorkbenchError("invalid_path", `目标不是普通文件: ${filePath}`);
+  }
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      throw new WorkbenchError("invalid_path", `目标不是普通文件: ${filePath}`);
+    }
+    if (stat.size > maxBytes) {
+      throw new WorkbenchError("corrupt_record", `文件超出最大长度限制 (${maxBytes} 字节): ${path.basename(filePath)}`);
+    }
+    const buf = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const bytesRead = fs.readSync(fd, buf, offset, stat.size - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return buf.subarray(0, offset);
+  } catch (error) {
+    if (error instanceof WorkbenchError) throw error;
+    throw new WorkbenchError("corrupt_record", `读取二进制文件失败: ${path.basename(filePath)}`);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function readJsonStrict<T>(filePath: string, maxBytes: number): T {
   const raw = readBoundedText(filePath, maxBytes);
   try {

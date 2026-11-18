@@ -192,6 +192,7 @@ function helpText(): string {
     "                   [--design] [--criteria] [--summary] [--note] [--handoff-note] [--revision <n>]",
     "  tasks <REQ-ID> [--tasks <json|@file>]      查看或更新实施任务与提交待验收",
     "                 [--ready] [--note <text>] [--revision <n>]",
+    "  screenshot <REQ-ID> [--label <text>]       采集 UI 截图验收证据（浏览器缺失时记录跳过批次）",
     "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all) [--timeout <ms>]",
     "                                             运行真实验证命令并记录不可变证据",
     "  review <REQ-ID> --verdict <pass|concern|block> --summary <text> [--body <md|@file>]",
@@ -688,6 +689,18 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (typeof revision === "string") payload.expectedRevision = Number(revision);
 
         const res = await executeWorkbenchTool(root, "wb_update_tasks", payload);
+        printResult(res, asJson);
+        return 0;
+      }
+
+      case "screenshot": {
+        const id = parsed.positionals[0];
+        if (!id) throw new WorkbenchError("invalid_input", "请提供需求编号，例如: wb screenshot REQ-001 --label \"验收截图\"");
+        const label = parsed.flags.get("label");
+        const res = await executeWorkbenchTool(root, "wb_screenshot", {
+          id,
+          ...(typeof label === "string" && label.trim() ? { label: label.trim() } : {}),
+        });
         printResult(res, asJson);
         return 0;
       }

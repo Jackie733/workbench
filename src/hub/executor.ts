@@ -373,10 +373,16 @@ export function buildExecutionPrompt(
       ? "注意：你无权也无需执行批准或最终验收操作；本轮只产出方案，提交后立即停止，不要继续实施。"
       : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。";
 
+  const screenshotHint =
+    input.action === "implement" || input.action === "fix"
+      ? "若本次需求涉及 UI，提交验收时会自动采集界面截图证据；也可随时执行 `wb screenshot <REQ-ID>`（或 MCP wb_screenshot）补充采集。"
+      : "";
+
   return [
     `请接力执行工作台需求 ${reqId}（可用命令行 \`wb\` 工具操作，WORKBENCH_ROOT 已自动指向当前仓库）。`,
     modeVerb,
     boundaryGuard,
+    screenshotHint,
     "",
     buildOutputLanguageDirective(lang, "plan"),
     "",
