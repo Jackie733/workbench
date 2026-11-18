@@ -197,7 +197,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 .sb-section { display: flex; flex-direction: column; gap: 8px; }
 .sb-section-bottom { margin-top: auto; }
-.sb-head { display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 4px; }
+.sb-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 4px; }
+.sb-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-head .btn { flex-shrink: 0; white-space: nowrap; }
 .sb-list { display: flex; flex-direction: column; gap: 4px; }
 .sb-item { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; border: 1px solid transparent; }
 .sb-item:hover { background: var(--surface-2); }
@@ -207,8 +209,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .sb-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; background: var(--muted); }
 .sb-dot.ready { background: var(--success); }
 .sb-dot.running { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.sb-item-badges { display: flex; gap: 4px; align-items: center; }
-.sb-badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+.sb-item-badges { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.sb-badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.sb-item-badges .sb-badge { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
 .sb-badge.warn { background: var(--warning-soft); color: var(--warning); font-weight: 600; }
 
 .sb-preset-pill { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; border-radius: 8px; background: var(--surface-2); cursor: pointer; }
@@ -704,8 +707,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .handoff-preview-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 55vh; overflow-y: auto; background: var(--surface-2); }
 
 .more-wrap { position: relative; }
-.more-menu { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; min-width: 170px; box-shadow: 0 10px 25px rgba(0,0,0,0.16); padding: 4px; z-index: 38; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: wb-menu-in 120ms ease-out; }
-.more-menu button { width: 100%; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+/* REQ-005: percentage-width items inside the Radix portal wrapper form a circular max-content
+ * dependency that stretches the menu to the viewport width; column flex sizes to content instead. */
+.more-menu { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; min-width: 170px; box-shadow: 0 10px 25px rgba(0,0,0,0.16); padding: 4px; z-index: 38; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: wb-menu-in 120ms ease-out; }
+.more-menu button { width: auto; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .more-menu button:hover, .more-menu button[data-highlighted] { background: var(--surface-2); outline: none; }
 @keyframes wb-menu-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
 
