@@ -13,10 +13,8 @@ import {
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_environment.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;

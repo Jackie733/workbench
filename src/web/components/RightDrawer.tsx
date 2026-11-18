@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
+import { api } from "../api.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
   adoptDiscussion,
@@ -15,6 +16,7 @@ import { formatDateTime } from "../state.ts";
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/uiStore.ts";
+import { ConsoleOutput } from "./ConsoleOutput.tsx";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 
@@ -66,7 +68,6 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
             ? "collapsed closing"
             : "collapsed settled";
   const threadRef = useRef<HTMLDivElement | null>(null);
-  const consolePreRef = useRef<HTMLPreElement | null>(null);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const [maxWidth, setMaxWidth] = useState<number>(DEFAULT_DRAWER_WIDTH);
 
@@ -200,6 +201,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
       : null;
 
   const liveText = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] ?? "" : ""));
+  const hasCachedLog = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] !== undefined : false));
   const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
 
   useEffect(() => {
@@ -209,10 +211,27 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   }, [drawerOpen, drawerTab, activeRun, streamText]);
 
   useEffect(() => {
-    if (drawerOpen && drawerTab === "console" && consolePreRef.current) {
-      consolePreRef.current.scrollTop = consolePreRef.current.scrollHeight;
-    }
-  }, [drawerOpen, drawerTab, liveText]);
+    if (!drawerOpen || drawerTab !== "console" || !reqId || !currentRun) return;
+    if (hasCachedLog) return;
+    let cancelled = false;
+    void api
+      .getAgentRunLog(reqId, currentRun.id)
+      .then((res) => {
+        if (cancelled) return;
+        const existing = useStreamStore.getState().liveRunLogs[currentRun.id];
+        if (existing === undefined || res.log.length > existing.length) {
+          useStreamStore.getState().setRunLogFull(currentRun.id, res.log);
+        }
+      })
+      .catch(() => {
+        if (!cancelled && useStreamStore.getState().liveRunLogs[currentRun.id] === undefined) {
+          useStreamStore.getState().setRunLogFull(currentRun.id, "");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [drawerOpen, drawerTab, reqId, currentRun?.id, hasCachedLog]);
 
   const effectiveWidth = clampDrawerWidth(drawerWidth, maxWidth);
   const discussions = d?.state.discussions ?? [];
@@ -508,9 +527,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           {currentRun.errorSummary}
                         </div>
                       )}
-                      <pre className="console-log" data-testid="console-log-output" ref={consolePreRef}>
-                        {liveText || "等待终端输出…"}
-                      </pre>
+                      <ConsoleOutput
+                        runId={currentRun.id}
+                        rawLog={liveText}
+                        isRunning={currentRun.status === "running"}
+                      />
                     </>
                   ) : (
                     <div className="empty-card xs muted" style={{ textAlign: "center" }}>

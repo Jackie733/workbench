@@ -8,10 +8,8 @@ import { runVerification } from "../../src/core/runner.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_environment.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
 const SCREENSHOT_DIR = "/tmp/opencode/req-001-visual";
 
 const DESIGN_MD = [
