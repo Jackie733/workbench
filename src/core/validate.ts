@@ -10,6 +10,9 @@ import {
   MAX_DISCUSSIONS,
   MAX_HANDOFF_BYTES,
   MAX_REASON_CHARS,
+  MAX_SCREENSHOT_BYTES,
+  MAX_SCREENSHOT_BATCHES,
+  MAX_SCREENSHOTS_PER_BATCH,
   MAX_SPEC_BYTES,
   MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TASKS,
@@ -51,6 +54,10 @@ import {
   type RequirementState,
   type ReviewReport,
   type ReviewVerdict,
+  type ScreenshotBatch,
+  type ScreenshotBatchStatus,
+  type ScreenshotShot,
+  type ScreenshotTrigger,
   type Stage,
   type TaskInput,
   type TaskItem,
@@ -66,6 +73,10 @@ export const REQUIREMENT_ID_RE = /^REQ-\d{3,}$/;
 const TOKEN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SNAPSHOT_PATH_RE = /^snapshots\/acceptance-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
+const SCREENSHOT_SHOT_ID_RE = /^S-[A-Za-z0-9-]{1,64}$/;
+const SCREENSHOT_BATCH_ID_RE = /^SB-[A-Za-z0-9-]{1,64}$/;
+const SCREENSHOT_PATH_RE = /^screenshots\/shot-S-[A-Za-z0-9-]{1,64}\.png$/;
+const SCREENSHOT_VIEWPORT_RE = /^\d{2,5}x\d{2,5}$/;
 const GIT_REF_RE = /^[0-9a-f]{7,64}$/i;
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const GIT_BRANCH_RE = /^(?![-.])(?!.*\.\.)(?!.*@\{)[A-Za-z0-9._/-]{1,128}(?<!\.lock)(?<![./])$/;
@@ -73,6 +84,8 @@ const DIFF_STATUSES: DiffEvidenceStatus[] = ["captured", "empty", "unavailable"]
 const FILES_SCOPES: DiffFilesScope[] = ["baseline-relative", "worktree", "none"];
 const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "stale", "unknown"];
 const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
+const SCREENSHOT_TRIGGERS: ScreenshotTrigger[] = ["auto_submit", "manual"];
+const SCREENSHOT_STATUSES: ScreenshotBatchStatus[] = ["captured", "partial", "skipped"];
 
 export function validateGitHubRepoSlug(repo: string): string {
   const trimmed = repo.trim();
@@ -588,6 +601,81 @@ export function validateAcceptanceVerificationEvidence(raw: unknown): Acceptance
   };
 }
 
+export function validateScreenshotShot(raw: unknown): ScreenshotShot {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图记录必须是对象");
+  assertAllowedKeys(raw, ["id", "label", "urlPath", "viewport", "theme", "path", "sha256", "sizeBytes"], "screenshot");
+  if (
+    typeof raw.id !== "string" ||
+    !SCREENSHOT_SHOT_ID_RE.test(raw.id) ||
+    !isSafeText(raw.label, 300) ||
+    !isSafeText(raw.urlPath, 4096) ||
+    !SCREENSHOT_VIEWPORT_RE.test(String(raw.viewport)) ||
+    (raw.theme !== "light" && raw.theme !== "dark") ||
+    typeof raw.path !== "string" ||
+    !SCREENSHOT_PATH_RE.test(raw.path) ||
+    raw.path !== `screenshots/shot-${raw.id}.png` ||
+    typeof raw.sha256 !== "string" ||
+    !SHA256_RE.test(raw.sha256) ||
+    !isSafeInt(raw.sizeBytes, 0) ||
+    raw.sizeBytes > MAX_SCREENSHOT_BYTES
+  ) {
+    throw new WorkbenchError("corrupt_record", "截图记录字段损坏");
+  }
+  return raw as unknown as ScreenshotShot;
+}
+
+export function validateScreenshotBatch(raw: unknown): ScreenshotBatch {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图批次必须是对象");
+  assertAllowedKeys(
+    raw,
+    ["id", "createdAt", "trigger", "actor", "specHash", "codeSnapshotHash", "status", "skipReason", "shots", "durationMs"],
+    "screenshotBatch",
+  );
+  if (
+    typeof raw.id !== "string" ||
+    !SCREENSHOT_BATCH_ID_RE.test(raw.id) ||
+    !isSafeInt(raw.createdAt, 0) ||
+    !SCREENSHOT_TRIGGERS.includes(raw.trigger as ScreenshotTrigger) ||
+    (raw.actor !== "agent" && raw.actor !== "human" && raw.actor !== "system") ||
+    typeof raw.specHash !== "string" ||
+    !SHA256_RE.test(raw.specHash) ||
+    typeof raw.codeSnapshotHash !== "string" ||
+    !SHA256_RE.test(raw.codeSnapshotHash) ||
+    !SCREENSHOT_STATUSES.includes(raw.status as ScreenshotBatchStatus) ||
+    (raw.skipReason !== null && !isSafeText(raw.skipReason, 4000, true)) ||
+    !Array.isArray(raw.shots) ||
+    raw.shots.length > MAX_SCREENSHOTS_PER_BATCH ||
+    (raw.status === "captured" && raw.shots.length === 0) ||
+    !isSafeInt(raw.durationMs, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "截图批次字段损坏");
+  }
+  const seen = new Set<string>();
+  for (const shot of raw.shots) {
+    const validated = validateScreenshotShot(shot);
+    if (seen.has(validated.id)) {
+      throw new WorkbenchError("corrupt_record", "截图批次包含重复的截图 ID");
+    }
+    seen.add(validated.id);
+  }
+  return raw as unknown as ScreenshotBatch;
+}
+
+export function validateScreenshotBatches(raw: unknown): ScreenshotBatch[] {
+  if (!Array.isArray(raw) || raw.length > MAX_SCREENSHOT_BATCHES) {
+    throw new WorkbenchError("corrupt_record", `截图批次数量不能超过 ${MAX_SCREENSHOT_BATCHES} 批`);
+  }
+  const seen = new Set<string>();
+  const out = raw.map((item) => validateScreenshotBatch(item));
+  for (const batch of out) {
+    if (seen.has(batch.id)) {
+      throw new WorkbenchError("corrupt_record", "截图批次 ID 重复");
+    }
+    seen.add(batch.id);
+  }
+  return out;
+}
+
 /** Validates one frozen acceptance artifact; guarantees the stored bytes can be trusted as history. */
 export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?: string): AcceptanceSnapshot {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "验收快照必须是对象");
@@ -610,6 +698,7 @@ export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?:
       "verifications",
       "omittedVerificationCount",
       "git",
+      "screenshots",
       "contentDigest",
     ],
     "验收快照",
@@ -656,6 +745,7 @@ export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?:
   }
   for (const verification of raw.verifications) validateAcceptanceVerificationEvidence(verification);
   validateAcceptanceGitEvidence(raw.git);
+  if (raw.screenshots !== undefined) validateScreenshotBatches(raw.screenshots);
   if (typeof raw.contentDigest !== "string" || !SHA256_RE.test(raw.contentDigest)) {
     throw new WorkbenchError("corrupt_record", "验收快照缺少有效内容摘要");
   }
@@ -856,6 +946,8 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       "lastFeedback",
       "blockedFrom",
       "blockedReason",
+      "uiRelated",
+      "screenshotBatches",
       "handoffNote",
       "discussions",
       "agentRuns",
@@ -889,6 +981,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     (raw.lastFeedback !== null && !isSafeText(raw.lastFeedback, 8000, true)) ||
     (raw.blockedFrom !== null && !STAGES.includes(raw.blockedFrom as Stage)) ||
     (raw.blockedReason !== null && !isSafeText(raw.blockedReason, 8000, true)) ||
+    (raw.uiRelated !== undefined && typeof raw.uiRelated !== "boolean") ||
     !isSafeInt(raw.createdAt, 0) ||
     !isSafeInt(raw.updatedAt, 0)
   ) {
@@ -924,6 +1017,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);
   validateRequirementGitHubLink(raw.github);
+  if (raw.screenshotBatches !== undefined) validateScreenshotBatches(raw.screenshotBatches);
   if (Array.isArray(raw.discussions)) {
     for (const d of raw.discussions) validateDiscussionEntry(d);
   }

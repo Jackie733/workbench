@@ -266,7 +266,7 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     };
 
     workbenchExtension(mockPi);
-    expect(Array.from(tools.keys())).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_verify"]);
+    expect(Array.from(tools.keys())).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_screenshot", "wb_verify"]);
     expect(tools.get("wb_list")?.approval).toBe("read");
     expect(tools.get("wb_propose")?.approval).toBe("write");
     expect(tools.get("wb_verify")?.approval).toBe("exec");

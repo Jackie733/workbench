@@ -782,11 +782,14 @@ export async function promotePainPoint(
         ];
 
   const snap = await observeGitSnapshot(wbRoot);
+  const uiRelated =
+    pain.source === "ui_quick_report" || pain.source === "ui_error" || pain.category === "ui_anomaly";
   let detail = await createRequirement(wbRoot, {
     title: `[RSI] ${pain.title}`.slice(0, 115),
     goal: specGoal,
     criteria,
     track: "plan_first",
+    uiRelated,
     currentCodeSnapshotHash: snap?.fingerprint ?? null,
   });
 

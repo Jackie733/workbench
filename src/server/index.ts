@@ -50,6 +50,8 @@ import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, resolveEffectiveOutpu
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
+import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
   WORKBENCH_DIR,
@@ -1019,6 +1021,33 @@ export async function startWorkbenchServer(options: {
       if (method === "GET" && evMatch) {
         const evidence = getVerificationEvidence(base, id, decodeURIComponent(evMatch[1]!));
         return jsonResponse(evidence);
+      }
+
+      const shotMatch = /^screenshots\/([^/]+)$/.exec(sub);
+      if (method === "GET" && shotMatch) {
+        const screenshot = readRequirementScreenshot(base, id, decodeURIComponent(shotMatch[1]!));
+        return new Response(new Uint8Array(screenshot.bytes), {
+          status: 200,
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(screenshot.bytes.length),
+            "Cache-Control": "private, max-age=31536000, immutable",
+          },
+        });
+      }
+
+      if (method === "POST" && sub === "screenshots/capture") {
+        const body = await readBody(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const capture = await captureRequirementScreenshots(base, id, {
+          trigger: "manual",
+          actor: "human",
+          ...(typeof body.label === "string" && body.label.trim() ? { label: body.label.trim() } : {}),
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        broadcastUi({ type: "workbench.updated", reason: "screenshots.captured", root: base, id, at: Date.now() });
+        return jsonResponse({ detail, screenshotCapture: capture });
       }
 
       if (method === "PATCH" && sub === "spec") {

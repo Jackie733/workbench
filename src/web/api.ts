@@ -14,6 +14,7 @@ import type {
   RequirementGitHubLink,
   RequirementGitHubPrLink,
   RequirementSummary,
+  ScreenshotCaptureResult,
   Stage,
   VerificationRecord,
 } from "../core/types.ts";
@@ -122,6 +123,13 @@ export function withProjectParam(url: string, explicitProjectId?: string | null)
   if (!pid || pid === "default") return url;
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}project=${encodeURIComponent(pid)}`;
+}
+
+/** Builds the immutable PNG evidence URL used by thumbnail grids and the lightbox. */
+export function screenshotUrl(requirementId: string, shotId: string): string {
+  return withProjectParam(
+    `/api/requirements/${encodeURIComponent(requirementId)}/screenshots/${encodeURIComponent(shotId)}`,
+  );
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -295,6 +303,11 @@ export const api = {
   getEvidence: (id: string, verificationId: string) =>
     requestJson<{ record: VerificationRecord; log: string }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/evidence/${encodeURIComponent(verificationId)}`),
+    ),
+  captureScreenshots: (id: string, label?: string) =>
+    requestJson<{ detail: RequirementDetail; screenshotCapture: ScreenshotCaptureResult }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/screenshots/capture`),
+      { method: "POST", body: JSON.stringify({ ...(label?.trim() ? { label: label.trim() } : {}) }) },
     ),
   getHandoff: (id: string) =>
     requestJson<{ markdown: string; detail: RequirementDetail }>(

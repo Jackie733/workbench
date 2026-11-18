@@ -54,7 +54,7 @@ describe("WB-03 MCP Server and wb CLI", () => {
 
     const listToolsResp = await handleMcpMessage(root, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const tools = (listToolsResp?.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
-    expect(tools).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_verify"]);
+    expect(tools).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_screenshot", "wb_verify"]);
 
     // Reject unknown/privileged tools
     for (const forbidden of ["wb_approve", "wb_accept", "approve", "accept"]) {

@@ -169,6 +169,7 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                       className="board-card"
                       data-action="open-req"
                       data-id={item.id}
+                      data-testid={`req-card-${item.id}`}
                       tabIndex={0}
                       onClick={() => void openRequirement(item.id)}
                       onKeyDown={(e) => {
@@ -386,7 +387,7 @@ export function HomeView() {
                     }}
                   >
                     <span className="req-id">{item.id}</span>
-                    <div>
+                    <div data-testid={`req-card-${item.id}`}>
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
                         <span className={`badge ${meta.tone}`}>{meta.label}</span>
