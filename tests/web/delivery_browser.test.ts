@@ -12,11 +12,11 @@ import {
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
+import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
+const browserEnv = resolveBrowserEnvironment();
+const HAS_BROWSER = browserEnv.ok;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -59,11 +59,11 @@ function makeTempHub(): string {
 
 beforeAll(async () => {
   if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  const mod = (await import(browserEnv.puppeteerPath!)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
+    executablePath: browserEnv.chromePath!,
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });

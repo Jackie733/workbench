@@ -5,13 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { approveDesign, createRequirement, initProject, propose, updateTasks } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
+import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
+const browserEnv = resolveBrowserEnvironment();
+const HAS_BROWSER = browserEnv.ok;
 const SCREENSHOT_DIR = "/tmp/opencode/req-001-visual";
 
 const DESIGN_MD = [
@@ -171,15 +171,15 @@ async function setup(): Promise<{ server: WorkbenchServerHandle; page: BrowserPa
 beforeAll(async () => {
   if (!HAS_BROWSER) {
     throw new Error(
-      `Browser prerequisites missing (chromium=${CHROME_PATH}, puppeteer=${PUPPETEER_PATH}); ` +
+      `Browser prerequisites missing (chromium=${browserEnv.chromePath ?? "not found"}, puppeteer=${browserEnv.puppeteerPath ?? "not found"}); ` +
         "REQ-001 browser criteria require real browser execution and must not be skipped.",
     );
   }
-  const mod = (await import(PUPPETEER_PATH)) as {
+  const mod = (await import(browserEnv.puppeteerPath!)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
+    executablePath: browserEnv.chromePath!,
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });

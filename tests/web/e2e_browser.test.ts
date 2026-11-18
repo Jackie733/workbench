@@ -4,14 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
+import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, readHubConfig } from "../../src/hub/registry.ts";
+import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
-const CHROME_PATH = "/home/jackie/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome";
-const PUPPETEER_PATH = "/home/jackie/.bun/install/global/node_modules/puppeteer-core/lib/puppeteer/puppeteer-core.js";
-const HAS_BROWSER = fs.existsSync(CHROME_PATH) && fs.existsSync(PUPPETEER_PATH);
+const browserEnv = resolveBrowserEnvironment();
+const HAS_BROWSER = browserEnv.ok;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -73,11 +73,11 @@ async function clickReady(page: BrowserPage, selector: string, timeout = 5000): 
 
 beforeAll(async () => {
   if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  const mod = (await import(browserEnv.puppeteerPath!)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
+    executablePath: browserEnv.chromePath!,
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
@@ -1437,6 +1437,155 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await openMenu();
       await page.click(".ws-title");
       await menuGone();
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 「更多」下拉菜单宽度随内容自适应且菜单项整行填满", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "MenuWidthRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "修复更多下拉菜单宽度异常",
+      criteria: [{ id: "AC-1", description: "菜单宽度随内容自适应", required: true, command: "echo ok" }],
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const menuGone = () =>
+      page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+    const openMenu = async () => {
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+      await Bun.sleep(300); // 等待 Radix 定位与入场动画（scale 0.96→1）结束再测量
+    };
+
+    try {
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 5000 });
+
+      for (const viewport of [
+        { width: 1280, height: 800 },
+        { width: 2514, height: 1348 },
+      ]) {
+        await page.setViewport(viewport);
+        await Bun.sleep(100);
+        await openMenu();
+        const metrics = await page.evaluate(() => {
+          const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
+          const trigger = document.querySelector('[data-testid="more-menu-btn"]')!.getBoundingClientRect();
+          const rect = menu.getBoundingClientRect();
+          const style = getComputedStyle(menu);
+          const contentWidth =
+            menu.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+          const items = Array.from(menu.querySelectorAll("button")).map((b) => (b as HTMLElement).offsetWidth);
+          return {
+            width: rect.width,
+            right: rect.right,
+            triggerRight: trigger.right,
+            contentWidth,
+            items,
+            viewportWidth: window.innerWidth,
+          };
+        });
+        // 菜单宽度随内容自适应：保留 170px 下限，最长菜单项量级不超过 320px，绝不 stretch 到视口宽度。
+        expect(metrics.width).toBeGreaterThanOrEqual(170);
+        expect(metrics.width).toBeLessThanOrEqual(320);
+        expect(metrics.width).toBeLessThan(metrics.viewportWidth / 2);
+        // 沿用 REQ-012 的右缘对齐约定。
+        expect(Math.abs(metrics.right - metrics.triggerRight)).toBeLessThan(4);
+        // 整行 hover 高亮依赖菜单项填满菜单内容宽度。
+        expect(metrics.items.length).toBeGreaterThanOrEqual(6);
+        for (const itemWidth of metrics.items) {
+          expect(Math.abs(itemWidth - metrics.contentWidth)).toBeLessThanOrEqual(1);
+        }
+        await page.keyboard.press("Escape");
+        await menuGone();
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 侧栏节点徽标与算力路由配置按钮单行显示", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const remoteRepo = initGitRepo();
+    const localRepo = initGitRepo();
+    await initProject(localRepo, { name: "Workbench-Node", privacyMode: "local" });
+    registerHubProject(localRepo, { name: "Workbench-Node" });
+    registerHubProject(remoteRepo, {
+      name: "deepmdt-frontend-pc",
+      nodeId: "wsl-work",
+      nodeName: "Windows WSL2",
+      activate: true,
+    });
+
+    const server = await startWorkbenchServer({ root: localRepo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="sidebar-routing-btn"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[data-action="switch-project"]')).some((row) =>
+            (row.textContent ?? "").includes("deepmdt-frontend-pc"),
+          ),
+        { timeout: 5000 },
+      );
+      await Bun.sleep(150);
+
+      const metrics = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-action="switch-project"]'));
+        const remoteRow = rows.find((row) => (row.textContent ?? "").includes("deepmdt-frontend-pc"));
+        const badge = remoteRow?.querySelector(".sb-item-badges .sb-badge") as HTMLElement | null;
+        const projectName = remoteRow?.querySelector(".sb-item-name") as HTMLElement | null;
+        const routingBtn = document.querySelector('[data-testid="sidebar-routing-btn"]') as HTMLElement | null;
+        const routingHead = routingBtn?.closest(".sb-head") as HTMLElement | null;
+        const routingTitle = routingHead?.querySelector("span") as HTMLElement | null;
+        const height = (el: HTMLElement | null) => (el ? el.getBoundingClientRect().height : -1);
+        return {
+          badgeText: badge?.textContent ?? "",
+          badgeHeight: height(badge),
+          projectNameHeight: height(projectName),
+          routingBtnHeight: height(routingBtn),
+          routingTitleText: routingTitle?.textContent ?? "",
+          routingTitleHeight: height(routingTitle),
+        };
+      });
+
+      // 远程节点徽标单行（离线节点场景，修复前为两行 35px）。
+      expect(metrics.badgeText).toContain("Windows WSL2");
+      expect(metrics.badgeHeight).toBeGreaterThan(0);
+      expect(metrics.badgeHeight).toBeLessThanOrEqual(24);
+      // 项目名继续单行省略，不被徽标挤压换行。
+      expect(metrics.projectNameHeight).toBeLessThanOrEqual(24);
+      // 路由区头标题含长节点后缀仍单行（修复前两行 35px）。
+      expect(metrics.routingTitleText).toContain("Windows WSL2");
+      expect(metrics.routingTitleHeight).toBeLessThanOrEqual(24);
+      // 配置按钮图标与文本单行横排（修复前逐字竖排 46px）。
+      expect(metrics.routingBtnHeight).toBeGreaterThan(0);
+      expect(metrics.routingBtnHeight).toBeLessThanOrEqual(32);
 
       expect(pageErrors).toEqual([]);
     } finally {
