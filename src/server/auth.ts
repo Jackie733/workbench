@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { WorkbenchError } from "../core/errors.ts";
@@ -51,7 +51,7 @@ function writeAuthFile(hubDir: string, file: AuthFile): void {
 }
 
 function generatePassword(): string {
-  return randomBytes(9).toString("base64url");
+  return String(randomInt(100_000, 1_000_000));
 }
 
 function encodePasswordHash(password: string): string {
