@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
+import { Toaster } from "sonner";
 import { api } from "./api.ts";
 import { EmptyHubCard, HomeView, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
 import { HubSidebar } from "./components/HubSidebar.tsx";
 import { LoginView } from "./components/LoginView.tsx";
 import { Modals } from "./components/Modals.tsx";
-import { ToastBanner } from "./components/Primitives.tsx";
 import { RightDrawer } from "./components/RightDrawer.tsx";
 import { Topbar } from "./components/Topbar.tsx";
 import { WorkspaceView } from "./components/WorkspaceView.tsx";
@@ -283,9 +283,22 @@ function WorkbenchShell() {
         <Modals />
       </div>
       <DomElementPicker />
-      <div id="toast-root">
-        <ToastBanner />
-      </div>
+      <Toaster
+        position="bottom-right"
+        duration={4000}
+        closeButton
+        richColors
+        theme={theme}
+        offset={18}
+        visibleToasts={4}
+        style={
+          {
+            "--normal-bg": "var(--surface)",
+            "--normal-text": "var(--text)",
+            "--normal-border": "var(--border)",
+          } as CSSProperties
+        }
+      />
     </>
   );
 }

@@ -5,11 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, readHubConfig } from "../../src/hub/registry.ts";
+import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
-import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_environment.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -57,6 +59,24 @@ function initGitRepo(): string {
 async function clickReady(page: BrowserPage, selector: string, timeout = 5000): Promise<void> {
   const readySel = `${selector}:not([disabled])`;
   await page.waitForSelector(readySel, { timeout });
+  // 右下角 Sonner 提示可能短暂遮挡按钮中心；元素已在视口内时等待其真正可命中。
+  // Radix 弹窗/菜单打开时 body 为 pointer-events:none，命中检测不适用，直接放行。
+  await page.waitForFunction(
+    (sel: unknown) => {
+      const el = document.querySelector(String(sel));
+      if (!el) return false;
+      if (getComputedStyle(document.body).pointerEvents === "none") return true;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return true;
+      const hit = document.elementFromPoint(cx, cy);
+      return hit === el || el.contains(hit);
+    },
+    { timeout },
+    readySel,
+  );
   try {
     await page.click(readySel);
   } catch (err) {
@@ -70,13 +90,13 @@ async function clickReady(page: BrowserPage, selector: string, timeout = 5000): 
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);
@@ -229,6 +249,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="action-approve_and_implement"]', { timeout: 5000 });
 
       // Verify design version diff toggle works
+      // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
+      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 6000 });
       await page.click('[data-action="toggle-design-diff"]');
       await page.waitForSelector(".diff-code", { timeout: 5000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
@@ -459,7 +481,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
         designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
       }));
-      expect(firstReopen).toEqual({ designModel: "qodercn::DeepSeek-V4-Pro", designEffort: "xhigh" });
+      expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
       await page.select('[data-testid="route-effort-design"]', "high");
@@ -1168,7 +1190,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           subscription: "QoderCN",
           installed: true,
           executable: "qodercn",
-          models: [{ id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" }],
+          models: [
+            { id: "Qwen4-Max", tier: "sota", source: "detected" },
+            { id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" },
+          ],
           defaultModel: "DeepSeek-V4-Pro",
           detectedAt: Date.now(),
         },
@@ -1632,6 +1657,155 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")),
         { timeout: 5000 },
       );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 「更多」下拉菜单宽度随内容自适应且菜单项整行填满", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "MenuWidthRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "修复更多下拉菜单宽度异常",
+      criteria: [{ id: "AC-1", description: "菜单宽度随内容自适应", required: true, command: "echo ok" }],
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const menuGone = () =>
+      page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+    const openMenu = async () => {
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+      await Bun.sleep(300); // 等待 Radix 定位与入场动画（scale 0.96→1）结束再测量
+    };
+
+    try {
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 5000 });
+
+      for (const viewport of [
+        { width: 1280, height: 800 },
+        { width: 2514, height: 1348 },
+      ]) {
+        await page.setViewport(viewport);
+        await Bun.sleep(100);
+        await openMenu();
+        const metrics = await page.evaluate(() => {
+          const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
+          const trigger = document.querySelector('[data-testid="more-menu-btn"]')!.getBoundingClientRect();
+          const rect = menu.getBoundingClientRect();
+          const style = getComputedStyle(menu);
+          const contentWidth =
+            menu.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+          const items = Array.from(menu.querySelectorAll("button")).map((b) => (b as HTMLElement).offsetWidth);
+          return {
+            width: rect.width,
+            right: rect.right,
+            triggerRight: trigger.right,
+            contentWidth,
+            items,
+            viewportWidth: window.innerWidth,
+          };
+        });
+        // 菜单宽度随内容自适应：保留 170px 下限，最长菜单项量级不超过 320px，绝不 stretch 到视口宽度。
+        expect(metrics.width).toBeGreaterThanOrEqual(170);
+        expect(metrics.width).toBeLessThanOrEqual(320);
+        expect(metrics.width).toBeLessThan(metrics.viewportWidth / 2);
+        // 沿用 REQ-012 的右缘对齐约定。
+        expect(Math.abs(metrics.right - metrics.triggerRight)).toBeLessThan(4);
+        // 整行 hover 高亮依赖菜单项填满菜单内容宽度。
+        expect(metrics.items.length).toBeGreaterThanOrEqual(6);
+        for (const itemWidth of metrics.items) {
+          expect(Math.abs(itemWidth - metrics.contentWidth)).toBeLessThanOrEqual(1);
+        }
+        await page.keyboard.press("Escape");
+        await menuGone();
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 侧栏节点徽标与算力路由配置按钮单行显示", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const remoteRepo = initGitRepo();
+    const localRepo = initGitRepo();
+    await initProject(localRepo, { name: "Workbench-Node", privacyMode: "local" });
+    registerHubProject(localRepo, { name: "Workbench-Node" });
+    registerHubProject(remoteRepo, {
+      name: "deepmdt-frontend-pc",
+      nodeId: "wsl-work",
+      nodeName: "Windows WSL2",
+      activate: true,
+    });
+
+    const server = await startWorkbenchServer({ root: localRepo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="sidebar-routing-btn"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[data-action="switch-project"]')).some((row) =>
+            (row.textContent ?? "").includes("deepmdt-frontend-pc"),
+          ),
+        { timeout: 5000 },
+      );
+      await Bun.sleep(150);
+
+      const metrics = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-action="switch-project"]'));
+        const remoteRow = rows.find((row) => (row.textContent ?? "").includes("deepmdt-frontend-pc"));
+        const badge = remoteRow?.querySelector(".sb-item-badges .sb-badge") as HTMLElement | null;
+        const projectName = remoteRow?.querySelector(".sb-item-name") as HTMLElement | null;
+        const routingBtn = document.querySelector('[data-testid="sidebar-routing-btn"]') as HTMLElement | null;
+        const routingHead = routingBtn?.closest(".sb-head") as HTMLElement | null;
+        const routingTitle = routingHead?.querySelector("span") as HTMLElement | null;
+        const height = (el: HTMLElement | null) => (el ? el.getBoundingClientRect().height : -1);
+        return {
+          badgeText: badge?.textContent ?? "",
+          badgeHeight: height(badge),
+          projectNameHeight: height(projectName),
+          routingBtnHeight: height(routingBtn),
+          routingTitleText: routingTitle?.textContent ?? "",
+          routingTitleHeight: height(routingTitle),
+        };
+      });
+
+      // 远程节点徽标单行（离线节点场景，修复前为两行 35px）。
+      expect(metrics.badgeText).toContain("Windows WSL2");
+      expect(metrics.badgeHeight).toBeGreaterThan(0);
+      expect(metrics.badgeHeight).toBeLessThanOrEqual(24);
+      // 项目名继续单行省略，不被徽标挤压换行。
+      expect(metrics.projectNameHeight).toBeLessThanOrEqual(24);
+      // 路由区头标题含长节点后缀仍单行（修复前两行 35px）。
+      expect(metrics.routingTitleText).toContain("Windows WSL2");
+      expect(metrics.routingTitleHeight).toBeLessThanOrEqual(24);
+      // 配置按钮图标与文本单行横排（修复前逐字竖排 46px）。
+      expect(metrics.routingBtnHeight).toBeGreaterThan(0);
+      expect(metrics.routingBtnHeight).toBeLessThanOrEqual(32);
 
       expect(pageErrors).toEqual([]);
     } finally {

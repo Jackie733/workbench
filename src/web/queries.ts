@@ -3,7 +3,7 @@ import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
-import { activeRunnerChoice, type Scope } from "./state.ts";
+import { activeRunnerChoice, getModelEffortCapability, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
 import { useStreamStore } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
@@ -362,6 +362,13 @@ export async function triggerActiveRun(
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const { selectedRunnerKey, selectedEffort } = useDraftStore.getState();
   const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, action, selectedEffort);
+  const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
+  const effectiveEffort =
+    effortCap.mode === "configurable"
+      ? choice.effort && effortCap.efforts.includes(choice.effort)
+        ? choice.effort
+        : undefined
+      : undefined;
   const ui = useUiStore.getState();
 
   const res = await runBusy(async () => {
@@ -369,7 +376,7 @@ export async function triggerActiveRun(
       action,
       harness: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
       model: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
-      reasoningEffort: choice.effort,
+      reasoningEffort: effectiveEffort,
       message: opts?.message,
       anchor: opts?.anchor,
       anchorIds: opts?.anchorIds,

@@ -113,12 +113,15 @@ function newestChromiumFromPlaywright(): string | null {
     return null;
   }
   const versions = entries
-    .map((entry) => /^chromium-(\d+)$/.exec(entry))
+    .map((entry) => /^chromium(_headless_shell)?-(\d+)$/.exec(entry))
     .filter((match): match is RegExpExecArray => Boolean(match))
-    .map((match) => ({ dir: match[0], version: Number(match[1]) }))
-    .sort((a, b) => b.version - a.version);
+    .map((match) => ({ dir: match[0], version: Number(match[2]), headlessShell: Boolean(match[1]) }))
+    .sort((a, b) => b.version - a.version || Number(a.headlessShell) - Number(b.headlessShell));
   for (const candidate of versions) {
-    for (const relative of ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"]) {
+    const relatives = candidate.headlessShell
+      ? ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-headless-shell-linux/chrome-headless-shell"]
+      : ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"];
+    for (const relative of relatives) {
       const full = path.join(cacheDir, candidate.dir, relative);
       if (fs.existsSync(full)) return full;
     }
@@ -156,7 +159,12 @@ function resolvePuppeteerModule(): string | null {
     "puppeteer",
     "puppeteer-core.js",
   );
-  return fs.existsSync(globalPath) ? globalPath : null;
+  if (fs.existsSync(globalPath)) return globalPath;
+  try {
+    return Bun.resolveSync("puppeteer-core", path.resolve(import.meta.dir, "../.."));
+  } catch {
+    return null;
+  }
 }
 
 /** Resolves Chromium and puppeteer-core without adding dependencies; explicit env paths are authoritative. */

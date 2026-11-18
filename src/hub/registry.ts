@@ -10,6 +10,7 @@ import { buildPresetRouting, normalizeRoutingConfig } from "./routing.ts";
 import {
   type BrowseEntry,
   type DaemonInfo,
+  type HarnessInfo,
   type HubConfig,
   type HubProjectEntry,
   type RoutingConfig,
@@ -212,9 +213,9 @@ export function updateHubRouting(routing: RoutingConfig): HubConfig {
   return writeHubConfig(config);
 }
 
-export function applyHubRoutingPreset(preset: RoutingPreset): HubConfig {
+export function applyHubRoutingPreset(preset: RoutingPreset, harnesses?: HarnessInfo[] | null): HubConfig {
   const config = readHubConfig();
-  config.routing = buildPresetRouting(preset);
+  config.routing = buildPresetRouting(preset, harnesses);
   return writeHubConfig(config);
 }
 

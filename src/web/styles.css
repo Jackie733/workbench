@@ -237,7 +237,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 
 .sb-section { display: flex; flex-direction: column; gap: 8px; }
 .sb-section-bottom { margin-top: auto; }
-.sb-head { display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 4px; }
+.sb-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 4px; }
+.sb-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-head .btn { flex-shrink: 0; white-space: nowrap; }
 .sb-list { display: flex; flex-direction: column; gap: 4px; }
 .sb-item { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; border: 1px solid transparent; }
 .sb-item:hover { background: var(--surface-2); }
@@ -247,8 +249,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .sb-dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; background: var(--muted); }
 .sb-dot.ready { background: var(--success); }
 .sb-dot.running { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.sb-item-badges { display: flex; gap: 4px; align-items: center; }
-.sb-badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+.sb-item-badges { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.sb-badge { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.sb-item-badges .sb-badge { max-width: 132px; overflow: hidden; text-overflow: ellipsis; }
 .sb-badge.warn { background: var(--warning-soft); color: var(--warning); font-weight: 600; }
 
 .sb-preset-pill { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; border-radius: 8px; background: var(--surface-2); cursor: pointer; }
@@ -887,8 +890,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .handoff-preview-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 55vh; overflow-y: auto; background: var(--surface-2); }
 
 .more-wrap { position: relative; }
-.more-menu { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; min-width: 170px; box-shadow: 0 10px 25px rgba(0,0,0,0.16); padding: 4px; z-index: 38; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: wb-menu-in 120ms ease-out; }
-.more-menu button { width: 100%; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+/* REQ-005: percentage-width items inside the Radix portal wrapper form a circular max-content
+ * dependency that stretches the menu to the viewport width; column flex sizes to content instead. */
+.more-menu { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; min-width: 170px; box-shadow: 0 10px 25px rgba(0,0,0,0.16); padding: 4px; z-index: 38; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: wb-menu-in 120ms ease-out; }
+.more-menu button { width: auto; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .more-menu button:hover, .more-menu button[data-highlighted] { background: var(--surface-2); outline: none; }
 @keyframes wb-menu-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
 
@@ -896,8 +901,13 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .callout { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; background: var(--surface-2); }
 .callout.warning { border-color: var(--warning); background: var(--warning-soft); }
 .callout.danger { border-color: var(--danger); background: var(--danger-soft); }
-.toast { position: fixed; right: 18px; bottom: 18px; background: var(--text); color: var(--surface); padding: 9px 14px; border-radius: 8px; font-size: 13px; z-index: 50; box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
-.toast.error { background: var(--danger); color: #fff; }
+/* Sonner 提示：窄屏下容器不超出视口（颜色变量由 Toaster 内联样式接入主题）。
+   Radix 弹窗打开时会给 body 设 pointer-events:none，门户中的提示需显式恢复可交互。 */
+[data-sonner-toaster] { font-family: var(--sans); pointer-events: none; }
+[data-sonner-toast] { pointer-events: auto; }
+@media (max-width: 600px) {
+  [data-sonner-toaster][data-sonner-theme] { width: calc(100vw - 32px); }
+}
 .muted { color: var(--muted); }
 .xs { font-size: 12px; }
 

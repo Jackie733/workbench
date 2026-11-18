@@ -47,7 +47,7 @@ import {
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { EFFORT_LABELS, formatDateTime, parseRunnerKey, supportedEffortsForModel } from "../state.ts";
+import { EFFORT_LABELS, formatDateTime, getModelEffortCapability, parseRunnerKey } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -662,7 +662,8 @@ export function Modals() {
                   const customInList = harnesses.some(
                     (h) => h.id === rule.primary.harness && h.models.some((x) => x.id === rule.primary.model),
                   );
-                  const efforts = supportedEffortsForModel(harnesses, rule.primary.harness, rule.primary.model);
+                  const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
+                  const efforts = effortCap.efforts;
 
                   return (
                     <div key={stg} className="routing-row">
@@ -681,9 +682,11 @@ export function Modals() {
                             const parsed = parseRunnerKey(e.target.value);
                             if (!parsed || !cfg) return;
                             const { harness, model } = parsed;
-                            const nextEfforts = supportedEffortsForModel(harnesses, harness, model);
+                            const nextCap = getModelEffortCapability(harnesses, harness, model);
                             const keepEffort =
-                              rule.primary.reasoningEffort && nextEfforts.includes(rule.primary.reasoningEffort)
+                              nextCap.mode === "configurable" &&
+                              rule.primary.reasoningEffort &&
+                              nextCap.efforts.includes(rule.primary.reasoningEffort)
                                 ? rule.primary.reasoningEffort
                                 : undefined;
                             const nextCfg = {
@@ -722,33 +725,53 @@ export function Modals() {
                             </optgroup>
                           ))}
                         </select>
-                        <select
-                          className="select font-mono w-[135px]"
-                          data-testid={`route-effort-${stg}`}
-                          title="该阶段推理强度 (Reasoning Effort)"
-                          value={rule.primary.reasoningEffort ?? ""}
-                          onChange={(e) => {
-                            const eff = e.target.value as ReasoningEffort | "";
-                            const nextPrimary = { ...rule.primary };
-                            if (eff) nextPrimary.reasoningEffort = eff;
-                            else delete nextPrimary.reasoningEffort;
-                            const nextCfg = {
-                              ...cfg,
-                              stages: {
-                                ...cfg.stages,
-                                [stg]: { ...cfg.stages[stg], primary: nextPrimary },
-                              },
-                            };
-                            setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                          }}
-                        >
-                          <option value="">默认强度</option>
-                          {efforts.map((eff) => (
-                            <option key={eff} value={eff}>
-                              {EFFORT_LABELS[eff] ?? eff}
+                        {effortCap.mode === "configurable" ? (
+                          <select
+                            className="select font-mono w-[135px]"
+                            data-testid={`route-effort-${stg}`}
+                            title="该阶段推理强度 (Reasoning Effort)"
+                            value={rule.primary.reasoningEffort && efforts.includes(rule.primary.reasoningEffort) ? rule.primary.reasoningEffort : ""}
+                            onChange={(e) => {
+                              const eff = e.target.value as ReasoningEffort | "";
+                              const nextPrimary = { ...rule.primary };
+                              if (eff) nextPrimary.reasoningEffort = eff;
+                              else delete nextPrimary.reasoningEffort;
+                              const nextCfg = {
+                                ...cfg,
+                                stages: {
+                                  ...cfg.stages,
+                                  [stg]: { ...cfg.stages[stg], primary: nextPrimary },
+                                },
+                              };
+                              setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                            }}
+                          >
+                            <option value="">
+                              默认强度{effortCap.defaultEffort ? ` (${effortCap.defaultEffort})` : ""}
                             </option>
-                          ))}
-                        </select>
+                            {efforts.map((eff) => (
+                              <option key={eff} value={eff}>
+                                {EFFORT_LABELS[eff] ?? eff}
+                              </option>
+                            ))}
+                          </select>
+                        ) : effortCap.mode === "locked" ? (
+                          <span
+                            className="inline-flex items-center justify-center w-[135px] px-2 py-1.5 rounded border border-[var(--border)] text-xs font-mono text-[var(--muted)]"
+                            data-testid={`route-effort-${stg}-locked`}
+                            title="该模型变体已内置固定推理强度"
+                          >
+                            固定 ({effortCap.defaultEffort ?? efforts[0] ?? "内置"})
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center justify-center w-[135px] px-2 py-1.5 rounded border border-[var(--border)] text-xs text-[var(--muted)]"
+                            data-testid={`route-effort-${stg}-unsupported`}
+                            title="该模型不支持或无需调节推理强度"
+                          >
+                            自动 / 无需调节
+                          </span>
+                        )}
                       </div>
                     </div>
                   );
