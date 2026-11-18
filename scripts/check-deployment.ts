@@ -8,7 +8,7 @@ import { isRecord } from "../src/core/validate.ts";
 
 const STEP_TIMEOUT = 10_000;
 const CLI_ENTRY = path.resolve(import.meta.dir, "../src/cli/index.ts");
-const TOOL_NAMES = ["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_verify"].sort();
+const TOOL_NAMES = ["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_verify", "wb_screenshot"].sort();
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -212,7 +212,7 @@ async function checkMcp(root: string): Promise<void> {
       }
       const names = listed.tools.map((tool: Record<string, unknown>) => tool.name as string).sort();
       if (names.length !== TOOL_NAMES.length || names.some((name, index) => name !== TOOL_NAMES[index])) {
-        throw new Error(`MCP tools/list did not expose the five Workbench tools: ${JSON.stringify(names)}.`);
+        throw new Error(`MCP tools/list did not expose the six Workbench tools: ${JSON.stringify(names)}.`);
       }
       const result = await rpc("tools/call", { name: "wb_list", arguments: { scope: "all" } });
       if (result.isError === true) throw new Error(`MCP wb_list failed: ${JSON.stringify(result.content)}`);

@@ -15,6 +15,11 @@ export function HubSidebar() {
   const { data: project } = useProjectQuery(activeProjectId);
 
   const projects = hub?.projects ?? [];
+  const nodes = hub?.nodes ?? [];
+  const remoteNodes = nodes.filter((n) => !n.isLocal);
+  const hasMultiNode = remoteNodes.length > 0 || projects.some((p) => p.nodeId && p.nodeId !== "local");
+  const activeNodeId = hub?.activeNodeId ?? "local";
+  const activeNode = nodes.find((n) => n.nodeId === activeNodeId);
   const harnesses = hub?.harnesses ?? [];
   const routing = hub?.routing ?? null;
   const desktopPhase = useCollapsePhase(desktopSidebarOpen, 245, 195);
@@ -68,14 +73,14 @@ export function HubSidebar() {
 
           <div className="sb-section">
             <div className="sb-head">
-              <span>本地项目 ({projects.length})</span>
+              <span>{hasMultiNode ? `项目 (${projects.length})` : `本地项目 (${projects.length})`}</span>
               <button
                 className="btn ghost xs"
                 type="button"
                 data-action="open-add-project"
                 data-testid="add-project-btn"
                 title="添加或初始化项目"
-                onClick={() => void openAddProjectModal()}
+                onClick={() => void openAddProjectModal(activeNodeId)}
               >
                 <Icon icon={Plus} size={14} /> 添加
               </button>
@@ -89,6 +94,8 @@ export function HubSidebar() {
                 projects.map((p) => {
                   const active =
                     p.id === activeProjectId || (activeProjectId === null && p.root === project?.root);
+                  const isRemote = Boolean(p.nodeId && p.nodeId !== "local");
+                  const offline = isRemote && p.nodeOnline === false;
                   return (
                     <div
                       key={p.id}
@@ -96,20 +103,31 @@ export function HubSidebar() {
                       data-action="switch-project"
                       data-id={p.id}
                       data-testid={`hub-project-${p.id}`}
-                      title={p.root}
+                      title={isRemote ? `[${p.nodeName ?? p.nodeId}] ${p.root}` : p.root}
                       onClick={() => void switchProject(p.id)}
                     >
                       <div className="sb-item-main">
-                        <span className={`sb-dot ${p.runningCount > 0 ? "running" : p.initialized ? "ready" : "uninit"}`} />
+                        <span
+                          className={`sb-dot ${
+                            offline ? "" : p.runningCount > 0 ? "running" : p.initialized ? "ready" : "uninit"
+                          }`}
+                        />
                         <span className="sb-item-name">{p.name}</span>
                       </div>
                       <div className="sb-item-badges">
+                        {isRemote && (
+                          <span className="sb-badge" title={`节点: ${p.nodeName ?? p.nodeId}`}>
+                            {p.nodeName ?? p.nodeId}
+                          </span>
+                        )}
                         {p.decisionCount > 0 && (
                           <span className="sb-badge warn" title="待拍板">
                             {p.decisionCount}
                           </span>
                         )}
-                        {!p.initialized ? (
+                        {offline ? (
+                          <span className="sb-badge muted">离线</span>
+                        ) : !p.initialized ? (
                           <span className="sb-badge muted">未初始化</span>
                         ) : p.activeCount > 0 ? (
                           <span className="sb-badge">{p.activeCount}</span>
@@ -122,9 +140,31 @@ export function HubSidebar() {
             </div>
           </div>
 
+          {remoteNodes.length > 0 && (
+            <div className="sb-section">
+              <div className="sb-head">
+                <span>设备节点 ({nodes.filter((n) => n.connected).length}/{nodes.length})</span>
+              </div>
+              <div className="sb-harnesses" data-testid="hub-nodes-list">
+                {nodes.map((n) => (
+                  <div key={n.nodeId} className="sb-harness-row" title={`${n.hostname} (${n.platform})`}>
+                    <span className={`dot ${n.connected ? "online" : ""}`} />
+                    <span className="sb-harness-name" style={{ fontFamily: "var(--sans)" }}>
+                      {n.name}
+                    </span>
+                    <span className="muted xs">{n.connected ? "在线" : "离线"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="sb-section sb-section-bottom">
             <div className="sb-head">
-              <span>算力与模型路由</span>
+              <span>
+                算力与模型路由
+                {hasMultiNode && activeNode ? ` · ${activeNode.name}` : ""}
+              </span>
               <button
                 className="btn ghost xs"
                 type="button"

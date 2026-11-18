@@ -2,7 +2,7 @@ import { getProjectStatus, getRequirement, getRequirementDiff, isUiRelatedRequir
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
-import { checkLanguageMismatchWarning, resolveEffectiveOutputLanguage } from "../core/language.ts";
+import { checkLanguageMismatchWarning, normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
@@ -245,7 +245,7 @@ export async function executeWorkbenchTool(
       const projectMeta = getProjectStatus(base).project;
       const outputLanguage = resolveEffectiveOutputLanguage({
         projectLanguage: projectMeta?.outputLanguage,
-        hubLanguage: readHubConfig().outputLanguage,
+        hubLanguage: normalizeOutputLanguage(process.env.WORKBENCH_OUTPUT_LANGUAGE) ?? readHubConfig().outputLanguage,
         contextText: `${detail.state.title}\n${detail.specMarkdown}`,
       });
       const response: Record<string, unknown> = {
@@ -364,7 +364,7 @@ export async function executeWorkbenchTool(
       const projectMeta = getProjectStatus(base).project;
       const outputLanguage = resolveEffectiveOutputLanguage({
         projectLanguage: projectMeta?.outputLanguage,
-        hubLanguage: readHubConfig().outputLanguage,
+        hubLanguage: normalizeOutputLanguage(process.env.WORKBENCH_OUTPUT_LANGUAGE) ?? readHubConfig().outputLanguage,
         contextText: `${detail.state.title}\n${detail.specMarkdown}`,
       });
       const languageWarning = checkLanguageMismatchWarning(outputLanguage, {

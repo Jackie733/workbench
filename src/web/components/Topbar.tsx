@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
+  Laptop,
+  LogOut,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -11,7 +13,7 @@ import {
   Sun,
   Zap,
 } from "lucide-react";
-import { backHome, useHubStateQuery, useProjectQuery } from "../queries.ts";
+import { backHome, logoutSession, useAuthStatusQuery, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { bridgeStatusLabel } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -41,12 +43,17 @@ export function Topbar() {
   }, []);
 
   const activeRunCount = useStreamStore((s) => Object.keys(s.activeRuns).length);
+  const { data: auth } = useAuthStatusQuery();
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
 
   const isHub = Boolean(hub?.hubMode);
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
-  const projName = noHubProject ? "" : (project?.project?.name ?? project?.root.split("/").pop() ?? "");
+  const activeSummary = hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
+  const isRemoteProj = Boolean(activeSummary?.nodeId && activeSummary.nodeId !== "local");
+  const projName = noHubProject
+    ? ""
+    : (activeSummary?.name ?? project?.project?.name ?? project?.root.split("/").pop() ?? "");
   const bridge = noHubProject ? undefined : project?.bridge;
   const working = Boolean(bridge?.connected && bridge.state !== "idle");
 
@@ -99,6 +106,16 @@ export function Topbar() {
               </>
             ) : (
               <span className="brand">{projName}</span>
+            )}
+            {isRemoteProj && activeSummary && (
+              <span
+                className={`badge ${activeSummary.nodeOnline === false ? "warning" : "info"}`}
+                title={`运行节点: ${activeSummary.nodeName ?? activeSummary.nodeId} (${activeSummary.root})`}
+                data-testid="topbar-node-badge"
+              >
+                <Icon icon={Laptop} size={14} /> {activeSummary.nodeName ?? activeSummary.nodeId}
+                {activeSummary.nodeOnline === false ? " · 离线" : ""}
+              </span>
             )}
           </div>
         )}
@@ -224,6 +241,19 @@ export function Topbar() {
           <Icon icon={selectedId && drawerOpen ? PanelRightClose : PanelRightOpen} size={14} />
           <span className="header-btn-label">{selectedId && drawerOpen ? "收起侧栏" : "研讨 / 终端"}</span>
         </button>
+
+        {auth?.required && auth?.authenticated && (
+          <button
+            className="btn ghost xs"
+            type="button"
+            data-testid="logout-btn"
+            title="退出登录"
+            aria-label="退出登录"
+            onClick={() => void logoutSession()}
+          >
+            <Icon icon={LogOut} size={14} />
+          </button>
+        )}
       </div>
     </header>
   );

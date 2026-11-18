@@ -1332,7 +1332,12 @@ export function WorkspaceView() {
   const modelOptions = collectModelOptions(harnesses);
   const defaultAct = defaultActionForRequirement(d);
   const activeRun =
-    Object.values(activeRuns).find((r) => r.requirementId === s.id && r.status === "running") ?? null;
+    Object.values(activeRuns).find(
+      (r) =>
+        r.requirementId === s.id &&
+        r.status === "running" &&
+        (!r.projectId || r.projectId === activeProjectId),
+    ) ?? null;
   const runningThis = Boolean(activeRun);
   const canRunModel =
     s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && modelOptions.length > 0;

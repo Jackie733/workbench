@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
@@ -28,10 +29,23 @@ function isPidAlive(pid: number): boolean {
 export async function isDaemonHealthy(info: DaemonInfo): Promise<boolean> {
   if (!isPidAlive(info.pid)) return false;
   try {
+    let probeBase = info.url;
+    try {
+      const parsed = new URL(info.url);
+      if (parsed.hostname === "0.0.0.0") {
+        parsed.hostname = "127.0.0.1";
+        probeBase = parsed.origin;
+      } else if (parsed.hostname === "::" || parsed.hostname === "[::]") {
+        parsed.hostname = "[::1]";
+        probeBase = parsed.origin;
+      }
+    } catch {
+      // Keep original URL.
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 800);
     try {
-      const resp = await fetch(`${info.url}/api/health`, { signal: controller.signal });
+      const resp = await fetch(`${probeBase}/api/health`, { signal: controller.signal });
       if (!resp.ok) return false;
       const body = (await resp.json()) as { ok?: boolean; serverPid?: number };
       return body.ok === true && (body.serverPid === undefined || body.serverPid === info.pid);
@@ -164,4 +178,15 @@ export function openUrlInBrowser(url: string): void {
   } catch {
     // Ignore browser launch error; URL is still printed cleanly.
   }
+}
+
+/** Human-reachable LAN URL for wildcard binds; null for loopback/specific binds. */
+export function lanUrlFor(hostname: string, port: number): string | null {
+  if (hostname !== "0.0.0.0" && hostname !== "::") return null;
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === "IPv4" && !address.internal) return `http://${address.address}:${port}`;
+    }
+  }
+  return null;
 }

@@ -19,6 +19,7 @@ export const queryClient = new QueryClient({
 });
 
 export const queryKeys = {
+  authStatus: ["auth", "status"] as const,
   hubState: ["hub", "state"] as const,
   evolution: ["hub", "evolution"] as const,
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
@@ -29,6 +30,14 @@ export const queryKeys = {
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
   delivery: (projectId: string | null, id: string | null) => ["delivery", projectId, id] as const,
 };
+
+export function useAuthStatusQuery() {
+  return useQuery({
+    queryKey: queryKeys.authStatus,
+    queryFn: () => api.authStatus(),
+    staleTime: 30_000,
+  });
+}
 
 export function useGitHubStatusQuery(activeProjectId: string | null, enabled: boolean) {
   return useQuery({
@@ -54,7 +63,7 @@ export function usePlaybookQuery(activeProjectId: string | null, enabled: boolea
   });
 }
 
-export function useHubStateQuery() {
+export function useHubStateQuery(enabled = true) {
   return useQuery({
     queryKey: queryKeys.hubState,
     queryFn: async () => {
@@ -73,12 +82,15 @@ export function useHubStateQuery() {
       }
       return hub;
     },
+    enabled,
   });
 }
 
 export function useProjectQuery(activeProjectId: string | null) {
   const { data: hub } = useHubStateQuery();
-  const enabled = hub !== undefined && (!hub.hubMode || hub.projects.length > 0);
+  const activeProj = hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
+  const nodeOffline = Boolean(hub?.hubMode && activeProj && activeProj.nodeOnline === false);
+  const enabled = hub !== undefined && (!hub.hubMode || hub.projects.length > 0) && !nodeOffline;
   return useQuery({
     queryKey: queryKeys.project(activeProjectId),
     queryFn: async () => {
@@ -129,8 +141,9 @@ export async function invalidateAllWorkbenchQueries(): Promise<void> {
   await queryClient.invalidateQueries();
 }
 
-export function useWorkbenchWsSync(): void {
+export function useWorkbenchWsSync(enabled = true): void {
   useEffect(() => {
+    if (!enabled) return;
     const finishedSeen = new Set<string>();
     const disconnect = connectUiWebSocket((ev) => {
       const type = ev.type;
@@ -138,9 +151,11 @@ export function useWorkbenchWsSync(): void {
         const runId = typeof ev.runId === "string" ? ev.runId : "";
         const reqId = typeof ev.requirementId === "string" ? ev.requirementId : "";
         if (!runId) return;
-        const rec: AgentRunRecord & { requirementId: string } = {
+        const rec: AgentRunRecord & { requirementId: string; root?: string; projectId?: string } = {
           id: runId,
           requirementId: reqId,
+          ...(typeof ev.root === "string" ? { root: ev.root } : {}),
+          ...(typeof ev.projectId === "string" ? { projectId: ev.projectId } : {}),
           action: (ev.action as AgentAction) ?? "design",
           harness: String(ev.harness ?? ""),
           model: String(ev.model ?? ""),
@@ -212,7 +227,7 @@ export function useWorkbenchWsSync(): void {
       }
     });
     return disconnect;
-  }, []);
+  }, [enabled]);
 }
 
 export async function runBusy<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -307,22 +322,30 @@ export async function switchProject(pid: string): Promise<void> {
   }
 }
 
-export async function openAddProjectModal(): Promise<void> {
+export async function openAddProjectModal(preferredNodeId?: string): Promise<void> {
   const ui = useUiStore.getState();
   ui.setSidebarOpen(false);
+  const nodeId = preferredNodeId && preferredNodeId !== "local" ? preferredNodeId : "local";
   try {
-    const browse = await api.browseFs();
+    const browse = await api.browseFs(undefined, nodeId);
     ui.setModal({
       kind: "add_project",
+      nodeId,
       browse,
       pathInput: browse.currentPath,
       nameInput: "",
       initPrivacy: "local",
     });
   } catch (err) {
-    ui.setModal({ kind: "add_project", browse: null, pathInput: "", nameInput: "", initPrivacy: "local" });
+    ui.setModal({ kind: "add_project", nodeId, browse: null, pathInput: "", nameInput: "", initPrivacy: "local" });
     ui.showToast(err instanceof Error ? err.message : "读取目录失败", true);
   }
+}
+
+export async function logoutSession(): Promise<void> {
+  await api.logout();
+  await queryClient.invalidateQueries({ queryKey: queryKeys.authStatus });
+  queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== "auth" });
 }
 
 export async function triggerActiveRun(

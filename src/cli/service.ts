@@ -9,7 +9,8 @@ import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, atomicWriteJson } from "../core/fs.ts";
 import { readDaemonInfo, resolveHubDir } from "../hub/registry.ts";
 import type { DaemonInfo } from "../hub/types.ts";
-import { isDaemonHealthy } from "./daemon.ts";
+import { ensureAuthCredentials, isLoopbackBind } from "../server/auth.ts";
+import { isDaemonHealthy, lanUrlFor } from "./daemon.ts";
 
 type Manager = "launchd" | "systemd";
 type Action = "start" | "stop" | "restart" | "status" | "uninstall";
@@ -23,6 +24,7 @@ export interface ServiceInstallation {
   workingDirectory: string;
   hubDir: string;
   port: number;
+  host?: string;
   path: string;
   proxyEnv?: Record<string, string>;
 }
@@ -33,12 +35,13 @@ export interface ServiceStatus {
   active: boolean;
   healthy: boolean;
   url: string | null;
+  lanUrl?: string | null;
   definitionPath: string | null;
 }
 export interface ServiceCommandResult { exitCode: number; stdout: string; stderr: string }
 export interface UserServiceManager {
   readServiceInstallation(): ServiceInstallation | null;
-  installUserService(options?: { port?: number }): Promise<ServiceStatus>;
+  installUserService(options?: { port?: number; host?: string }): Promise<ServiceStatus>;
   controlUserService(action: Action): Promise<ServiceStatus>;
 }
 export interface UserServiceOptions {
@@ -72,6 +75,12 @@ function canonicalPath(value: string): string {
 function validPort(port: number): void {
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new WorkbenchError("invalid_input", `无效端口号: ${String(port)}`);
 }
+function validHost(host: string): void {
+  validateText(host);
+  if (!host || host.length > 253 || !/^[A-Za-z0-9.[\]:-]+$/.test(host)) {
+    throw new WorkbenchError("invalid_input", `无效监听地址: ${host}（可用 127.0.0.1、0.0.0.0、局域网 IP 或主机名）`);
+  }
+}
 function xml(value: string): string {
   return validateText(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[ch]!);
 }
@@ -82,7 +91,7 @@ function unit(value: string, executableArgument = false): string {
   return `"${escaped}"`;
 }
 function serviceArgs(s: ServiceInstallation): string[] {
-  return [s.bunPath, "run", s.cliPath, "serve", "--hub", "--host", "127.0.0.1", "--port", String(s.port), "--root", s.workingDirectory];
+  return [s.bunPath, "run", s.cliPath, "serve", "--hub", "--host", s.host ?? "127.0.0.1", "--port", String(s.port), "--root", s.workingDirectory];
 }
 function collectProxyEnv(env: NodeJS.ProcessEnv): Record<string, string> | undefined {
   const proxyEnv: Record<string, string> = {};
@@ -156,6 +165,10 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       validateText(s[key]);
     }
     validPort(s.port);
+    if (s.host !== undefined) {
+      if (typeof s.host !== "string") fail(`服务安装记录字段无效: host`);
+      validHost(s.host);
+    }
     if (s.proxyEnv !== undefined) {
       if (!s.proxyEnv || typeof s.proxyEnv !== "object" || Array.isArray(s.proxyEnv)) fail(`服务安装记录字段无效: proxyEnv`);
       for (const [key, value] of Object.entries(s.proxyEnv)) {
@@ -214,9 +227,11 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
   async function status(s: ServiceInstallation): Promise<ServiceStatus> {
     const state = await nativeState(s);
     const info = daemonInfo();
-    const url = `http://127.0.0.1:${s.port}`;
+    const host = s.host ?? "127.0.0.1";
+    const url = `http://${host}:${s.port}`;
+    const lanUrl = lanUrlFor(host, s.port);
     const healthy = Boolean(state.active && state.pid > 0 && info && info.pid === state.pid && info.port === s.port && info.url === url && await isDaemonHealthy(info));
-    return { installed: true, manager: s.manager, id: s.id, active: state.active, healthy, url: healthy ? url : null, definitionPath: s.definitionPath };
+    return { installed: true, manager: s.manager, id: s.id, active: state.active, healthy, url: healthy ? url : null, ...(lanUrl ? { lanUrl } : {}), definitionPath: s.definitionPath };
   }
   async function waitHealthy(s: ServiceInstallation): Promise<ServiceStatus> {
     const deadline = Date.now() + 30_000;
@@ -250,17 +265,21 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       await delay(100);
     }
   }
-  async function assertPortAvailable(port: number): Promise<void> {
+  async function assertPortAvailable(port: number, host = "127.0.0.1"): Promise<void> {
     const { promise, resolve, reject } = Promise.withResolvers<void>();
     const server = net.createServer();
-    server.once("error", (error) => reject(new WorkbenchError("execution_failed", `端口 127.0.0.1:${port} 不可用；不会自动换端口: ${error.message}`)));
-    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => server.close((error) => error ? reject(error) : resolve()));
+    server.once("error", (error) => reject(new WorkbenchError("execution_failed", `端口 ${host}:${port} 不可用；不会自动换端口: ${error.message}`)));
+    server.listen({ host, port, exclusive: true }, () => server.close((error) => error ? reject(error) : resolve()));
     await promise;
   }
-  async function installUserService(installOptions: { port?: number } = {}): Promise<ServiceStatus> {
+  async function installUserService(installOptions: { port?: number; host?: string } = {}): Promise<ServiceStatus> {
     const kind = manager();
     const port = installOptions.port ?? 4318;
     validPort(port);
+    const rawHost = installOptions.host?.trim();
+    if (rawHost !== undefined) validHost(rawHost);
+    const host = rawHost && rawHost !== "127.0.0.1" ? rawHost : undefined;
+    const bindHost = host ?? "127.0.0.1";
     const existing = readServiceInstallation();
     const id = identity(kind);
     validateText(home);
@@ -279,20 +298,21 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
     await ensureManager(kind);
     const searchPath = [...new Set([...(env.PATH ?? "").split(path.delimiter).filter((part) => part && path.isAbsolute(part)), path.dirname(bunPath)])].join(path.delimiter);
     const proxyEnv = collectProxyEnv(env);
-    const next: ServiceInstallation = { schemaVersion: 1, manager: kind, ...id, bunPath, cliPath, workingDirectory: home, hubDir, port, path: validateText(searchPath), ...(proxyEnv ? { proxyEnv } : {}) };
+    const next: ServiceInstallation = { schemaVersion: 1, manager: kind, ...id, bunPath, cliPath, workingDirectory: home, hubDir, port, ...(host ? { host } : {}), path: validateText(searchPath), ...(proxyEnv ? { proxyEnv } : {}) };
     // Render before stopping anything so invalid manager syntax cannot interrupt a working Hub.
     const contents = definition(next);
     if (!existing) {
       try { fs.lstatSync(id.definitionPath); fail(`拒绝覆盖未知服务定义: ${id.definitionPath}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const info = daemonInfo();
       if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
-      await assertPortAvailable(port);
+      await assertPortAvailable(port, bindHost);
     } else if (JSON.stringify(existing) === JSON.stringify(next)) {
       const current = await status(existing);
       if (current.healthy) return current;
       const info = daemonInfo();
       if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
-      await assertPortAvailable(port);
+      await assertPortAvailable(port, bindHost);
+      if (!isLoopbackBind(bindHost)) ensureAuthCredentials(hubDir);
       if (kind === "systemd") {
         await checked(kind, ["daemon-reload"]);
         await checked(kind, ["enable", "--now", existing.id]);
@@ -302,15 +322,18 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
     } else {
       const prevState = await nativeState(existing);
       if (existing.port !== port || !prevState.active) {
-        await assertPortAvailable(port);
+        await assertPortAvailable(port, bindHost);
       }
       process.stderr.write("Workbench 服务配置变更，正在停止并重新安装；运行中的任务将被中断。\n");
       await stop(existing);
       if (existing.port === port && prevState.active) {
-        await assertPortAvailable(port);
+        await assertPortAvailable(port, bindHost);
       }
     }
     fs.mkdirSync(hubDir, { recursive: true, mode: 0o700 });
+    if (!isLoopbackBind(bindHost)) {
+      ensureAuthCredentials(hubDir);
+    }
     // Proxy URLs may embed credentials. systemd --user and launchd gui load the file as the same
     // user, so a private mode does not affect service startup.
     atomicWriteFile(next.definitionPath, contents, next.proxyEnv ? 0o600 : undefined);
@@ -357,5 +380,5 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
   return { readServiceInstallation, installUserService, controlUserService };
 }
 export function readServiceInstallation(): ServiceInstallation | null { return createUserServiceManager().readServiceInstallation(); }
-export function installUserService(options: { port?: number } = {}): Promise<ServiceStatus> { return createUserServiceManager().installUserService(options); }
+export function installUserService(options: { port?: number; host?: string } = {}): Promise<ServiceStatus> { return createUserServiceManager().installUserService(options); }
 export function controlUserService(action: Action): Promise<ServiceStatus> { return createUserServiceManager().controlUserService(action); }

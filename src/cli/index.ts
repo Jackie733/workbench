@@ -39,8 +39,17 @@ import { PAIN_POINT_CATEGORIES, reportPainPoint, type PainPointCategory } from "
 import { isAutoRegistrableProjectRoot, readHubConfig, registerHubProject, updateHubPreferences } from "../hub/registry.ts";
 import { startMcpServer } from "../mcp/server.ts";
 import { executeWorkbenchTool } from "../mcp/tools.ts";
+import { ensureAuthCredentials, isLoopbackBind, resetAuthPassword } from "../server/auth.ts";
 import { startWorkbenchServer } from "../server/index.ts";
-import { getDaemonStatus, openUrlInBrowser, startDaemon, stopDaemon } from "./daemon.ts";
+import { getDaemonStatus, lanUrlFor, openUrlInBrowser, startDaemon, stopDaemon } from "./daemon.ts";
+import {
+  createNodeServiceManager,
+  defaultNodeIdentity,
+  readNodeConfig,
+  runNodeForeground,
+  startDetachedNode,
+  type NodeConfig,
+} from "./node_service.ts";
 import * as userService from "./service.ts";
 
 interface ParsedArgs {
@@ -78,8 +87,9 @@ function parseCliArgs(argv: string[]): ParsedArgs {
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
-        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track", "hub", "global"]);
-        if (!booleanFlags.has(key) && next !== undefined && !next.startsWith("--")) {
+        const booleanFlags = new Set(["json", "diff", "local", "tracked", "ready", "all", "help", "fast-track", "global"]);
+        const isBoolean = booleanFlags.has(key) || (key === "hub" && positionals[0] !== "node");
+        if (!isBoolean && next !== undefined && !next.startsWith("--")) {
           flags.set(key, next);
           i += 1;
         } else {
@@ -175,8 +185,11 @@ function helpText(): string {
     "  restart [--port 4318]                      重启全局 Workbench Hub 守护进程",
     "  status                                     查看守护进程与已纳管项目状态",
     "  open                                       确保 Hub 运行并在浏览器打开工作台",
-    "  service install [--port 4318]             安装并启动当前用户的原生 Hub 服务",
-    "  service start|stop|restart|status|uninstall 管理当前用户的原生 Hub 服务",
+    "  service install [--port 4318] [--host <addr>] 安装并启动当前用户的原生 Hub 服务；--host 0.0.0.0 启用局域网访问",
+    "  service start|stop|restart|status|password|uninstall 管理当前用户的原生 Hub 服务；password 重置局域网访问密码",
+    "  node install --hub <url> [--token <pwd>] [--id <id>] [--name <name>]",
+    "                                             安装远程节点自启后台服务（供 WSL2 接入主控 Hub）",
+    "  node start|stop|restart|status|uninstall|connect 管理远程节点轻量桥接服务",
     "  init [--name <name>] [--local|--tracked]   初始化项目 .workbench/ 存储",
     "       [--lang <zh-CN|en|auto>]",
     "  config [--global] [--output-language <zh-CN|en|auto|inherit>]",
@@ -217,25 +230,129 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
 
   try {
     const rootArg = parsed.flags.get("root");
-    const root = parsed.command === "service" ? process.cwd() : typeof rootArg === "string" ? canonicalRoot(rootArg) : resolveDefaultRoot();
+    const root =
+      parsed.command === "service" || parsed.command === "node"
+        ? process.cwd()
+        : typeof rootArg === "string"
+          ? canonicalRoot(rootArg)
+          : resolveDefaultRoot();
 
     switch (parsed.command) {
       case "service": {
         const action = parsed.positionals[0];
-        if (!action || !["install", "uninstall", "start", "stop", "restart", "status"].includes(action) || parsed.positionals.length !== 1) {
-          throw new WorkbenchError("invalid_input", "用法: wb service install [--port <1..65535>] | start | stop | restart | status | uninstall");
+        if (!action || !["install", "uninstall", "start", "stop", "restart", "status", "password"].includes(action) || parsed.positionals.length !== 1) {
+          throw new WorkbenchError("invalid_input", "用法: wb service install [--port <1..65535>] [--host <addr>] | start | stop | restart | status | password | uninstall");
         }
         for (const flag of parsed.flags.keys()) {
-          if (flag !== "json" && flag !== "root" && !(action === "install" && flag === "port")) throw new WorkbenchError("invalid_input", `未知服务参数: --${flag}`);
+          if (flag !== "json" && flag !== "root" && !(action === "install" && (flag === "port" || flag === "host"))) {
+            throw new WorkbenchError("invalid_input", `未知服务参数: --${flag}`);
+          }
+        }
+        if (action === "password") {
+          const { password } = resetAuthPassword();
+          if (asJson) {
+            printResult({ password }, true);
+          } else {
+            process.stdout.write(`已生成新的局域网访问密码（同样用于 wb node --token）：\n\n  ${password}\n\n请妥善保存；浏览器登录或 WSL2 接入时输入此密码即可。\n`);
+          }
+          return 0;
         }
         const portFlag = parsed.flags.get("port");
         if (portFlag !== undefined && (typeof portFlag !== "string" || !/^\d+$/.test(portFlag) || Number(portFlag) < 1 || Number(portFlag) > 65535)) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
         }
+        const hostFlag = parsed.flags.get("host");
+        if (hostFlag !== undefined && (typeof hostFlag !== "string" || !hostFlag.trim())) {
+          throw new WorkbenchError("invalid_input", `无效监听地址: ${String(hostFlag)}`);
+        }
+        const preCreds =
+          action === "install" && typeof hostFlag === "string" && !isLoopbackBind(hostFlag.trim())
+            ? ensureAuthCredentials()
+            : null;
         const result = action === "install"
-          ? await services.installUserService({ ...(typeof portFlag === "string" ? { port: Number(portFlag) } : {}) })
+          ? await services.installUserService({
+              ...(typeof portFlag === "string" ? { port: Number(portFlag) } : {}),
+              ...(typeof hostFlag === "string" ? { host: hostFlag.trim() } : {}),
+            })
           : await services.controlUserService(action as "start" | "stop" | "restart" | "status" | "uninstall");
-        printResult(result, asJson);
+        printResult(
+          preCreds?.password ? { ...result, generatedPassword: preCreds.password } : result,
+          asJson,
+        );
+        if (!asJson && action === "install" && typeof hostFlag === "string" && !isLoopbackBind(hostFlag.trim())) {
+          if (preCreds?.password) {
+            process.stderr.write(`\n首次开启局域网访问，已自动生成访问密码：${preCreds.password}\n`);
+          } else {
+            process.stderr.write(`\n局域网密码已存在；如需查看或重置，请运行：wb service password\n`);
+          }
+        }
+        return 0;
+      }
+
+      case "node": {
+        const action = parsed.positionals[0];
+        if (!action || !["install", "start", "stop", "restart", "status", "uninstall", "connect"].includes(action) || parsed.positionals.length !== 1) {
+          throw new WorkbenchError(
+            "invalid_input",
+            "用法: wb node install --hub <url> [--token <pwd>] [--id <id>] [--name <name>] | start | stop | restart | status | uninstall | connect",
+          );
+        }
+        const allowedFlags = new Set(["json", "root", "hub", "token", "id", "name"]);
+        for (const flag of parsed.flags.keys()) {
+          if (!allowedFlags.has(flag)) throw new WorkbenchError("invalid_input", `未知 node 参数: --${flag}`);
+        }
+        const nodeMgr = createNodeServiceManager();
+        if (action === "status" || action === "stop" || action === "uninstall" || action === "restart") {
+          const result = await nodeMgr.controlService(action);
+          printResult(result, asJson);
+          return 0;
+        }
+
+        const existingCfg = readNodeConfig();
+        const defaults = defaultNodeIdentity();
+        const hubFlag = parsed.flags.get("hub");
+        const tokenFlag = parsed.flags.get("token");
+        const idFlag = parsed.flags.get("id");
+        const nameFlag = parsed.flags.get("name");
+        const hubUrl = typeof hubFlag === "string" && hubFlag.trim() ? hubFlag.trim() : existingCfg?.hubUrl;
+        const token = typeof tokenFlag === "string" && tokenFlag.trim() ? tokenFlag.trim() : existingCfg?.token;
+        const nodeId = typeof idFlag === "string" && idFlag.trim() ? idFlag.trim() : existingCfg?.nodeId ?? defaults.nodeId;
+        const nodeName = typeof nameFlag === "string" && nameFlag.trim() ? nameFlag.trim() : existingCfg?.nodeName ?? defaults.nodeName;
+
+        if (action === "install") {
+          if (!hubUrl) {
+            throw new WorkbenchError("invalid_input", "请提供主控 Hub 地址，例如: wb node install --hub http://192.168.1.10:4318 --token <密码>");
+          }
+          const cfg: NodeConfig = { schemaVersion: 1, hubUrl, ...(token ? { token } : {}), nodeId, nodeName };
+          const status = await nodeMgr.installService(cfg);
+          printResult(status, asJson);
+          return 0;
+        }
+
+        if (action === "start") {
+          if (nodeMgr.readInstallation() && typeof hubFlag !== "string" && typeof tokenFlag !== "string") {
+            const status = await nodeMgr.controlService("start");
+            printResult(status, asJson);
+            return 0;
+          }
+          if (!hubUrl) {
+            throw new WorkbenchError("invalid_input", "尚未配置远程节点；请传入 --hub http://<ubuntu-ip>:4318 --token <密码>");
+          }
+          const cfg: NodeConfig = { schemaVersion: 1, hubUrl, ...(token ? { token } : {}), nodeId, nodeName };
+          const status = await startDetachedNode(cfg);
+          printResult(status, asJson);
+          return 0;
+        }
+
+        // action === "connect"
+        if (!hubUrl) {
+          throw new WorkbenchError("invalid_input", "尚未配置远程节点；请传入 --hub http://<ubuntu-ip>:4318 --token <密码>");
+        }
+        const cfg: NodeConfig = { schemaVersion: 1, hubUrl, ...(token ? { token } : {}), nodeId, nodeName };
+        if (!asJson) {
+          process.stderr.write(`正在以节点 ${cfg.nodeName} (${cfg.nodeId}) 连接 Hub: ${cfg.hubUrl} ...\n`);
+        }
+        await runNodeForeground(cfg);
         return 0;
       }
 
@@ -243,13 +360,17 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const installation = services.readServiceInstallation();
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
+        const expectedHost = installation?.host ?? "127.0.0.1";
         const port = typeof portFlag === "string" ? Number(portFlag) : installation?.port ?? 4318;
-        const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
+        const hostname = typeof hostFlag === "string" ? hostFlag : expectedHost;
         if ((portFlag !== undefined && typeof portFlag !== "string") || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
         }
-        if (installation && (port !== installation.port || hostname !== "127.0.0.1" || hostFlag === true)) {
-          throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
+        if (installation && (port !== installation.port || hostname !== expectedHost || hostFlag === true)) {
+          throw new WorkbenchError(
+            "invalid_input",
+            `已托管的 Hub 固定监听 ${expectedHost}:${installation.port}；请使用 wb service install --port <端口> --host <地址> 修改安装配置`,
+          );
         }
         const maybeGitOrWb = isAutoRegistrableProjectRoot(root);
         if (maybeGitOrWb) {
@@ -261,12 +382,14 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
           printResult({ ...daemon.info, started: service.healthy, service }, asJson);
           return 0;
         }
+        const creds = !isLoopbackBind(hostname) ? ensureAuthCredentials() : null;
         const res = await startDaemon({
           port,
           hostname,
           registerRoot: maybeGitOrWb ? root : undefined,
         });
-        printResult({ ...res.info, started: res.started }, asJson);
+        const lanUrl = lanUrlFor(hostname, res.info.port);
+        printResult({ ...res.info, started: res.started, ...(lanUrl ? { lanUrl } : {}), ...(creds?.password ? { generatedPassword: creds.password } : {}) }, asJson);
         return 0;
       }
 
@@ -284,14 +407,18 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const installation = services.readServiceInstallation();
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
+        const expectedHost = installation?.host ?? "127.0.0.1";
         const port = typeof portFlag === "string" ? Number(portFlag) : installation?.port ?? 4318;
-        const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
+        const hostname = typeof hostFlag === "string" ? hostFlag : expectedHost;
         if ((portFlag !== undefined && typeof portFlag !== "string") || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);
         }
         if (installation) {
-          if (port !== installation.port || hostname !== "127.0.0.1" || hostFlag === true) {
-            throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
+          if (port !== installation.port || hostname !== expectedHost || hostFlag === true) {
+            throw new WorkbenchError(
+              "invalid_input",
+              `已托管的 Hub 固定监听 ${expectedHost}:${installation.port}；请使用 wb service install --port <端口> --host <地址> 修改安装配置`,
+            );
           }
           const service = await services.controlUserService("restart");
           const daemon = await getDaemonStatus();
@@ -314,10 +441,14 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
       case "open": {
         const installation = services.readServiceInstallation();
         if (installation) {
+          const expectedHost = installation.host ?? "127.0.0.1";
           const portFlag = parsed.flags.get("port");
           const hostFlag = parsed.flags.get("host");
-          if ((portFlag !== undefined && (typeof portFlag !== "string" || Number(portFlag) !== installation.port)) || (hostFlag !== undefined && hostFlag !== "127.0.0.1")) {
-            throw new WorkbenchError("invalid_input", "已托管的 Hub 固定监听 127.0.0.1 和安装端口；请使用 wb service install --port <端口> 修改安装配置");
+          if ((portFlag !== undefined && (typeof portFlag !== "string" || Number(portFlag) !== installation.port)) || (hostFlag !== undefined && hostFlag !== expectedHost)) {
+            throw new WorkbenchError(
+              "invalid_input",
+              `已托管的 Hub 固定监听 ${expectedHost}:${installation.port}；请使用 wb service install --port <端口> --host <地址> 修改安装配置`,
+            );
           }
         }
         const maybeGitOrWb = isAutoRegistrableProjectRoot(root);
@@ -327,7 +458,8 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (installation) {
           const service = await services.controlUserService("start");
           if (!service.healthy || !service.url) throw new WorkbenchError("execution_failed", "用户服务未通过健康检查，不能打开 Web");
-          openUrlInBrowser(service.url);
+          const localOpenUrl = service.url.replace("://0.0.0.0:", "://127.0.0.1:").replace("://[::]:", "://[::1]:");
+          openUrlInBrowser(localOpenUrl);
           printResult({ url: service.url, service }, asJson);
           return 0;
         }

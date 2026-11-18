@@ -44,7 +44,7 @@ import {
   type RequirementDetail,
 } from "../core/types.ts";
 import { assertRequirementId, sanitizeOutput } from "../core/validate.ts";
-import { readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
+import { isLocalNodeId, readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
 
 export const PAIN_POINT_SOURCES = [
   "ui_quick_report",
@@ -64,6 +64,7 @@ export const PAIN_POINT_CATEGORIES = [
 export type PainPointCategory = (typeof PAIN_POINT_CATEGORIES)[number];
 
 export interface PainPointContext {
+  nodeId?: string;
   projectRoot?: string;
   requirementId?: string;
   runId?: string;
@@ -72,6 +73,16 @@ export interface PainPointContext {
   viewport?: string;
   theme?: string;
   urlPath?: string;
+}
+
+export interface PainPointReportInput {
+  source: PainPointSource;
+  category: PainPointCategory;
+  title: string;
+  detail?: string;
+  context?: PainPointContext;
+  /** 暂存区附件 ID；认领到该痛点的 hub 附件目录。 */
+  attachmentIds?: string[];
 }
 
 export interface EvolutionPainPoint {
@@ -121,6 +132,7 @@ function sanitizeContext(ctx?: PainPointContext): PainPointContext {
   const cleanStr = (v: unknown, max: number) =>
     typeof v === "string" && v.trim() ? sanitizeOutput(v.trim(), max).text.trim() : undefined;
   const out: PainPointContext = {};
+  const nodeId = cleanStr(ctx.nodeId, 64);
   const projectRoot = cleanStr(ctx.projectRoot, 512);
   const requirementId = cleanStr(ctx.requirementId, 32);
   const runId = cleanStr(ctx.runId, 64);
@@ -129,6 +141,7 @@ function sanitizeContext(ctx?: PainPointContext): PainPointContext {
   const viewport = cleanStr(ctx.viewport, 64);
   const theme = cleanStr(ctx.theme, 32);
   const urlPath = cleanStr(ctx.urlPath, 240);
+  if (nodeId) out.nodeId = nodeId;
   if (projectRoot) out.projectRoot = projectRoot;
   if (requirementId) out.requirementId = requirementId;
   if (runId) out.runId = runId;
@@ -180,15 +193,7 @@ function writePainPoints(list: EvolutionPainPoint[]): void {
   atomicWriteFile(filePath, body);
 }
 
-export function reportPainPoint(input: {
-  source: PainPointSource;
-  category: PainPointCategory;
-  title: string;
-  detail?: string;
-  context?: PainPointContext;
-  /** 暂存区附件 ID；认领到该痛点的 hub 附件目录。 */
-  attachmentIds?: string[];
-}): EvolutionPainPoint | null {
+export function reportPainPoint(input: PainPointReportInput): EvolutionPainPoint | null {
   if (
     process.env.WORKBENCH_RSI_DEPTH === "1" &&
     input.source !== "ui_quick_report" &&
@@ -294,6 +299,7 @@ export function resolveWorkbenchRepoRoot(fallbackRoot?: string): string {
   if (fallbackRoot && isWorkbenchDir(fallbackRoot)) return canonicalRoot(fallbackRoot);
   const cfg = readHubConfig();
   for (const proj of cfg.projects) {
+    if (!isLocalNodeId(proj.nodeId)) continue;
     if (isWorkbenchDir(proj.root)) return canonicalRoot(proj.root);
   }
   if (isWorkbenchDir(packageRoot)) return canonicalRoot(packageRoot);
@@ -309,24 +315,29 @@ export function inspectFinishedRunForPainPoints(input: {
   timedOut?: boolean;
   timeoutReason?: "idle" | "max_duration" | null;
   isRsiSandbox?: boolean;
+  nodeId?: string;
+  onReport?: (entry: PainPointReportInput) => EvolutionPainPoint | null;
 }): EvolutionPainPoint[] {
   if (process.env.WORKBENCH_RSI_DEPTH === "1" || input.isRsiSandbox) return [];
   const recorded: EvolutionPainPoint[] = [];
+  const emitPain = input.onReport ?? reportPainPoint;
+  const baseContext = (component: string): PainPointContext => ({
+    ...(input.nodeId ? { nodeId: input.nodeId } : {}),
+    projectRoot: input.root,
+    requirementId: input.requirementId,
+    runId: input.run.id,
+    component,
+  });
 
   // 1. Sniff workbench/CLI/MCP deadEnds logged by the agent
   for (const deadEnd of input.detail.state.handoffNote?.deadEnds ?? []) {
     if (/\b(wb|workbench|cli|mcp|propose|verify|tasks)\b/i.test(deadEnd)) {
-      const item = reportPainPoint({
+      const item = emitPain({
         source: "post_run_dead_end",
         category: "cli_ergonomics",
         title: `工具契约死胡同: ${deadEnd.slice(0, 90)}`,
         detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id} (${input.run.harness}/${input.run.model})\n\nDead-End 记录:\n${deadEnd}`,
-        context: {
-          projectRoot: input.root,
-          requirementId: input.requirementId,
-          runId: input.run.id,
-          component: "cli/mcp",
-        },
+        context: baseContext("cli/mcp"),
       });
       if (item) recorded.push(item);
     }
@@ -338,17 +349,12 @@ export function inspectFinishedRunForPainPoints(input: {
   const totalCliErrors = humanErrors.length + jsonErrors.length;
   if (totalCliErrors >= 2) {
     const uniqueErrors = Array.from(new Set(humanErrors.length > 0 ? humanErrors : jsonErrors)).slice(0, 5);
-    const item = reportPainPoint({
+    const item = emitPain({
       source: "agent_friction",
       category: "cli_ergonomics",
       title: `Agent 多次触发 wb CLI 参数错误 (${uniqueErrors[0]!.slice(0, 60)})`,
       detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n命中报错 (${totalCliErrors} 次):\n${uniqueErrors.map((e) => `- ${e}`).join("\n")}`,
-      context: {
-        projectRoot: input.root,
-        requirementId: input.requirementId,
-        runId: input.run.id,
-        component: "wb-cli",
-      },
+      context: baseContext("wb-cli"),
     });
     if (item) recorded.push(item);
   }
@@ -367,31 +373,21 @@ export function inspectFinishedRunForPainPoints(input: {
       /\[spawn error\]|segmentation fault|\bsigsegv\b|\bsigabrt\b|\bpanic:|unhandled/i.test(tail));
 
   if (isIdleTimeout) {
-    const item = reportPainPoint({
+    const item = emitPain({
       source: "agent_friction",
       category: "harness_bug",
       title: `Harness 执行超时: ${input.run.harness}/${input.run.model} (${input.run.action})`,
       detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n耗时: ${input.run.durationMs}ms\n尾部日志:\n${tail.slice(-1000)}`,
-      context: {
-        projectRoot: input.root,
-        requirementId: input.requirementId,
-        runId: input.run.id,
-        component: `${input.run.harness}/${input.run.action}`,
-      },
+      context: baseContext(`${input.run.harness}/${input.run.action}`),
     });
     if (item) recorded.push(item);
   } else if (isCrash) {
-    const item = reportPainPoint({
+    const item = emitPain({
       source: "agent_friction",
       category: "harness_bug",
       title: `Harness 异常崩溃: ${input.run.harness}/${input.run.model} (exit ${input.run.exitCode ?? "signal"})`,
       detail: `来源需求: ${input.requirementId}\n运行 ID: ${input.run.id}\n退出码: ${input.run.exitCode ?? "signal"}\n尾部日志:\n${tail.slice(-1200)}`,
-      context: {
-        projectRoot: input.root,
-        requirementId: input.requirementId,
-        runId: input.run.id,
-        component: `${input.run.harness}/${input.run.action}`,
-      },
+      context: baseContext(`${input.run.harness}/${input.run.action}`),
     });
     if (item) recorded.push(item);
   }
@@ -793,6 +789,7 @@ export async function promotePainPoint(
 
   const ctxLines = [
     `- 来源分类：\`${pain.source}\` / \`${pain.category}\`（累计发生 ${pain.occurrences} 次）`,
+    pain.context.nodeId ? `- 来源节点：\`${pain.context.nodeId}\`` : "",
     pain.context.projectRoot ? `- 触发项目：\`${pain.context.projectRoot}\`` : "",
     pain.context.requirementId ? `- 关联需求：\`${pain.context.requirementId}\`` : "",
     pain.context.domSelector ? `- 页面元素锚点：\`${pain.context.domSelector}\`` : "",

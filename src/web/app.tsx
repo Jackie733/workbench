@@ -2,14 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { api } from "./api.ts";
-import { EmptyHubCard, HomeView, InitCard } from "./components/HomeView.tsx";
+import { EmptyHubCard, HomeView, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
 import { HubSidebar } from "./components/HubSidebar.tsx";
+import { LoginView } from "./components/LoginView.tsx";
 import { Modals } from "./components/Modals.tsx";
 import { ToastBanner } from "./components/Primitives.tsx";
 import { RightDrawer } from "./components/RightDrawer.tsx";
 import { Topbar } from "./components/Topbar.tsx";
 import { WorkspaceView } from "./components/WorkspaceView.tsx";
-import { queryClient, useHubStateQuery, useProjectQuery, useWorkbenchWsSync } from "./queries.ts";
+import {
+  queryClient,
+  queryKeys,
+  useAuthStatusQuery,
+  useHubStateQuery,
+  useProjectQuery,
+  useWorkbenchWsSync,
+} from "./queries.ts";
 import { useUiStore } from "./stores/uiStore.ts";
 
 function describePickedElement(el: HTMLElement): { selector: string; snippet: string } {
@@ -157,7 +165,7 @@ function DomElementPicker() {
 }
 
 function WorkbenchShell() {
-  useWorkbenchWsSync();
+  useWorkbenchWsSync(true);
   const theme = useUiStore((s) => s.theme);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
@@ -236,7 +244,10 @@ function WorkbenchShell() {
 
   const showSidebar = Boolean(hub?.hubMode);
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
-  const showDrawer = Boolean(selectedId) && drawerOpen;
+  const activeSummary =
+    hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
+  const remoteOffline = Boolean(hub?.hubMode && activeSummary && activeSummary.nodeOnline === false);
+  const showDrawer = Boolean(selectedId) && drawerOpen && !remoteOffline;
 
   return (
     <>
@@ -249,10 +260,12 @@ function WorkbenchShell() {
           <div className="hub-workspace" ref={workspaceRef}>
             <div className="main-stage">
               <div className="shell">
-                {(hubLoading && !hub) || (!noHubProject && projectLoading && !project) ? (
+                {(hubLoading && !hub) || (!noHubProject && !remoteOffline && projectLoading && !project) ? (
                   <p className="muted">正在加载工作台…</p>
                 ) : noHubProject ? (
                   <EmptyHubCard />
+                ) : remoteOffline && activeSummary ? (
+                  <RemoteNodeOfflineCard project={activeSummary} />
                 ) : !project?.initialized ? (
                   <InitCard />
                 ) : selectedId ? (
@@ -262,7 +275,7 @@ function WorkbenchShell() {
                 )}
               </div>
             </div>
-            {selectedId && <RightDrawer workspaceRef={workspaceRef} />}
+            {selectedId && !remoteOffline && <RightDrawer workspaceRef={workspaceRef} />}
           </div>
         </div>
       </div>
@@ -277,11 +290,48 @@ function WorkbenchShell() {
   );
 }
 
+function AuthGate() {
+  const theme = useUiStore((s) => s.theme);
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.authStatus });
+    };
+    window.addEventListener("wb:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("wb:unauthorized", onUnauthorized);
+  }, []);
+
+  const { data: auth, isLoading } = useAuthStatusQuery();
+
+  if (isLoading && !auth) {
+    return (
+      <div className="shell" style={{ paddingTop: 48 }}>
+        <p className="muted">正在检查工作台访问状态…</p>
+      </div>
+    );
+  }
+
+  if (auth?.required && !auth.authenticated) {
+    return (
+      <LoginView
+        onAuthenticated={() => {
+          void queryClient.invalidateQueries();
+        }}
+      />
+    );
+  }
+
+  return <WorkbenchShell />;
+}
+
 const rootEl = document.getElementById("app");
 if (rootEl) {
   createRoot(rootEl).render(
     <QueryClientProvider client={queryClient}>
-      <WorkbenchShell />
+      <AuthGate />
     </QueryClientProvider>,
   );
 }

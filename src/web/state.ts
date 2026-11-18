@@ -49,7 +49,15 @@ export type ModalState =
   | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
   | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
   | { kind: "prompt_fallback"; title: string; subtitle: string; prompt: string }
-  | { kind: "add_project"; browse: BrowseResponse | null; pathInput: string; nameInput: string; initPrivacy: PrivacyMode | "none" }
+  | {
+      kind: "add_project";
+      nodeId: string;
+      browse: BrowseResponse | null;
+      pathInput: string;
+      nameInput: string;
+      initPrivacy: PrivacyMode | "none";
+      showNodeHelp?: boolean;
+    }
   | {
       kind: "routing";
       tab?: "global" | "project";

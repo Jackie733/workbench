@@ -1,4 +1,4 @@
-import type { OutputLanguage } from "../core/types.ts";
+import type { AgentRunRecord, OutputLanguage } from "../core/types.ts";
 
 export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
@@ -54,8 +54,26 @@ export interface HubProjectEntry {
   id: string;
   name: string;
   root: string;
+  /** 所属节点 ID；省略或 "local" 表示当前 Hub 本机项目 */
+  nodeId?: string;
+  /** 所属节点显示名称缓存，便于节点离线时在侧边栏展示 */
+  nodeName?: string;
   addedAt: number;
   lastOpenedAt: number;
+}
+
+export interface RemoteNodeInfo {
+  nodeId: string;
+  name: string;
+  isLocal: boolean;
+  hostname: string;
+  platform: string;
+  connected: boolean;
+  connectedAt: number | null;
+  lastSeenAt: number | null;
+  harnesses: HarnessInfo[];
+  activeRuns: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>;
+  workbenchVersion?: string;
 }
 
 export interface HubConfig {

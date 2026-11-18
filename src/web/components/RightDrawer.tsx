@@ -186,7 +186,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
   const reqId = d?.state.id ?? "";
   const activeRun = d
-    ? Object.values(activeRuns).find((r) => r.requirementId === reqId) ?? null
+    ? Object.values(activeRuns).find(
+        (r) => r.requirementId === reqId && (!r.projectId || r.projectId === activeProjectId),
+      ) ?? null
     : null;
   const runs = d ? [...(d.state.agentRuns ?? [])].reverse() : [];
   const currentRunId = activeRun?.id ?? selectedRunId ?? runs[0]?.id ?? null;

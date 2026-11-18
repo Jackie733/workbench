@@ -1,80 +1,30 @@
 import packageInfo from "../../package.json";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ServerWebSocket } from "bun";
-import {
-  acceptRequirement,
-  addDiscussion,
-  addRequirementAttachments,
-  approveDesign,
-  authorizeFastTrack,
-  blockRequirement,
-  cancelRequirement,
-  createRequirement,
-  deliverRequirement,
-  getAgentRunDetail,
-  getDesignHistoryVersion,
-  getProjectStatus,
-  getRequirement,
-  getRequirementDeliveryPreview,
-  getRequirementDiff,
-  getVerificationEvidence,
-  initProject,
-  linkRequirementGitHubIssue,
-  listRequirements,
-  markDesigning,
-  recordRequirementGitHubSync,
-  removeRequirementAttachment,
-  reopenRequirement,
-  requestChanges,
-  resolveDiscussions,
-  unblockRequirement,
-  updateDesign,
-  updateProjectConfig,
-  updateSpec,
-  type CorruptRequirementEntry,
-} from "../core/engine.ts";
 import {
   discardStagedAttachments,
   normalizeAttachments,
   painPointAttachmentsDir,
   readAttachmentForServe,
-  requirementAttachmentsDir,
   stageUpload,
 } from "../core/attachments.ts";
-import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
+import { getProjectStatus, getRequirement, initProject } from "../core/engine.ts";
+import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
-import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
+import type { GitHubCommandDeps } from "../core/github.ts";
+import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
+import { readPlaybook } from "../core/playbook.ts";
+import { readSandboxes } from "../core/sandbox.ts";
 import {
-  buildRequirementIssueBody,
-  commentOnGitHubIssue,
-  createGitHubIssue,
-  inspectGitHubEnvironment,
-  parseGitHubRepoFromRemoteUrl,
-  setGitHubIssueState,
-  viewGitHubIssue,
-  viewGitHubPr,
-  type GitHubCommandDeps,
-} from "../core/github.ts";
-import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
-import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
-import { runAllVerifications, runVerification } from "../core/runner.ts";
-import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
-import { captureRequirementScreenshots } from "../core/screenshots.ts";
-import { readRequirementScreenshot } from "../core/store.ts";
-import {
-  AGENT_ACTIONS,
   MAX_ATTACHMENT_TOTAL_BYTES,
   WORKBENCH_DIR,
-  type AgentAction,
-  type CriterionInput,
-  type OutputLanguage,
+  type AgentRunRecord,
   type PrivacyMode,
-  type ProjectGitHubConfig,
   type RequirementDetail,
   type Stage,
-  type Track,
 } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
 import {
@@ -92,44 +42,71 @@ import {
   type PainPointSource,
 } from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
-import { synthesizeHandoffPacket } from "../hub/handoff.ts";
-import { clearModelCooldown, summarizeTelemetry } from "../hub/telemetry.ts";
+import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
 import {
   applyHubRoutingPreset,
   browseDirectory,
   isAutoRegistrableProjectRoot,
+  isLocalNodeId,
+  LOCAL_NODE_ID,
   readHubConfig,
   registerHubProject,
   removeDaemonInfo,
   removeHubProject,
+  resolveHubDir,
   setActiveHubProject,
   updateHubPreferences,
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
-import { ROUTING_PRESETS, REASONING_EFFORTS, type ReasoningEffort, type RoutingConfig, type RoutingPreset } from "../hub/types.ts";
-import { buildAgentPrompt, type DispatchAction } from "./prompts.ts";
+import { clearModelCooldown, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
+import {
+  ROUTING_PRESETS,
+  type HarnessInfo,
+  type HubConfig,
+  type RemoteNodeInfo,
+  type RoutingConfig,
+  type RoutingPreset,
+} from "../hub/types.ts";
+import {
+  clearLoginFailures,
+  createSessionVerifier,
+  ensureAuthCredentials,
+  expiredSessionCookieHeader,
+  isLocalRequest,
+  isLoopbackBind,
+  issueSessionToken,
+  loginLockRemainingMs,
+  recordLoginFailure,
+  sessionCookieHeader,
+  verifyLoginPassword,
+} from "./auth.ts";
+import {
+  buildLocalProjectSnapshot,
+  createProjectApiHandler,
+  httpStatusForError,
+  jsonResponse,
+  readBody,
+  readStringArray,
+  type BridgeStatus,
+  type DispatchOutcome,
+  type LocalProjectSnapshot,
+} from "./project_api.ts";
+import { type DispatchAction } from "./prompts.ts";
 import { removeServerDiscovery, writeServerDiscovery, type ServerRuntimeInfo } from "./runtime.ts";
 
-export interface BridgeStatus {
-  connected: boolean;
-  agent: string | null;
-  sessionId: string | null;
-  state: "idle" | "working" | "waiting_user" | "offline";
-  model: string | null;
-  updatedAt: number;
-}
-
-export interface DispatchOutcome {
-  delivered: boolean;
-  status: "submitted" | "prefilled" | "rejected" | "offline";
-  reason?: string;
-  prompt: string;
-}
+export type { BridgeStatus, DispatchOutcome } from "./project_api.ts";
 
 interface WsClientData {
-  role: "ui" | "bridge";
+  role: "ui" | "bridge" | "node";
   id: string;
+  nodeId?: string;
+  nodeMeta?: {
+    name: string;
+    hostname: string;
+    platform: string;
+    workbenchVersion?: string;
+  };
 }
 
 export interface WorkbenchServerHandle {
@@ -140,69 +117,9 @@ export interface WorkbenchServerHandle {
   getBridgeStatus(): BridgeStatus;
 }
 
-function httpStatusForError(code: WorkbenchErrorCode): number {
-  switch (code) {
-    case "not_initialized":
-    case "invalid_input":
-    case "invalid_path":
-    case "symlink_not_allowed":
-      return 400;
-    case "payload_too_large":
-      return 413;
-    case "not_found":
-      return 404;
-    case "already_initialized":
-    case "revision_conflict":
-    case "invalid_transition":
-    case "approval_required":
-    case "acceptance_gate_failed":
-    case "lock_timeout":
-      return 409;
-    case "corrupt_record":
-    case "unsupported_schema":
-    case "execution_failed":
-      return 500;
-  }
-}
-
-function jsonResponse(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
-async function readBody(req: Request): Promise<Record<string, unknown>> {
-  let text = "";
-  try {
-    text = await req.text();
-  } catch {
-    throw new WorkbenchError("invalid_input", "无法读取请求体");
-  }
-  if (!text.trim()) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new WorkbenchError("invalid_input", "请求体必须是合法 JSON");
-  }
-  if (!isRecord(parsed)) {
-    throw new WorkbenchError("invalid_input", "请求体必须是 JSON 对象");
-  }
-  return parsed;
-}
-
 // Bun 1.3.14 在同进程重复 Bun.build 且相关模块已被运行时加载时会抛出 EBADF/EISDIR，
 // 因此非开发模式下同一 webDir 的初始构建结果在进程内共享；开发模式与显式 reload 仍每次重新构建。
 const initialWebBundles = new Map<string, Promise<{ html: string; css: string; js: string } | null>>();
-
-function readStringArray(raw: unknown): string[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  return raw.filter((v): v is string => typeof v === "string");
-}
 
 async function buildWebBundle(webDir: string): Promise<{ html: string; css: string; js: string } | null> {
   const htmlPath = path.join(webDir, "index.html");
@@ -248,6 +165,9 @@ export async function startWorkbenchServer(options: {
   const defaultRoot = canonicalRoot(options.root);
   const hubMode = options.hubMode === true;
   const hostname = options.hostname ?? "127.0.0.1";
+  const hubDir = resolveHubDir();
+  if (!isLoopbackBind(hostname)) ensureAuthCredentials(hubDir);
+  const isAuthenticated = createSessionVerifier(hubDir);
   const webDir = options.webDir ?? path.resolve(import.meta.dir, "../web");
   const isDevWeb = process.env.WORKBENCH_DEV_WEB === "1";
   let cachedWeb: { html: string; css: string; js: string } | null;
@@ -265,6 +185,8 @@ export async function startWorkbenchServer(options: {
     cachedWeb = await initial;
   }
   const executor = options.executor ?? new HubExecutor();
+  const nodeRegistry = new RemoteNodeRegistry();
+  const serverStartedAt = Date.now();
 
   if (hubMode && isAutoRegistrableProjectRoot(defaultRoot)) {
     registerHubProject(defaultRoot, { activate: false });
@@ -312,8 +234,19 @@ export async function startWorkbenchServer(options: {
     return { reloaded: true };
   };
 
+  const findProjectId = (cfg: HubConfig, nodeId: string, root: string): string | undefined => {
+    const targetNode = isLocalNodeId(nodeId) ? LOCAL_NODE_ID : nodeId;
+    return cfg.projects.find((p) => (p.nodeId ?? LOCAL_NODE_ID) === targetNode && p.root === root)?.id;
+  };
+
   const unsubExecutor = executor.subscribe((ev) => {
-    broadcastUi(ev as unknown as Record<string, unknown>);
+    const cfg = hubMode ? readHubConfig() : null;
+    const projectId = cfg ? findProjectId(cfg, LOCAL_NODE_ID, ev.root) : undefined;
+    broadcastUi({
+      ...(ev as unknown as Record<string, unknown>),
+      nodeId: LOCAL_NODE_ID,
+      ...(projectId ? { projectId } : {}),
+    });
   });
 
   const ensureWatcherFor = (projectRoot: string) => {
@@ -328,7 +261,7 @@ export async function startWorkbenchServer(options: {
         watchDebounces.set(
           projectRoot,
           setTimeout(() => {
-            broadcastUi({ type: "workbench.updated", reason: "fs", root: projectRoot, at: Date.now() });
+            broadcastUi({ type: "workbench.updated", reason: "fs", root: projectRoot, nodeId: LOCAL_NODE_ID, at: Date.now() });
           }, 60),
         );
       });
@@ -342,7 +275,9 @@ export async function startWorkbenchServer(options: {
     if (hubMode) {
       const cfg = readHubConfig();
       for (const p of cfg.projects) {
-        ensureWatcherFor(p.root);
+        if (isLocalNodeId(p.nodeId)) {
+          ensureWatcherFor(p.root);
+        }
       }
       return;
     }
@@ -351,23 +286,34 @@ export async function startWorkbenchServer(options: {
 
   syncAllWatchers();
 
-  const resolveRequestRoot = (req: Request, url: URL): string => {
+  const resolveRequestTarget = (
+    req: Request,
+    url: URL,
+    allowEmpty = false,
+  ): { root: string; nodeId: string; projectId: string | null } | null => {
     const param = url.searchParams.get("project") ?? req.headers.get("x-workbench-project");
     if (param) {
       const cfg = readHubConfig();
       const byId = cfg.projects.find((p) => p.id === param);
-      if (byId) return byId.root;
-      // Allow single-project root match
-      if (!hubMode && param === "default") return defaultRoot;
+      if (byId) {
+        return { root: byId.root, nodeId: byId.nodeId ?? LOCAL_NODE_ID, projectId: byId.id };
+      }
+      if (!hubMode && param === "default") {
+        return { root: defaultRoot, nodeId: LOCAL_NODE_ID, projectId: null };
+      }
+      if (allowEmpty) return null;
       throw new WorkbenchError("not_found", `未找到目标项目: ${param}`);
     }
     if (hubMode) {
       const cfg = readHubConfig();
       const active = cfg.projects.find((p) => p.id === cfg.activeProjectId) ?? cfg.projects[0];
-      if (active) return active.root;
+      if (active) {
+        return { root: active.root, nodeId: active.nodeId ?? LOCAL_NODE_ID, projectId: active.id };
+      }
+      if (allowEmpty) return null;
       throw new WorkbenchError("not_found", "当前 Hub 尚未纳管任何项目，请先添加本地项目");
     }
-    return defaultRoot;
+    return { root: defaultRoot, nodeId: LOCAL_NODE_ID, projectId: null };
   };
 
   const buildHubProjectsSnapshot = async () => {
@@ -375,43 +321,112 @@ export async function startWorkbenchServer(options: {
     if (!hubMode) {
       return { cfg, projects: [] };
     }
+
+    const remoteGroups = new Map<string, string[]>();
+    for (const p of cfg.projects) {
+      if (!isLocalNodeId(p.nodeId)) {
+        const nid = p.nodeId!;
+        const list = remoteGroups.get(nid) ?? [];
+        list.push(p.root);
+        remoteGroups.set(nid, list);
+      }
+    }
+
+    const remoteSnapshots = new Map<string, Record<string, LocalProjectSnapshot>>();
+    await Promise.all(
+      Array.from(remoteGroups.entries()).map(async ([nid, roots]) => {
+        if (!nodeRegistry.isConnected(nid)) return;
+        try {
+          const res = await nodeRegistry.rpc(nid, { kind: "projects_snapshot", roots }, 8_000);
+          const body = res.bodyJson as { snapshots?: Record<string, LocalProjectSnapshot> } | undefined;
+          if (body?.snapshots) {
+            remoteSnapshots.set(nid, body.snapshots);
+          }
+        } catch {
+          // Remote node timed out or disconnected mid-snapshot; fall back to offline state.
+        }
+      }),
+    );
+
     const projects = await Promise.all(
       cfg.projects.map(async (entry) => {
-        const status = getProjectStatus(entry.root);
-        const isGitRepo = fs.existsSync(path.join(entry.root, ".git"));
-        let activeCount = 0;
-        let decisionCount = 0;
-        if (status.initialized) {
-          try {
-            const { baseSnapshot: snap, byReqId } = await resolveProjectRequirementSnapshots(entry.root);
-            const items = listRequirements(entry.root, {
-              scope: "active",
-              currentCodeSnapshotHash: snap?.fingerprint ?? null,
-              codeSnapshotsById: byReqId,
-              onCorrupt: (corrupt) => {
-                console.warn(`[workbench] 跳过损坏需求 ${entry.root}/${corrupt.id}: ${corrupt.message}`);
-              },
-            });
-            activeCount = items.length;
-            decisionCount = items.filter((i) => i.needsDecision).length;
-          } catch (error) {
-            console.warn(
-              `[workbench] 读取项目快照失败 ${entry.root}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
+        if (isLocalNodeId(entry.nodeId)) {
+          const snap = await buildLocalProjectSnapshot(entry.root, executor);
+          return {
+            ...entry,
+            nodeId: LOCAL_NODE_ID,
+            nodeOnline: true,
+            ...snap,
+          };
         }
-        const runningCount = executor.getActiveRuns(entry.root).length;
+        const nid = entry.nodeId!;
+        const online = nodeRegistry.isConnected(nid);
+        const snap = remoteSnapshots.get(nid)?.[entry.root];
         return {
           ...entry,
-          initialized: status.initialized,
-          isGitRepo,
-          activeCount,
-          decisionCount,
-          runningCount,
+          nodeId: nid,
+          nodeName: nodeRegistry.getNode(nid)?.name ?? entry.nodeName ?? nid,
+          nodeOnline: online,
+          initialized: snap?.initialized ?? false,
+          isGitRepo: snap?.isGitRepo ?? false,
+          activeCount: snap?.activeCount ?? 0,
+          decisionCount: snap?.decisionCount ?? 0,
+          runningCount: snap?.runningCount ?? 0,
         };
       }),
     );
     return { cfg, projects };
+  };
+
+  const buildAllNodesList = (cfg: HubConfig, localHarnesses: HarnessInfo[]): RemoteNodeInfo[] => {
+    const enrichRuns = (
+      runs: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>,
+      nid: string,
+    ) =>
+      runs.map((r) => ({
+        ...r,
+        projectId: r.projectId ?? (r.root ? findProjectId(cfg, nid, r.root) : undefined),
+      }));
+
+    const localNode: RemoteNodeInfo = {
+      nodeId: LOCAL_NODE_ID,
+      name: "本机",
+      isLocal: true,
+      hostname: os.hostname(),
+      platform: process.platform,
+      connected: true,
+      connectedAt: serverStartedAt,
+      lastSeenAt: Date.now(),
+      harnesses: localHarnesses,
+      activeRuns: enrichRuns(executor.getActiveRuns(), LOCAL_NODE_ID),
+      workbenchVersion: packageInfo.version,
+    };
+
+    const connected = nodeRegistry.listConnectedNodes().map((n) => ({
+      ...n,
+      activeRuns: enrichRuns(n.activeRuns, n.nodeId),
+    }));
+    const seenIds = new Set<string>([LOCAL_NODE_ID, ...connected.map((n) => n.nodeId)]);
+
+    const offlineNodes: RemoteNodeInfo[] = [];
+    for (const proj of cfg.projects) {
+      if (isLocalNodeId(proj.nodeId) || seenIds.has(proj.nodeId!)) continue;
+      seenIds.add(proj.nodeId!);
+      offlineNodes.push({
+        nodeId: proj.nodeId!,
+        name: proj.nodeName ?? proj.nodeId!,
+        isLocal: false,
+        hostname: proj.nodeName ?? proj.nodeId!,
+        platform: "linux",
+        connected: false,
+        connectedAt: null,
+        lastSeenAt: null,
+        harnesses: [],
+        activeRuns: [],
+      });
+    }
+
+    return [localNode, ...connected, ...offlineNodes];
   };
 
   const dispatchToBridge = async (
@@ -450,84 +465,16 @@ export async function startWorkbenchServer(options: {
     return { ...ack, prompt };
   };
 
-  const resolveOutputLang = (projectRoot: string, detail?: RequirementDetail) => {
-    const projectMeta = getProjectStatus(projectRoot).project;
-    const hubCfg = readHubConfig();
-    return resolveEffectiveOutputLanguage({
-      projectLanguage: projectMeta?.outputLanguage,
-      hubLanguage: hubCfg.outputLanguage,
-      contextText: detail ? `${detail.state.title}\n${detail.specMarkdown}` : undefined,
-    });
-  };
-
-  const tryCreateAndLinkIssue = async (
-    projectRoot: string,
-    detail: RequirementDetail,
-    snapHash: string | null,
-    labels?: string[],
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
-    try {
-      const projectMeta = getProjectStatus(projectRoot).project;
-      const ghEnv = await inspectGitHubEnvironment(projectRoot, projectMeta?.github, options.githubDeps);
-      if (!ghEnv.ready || !ghEnv.repo) {
-        return { detail, warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue" };
-      }
-      const issue = await createGitHubIssue(
-        {
-          root: projectRoot,
-          repo: ghEnv.repo,
-          title: `[${detail.state.id}] ${detail.state.title}`,
-          body: buildRequirementIssueBody(detail),
-          labels,
-        },
-        options.githubDeps,
-      );
-      const updated = await linkRequirementGitHubIssue(projectRoot, detail.state.id, {
-        repo: ghEnv.repo,
-        issue,
-        currentCodeSnapshotHash: snapHash,
-      });
-      return { detail: updated };
-    } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
-    }
-  };
-
-  const trySyncIssueMilestone = async (
-    projectRoot: string,
-    detail: RequirementDetail,
-    comment: string,
-    opts?: { state?: "open" | "closed"; snapHash?: string | null },
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
-    const linked = detail.state.github?.issue;
-    const repo = detail.state.github?.repo;
-    if (!linked || !repo) return { detail };
-    try {
-      if (opts?.state && opts.state !== linked.state) {
-        await setGitHubIssueState(
-          { root: projectRoot, repo, issueNumber: linked.number, state: opts.state, comment },
-          options.githubDeps,
-        );
-      } else {
-        await commentOnGitHubIssue(
-          { root: projectRoot, repo, issueNumber: linked.number, body: comment },
-          options.githubDeps,
-        );
-      }
-      const updated = await recordRequirementGitHubSync(projectRoot, detail.state.id, {
-        issuePatch: {
-          ...(opts?.state ? { state: opts.state } : {}),
-          lastSyncedStage: detail.state.stage,
-        },
-        eventKind: "github_issue_synced",
-        summary: `已同步阶段 [${detail.state.stage}] 至 GitHub Issue #${linked.number}`,
-        currentCodeSnapshotHash: opts?.snapHash ?? null,
-      });
-      return { detail: updated };
-    } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
-    }
-  };
+  const handleProjectApi = createProjectApiHandler({
+    executor,
+    getBridgeStatus: () => bridgeStatus,
+    dispatchToBridge,
+    broadcastUi,
+    ensureWatcherFor,
+    reloadWebBundle,
+    getHubOutputLanguage: () => readHubConfig().outputLanguage,
+    githubDeps: options.githubDeps,
+  });
 
   const handleApi = async (req: Request, url: URL): Promise<Response> => {
     const pathname = url.pathname;
@@ -560,6 +507,21 @@ export async function startWorkbenchServer(options: {
       if (files.length === 0) {
         throw new WorkbenchError("invalid_input", "请选择至少一个附件文件");
       }
+
+      if (url.searchParams.get("scope") !== "hub") {
+        const target = resolveRequestTarget(req, url, true);
+        if (target && !isLocalNodeId(target.nodeId)) {
+          const encoded = await Promise.all(
+            files.map(async (file) => ({
+              name: file.name,
+              bytesBase64: Buffer.from(await file.arrayBuffer()).toString("base64"),
+            })),
+          );
+          const res = await nodeRegistry.rpc(target.nodeId, { kind: "upload_stage", files: encoded }, 45_000);
+          return jsonResponse(res.bodyJson, res.status);
+        }
+      }
+
       const inputs = await Promise.all(
         files.map(async (file) => ({
           name: file.name,
@@ -572,17 +534,33 @@ export async function startWorkbenchServer(options: {
 
     // --- Hub & Global Discovery/Routing Routes ---
     if (method === "GET" && pathname === "/api/hub/state") {
-      const [{ cfg, projects }, harnesses] = await Promise.all([buildHubProjectsSnapshot(), executor.getHarnesses(false, !hubMode)]);
+      const [{ cfg, projects }, localHarnesses] = await Promise.all([
+        buildHubProjectsSnapshot(),
+        executor.getHarnesses(false, !hubMode),
+      ]);
       const evolutionOpenCount = readPainPoints().filter((p) => p.status === "open").length;
       const telemetry = summarizeTelemetry();
+      const nodes = buildAllNodesList(cfg, localHarnesses);
+      const activeId = hubMode ? (cfg.activeProjectId ?? projects[0]?.id ?? null) : null;
+      const activeProj = activeId ? projects.find((p) => p.id === activeId) : undefined;
+      const activeNodeId = activeProj?.nodeId ?? LOCAL_NODE_ID;
+      const activeNode = nodes.find((n) => n.nodeId === activeNodeId);
+      const effectiveHarnesses =
+        !isLocalNodeId(activeNodeId) && activeNode
+          ? activeNode.harnesses
+          : localHarnesses;
+      const activeRuns = nodes.flatMap((n) => n.activeRuns);
+
       return jsonResponse({
         hubMode,
-        activeProjectId: hubMode ? (cfg.activeProjectId ?? projects[0]?.id ?? null) : null,
+        activeProjectId: activeId,
+        activeNodeId,
         projects: hubMode ? projects : [],
-        harnesses,
+        nodes,
+        harnesses: effectiveHarnesses,
         routing: cfg.routing,
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
-        activeRuns: executor.getActiveRuns(),
+        activeRuns,
         evolutionOpenCount,
         cooldownCount: telemetry.activeCooldowns.length,
       });
@@ -595,6 +573,7 @@ export async function startWorkbenchServer(options: {
         throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
       }
       const cfg = updateHubPreferences({ outputLanguage });
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
       broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
       return jsonResponse({ outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE });
     }
@@ -602,12 +581,41 @@ export async function startWorkbenchServer(options: {
     if (method === "POST" && pathname === "/api/hub/projects") {
       const body = await readBody(req);
       const rawRoot = typeof body.root === "string" ? body.root : "";
+      const rawNodeId = typeof body.nodeId === "string" ? body.nodeId.trim() : "";
+      const initPrivacy = body.initPrivacy === "local" || body.initPrivacy === "tracked" ? (body.initPrivacy as PrivacyMode) : undefined;
+
+      if (rawNodeId && !isLocalNodeId(rawNodeId)) {
+        const node = nodeRegistry.getNode(rawNodeId);
+        if (!node) {
+          throw new WorkbenchError("execution_failed", `远程节点 ${rawNodeId} 当前不在线，无法添加项目`);
+        }
+        const probeRes = await nodeRegistry.rpc(rawNodeId, {
+          kind: "register_probe",
+          root: rawRoot,
+          name: typeof body.name === "string" ? body.name : undefined,
+          initPrivacy,
+        });
+        if (probeRes.status >= 400) {
+          return jsonResponse(probeRes.bodyJson, probeRes.status);
+        }
+        const probe = probeRes.bodyJson as { root: string; name?: string };
+        const { project } = registerHubProject(probe.root, {
+          name: typeof body.name === "string" && body.name.trim() ? body.name : probe.name,
+          activate: body.activate !== false,
+          nodeId: rawNodeId,
+          nodeName: node.name,
+        });
+        broadcastUi({ type: "hub.updated", reason: "project.added", projectId: project.id, at: Date.now() });
+        const { cfg, projects } = await buildHubProjectsSnapshot();
+        return jsonResponse({ project, activeProjectId: cfg.activeProjectId, projects }, 201);
+      }
+
       const { project } = registerHubProject(rawRoot, {
         name: typeof body.name === "string" ? body.name : undefined,
         activate: body.activate !== false,
       });
-      if ((body.initPrivacy === "local" || body.initPrivacy === "tracked") && !getProjectStatus(project.root).initialized) {
-        await initProject(project.root, { name: project.name, privacyMode: body.initPrivacy });
+      if (initPrivacy && !getProjectStatus(project.root).initialized) {
+        await initProject(project.root, { name: project.name, privacyMode: initPrivacy });
       }
       ensureWatcherFor(project.root);
       broadcastUi({ type: "hub.updated", reason: "project.added", projectId: project.id, at: Date.now() });
@@ -619,7 +627,9 @@ export async function startWorkbenchServer(options: {
     if (method === "POST" && hubActivateMatch) {
       const projectId = decodeURIComponent(hubActivateMatch[1]!);
       const { project } = setActiveHubProject(projectId);
-      ensureWatcherFor(project.root);
+      if (isLocalNodeId(project.nodeId)) {
+        ensureWatcherFor(project.root);
+      }
       broadcastUi({ type: "hub.updated", reason: "project.activated", projectId: project.id, at: Date.now() });
       const { cfg, projects } = await buildHubProjectsSnapshot();
       return jsonResponse({ project, activeProjectId: cfg.activeProjectId, projects });
@@ -634,16 +644,31 @@ export async function startWorkbenchServer(options: {
     }
 
     if (method === "GET" && pathname === "/api/fs/browse") {
+      const nodeParam = url.searchParams.get("node");
       const target = url.searchParams.get("path") ?? undefined;
+      if (nodeParam && !isLocalNodeId(nodeParam)) {
+        const rpcRes = await nodeRegistry.rpc(nodeParam, { kind: "browse", path: target });
+        return jsonResponse(rpcRes.bodyJson, rpcRes.status);
+      }
       return jsonResponse(browseDirectory(target));
     }
 
     if (method === "GET" && pathname === "/api/hub/harnesses") {
+      const nodeParam = url.searchParams.get("node");
+      if (nodeParam && !isLocalNodeId(nodeParam)) {
+        const node = nodeRegistry.getNode(nodeParam);
+        return jsonResponse({ harnesses: node?.harnesses ?? [] });
+      }
       const harnesses = await executor.getHarnesses(false);
       return jsonResponse({ harnesses });
     }
 
     if (method === "POST" && pathname === "/api/hub/harnesses/refresh") {
+      const nodeParam = url.searchParams.get("node");
+      if (nodeParam && !isLocalNodeId(nodeParam)) {
+        const rpcRes = await nodeRegistry.rpc(nodeParam, { kind: "refresh_harnesses" }, 45_000);
+        return jsonResponse(rpcRes.bodyJson, rpcRes.status);
+      }
       const harnesses = await executor.getHarnesses(true);
       return jsonResponse({ harnesses });
     }
@@ -656,6 +681,7 @@ export async function startWorkbenchServer(options: {
     if (method === "PUT" && pathname === "/api/hub/routing") {
       const body = await readBody(req);
       const cfg = updateHubRouting(body as unknown as RoutingConfig);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
       broadcastUi({ type: "hub.updated", reason: "routing.updated", at: Date.now() });
       return jsonResponse({ routing: cfg.routing });
     }
@@ -667,6 +693,7 @@ export async function startWorkbenchServer(options: {
         throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
       }
       const cfg = applyHubRoutingPreset(preset as RoutingPreset);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
       broadcastUi({ type: "hub.updated", reason: "routing.preset", preset, at: Date.now() });
       return jsonResponse({ routing: cfg.routing });
     }
@@ -679,8 +706,8 @@ export async function startWorkbenchServer(options: {
         (paramPid ? cfg.projects.find((p) => p.id === paramPid) : undefined) ??
         cfg.projects.find((p) => p.id === cfg.activeProjectId) ??
         cfg.projects[0];
-      const currentPlaybookRoot = activeProj?.root ?? (hubMode ? null : defaultRoot);
-      const wbProjectId = cfg.projects.find((p) => p.root === wbRoot)?.id ?? null;
+      const currentPlaybookRoot = activeProj && isLocalNodeId(activeProj.nodeId) ? activeProj.root : hubMode ? null : defaultRoot;
+      const wbProjectId = cfg.projects.find((p) => isLocalNodeId(p.nodeId) && p.root === wbRoot)?.id ?? null;
       const sandboxes = Object.values(readSandboxes()).map((sb) => {
         let stage: Stage | null = null;
         let canApply = false;
@@ -827,786 +854,21 @@ export async function startWorkbenchServer(options: {
     }
 
     // --- Project-Scoped Routes (?project=<id> or default) ---
-    const base = resolveRequestRoot(req, url);
-
-    if (method === "GET" && pathname === "/api/project") {
-      const status = getProjectStatus(base);
-      const git = await observeGitSnapshot(base);
-      const remoteRepo = git ? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base)) : null;
-      const hubCfg = readHubConfig();
-      const effectiveOutputLanguage = resolveEffectiveOutputLanguage({
-        projectLanguage: status.project?.outputLanguage,
-        hubLanguage: hubCfg.outputLanguage,
-      });
-      return jsonResponse({
-        ...status,
-        root: base,
-        bridge: bridgeStatus,
-        effectiveOutputLanguage,
-        remoteRepo,
-        git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
-      });
-    }
-
-    if (method === "PATCH" && pathname === "/api/project/settings") {
-      const body = await readBody(req);
-      let outputLanguagePatch: OutputLanguage | null | undefined = undefined;
-      if (body.outputLanguage === null || body.outputLanguage === "inherit") {
-        outputLanguagePatch = null;
-      } else if (body.outputLanguage !== undefined) {
-        const valid = normalizeOutputLanguage(body.outputLanguage);
-        if (!valid) {
-          throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
-        }
-        outputLanguagePatch = valid;
-      }
-      let githubPatch: ProjectGitHubConfig | null | undefined = undefined;
-      if (body.github === null) {
-        githubPatch = null;
-      } else if (isRecord(body.github)) {
-        githubPatch = {
-          ...(typeof body.github.repo === "string" ? { repo: body.github.repo } : {}),
-          ...(typeof body.github.defaultBaseBranch === "string"
-            ? { defaultBaseBranch: body.github.defaultBaseBranch }
-            : {}),
-          ...(typeof body.github.autoCreateIssue === "boolean"
-            ? { autoCreateIssue: body.github.autoCreateIssue }
-            : {}),
-          ...(typeof body.github.autoSyncIssue === "boolean"
-            ? { autoSyncIssue: body.github.autoSyncIssue }
-            : {}),
-        };
-      }
-      const project = await updateProjectConfig(base, {
-        ...(typeof body.name === "string" ? { name: body.name } : {}),
-        ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
-        ...(githubPatch !== undefined ? { github: githubPatch } : {}),
-      });
-      broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
-      return jsonResponse({ project });
-    }
-
-    if (method === "GET" && pathname === "/api/github/status") {
-      const status = getProjectStatus(base);
-      const envStatus = await inspectGitHubEnvironment(base, status.project?.github, options.githubDeps);
-      return jsonResponse(envStatus);
-    }
-
-    if (method === "GET" && pathname === "/api/project/playbook") {
-      return jsonResponse(readPlaybook(base));
-    }
-
-    if (method === "PUT" && pathname === "/api/project/playbook") {
-      const body = await readBody(req);
-      const markdown = typeof body.markdown === "string" ? body.markdown : "";
-      const saved = await writePlaybook(base, markdown);
-      broadcastUi({ type: "workbench.updated", reason: "playbook.updated", root: base, at: Date.now() });
-      return jsonResponse({ exists: true, ...saved });
-    }
-
-    if (method === "POST" && pathname === "/api/project/playbook/distill") {
-      const body = await readBody(req);
-      const reqId = typeof body.requirementId === "string" ? body.requirementId : null;
-      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
-      let addedTotal = 0;
-      if (reqId) {
-        const snap = await observeGitSnapshot(resolveCodeRoot(base, reqId));
-        const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-        const out = await distillRequirementToPlaybook(base, detail);
-        addedTotal += out.added;
-      } else {
-        const summaries = listRequirements(base, {
-          scope: "all",
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-          codeSnapshotsById: byReqId,
-        });
-        for (const item of summaries) {
-          const itemHash = byReqId.has(item.id) ? (byReqId.get(item.id) ?? null) : (snapshot?.fingerprint ?? null);
-          const detail = getRequirement(base, item.id, { currentCodeSnapshotHash: itemHash });
-          const out = await distillRequirementToPlaybook(base, detail);
-          addedTotal += out.added;
-        }
-      }
-      broadcastUi({ type: "workbench.updated", reason: "playbook.distilled", root: base, at: Date.now() });
-      return jsonResponse({ added: addedTotal, ...readPlaybook(base) });
-    }
-
-    if (method === "POST" && pathname === "/api/project/init") {
-      const body = await readBody(req);
-      let outputLanguage: OutputLanguage | undefined;
-      if (body.outputLanguage !== undefined && body.outputLanguage !== "inherit") {
-        outputLanguage = normalizeOutputLanguage(body.outputLanguage);
-        if (!outputLanguage) {
-          throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
-        }
-      }
-      const project = await initProject(base, {
-        name: typeof body.name === "string" ? body.name : undefined,
-        privacyMode: body.privacyMode === "tracked" ? "tracked" : "local",
-        ...(outputLanguage ? { outputLanguage } : {}),
-      });
-      ensureWatcherFor(base);
-      broadcastUi({ type: "workbench.updated", reason: "project.init", root: base, at: Date.now() });
-      return jsonResponse({ initialized: true, project }, 201);
-    }
-
-    if (method === "GET" && pathname === "/api/requirements") {
-      const scope = (url.searchParams.get("scope") ?? "active") as "active" | "done" | "cancelled" | "all";
-      const stageParam = url.searchParams.get("stage");
-      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
-      const corruptItems: CorruptRequirementEntry[] = [];
-      const items = listRequirements(base, {
-        scope,
-        stage: stageParam ? (stageParam as Stage) : undefined,
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        codeSnapshotsById: byReqId,
-        onCorrupt: (corrupt) => {
-          console.warn(`[workbench] 跳过损坏需求 ${base}/${corrupt.id}: ${corrupt.message}`);
-          corruptItems.push(corrupt);
-        },
-      });
-      return jsonResponse({
-        items,
-        ...(corruptItems.length > 0 ? { corruptItems } : {}),
-        codeSnapshotHash: snapshot?.fingerprint ?? null,
-        bridge: bridgeStatus,
-      });
-    }
-
-    if (method === "POST" && pathname === "/api/requirements/import-issue") {
-      const body = await readBody(req);
-      const issueRef =
-        typeof body.issueRef === "string" || typeof body.issueRef === "number" ? body.issueRef : "";
-      if (!String(issueRef).trim()) {
-        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL");
-      }
-      const projectMeta = getProjectStatus(base).project;
-      const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
-      const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef }, options.githubDeps);
-      const snapshot = await observeGitSnapshot(base);
-
-      // Avoid importing the exact same GitHub Issue twice if an active/existing requirement already tracks it.
-      const existingList = listRequirements(base, {
-        scope: "all",
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-      });
-      const existingMatch = existingList.find(
-        (item) => item.github?.repo === issue.repo && item.github?.issue?.number === issue.number,
+    const target = resolveRequestTarget(req, url)!;
+    if (!isLocalNodeId(target.nodeId)) {
+      const cfg = readHubConfig();
+      return nodeRegistry.forwardProjectHttp(
+        target.nodeId,
+        target.root,
+        req,
+        url,
+        cfg.routing,
+        cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
       );
-      if (existingMatch) {
-        const existingDetail = getRequirement(base, existingMatch.id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        return jsonResponse({ detail: existingDetail, alreadyExisted: true, issue }, 200);
-      }
-
-      const goal = [
-        `# ${issue.title}`,
-        "",
-        `> 导入自 GitHub Issue: ${issue.url}`,
-        issue.labels.length > 0 ? `> 标签：${issue.labels.join(", ")}` : "",
-        "",
-        issue.body || issue.title,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      let detail = await createRequirement(base, {
-        goal,
-        title: issue.title,
-        track: body.track === "fast_track" ? "fast_track" : "plan_first",
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-      });
-      detail = await linkRequirementGitHubIssue(base, detail.state.id, {
-        repo: issue.repo,
-        issue: {
-          number: issue.number,
-          url: issue.url,
-          title: issue.title,
-          state: issue.state,
-          lastSyncedAt: Date.now(),
-        },
-        summary: `从 GitHub Issue #${issue.number} 导入`,
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-      });
-
-      let dispatch: DispatchOutcome | null = null;
-      if (body.dispatchAgent === true) {
-        detail = await markDesigning(base, detail.state.id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
-        dispatch = await dispatchToBridge(detail.state.id, "design", "send", prompt);
-      }
-
-      broadcastUi({ type: "workbench.updated", reason: "requirement.created", id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, alreadyExisted: false, issue }, 201);
     }
 
-    if (method === "POST" && pathname === "/api/requirements") {
-      const body = await readBody(req);
-      const goal = typeof body.goal === "string" ? body.goal : "";
-      const title = typeof body.title === "string" ? body.title : undefined;
-      const track: Track = body.track === "fast_track" ? "fast_track" : "plan_first";
-      const snapshot = await observeGitSnapshot(base);
-      const attachmentIds = readStringArray(body.attachmentIds);
-      let detail = await createRequirement(base, {
-        goal,
-        title,
-        criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
-        track,
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
-      });
-
-      const projectMeta = getProjectStatus(base).project;
-      const shouldCreateIssue =
-        body.createGitHubIssue === true ||
-        (body.createGitHubIssue !== false && projectMeta?.github?.autoCreateIssue === true);
-      let githubWarning: string | undefined;
-      if (shouldCreateIssue) {
-        const linked = await tryCreateAndLinkIssue(base, detail, snapshot?.fingerprint ?? null);
-        detail = linked.detail;
-        githubWarning = linked.warning;
-      }
-
-      let dispatch: DispatchOutcome | null = null;
-      if (body.dispatchAgent === true) {
-        detail = await markDesigning(base, detail.state.id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
-        dispatch = await dispatchToBridge(detail.state.id, "design", "send", prompt);
-      }
-
-      broadcastUi({ type: "workbench.updated", reason: "requirement.created", id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, ...(githubWarning ? { githubWarning } : {}) }, 201);
-    }
-
-    // Routes matching /api/requirements/:id[/...]
-    const reqMatch = /^\/api\/requirements\/(REQ-\d{3,})(?:\/(.*))?$/.exec(pathname);
-    if (reqMatch) {
-      const id = reqMatch[1]!;
-      const sub = reqMatch[2] ?? "";
-
-      if (method === "GET" && sub === "") {
-        const codeRoot = resolveCodeRoot(base, id);
-        const snapshot = await observeGitSnapshot(codeRoot);
-        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        const sandbox = getSandboxForRequirement(base, id);
-        return jsonResponse({
-          detail,
-          bridge: bridgeStatus,
-          codeSnapshotHash: snapshot?.fingerprint ?? null,
-          sandbox,
-        });
-      }
-
-      if (method === "GET" && sub === "diff") {
-        const live = url.searchParams.get("live") === "1";
-        const diffView = await getRequirementDiff(base, id, { live });
-        return jsonResponse({ ...diffView, changes: diffView.observation });
-      }
-
-      const histMatch = /^history\/(\d+)$/.exec(sub);
-      if (method === "GET" && histMatch) {
-        const version = Number(histMatch[1]);
-        const markdown = getDesignHistoryVersion(base, id, version);
-        return jsonResponse({ version, markdown });
-      }
-
-      const attMatch = /^attachments\/([^/]+)$/.exec(sub);
-      if (method === "GET" && attMatch) {
-        const attId = decodeURIComponent(attMatch[1]!);
-        const state = getRequirement(base, id).state;
-        const metas = normalizeAttachments(state.attachments) ?? [];
-        const served = readAttachmentForServe(requirementAttachmentsDir(base, id), attId, metas);
-        return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
-      }
-
-      if (method === "DELETE" && attMatch) {
-        const attId = decodeURIComponent(attMatch[1]!);
-        const detail = await removeRequirementAttachment(base, id, attId);
-        broadcastUi({ type: "workbench.updated", reason: "attachment.removed", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "attachments") {
-        const body = await readBody(req);
-        const attachmentIds = readStringArray(body.attachmentIds) ?? [];
-        const detail = await addRequirementAttachments(base, id, attachmentIds, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "attachment.added", root: base, id, at: Date.now() });
-        return jsonResponse({ detail }, 201);
-      }
-
-      const evMatch = /^evidence\/([^/]+)$/.exec(sub);
-      if (method === "GET" && evMatch) {
-        const evidence = getVerificationEvidence(base, id, decodeURIComponent(evMatch[1]!));
-        return jsonResponse(evidence);
-      }
-
-      const shotMatch = /^screenshots\/([^/]+)$/.exec(sub);
-      if (method === "GET" && shotMatch) {
-        const screenshot = readRequirementScreenshot(base, id, decodeURIComponent(shotMatch[1]!));
-        return new Response(new Uint8Array(screenshot.bytes), {
-          status: 200,
-          headers: {
-            "Content-Type": "image/png",
-            "Content-Length": String(screenshot.bytes.length),
-            "Cache-Control": "private, max-age=31536000, immutable",
-          },
-        });
-      }
-
-      if (method === "POST" && sub === "screenshots/capture") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const capture = await captureRequirementScreenshots(base, id, {
-          trigger: "manual",
-          actor: "human",
-          ...(typeof body.label === "string" && body.label.trim() ? { label: body.label.trim() } : {}),
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        broadcastUi({ type: "workbench.updated", reason: "screenshots.captured", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, screenshotCapture: capture });
-      }
-
-      if (method === "PATCH" && sub === "spec") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await updateSpec(base, id, {
-          title: typeof body.title === "string" ? body.title : undefined,
-          specMarkdown: typeof body.specMarkdown === "string" ? body.specMarkdown : undefined,
-          criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "spec.updated", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "PATCH" && sub === "design") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await updateDesign(base, id, {
-          designMarkdown: typeof body.designMarkdown === "string" ? body.designMarkdown : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          actor: "human",
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "design.updated", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "GET" && sub === "handoff") {
-        const synthesized = await synthesizeHandoffPacket(base, id, { action: "implement" });
-        return jsonResponse({ markdown: synthesized.markdown, detail: synthesized.detail });
-      }
-
-      if (method === "POST" && sub === "discussions") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const res = await addDiscussion(base, id, {
-          actor: "human",
-          mode: body.mode === "refine" ? "refine" : "ask",
-          anchor: typeof body.anchor === "string" ? body.anchor : undefined,
-          message: typeof body.message === "string" ? body.message : "",
-          resolved: typeof body.resolved === "boolean" ? body.resolved : undefined,
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "discussion.added", root: base, id, at: Date.now() });
-        return jsonResponse(res, 201);
-      }
-
-      if (method === "POST" && sub === "discussions/resolve") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await resolveDiscussions(base, id, {
-          ids: Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === "string") : undefined,
-          resolved: typeof body.resolved === "boolean" ? body.resolved : true,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "discussion.resolved", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "run") {
-        const body = await readBody(req);
-        const action = typeof body.action === "string" && (AGENT_ACTIONS as readonly string[]).includes(body.action)
-          ? (body.action as AgentAction)
-          : "design";
-        const started = await executor.startRun({
-          root: base,
-          requirementId: id,
-          action,
-          harness: typeof body.harness === "string" ? body.harness : undefined,
-          model: typeof body.model === "string" ? body.model : undefined,
-          reasoningEffort:
-            typeof body.reasoningEffort === "string" && (REASONING_EFFORTS as readonly string[]).includes(body.reasoningEffort)
-              ? (body.reasoningEffort as ReasoningEffort)
-              : undefined,
-          message: typeof body.message === "string" ? body.message : undefined,
-          anchor: typeof body.anchor === "string" ? body.anchor : undefined,
-          anchorIds: Array.isArray(body.anchorIds) ? body.anchorIds.filter((x): x is string => typeof x === "string") : undefined,
-          mode: body.mode === "refine" ? "refine" : body.mode === "ask" ? "ask" : undefined,
-          useFallback: body.useFallback === true,
-          timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
-          idleTimeoutMs: typeof body.idleTimeoutMs === "number" ? body.idleTimeoutMs : undefined,
-        });
-        return jsonResponse(started, 202);
-      }
-
-      const runCancelMatch = /^runs\/([^/]+)\/cancel$/.exec(sub);
-      if (method === "POST" && runCancelMatch) {
-        const runId = decodeURIComponent(runCancelMatch[1]!);
-        const cancelled = executor.cancelRun(runId);
-        return jsonResponse({ cancelled, runId });
-      }
-
-      const runDetailMatch = /^runs\/([^/]+)$/.exec(sub);
-      if (method === "GET" && runDetailMatch) {
-        const runId = decodeURIComponent(runDetailMatch[1]!);
-        const liveLog = executor.getLiveLog(runId);
-        if (liveLog !== null) {
-          const active = executor.getActiveRuns(base).find((r) => r.id === runId);
-          if (active) return jsonResponse({ record: active, log: liveLog });
-        }
-        return jsonResponse(getAgentRunDetail(base, id, runId));
-      }
-
-      if (method === "POST" && sub === "approve") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await approveDesign(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          baseline: snapshot,
-          note: typeof body.note === "string" ? body.note : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
-          dispatch = await dispatchToBridge(id, "implement", "send", prompt);
-        }
-        broadcastUi({ type: "workbench.updated", reason: "approved", id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
-      }
-
-      if (method === "POST" && sub === "fast-track") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await authorizeFastTrack(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          baseline: snapshot,
-          note: typeof body.note === "string" ? body.note : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
-          dispatch = await dispatchToBridge(id, "implement", "send", prompt);
-        }
-        broadcastUi({ type: "workbench.updated", reason: "fast_tracked", id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
-      }
-
-      if (method === "POST" && sub === "request-changes") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await requestChanges(base, id, {
-          feedback: typeof body.feedback === "string" ? body.feedback : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        await distillRequirementToPlaybook(base, detail, {
-          feedback: typeof body.feedback === "string" ? body.feedback : undefined,
-        }).catch(() => {});
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const action: DispatchAction = detail.state.stage === "designing" ? "design" : "fix";
-          dispatch = await dispatchToBridge(
-            id,
-            action,
-            "send",
-            buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) }),
-          );
-        }
-        broadcastUi({ type: "workbench.updated", reason: "changes_requested", id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
-      }
-
-      if (method === "POST" && sub === "verify") {
-        const body = await readBody(req);
-        const timeoutMs = typeof body.timeoutMs === "number" ? body.timeoutMs : undefined;
-        broadcastUi({ type: "verify.started", id, at: Date.now() });
-        try {
-          if (body.all === true || typeof body.command !== "string") {
-            const res = await runAllVerifications(base, id, { timeoutMs });
-            broadcastUi({ type: "workbench.updated", reason: "verified", id, at: Date.now() });
-            return jsonResponse({ detail: res.detail, runs: res.runs.map((r) => r.record) });
-          }
-          const criterionIds = Array.isArray(body.criterionIds)
-            ? body.criterionIds.filter((c): c is string => typeof c === "string")
-            : [];
-          const res = await runVerification(base, id, {
-            command: body.command,
-            criterionIds,
-            timeoutMs,
-          });
-          broadcastUi({ type: "workbench.updated", reason: "verified", id, at: Date.now() });
-          return jsonResponse({ detail: res.detail, runs: [res.record] });
-        } finally {
-          broadcastUi({ type: "verify.finished", id, at: Date.now() });
-        }
-      }
-
-      if (method === "POST" && sub === "accept") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        let detail = await acceptRequirement(base, id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          note: typeof body.note === "string" ? body.note : undefined,
-        });
-        await distillRequirementToPlaybook(base, detail).catch(() => {});
-        const projectMeta = getProjectStatus(base).project;
-        let githubSyncWarning: string | undefined;
-        if (detail.state.github?.issue && projectMeta?.github?.autoSyncIssue !== false) {
-          const synced = await trySyncIssueMilestone(
-            base,
-            detail,
-            `需求 \`${id}\` 已通过人类最终验收（必需验收条件 ${detail.validity.coverage.requiredPassed}/${detail.validity.coverage.requiredTotal} 通过${detail.state.acceptance?.snapshot ? ` · 快照 \`${detail.state.acceptance.snapshot.id}\`` : ""}）。`,
-            { snapHash: snapshot?.fingerprint ?? null },
-          );
-          detail = synced.detail;
-          githubSyncWarning = synced.warning;
-        }
-        broadcastUi({ type: "workbench.updated", reason: "accepted", id, at: Date.now() });
-        return jsonResponse({ detail, ...(githubSyncWarning ? { githubSyncWarning } : {}) });
-      }
-
-      if (method === "GET" && sub === "delivery") {
-        const preview = await getRequirementDeliveryPreview(base, id, options.githubDeps);
-        return jsonResponse(preview);
-      }
-
-      if (method === "POST" && sub === "deliver") {
-        const body = await readBody(req);
-        const files = Array.isArray(body.files) ? body.files.filter((f): f is string => typeof f === "string") : [];
-        const commitMessage = typeof body.commitMessage === "string" ? body.commitMessage : "";
-        const res = await deliverRequirement(
-          base,
-          id,
-          {
-            files,
-            commitMessage,
-            expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-            note: typeof body.note === "string" ? body.note : undefined,
-            createPr: body.createPr === true,
-            branchName: typeof body.branchName === "string" ? body.branchName : undefined,
-            baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : undefined,
-            prTitle: typeof body.prTitle === "string" ? body.prTitle : undefined,
-            prBody: typeof body.prBody === "string" ? body.prBody : undefined,
-          },
-          options.githubDeps,
-        );
-        const reloadRes = !body.createPr && res.touchesWeb ? await reloadWebBundle() : { reloaded: false };
-        broadcastUi({ type: "workbench.updated", reason: "delivered", root: base, id, at: Date.now() });
-        if (res.pr) {
-          broadcastUi({ type: "hub.updated", reason: "github.pr_created", id, at: Date.now() });
-        }
-        return jsonResponse({
-          detail: res.detail,
-          delivery: res.delivery,
-          ...(res.pr ? { pr: res.pr } : {}),
-          ...(res.githubSyncWarning ? { githubSyncWarning: res.githubSyncWarning } : {}),
-          webReloaded: reloadRes.reloaded,
-          restartRecommended: !body.createPr && res.touchesBackend,
-        });
-      }
-
-      if (method === "POST" && sub === "github/issue") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        const projectMeta = getProjectStatus(base).project;
-        if (typeof body.issueRef === "string" || typeof body.issueRef === "number") {
-          const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
-          const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef: body.issueRef }, options.githubDeps);
-          const updated = await linkRequirementGitHubIssue(base, id, {
-            repo: issue.repo,
-            issue: {
-              number: issue.number,
-              url: issue.url,
-              title: issue.title,
-              state: issue.state,
-              lastSyncedAt: Date.now(),
-            },
-            summary: `关联已有 GitHub Issue #${issue.number}`,
-            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-          });
-          broadcastUi({ type: "workbench.updated", reason: "github.issue_linked", root: base, id, at: Date.now() });
-          return jsonResponse({ detail: updated });
-        }
-        const ghEnv = await inspectGitHubEnvironment(base, projectMeta?.github, options.githubDeps);
-        if (!ghEnv.ready || !ghEnv.repo) {
-          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue");
-        }
-        const issue = await createGitHubIssue(
-          {
-            root: base,
-            repo: ghEnv.repo,
-            title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : `[${id}] ${detail.state.title}`,
-            body: typeof body.body === "string" && body.body.trim() ? body.body.trim() : buildRequirementIssueBody(detail),
-          },
-          options.githubDeps,
-        );
-        const updated = await linkRequirementGitHubIssue(base, id, {
-          repo: ghEnv.repo,
-          issue,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "github.issue_linked", root: base, id, at: Date.now() });
-        return jsonResponse({ detail: updated }, 201);
-      }
-
-      if (method === "POST" && sub === "github/sync-issue") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        if (!detail.state.github?.issue || !detail.state.github?.repo) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`);
-        }
-        const targetState =
-          body.state === "closed" || body.state === "open"
-            ? (body.state as "open" | "closed")
-            : detail.state.stage === "cancelled"
-              ? "closed"
-              : undefined;
-        const comment =
-          typeof body.comment === "string" && body.comment.trim()
-            ? body.comment.trim()
-            : `Workbench 状态同步：需求 \`${id}\` 当前处于阶段 \`${detail.state.stage}\`（必需条件通过 ${detail.validity.coverage.requiredPassed}/${detail.validity.coverage.requiredTotal}${detail.state.github.pr ? ` · PR: ${detail.state.github.pr.url}` : ""}）。`;
-        const synced = await trySyncIssueMilestone(base, detail, comment, {
-          state: targetState,
-          snapHash: snapshot?.fingerprint ?? null,
-        });
-        if (synced.warning) {
-          throw new WorkbenchError("execution_failed", synced.warning);
-        }
-        broadcastUi({ type: "workbench.updated", reason: "github.issue_synced", root: base, id, at: Date.now() });
-        return jsonResponse({ detail: synced.detail });
-      }
-
-      if (method === "POST" && sub === "github/pr-sync") {
-        const body = await readBody(req);
-        const hasSandbox = Boolean(getSandboxForRequirement(base, id));
-        if (hasSandbox) {
-          const synced = await syncRsiSandboxPrAndCleanup(
-            base,
-            id,
-            { forceCleanup: body.forceCleanup === true },
-            options.githubDeps,
-          );
-          const reloadRes = synced.cleanedSandbox && synced.touchesWeb ? await reloadWebBundle() : { reloaded: false };
-          broadcastUi({ type: "hub.updated", reason: "evolution.pr_synced", id, at: Date.now() });
-          broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
-          return jsonResponse({
-            ...synced,
-            webReloaded: reloadRes.reloaded,
-            restartRecommended: synced.cleanedSandbox && synced.touchesBackend,
-          });
-        }
-        const snapshot = await observeGitSnapshot(base);
-        const current = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        if (!current.state.github?.repo || !current.state.github?.pr) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub PR`);
-        }
-        const latestPr = await viewGitHubPr(
-          { root: base, repo: current.state.github.repo, prNumber: current.state.github.pr.number },
-          options.githubDeps,
-        );
-        const updated = await recordRequirementGitHubSync(base, id, {
-          prPatch: latestPr,
-          ...(latestPr.state === "merged" && current.state.github.issue ? { issuePatch: { state: "closed" } } : {}),
-          eventKind: "github_pr_synced",
-          summary: `同步 GitHub PR #${latestPr.number} 状态：${latestPr.state}`,
-          detail: latestPr.url,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
-        return jsonResponse({ detail: updated, pr: latestPr, cleanedSandbox: false, mainUpdated: false, mainSyncReason: null });
-      }
-
-      if (method === "POST" && sub === "block") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await blockRequirement(base, id, {
-          reason: typeof body.reason === "string" ? body.reason : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "blocked", id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "unblock") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await unblockRequirement(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "unblocked", id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "cancel") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await cancelRequirement(base, id, {
-          reason: typeof body.reason === "string" ? body.reason : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "cancelled", id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "reopen") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await reopenRequirement(base, id, {
-          reason: typeof body.reason === "string" ? body.reason : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        broadcastUi({ type: "workbench.updated", reason: "reopened", id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "dispatch") {
-        const body = await readBody(req);
-        const action = (body.action === "implement" || body.action === "fix" ? body.action : "design") as DispatchAction;
-        const mode = body.mode === "prefill" ? "prefill" : "send";
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-
-        if (action === "design" && detail.state.stage === "draft") {
-          detail = await markDesigning(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-          broadcastUi({ type: "workbench.updated", reason: "designing", id, at: Date.now() });
-        }
-
-        const prompt = buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) });
-        const dispatch = await dispatchToBridge(id, action, mode, prompt);
-        return jsonResponse({ detail, dispatch });
-      }
-    }
+    const handled = await handleProjectApi(req, url, target.root);
+    if (handled) return handled;
 
     return jsonResponse({ error: { code: "not_found", message: `未知接口: ${method} ${pathname}` } }, 404);
   };
@@ -1616,10 +878,90 @@ export async function startWorkbenchServer(options: {
     port: options.port ?? 0,
     async fetch(req, bunServer) {
       const url = new URL(req.url);
+      const remoteAddress = bunServer.requestIP(req)?.address ?? null;
+      const local = isLocalRequest(remoteAddress, req.headers.get("host"), hostname);
+      const authed = local || isAuthenticated(req);
+
+      if (url.pathname === "/api/auth/status" && req.method === "GET") {
+        return jsonResponse({ required: !local, authenticated: authed });
+      }
+      if (url.pathname === "/api/auth/login" && req.method === "POST") {
+        const lockedMs = loginLockRemainingMs(remoteAddress);
+        if (lockedMs > 0) {
+          return jsonResponse(
+            { error: { code: "rate_limited", message: `登录尝试过于频繁，请 ${Math.ceil(lockedMs / 1000)} 秒后再试` } },
+            429,
+          );
+        }
+        let body: Record<string, unknown>;
+        try {
+          body = await readBody(req);
+        } catch (error) {
+          return jsonResponse(
+            { error: { code: "invalid_input", message: error instanceof Error ? error.message : String(error) } },
+            400,
+          );
+        }
+        const password = typeof body.password === "string" ? body.password : "";
+        if (!verifyLoginPassword(password, hubDir)) {
+          recordLoginFailure(remoteAddress);
+          return jsonResponse({ error: { code: "unauthorized", message: "密码错误" } }, 401);
+        }
+        clearLoginFailures(remoteAddress);
+        return new Response(JSON.stringify({ authenticated: true }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Set-Cookie": sessionCookieHeader(issueSessionToken(hubDir)),
+          },
+        });
+      }
+      if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+        return new Response(JSON.stringify({ authenticated: false }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+            "Set-Cookie": expiredSessionCookieHeader(),
+          },
+        });
+      }
+
+      if (!authed) {
+        if (url.pathname.startsWith("/api/")) {
+          return jsonResponse({ error: { code: "unauthorized", message: "需要登录；请在登录页输入访问密码" } }, 401);
+        }
+        if (url.pathname === "/ws") {
+          return new Response("Unauthorized", { status: 401 });
+        }
+        // Static assets stay public so the login view itself can load.
+      }
 
       if (url.pathname === "/ws") {
-        const role = url.searchParams.get("role") === "bridge" ? "bridge" : "ui";
-        const upgraded = bunServer.upgrade(req, { data: { role, id: randomUUID() } });
+        const roleParam = url.searchParams.get("role");
+        const role = roleParam === "bridge" ? "bridge" : roleParam === "node" ? "node" : "ui";
+        let nodeId: string | undefined;
+        let nodeMeta: WsClientData["nodeMeta"];
+        if (role === "node") {
+          const rawNodeId = (url.searchParams.get("nodeId") ?? "").trim();
+          if (!rawNodeId || isLocalNodeId(rawNodeId) || !/^[A-Za-z0-9._-]{1,64}$/.test(rawNodeId)) {
+            return new Response("Invalid nodeId", { status: 400 });
+          }
+          nodeId = rawNodeId;
+          const cleanParam = (key: string, max: number) =>
+            (url.searchParams.get(key) ?? "").replace(/[\0\r\n]/g, "").trim().slice(0, max);
+          const version = cleanParam("version", 32);
+          nodeMeta = {
+            name: cleanParam("name", 120) || rawNodeId,
+            hostname: cleanParam("hostname", 120) || rawNodeId,
+            platform: cleanParam("platform", 32) || "linux",
+            ...(version ? { workbenchVersion: version } : {}),
+          };
+        }
+        const upgraded = bunServer.upgrade(req, {
+          data: { role, id: randomUUID(), ...(nodeId ? { nodeId, nodeMeta } : {}) },
+        });
         if (upgraded) return undefined;
         return new Response("WebSocket upgrade failed", { status: 400 });
       }
@@ -1673,6 +1015,18 @@ export async function startWorkbenchServer(options: {
         if (ws.data.role === "ui") {
           uiSockets.add(ws);
           ws.send(JSON.stringify({ type: "bridge.status", bridge: bridgeStatus }));
+        } else if (ws.data.role === "node" && ws.data.nodeId) {
+          const cfg = readHubConfig();
+          nodeRegistry.registerSocket(ws, {
+            nodeId: ws.data.nodeId,
+            name: ws.data.nodeMeta?.name ?? ws.data.nodeId,
+            hostname: ws.data.nodeMeta?.hostname ?? ws.data.nodeId,
+            platform: ws.data.nodeMeta?.platform ?? "linux",
+            workbenchVersion: ws.data.nodeMeta?.workbenchVersion,
+            routing: cfg.routing,
+            outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+          });
+          broadcastUi({ type: "hub.updated", reason: "node.connected", nodeId: ws.data.nodeId, at: Date.now() });
         } else {
           if (bridgeSocket && bridgeSocket !== ws) {
             try {
@@ -1685,6 +1039,36 @@ export async function startWorkbenchServer(options: {
         }
       },
       message(ws, message) {
+        if (ws.data.role === "node" && ws.data.nodeId) {
+          nodeRegistry.handleMessage(ws, ws.data.nodeId, Buffer.isBuffer(message) ? message : String(message), {
+            onPainPoint: (nid, input) => {
+              reportPainPoint({
+                ...input,
+                context: { ...(input.context ?? {}), nodeId: nid },
+              });
+              broadcastUi({ type: "hub.updated", reason: "evolution.reported", nodeId: nid, at: Date.now() });
+            },
+            onTelemetry: (_nid, outcome) => {
+              recordModelRunOutcome(outcome);
+              broadcastUi({ type: "hub.updated", reason: "telemetry.updated", at: Date.now() });
+            },
+            onEvent: (nid, evt) => {
+              const cfg = readHubConfig();
+              const rootStr = typeof evt.root === "string" ? evt.root : "";
+              const projectId = rootStr ? findProjectId(cfg, nid, rootStr) : undefined;
+              broadcastUi({
+                ...evt,
+                nodeId: nid,
+                ...(projectId ? { projectId } : {}),
+              });
+            },
+            onStatusChanged: () => {
+              broadcastUi({ type: "hub.updated", reason: "node.updated", nodeId: ws.data.nodeId, at: Date.now() });
+            },
+          });
+          return;
+        }
+
         if (ws.data.role !== "bridge") return;
         let parsed: Record<string, unknown>;
         try {
@@ -1729,6 +1113,12 @@ export async function startWorkbenchServer(options: {
       close(ws) {
         if (ws.data.role === "ui") {
           uiSockets.delete(ws);
+        } else if (ws.data.role === "node" && ws.data.nodeId) {
+          nodeRegistry.handleClose(ws, ws.data.nodeId, {
+            onStatusChanged: () => {
+              broadcastUi({ type: "hub.updated", reason: "node.disconnected", nodeId: ws.data.nodeId, at: Date.now() });
+            },
+          });
         } else if (bridgeSocket === ws) {
           bridgeSocket = null;
           bridgeStatus = {
@@ -1781,6 +1171,7 @@ export async function startWorkbenchServer(options: {
     stop() {
       unsubExecutor();
       executor.stopAllRuns();
+      nodeRegistry.stopAll();
       for (const timer of watchDebounces.values()) clearTimeout(timer);
       watchDebounces.clear();
       for (const w of watchers.values()) w.close();

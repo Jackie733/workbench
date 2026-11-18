@@ -40,9 +40,28 @@ function ensureHubDir(): string {
   return dir;
 }
 
-function projectIdForRoot(canonical: string): string {
+export const LOCAL_NODE_ID = "local";
+
+export function isLocalNodeId(nodeId?: string | null): boolean {
+  const trimmed = nodeId?.trim();
+  return !trimmed || trimmed === LOCAL_NODE_ID;
+}
+
+function normalizeRemoteRoot(root: string): string {
+  const trimmed = root.trim();
+  if (!trimmed || /[\0\r\n]/.test(trimmed)) {
+    throw new WorkbenchError("invalid_path", "远程项目根目录路径无效");
+  }
+  if (trimmed.length > 1 && /[\\/]+$/.test(trimmed) && !/^[A-Za-z]:[\\/]+$/.test(trimmed)) {
+    return trimmed.replace(/[\\/]+$/, "");
+  }
+  return trimmed;
+}
+
+function projectIdForRoot(canonical: string, nodeId?: string): string {
   const slug = path.basename(canonical).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "repo";
-  const hash = createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 8);
+  const key = isLocalNodeId(nodeId) ? canonical : `${nodeId!.trim()}::${canonical}`;
+  const hash = createHash("sha256").update(key, "utf8").digest("hex").slice(0, 8);
   return `${slug}-${hash}`;
 }
 
@@ -65,17 +84,22 @@ export function readHubConfig(): HubConfig {
     const raw = readJsonStrict<Record<string, unknown>>(filePath, 256 * 1024);
     const projectsRaw = Array.isArray(raw.projects) ? raw.projects : [];
     const projects: HubProjectEntry[] = [];
-    const seenRoots = new Set<string>();
+    const seenKeys = new Set<string>();
     for (const p of projectsRaw) {
       if (!p || typeof p !== "object") continue;
       const obj = p as Record<string, unknown>;
       if (typeof obj.id !== "string" || typeof obj.root !== "string") continue;
-      if (!fs.existsSync(obj.root) || seenRoots.has(obj.root)) continue;
-      seenRoots.add(obj.root);
+      const nodeId = typeof obj.nodeId === "string" && !isLocalNodeId(obj.nodeId) ? obj.nodeId.trim() : undefined;
+      const nodeName = typeof obj.nodeName === "string" && obj.nodeName.trim() ? obj.nodeName.trim() : undefined;
+      const dedupeKey = `${nodeId ?? LOCAL_NODE_ID}::${obj.root}`;
+      if ((!nodeId && !fs.existsSync(obj.root)) || seenKeys.has(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
       projects.push({
         id: obj.id,
         name: typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : path.basename(obj.root),
         root: obj.root,
+        ...(nodeId ? { nodeId } : {}),
+        ...(nodeName ? { nodeName } : {}),
         addedAt: typeof obj.addedAt === "number" ? obj.addedAt : Date.now(),
         lastOpenedAt: typeof obj.lastOpenedAt === "number" ? obj.lastOpenedAt : Date.now(),
       });
@@ -108,16 +132,19 @@ export function writeHubConfig(config: HubConfig): HubConfig {
 
 export function registerHubProject(
   root: string,
-  options: { name?: string; activate?: boolean } = {},
+  options: { name?: string; activate?: boolean; nodeId?: string; nodeName?: string } = {},
 ): { config: HubConfig; project: HubProjectEntry } {
-  const base = canonicalRoot(root);
+  const local = isLocalNodeId(options.nodeId);
+  const nodeId = local ? undefined : options.nodeId!.trim();
+  const nodeName = !local && options.nodeName?.trim() ? options.nodeName.trim() : undefined;
+  const base = local ? canonicalRoot(root) : normalizeRemoteRoot(root);
   const config = readHubConfig();
   const now = Date.now();
-  const existingIdx = config.projects.findIndex((p) => p.root === base);
+  const existingIdx = config.projects.findIndex((p) => (p.nodeId ?? LOCAL_NODE_ID) === (nodeId ?? LOCAL_NODE_ID) && p.root === base);
 
   let project: HubProjectEntry;
   let inferredName = options.name?.trim();
-  if (!inferredName) {
+  if (local && !inferredName) {
     try {
       const projFile = path.join(base, WORKBENCH_DIR, "project.json");
       if (fs.existsSync(projFile)) {
@@ -133,14 +160,18 @@ export function registerHubProject(
     project = {
       ...prev,
       name: inferredName || prev.name,
+      ...(nodeId ? { nodeId } : {}),
+      ...(nodeName ? { nodeName } : prev.nodeName ? { nodeName: prev.nodeName } : {}),
       lastOpenedAt: now,
     };
     config.projects[existingIdx] = project;
   } else {
     project = {
-      id: projectIdForRoot(base),
+      id: projectIdForRoot(base, nodeId),
       name: inferredName || path.basename(base) || "project",
       root: base,
+      ...(nodeId ? { nodeId } : {}),
+      ...(nodeName ? { nodeName } : {}),
       addedAt: now,
       lastOpenedAt: now,
     };

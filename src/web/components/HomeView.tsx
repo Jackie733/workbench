@@ -1,8 +1,10 @@
 import { useLayoutEffect } from "react";
-import { ArrowRight, Plus } from "lucide-react";
+import { ArrowRight, Plus, RefreshCw, WifiOff } from "lucide-react";
 import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
+import type { HubProjectSummary } from "../api.ts";
 import {
   initProjectSubmit,
+  invalidateAllWorkbenchQueries,
   openAddProjectModal,
   openRequirement,
   useProjectQuery,
@@ -12,6 +14,33 @@ import { filteredItems, progressDetail, relativeTime, STAGE_META } from "../stat
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+
+export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
+  const nodeLabel = project.nodeName ?? project.nodeId ?? "远程节点";
+  return (
+    <div className="empty-card" data-testid="remote-node-offline-card">
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <Icon icon={WifiOff} size={20} />
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>远程节点当前离线：{nodeLabel}</h2>
+      </div>
+      <p className="muted" style={{ margin: "0 0 12px" }}>
+        项目 <strong>{project.name}</strong>（<code>{project.root}</code>）位于远程节点 <strong>{nodeLabel}</strong>，当前未连接到本机 Hub。
+      </p>
+      <div className="callout info xs" style={{ marginBottom: 14 }}>
+        请在 <strong>{nodeLabel}</strong> 终端执行以下命令启动后台桥接服务：
+        <pre style={{ margin: "6px 0 0", fontFamily: "var(--mono)", fontSize: 12 }}>wb node start</pre>
+      </div>
+      <button
+        className="btn primary"
+        type="button"
+        data-testid="remote-node-refresh-btn"
+        onClick={() => void invalidateAllWorkbenchQueries()}
+      >
+        <Icon icon={RefreshCw} size={14} /> 刷新连接状态
+      </button>
+    </div>
+  );
+}
 
 export function EmptyHubCard() {
   return (
@@ -368,7 +397,10 @@ export function HomeView() {
                 const meta = STAGE_META[item.stage];
                 const detail = progressDetail(item);
                 const activeReqRun = Object.values(activeRuns).find(
-                  (r) => r.requirementId === item.id && r.status === "running",
+                  (r) =>
+                    r.requirementId === item.id &&
+                    r.status === "running" &&
+                    (!r.projectId || r.projectId === activeProjectId),
                 );
                 return (
                   <div

@@ -5,7 +5,7 @@ import { observeGitChanges } from "../core/git.ts";
 import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail } from "../core/types.ts";
+import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type RequirementDetail } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "./registry.ts";
 
@@ -17,6 +17,7 @@ export interface HandoffSynthesisOptions {
   anchorIds?: string[];
   previousRun?: AgentRunRecord | null;
   previousLogTail?: string;
+  hubOutputLanguage?: OutputLanguage;
 }
 
 /**
@@ -33,10 +34,10 @@ export async function synthesizeHandoffPacket(
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
   const { state, specMarkdown, designMarkdown, validity } = detail;
   const projectMeta = getProjectStatus(root).project;
-  const hubCfg = readHubConfig();
+  const hubLanguage = options.hubOutputLanguage ?? readHubConfig().outputLanguage;
   const outputLanguage = resolveEffectiveOutputLanguage({
     projectLanguage: projectMeta?.outputLanguage,
-    hubLanguage: hubCfg.outputLanguage,
+    hubLanguage,
     contextText: `${state.title}\n${specMarkdown}`,
   });
 

@@ -40,10 +40,11 @@ export interface AttachmentPickerProps {
   value: AttachmentMeta[];
   onChange: (metas: AttachmentMeta[]) => void;
   disabled?: boolean;
+  scope?: "project" | "hub";
 }
 
 /** 文件选择 / 拖拽 / 剪贴板截图三合一附件选择器。 */
-export function AttachmentPicker({ value, onChange, disabled }: AttachmentPickerProps) {
+export function AttachmentPicker({ value, onChange, disabled, scope = "project" }: AttachmentPickerProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -99,7 +100,7 @@ export function AttachmentPicker({ value, onChange, disabled }: AttachmentPicker
     }
     setUploading(true);
     try {
-      const res = await api.uploadAttachments(picked);
+      const res = await api.uploadAttachments(picked, scope);
       const next = [...value, ...res.attachments];
       const nextTotal = next.reduce((sum, meta) => sum + meta.size, 0);
       if (nextTotal > MAX_ATTACHMENT_TOTAL_BYTES) {

@@ -34,6 +34,7 @@ import type {
   HarnessInfo,
   HubProjectEntry,
   ModelTarget,
+  RemoteNodeInfo,
   RoutingConfig,
   RoutingPreset,
 } from "../hub/types.ts";
@@ -51,6 +52,7 @@ export interface ProjectInfoResponse {
 }
 
 export interface HubProjectSummary extends HubProjectEntry {
+  nodeOnline?: boolean;
   initialized: boolean;
   isGitRepo: boolean;
   activeCount: number;
@@ -61,11 +63,13 @@ export interface HubProjectSummary extends HubProjectEntry {
 export interface HubStateResponse {
   hubMode: boolean;
   activeProjectId: string | null;
+  activeNodeId?: string;
   projects: HubProjectSummary[];
+  nodes?: RemoteNodeInfo[];
   harnesses: HarnessInfo[];
   routing: RoutingConfig;
   outputLanguage?: OutputLanguage;
-  activeRuns: Array<AgentRunRecord & { requirementId: string }>;
+  activeRuns: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>;
   evolutionOpenCount?: number;
   cooldownCount?: number;
 }
@@ -148,6 +152,9 @@ async function requestForm<T>(url: string, form: FormData): Promise<T> {
   const data = (await resp.json()) as Record<string, unknown>;
   if (!resp.ok) {
     const err = data.error as { code?: string; message?: string; details?: Record<string, unknown> } | undefined;
+    if (resp.status === 401 && err?.code === "unauthorized" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("wb:unauthorized"));
+    }
     throw new ApiClientError(err?.code ?? "request_failed", err?.message ?? `HTTP ${resp.status}`, err?.details);
   }
   return data as T;
@@ -161,14 +168,21 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const data = (await resp.json()) as Record<string, unknown>;
   if (!resp.ok) {
     const err = data.error as { code?: string; message?: string; details?: Record<string, unknown> } | undefined;
+    if (resp.status === 401 && err?.code === "unauthorized" && typeof window !== "undefined") {
+      window.dispatchEvent(new Event("wb:unauthorized"));
+    }
     throw new ApiClientError(err?.code ?? "request_failed", err?.message ?? `HTTP ${resp.status}`, err?.details);
   }
   return data as T;
 }
 
 export const api = {
+  authStatus: () => requestJson<{ required: boolean; authenticated: boolean }>("/api/auth/status"),
+  login: (password: string) =>
+    requestJson<{ authenticated: boolean }>("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
+  logout: () => requestJson<{ authenticated: boolean }>("/api/auth/logout", { method: "POST" }),
   getHubState: () => requestJson<HubStateResponse>("/api/hub/state"),
-  addHubProject: (input: { root: string; name?: string; initPrivacy?: PrivacyMode; activate?: boolean }) =>
+  addHubProject: (input: { root: string; name?: string; initPrivacy?: PrivacyMode; activate?: boolean; nodeId?: string }) =>
     requestJson<{ project: HubProjectEntry; activeProjectId: string | null; projects: HubProjectSummary[] }>("/api/hub/projects", {
       method: "POST",
       body: JSON.stringify(input),
@@ -183,9 +197,17 @@ export const api = {
       `/api/hub/projects/${encodeURIComponent(projectId)}`,
       { method: "DELETE" },
     ),
-  browseFs: (targetPath?: string) =>
-    requestJson<BrowseResponse>(targetPath ? `/api/fs/browse?path=${encodeURIComponent(targetPath)}` : "/api/fs/browse"),
-  refreshHarnesses: () => requestJson<{ harnesses: HarnessInfo[] }>("/api/hub/harnesses/refresh", { method: "POST" }),
+  browseFs: (targetPath?: string, nodeId?: string) => {
+    const params = new URLSearchParams();
+    if (targetPath) params.set("path", targetPath);
+    if (nodeId && nodeId !== "local") params.set("node", nodeId);
+    const qs = params.toString();
+    return requestJson<BrowseResponse>(qs ? `/api/fs/browse?${qs}` : "/api/fs/browse");
+  },
+  refreshHarnesses: (nodeId?: string) => {
+    const qs = nodeId && nodeId !== "local" ? `?node=${encodeURIComponent(nodeId)}` : "";
+    return requestJson<{ harnesses: HarnessInfo[] }>(`/api/hub/harnesses/refresh${qs}`, { method: "POST" });
+  },
   saveRouting: (routing: RoutingConfig) =>
     requestJson<{ routing: RoutingConfig }>("/api/hub/routing", {
       method: "PUT",
@@ -202,10 +224,11 @@ export const api = {
       body: JSON.stringify(input),
     }),
   getEvolution: () => requestJson<EvolutionStateResponse>(withProjectParam("/api/hub/evolution")),
-  uploadAttachments: (files: File[]) => {
+  uploadAttachments: (files: File[], scope: "project" | "hub" = "project") => {
     const form = new FormData();
     for (const file of files) form.append("files", file, file.name);
-    return requestForm<{ attachments: AttachmentMeta[] }>("/api/uploads", form);
+    const endpoint = scope === "hub" ? "/api/uploads?scope=hub" : withProjectParam("/api/uploads");
+    return requestForm<{ attachments: AttachmentMeta[] }>(endpoint, form);
   },
   reportPainPoint: (input: {
     source?: PainPointSource;

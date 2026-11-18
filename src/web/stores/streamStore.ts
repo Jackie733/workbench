@@ -1,13 +1,15 @@
 import { create } from "zustand";
 import type { AgentRunRecord } from "../../core/types.ts";
 
+export type ActiveRunItem = AgentRunRecord & { requirementId: string; root?: string; projectId?: string };
+
 export interface StreamStoreState {
-  activeRuns: Record<string, AgentRunRecord & { requirementId: string }>;
+  activeRuns: Record<string, ActiveRunItem>;
   liveRunLogs: Record<string, string>;
   selectedRunId: string | null;
 
-  syncActiveRuns: (runs: Array<AgentRunRecord & { requirementId: string }>) => void;
-  setRunStarted: (run: AgentRunRecord & { requirementId: string }) => void;
+  syncActiveRuns: (runs: ActiveRunItem[]) => void;
+  setRunStarted: (run: ActiveRunItem) => void;
   appendRunLog: (runId: string, chunk: string) => void;
   setRunLogFull: (runId: string, log: string) => void;
   markRunFinished: (runId: string) => void;
@@ -21,7 +23,7 @@ export const useStreamStore = create<StreamStoreState>((set) => ({
 
   syncActiveRuns: (runs) =>
     set(() => {
-      const nextActive: Record<string, AgentRunRecord & { requirementId: string }> = {};
+      const nextActive: Record<string, ActiveRunItem> = {};
       for (const r of runs) nextActive[r.id] = r;
       return { activeRuns: nextActive };
     }),

@@ -20,16 +20,21 @@ import {
   type ResolvedOutputLanguage,
 } from "../core/language.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
+import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type RequirementDetail, type ReviewVerdict } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick } from "./discovery.ts";
-import { inspectFinishedRunForPainPoints, syncRequirementMirrorToSandbox } from "./evolution.ts";
+import {
+  inspectFinishedRunForPainPoints,
+  syncRequirementMirrorToSandbox,
+  type EvolutionPainPoint,
+  type PainPointReportInput,
+} from "./evolution.ts";
 import { synthesizeHandoffPacket } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
 import { recordModelRunOutcome } from "./telemetry.ts";
-import type { HarnessInfo, ModelTarget } from "./types.ts";
+import type { HarnessInfo, ModelTarget, RoutingConfig } from "./types.ts";
 
 export interface BuiltCommand {
   command: string;
@@ -561,21 +566,35 @@ function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorRe
   return { displayText: `${trimmed}\n`, replyText: null };
 }
 
+export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
+
 export class HubExecutor {
   private readonly activeJobs = new Map<string, ActiveJob>();
   private readonly runLogs = new Map<string, string>();
   private readonly listeners = new Set<(ev: RunExecutorEvent) => void>();
   private readonly cliEntryPath: string;
   private readonly commandBuilder?: CustomCommandBuilder;
+  private readonly getHubPreferences?: () => { routing?: RoutingConfig; outputLanguage?: OutputLanguage };
+  private readonly onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
+  private readonly onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
+  private readonly nodeId?: string;
   private cachedHarnesses: HarnessInfo[] | null = null;
 
   constructor(options: {
     cliEntryPath?: string;
     commandBuilder?: CustomCommandBuilder;
     initialHarnesses?: HarnessInfo[];
+    getHubPreferences?: () => { routing?: RoutingConfig; outputLanguage?: OutputLanguage };
+    onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
+    onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
+    nodeId?: string;
   } = {}) {
     this.cliEntryPath = options.cliEntryPath ?? path.resolve(import.meta.dir, "../cli/index.ts");
     this.commandBuilder = options.commandBuilder;
+    this.getHubPreferences = options.getHubPreferences;
+    this.onTelemetryOutcome = options.onTelemetryOutcome;
+    this.onPainPoint = options.onPainPoint;
+    this.nodeId = options.nodeId;
     if (options.initialHarnesses) {
       this.cachedHarnesses = options.initialHarnesses;
     }
@@ -614,13 +633,14 @@ export class HubExecutor {
     return this.cachedHarnesses;
   }
 
-  getActiveRuns(root?: string): Array<AgentRunRecord & { requirementId: string }> {
-    const out: Array<AgentRunRecord & { requirementId: string }> = [];
+  getActiveRuns(root?: string): Array<AgentRunRecord & { requirementId: string; root?: string }> {
+    const out: Array<AgentRunRecord & { requirementId: string; root?: string }> = [];
     for (const job of this.activeJobs.values()) {
       if (root && job.root !== root) continue;
       out.push({
         id: job.runId,
         requirementId: job.requirementId,
+        root: job.root,
         action: job.action,
         harness: job.target.harness,
         model: job.target.model,
@@ -652,7 +672,10 @@ export class HubExecutor {
       }
     }
 
-    const cfg = readHubConfig();
+    const prefs = this.getHubPreferences?.();
+    const cfg = prefs?.routing ? null : readHubConfig();
+    const activeRouting = prefs?.routing ?? cfg!.routing;
+    const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
     const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
     const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
@@ -680,7 +703,7 @@ export class HubExecutor {
         : input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
           : null;
-    const candidates = resolveRouteCandidates(cfg.routing, harnesses, input.action, override);
+    const candidates = resolveRouteCandidates(activeRouting, harnesses, input.action, override);
 
     let target = candidates[0]!;
     if (input.useFallback && prevRun) {
@@ -714,6 +737,7 @@ export class HubExecutor {
       anchorIds: input.anchorIds,
       previousRun: prevRun,
       previousLogTail: prevTail,
+      hubOutputLanguage,
     });
 
     // Determine whether we can safely use same-harness native session resume
@@ -775,6 +799,7 @@ export class HubExecutor {
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
       WORKBENCH_ROOT: base,
       WORKBENCH_REQ_ID: id,
+      WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
       ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
     };
 
@@ -982,7 +1007,7 @@ export class HubExecutor {
           : undefined;
 
       try {
-        recordModelRunOutcome({
+        const outcome: TelemetryOutcomeInput = {
           harness: target.harness,
           model: target.model,
           action: input.action,
@@ -992,7 +1017,12 @@ export class HubExecutor {
           timedOut: job.timedOut,
           modelFallback: job.modelFallback === true,
           now: endedAt,
-        });
+        };
+        if (this.onTelemetryOutcome) {
+          this.onTelemetryOutcome(outcome);
+        } else {
+          recordModelRunOutcome(outcome);
+        }
       } catch {
         // Telemetry write failure must not abort run finalization.
       }
@@ -1069,6 +1099,8 @@ export class HubExecutor {
             timedOut: job.timedOut,
             timeoutReason: job.timeoutReason,
             isRsiSandbox: codeRoot !== base,
+            ...(this.nodeId ? { nodeId: this.nodeId } : {}),
+            ...(this.onPainPoint ? { onReport: this.onPainPoint } : {}),
           });
         }
         if (codeRoot !== base) {

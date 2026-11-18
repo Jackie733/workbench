@@ -8,10 +8,12 @@ import {
   Folder,
   GitPullRequest,
   Globe,
+  Laptop,
   Lightbulb,
   Link2,
   Pencil,
   RefreshCw,
+  Server,
   Sparkles,
   Trash2,
   Zap,
@@ -282,13 +284,26 @@ export function Modals() {
 
   if (m.kind === "add_project") {
     const browse = m.browse;
-    const browseDir = async (targetPath: string) => {
+    const nodes = hub?.nodes ?? [];
+    const connectedNodes = nodes.filter((n) => n.isLocal || n.connected);
+    const selectedNodeId = m.nodeId || "local";
+    const originHint = typeof window !== "undefined" ? window.location.origin : "http://<ubuntu-ip>:4318";
+
+    const browseDir = async (targetPath?: string, nodeOverride?: string) => {
+      const targetNode = nodeOverride ?? selectedNodeId;
       try {
-        const next = await api.browseFs(targetPath);
+        const next = await api.browseFs(targetPath, targetNode);
         setModal((prev) =>
-          prev?.kind === "add_project" ? { ...prev, browse: next, pathInput: next.currentPath } : prev,
+          prev?.kind === "add_project"
+            ? { ...prev, nodeId: targetNode, browse: next, pathInput: next.currentPath }
+            : prev,
         );
       } catch (err) {
+        setModal((prev) =>
+          prev?.kind === "add_project"
+            ? { ...prev, nodeId: targetNode, browse: null, pathInput: "" }
+            : prev,
+        );
         showToast(err instanceof Error ? err.message : "无法打开目录", true);
       }
     };
@@ -304,6 +319,7 @@ export function Modals() {
           root: rootPath,
           name: m.nameInput.trim() || undefined,
           initPrivacy: m.initPrivacy === "none" ? undefined : m.initPrivacy,
+          ...(selectedNodeId !== "local" ? { nodeId: selectedNodeId } : {}),
         });
         setApiProjectScope(out.project.id);
         setModal(null);
@@ -321,7 +337,60 @@ export function Modals() {
 
     return (
       <ModalShell onClose={close} wide testId="add-project-modal">
-        <h3>添加或切换本地项目目录</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>添加或切换项目目录</h3>
+          <button
+            className="btn ghost xs"
+            type="button"
+            data-testid="toggle-node-help-btn"
+            onClick={() =>
+              setModal((prev) => (prev?.kind === "add_project" ? { ...prev, showNodeHelp: !prev.showNodeHelp } : prev))
+            }
+          >
+            {m.showNodeHelp ? "收起 WSL2 接入指引" : "+ 如何接入 Windows WSL2？"}
+          </button>
+        </div>
+
+        {(connectedNodes.length > 1 || selectedNodeId !== "local") && (
+          <div style={{ marginBottom: 10 }}>
+            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+              项目所在设备节点
+            </label>
+            <div className="segmented" role="tablist" aria-label="选择设备节点" data-testid="add-project-node-tabs">
+              {connectedNodes.map((n) => (
+                <button
+                  key={n.nodeId}
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedNodeId === n.nodeId}
+                  className={selectedNodeId === n.nodeId ? "active" : ""}
+                  data-testid={`add-project-node-${n.nodeId}`}
+                  onClick={() => void browseDir(undefined, n.nodeId)}
+                >
+                  <Icon icon={n.isLocal ? Server : Laptop} size={14} /> {n.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {m.showNodeHelp && (
+          <div className="callout info xs" style={{ marginBottom: 10 }} data-testid="node-connect-guide">
+            <div>
+              <strong>将 Windows WSL2 中的工作项目挂载到此 Web UI（平时零负载，按需执行）：</strong>
+            </div>
+            <div style={{ marginTop: 4 }}>
+              在 Windows WSL2 终端运行一次以下命令，即可在上方切换选择 WSL2 目录：
+            </div>
+            <pre style={{ margin: "6px 0 0", fontFamily: "var(--mono)", fontSize: 11.5, whiteSpace: "pre-wrap" }}>
+              {`wb node install --hub ${originHint} --token <访问密码> --id wsl-work --name "Windows WSL2"`}
+            </pre>
+            <div className="muted" style={{ marginTop: 4 }}>
+              注：访问密码可在当前主控机执行 <code>wb service password</code> 查看或重置。
+            </div>
+          </div>
+        )}
+
         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
           项目根目录路径（支持手动输入或下方点击浏览）
         </label>
@@ -332,7 +401,7 @@ export function Modals() {
             data-testid="add-project-path"
             autoFocus
             value={m.pathInput}
-            placeholder="/home/jackie/code/your-project"
+            placeholder="/home/tsien/code/your-project"
             onChange={(e) =>
               setModal((prev) => (prev?.kind === "add_project" ? { ...prev, pathInput: e.target.value } : prev))
             }
@@ -474,10 +543,12 @@ export function Modals() {
     };
 
     const refreshHarnesses = async () => {
-      const res = await runBusy(() => api.refreshHarnesses());
+      const targetNodeId = hub?.activeNodeId;
+      const res = await runBusy(() => api.refreshHarnesses(targetNodeId));
       if (res) {
         await syncHubStatePatch({ harnesses: res.harnesses });
-        showToast("已刷新本机 CLI 与模型列表");
+        const nodeLabel = hub?.nodes?.find((n) => n.nodeId === targetNodeId)?.name ?? "本机";
+        showToast(`已刷新 ${nodeLabel} CLI 与模型列表`);
       }
     };
 
@@ -1049,6 +1120,7 @@ export function Modals() {
           detail: m.detail.trim() || undefined,
           ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
           context: {
+            nodeId: hub?.activeNodeId && hub.activeNodeId !== "local" ? hub.activeNodeId : undefined,
             projectRoot: project?.root,
             requirementId: selectedId ?? undefined,
             domSelector: m.domSelector.trim() || undefined,
@@ -1165,6 +1237,7 @@ export function Modals() {
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, attachments } : prev))
           }
           disabled={busy}
+          scope="hub"
         />
         <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
           <input

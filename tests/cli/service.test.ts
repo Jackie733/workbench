@@ -58,11 +58,12 @@ function fixture(platform: "darwin" | "linux" = "darwin", extra: Partial<UserSer
     if (starting) {
       const installation = JSON.parse(fs.readFileSync(path.join(hubDir, "service.json"), "utf8"));
       server?.stop(true);
-      server = Bun.serve({ hostname: "127.0.0.1", port: installation.port, fetch: () => Response.json({ ok: true, hubMode: true, serverPid: process.pid }) });
+      const host = installation.host ?? "127.0.0.1";
+      server = Bun.serve({ hostname: host, port: installation.port, fetch: () => Response.json({ ok: true, hubMode: true, serverPid: process.pid }) });
       actualPort = server.port!;
       loaded = true;
       active = true;
-      fs.writeFileSync(path.join(hubDir, "daemon.json"), JSON.stringify({ pid: process.pid, port: actualPort, url: `http://127.0.0.1:${actualPort}`, root: home, startedAt: new Date().toISOString(), version: "test" }));
+      fs.writeFileSync(path.join(hubDir, "daemon.json"), JSON.stringify({ pid: process.pid, port: actualPort, hostname: host, url: `http://${host}:${actualPort}`, root: home, startedAt: new Date().toISOString(), version: "test" }));
     } else if (["bootout", "stop", "disable"].includes(action!)) {
       server?.stop(true);
       server = null;
@@ -550,9 +551,29 @@ describe("service-aware CLI routing in isolated child environments", () => {
     expect(result.calls.filter((call) => call[1] === "bootstrap")).toHaveLength(4);
   });
 
-  test("service commands reject unknown actions, arguments, extra positionals and invalid ports", async () => {
-    const result = await child([["service", "unknown"], ["service", "install", "--host", "127.0.0.1"], ["service", "install", "--port", "0"], ["service", "install", "--port", "65536"], ["service", "install", "--port"], ["service", "install", "--port", "2.5"], ["service", "status", "extra"]]);
-    expect(result.results).toEqual([1, 1, 1, 1, 1, 1, 1]);
+  test("service commands reject unknown actions, arguments, extra positionals, invalid hosts and invalid ports", async () => {
+    const result = await child([["service", "unknown"], ["service", "install", "--unknown"], ["service", "install", "--host", "bad host!"], ["service", "install", "--port", "0"], ["service", "install", "--port", "65536"], ["service", "install", "--port"], ["service", "install", "--port", "2.5"], ["service", "status", "extra"]]);
+    expect(result.results).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
     expect(result.stderr).toContain('"code": "invalid_input"');
+  });
+
+  test("installUserService supports explicit --host 0.0.0.0 with auth credentials and lanUrl", async () => {
+    const f = fixture("linux");
+    f.setFailure(null);
+    const port = await unusedPort();
+    const initial = await f.manager.installUserService({ port });
+    expect(initial.healthy).toBe(true);
+    expect(initial.url).toBe(`http://127.0.0.1:${port}`);
+
+    // Reconfiguring host from 127.0.0.1 to 0.0.0.0 on the same active port stops old listener first.
+    const status = await f.manager.installUserService({ port, host: "0.0.0.0" });
+    expect(status.healthy).toBe(true);
+    expect(status.url).toBe(`http://0.0.0.0:${port}`);
+    const installation = f.manager.readServiceInstallation()!;
+    expect(installation.host).toBe("0.0.0.0");
+    expect(fs.existsSync(path.join(f.hubDir, "auth.json"))).toBe(true);
+    expect(fs.statSync(path.join(f.hubDir, "auth.json")).mode & 0o777).toBe(0o600);
+    const unitText = fs.readFileSync(installation.definitionPath, "utf8");
+    expect(unitText).toContain(`"--host" "0.0.0.0"`);
   });
 });
