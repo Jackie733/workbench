@@ -177,15 +177,3 @@ export function ModalShell({
     </Root>
   );
 }
-
-export function ToastBanner() {
-  const toast = useUiStore((s) => s.toast);
-  const language = useUiStore((s) => s.language);
-  if (!toast) return null;
-  const text = toast.messageKey ? t(language, toast.messageKey, toast.params) : toast.message;
-  return (
-    <div className={`toast ${toast.isError ? "error" : ""}`} role="status">
-      {text}
-    </div>
-  );
-}

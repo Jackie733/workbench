@@ -14,7 +14,7 @@ import type {
   ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
-import { REASONING_EFFORTS, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
+import { REASONING_EFFORTS, type DiscoveredModel, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
 import type { BrowseResponse } from "./api.ts";
 import {
@@ -398,21 +398,81 @@ export function activeRunnerChoice(
   return primary ? { harness: primary.harness, model: primary.model, ...(effort ? { effort } : {}) } : {};
 }
 
+export interface ModelEffortCapability {
+  mode: "configurable" | "locked" | "unsupported";
+  efforts: ReasoningEffort[];
+  defaultEffort?: ReasoningEffort;
+}
+
+export function getModelEffortCapability(
+  harnesses: HarnessInfo[],
+  harnessId?: string,
+  modelId?: string,
+): ModelEffortCapability {
+  if (!harnessId || !modelId) {
+    return { mode: "configurable", efforts: ["low", "medium", "high", "xhigh"] };
+  }
+  const h = harnesses.find((x) => x.id === harnessId);
+  const exact = h?.models.find((x) => x.id === modelId);
+  if (exact) {
+    if (exact.effortLocked) {
+      const lockedEff = exact.defaultEffort ?? exact.supportedEfforts?.[0];
+      return {
+        mode: "locked",
+        efforts: lockedEff ? [lockedEff] : [],
+        defaultEffort: lockedEff,
+      };
+    }
+    if (exact.supportedEfforts !== undefined) {
+      if (exact.supportedEfforts.length === 0) {
+        return { mode: "unsupported", efforts: [] };
+      }
+      if (exact.supportedEfforts.length === 1) {
+        return {
+          mode: "locked",
+          efforts: exact.supportedEfforts,
+          defaultEffort: exact.defaultEffort ?? exact.supportedEfforts[0],
+        };
+      }
+      return {
+        mode: "configurable",
+        efforts: exact.supportedEfforts,
+        defaultEffort: exact.defaultEffort,
+      };
+    }
+  } else if (h) {
+    for (const candidate of h.models) {
+      if (!candidate.effortVariants) continue;
+      for (const [eff, variantId] of Object.entries(candidate.effortVariants) as Array<[ReasoningEffort, string]>) {
+        if (variantId === modelId) {
+          return {
+            mode: "locked",
+            efforts: [eff],
+            defaultEffort: eff,
+          };
+        }
+      }
+    }
+  }
+
+  if (harnessId === "codex" || harnessId === "agy" || harnessId === "qodercn") {
+    return { mode: "configurable", efforts: ["low", "medium", "high", "xhigh", "max"] };
+  }
+  if (harnessId === "omp") {
+    return { mode: "configurable", efforts: ["minimal", "low", "medium", "high", "xhigh", "max", "auto"] };
+  }
+  if (harnessId === "opencode") {
+    return { mode: "configurable", efforts: ["low", "medium", "high"] };
+  }
+  return { mode: "configurable", efforts: [...REASONING_EFFORTS] };
+}
+
 export function supportedEffortsForModel(
   harnesses: HarnessInfo[],
   harnessId?: string,
   modelId?: string,
 ): ReasoningEffort[] {
-  if (!harnessId || !modelId) return ["low", "medium", "high", "xhigh"];
-  const h = harnesses.find((x) => x.id === harnessId);
-  const m = h?.models.find((x) => x.id === modelId);
-  if (m?.supportedEfforts && m.supportedEfforts.length > 0) return m.supportedEfforts;
-  if (harnessId === "codex" || harnessId === "agy" || harnessId === "qodercn") {
-    return ["low", "medium", "high", "xhigh", "max"];
-  }
-  if (harnessId === "omp") return ["minimal", "low", "medium", "high", "xhigh", "max", "auto"];
-  if (harnessId === "opencode") return ["low", "medium", "high"];
-  return [...REASONING_EFFORTS];
+  return getModelEffortCapability(harnesses, harnessId, modelId).efforts;
 }
 
 export function collectModelOptions(
@@ -424,8 +484,10 @@ export function collectModelOptions(
   harnessLabel: string;
   modelId: string;
   displayLabel: string;
-  tier: string;
+  tier: DiscoveredModel["tier"];
   provider?: string;
+  intelligence?: number;
+  isLegacy?: boolean;
 }> {
   const opts: Array<{
     key: string;
@@ -434,8 +496,10 @@ export function collectModelOptions(
     harnessLabel: string;
     modelId: string;
     displayLabel: string;
-    tier: string;
+    tier: DiscoveredModel["tier"];
     provider?: string;
+    intelligence?: number;
+    isLegacy?: boolean;
   }> = [];
   for (const h of harnesses) {
     if (!h.installed) continue;
@@ -449,6 +513,8 @@ export function collectModelOptions(
         displayLabel: m.label ?? m.id,
         tier: m.tier,
         ...(m.provider ? { provider: m.provider } : {}),
+        ...(typeof m.intelligence === "number" ? { intelligence: m.intelligence } : {}),
+        ...(m.isLegacy ? { isLegacy: true } : {}),
       });
     }
   }

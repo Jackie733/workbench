@@ -359,6 +359,14 @@ const zhCN = {
   "shot.updated": "截图证据已更新（{count} 张）",
   "shot.partial": "截图部分完成（{count} 张），存在跳过项",
   "shot.skippedReason": "截图采集已跳过",
+  "shot.reason.browser_missing":
+    "未找到 Chromium/Chrome 浏览器，已跳过截图。可安装 Playwright Chromium，或设置 WORKBENCH_CHROME_PATH 指向 Chrome 可执行文件。",
+  "shot.reason.chrome_path_missing": "WORKBENCH_CHROME_PATH 指向的浏览器不存在：{path}",
+  "shot.reason.puppeteer_path_missing": "WORKBENCH_PUPPETEER_PATH 指向的 puppeteer-core 不存在：{path}",
+  "shot.reason.server_unavailable": "启动或复用本地 Web 服务失败，已跳过截图",
+  "shot.reason.browser_launch_failed":
+    "启动无头浏览器失败，已跳过截图。可安装 Playwright Chromium 或设置 WORKBENCH_CHROME_PATH。",
+  "shot.reason.no_shots": "未采集到任何截图",
 
   "changes.tasks": "实施任务清单（{done}/{total}）",
   "changes.tasksEmpty": "Agent 开始实施后将在此自动维护步骤进度。",
@@ -471,6 +479,9 @@ const zhCN = {
   "runner.quickPresets": "快捷策略",
   "runner.effortTitle": "模型推理强度 (Reasoning Effort)",
   "runner.effortDefault": "默认强度",
+  "runner.effortLockedTitle": "该模型变体已内置固定推理强度，不可单独覆盖",
+  "runner.effortLockedLabel": "固定: {effort}",
+  "runner.effortBuiltin": "内置",
 
   "newReq.title": "新建需求",
   "newReq.modeAria": "新建需求方式",
@@ -529,6 +540,11 @@ const zhCN = {
   "routing.unverified": "未验证",
   "routing.effortTitle": "该阶段推理强度 (Reasoning Effort)",
   "routing.defaultEffort": "默认强度",
+  "routing.effortLockedTitle": "该模型变体已内置固定推理强度，不可单独覆盖",
+  "routing.effortLockedLabel": "固定 ({effort})",
+  "routing.effortBuiltin": "内置",
+  "routing.effortUnsupportedTitle": "该模型不支持或无需调节推理强度",
+  "routing.effortUnsupportedLabel": "自动 / 无需调节",
   "routing.outputLanguageCallout": "所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。",
   "routing.hubLangLabel": "Hub 全局默认输出语言（对所有项目生效）",
   "routing.langZhDefault": "简体中文 (zh-CN) — 推荐默认",
@@ -1209,6 +1225,14 @@ const en: Record<MessageKey, string> = {
   "shot.updated": "Screenshot evidence updated ({count})",
   "shot.partial": "Screenshots partially captured ({count}); some were skipped",
   "shot.skippedReason": "Screenshot capture skipped",
+  "shot.reason.browser_missing":
+    "No Chromium/Chrome browser was found, so screenshots were skipped. Install Playwright Chromium or set WORKBENCH_CHROME_PATH to a Chrome executable.",
+  "shot.reason.chrome_path_missing": "The browser referenced by WORKBENCH_CHROME_PATH does not exist: {path}",
+  "shot.reason.puppeteer_path_missing": "The puppeteer-core referenced by WORKBENCH_PUPPETEER_PATH does not exist: {path}",
+  "shot.reason.server_unavailable": "Failed to start or reuse the local web server, so screenshots were skipped",
+  "shot.reason.browser_launch_failed":
+    "Failed to launch the headless browser, so screenshots were skipped. Install Playwright Chromium or set WORKBENCH_CHROME_PATH.",
+  "shot.reason.no_shots": "No screenshots were captured",
 
   "changes.tasks": "Implementation tasks ({done}/{total})",
   "changes.tasksEmpty": "Step progress will appear here once the agent starts implementing.",
@@ -1321,6 +1345,9 @@ const en: Record<MessageKey, string> = {
   "runner.quickPresets": "Quick strategies",
   "runner.effortTitle": "Model reasoning effort",
   "runner.effortDefault": "Default effort",
+  "runner.effortLockedTitle": "This model variant has a built-in fixed reasoning effort and cannot be overridden",
+  "runner.effortLockedLabel": "Fixed: {effort}",
+  "runner.effortBuiltin": "built-in",
 
   "newReq.title": "New requirement",
   "newReq.modeAria": "Requirement creation mode",
@@ -1379,6 +1406,11 @@ const en: Record<MessageKey, string> = {
   "routing.unverified": "unverified",
   "routing.effortTitle": "Reasoning effort for this stage",
   "routing.defaultEffort": "Default effort",
+  "routing.effortLockedTitle": "This model variant has a built-in fixed reasoning effort and cannot be overridden",
+  "routing.effortLockedLabel": "Fixed ({effort})",
+  "routing.effortBuiltin": "built-in",
+  "routing.effortUnsupportedTitle": "This model does not support or need reasoning-effort tuning",
+  "routing.effortUnsupportedLabel": "Auto / not needed",
   "routing.outputLanguageCallout": "All model prompts, handoff briefs (handoff.md), and MCP tool descriptions will strictly follow the document output language configured here, avoiding mixed Chinese/English output across models.",
   "routing.hubLangLabel": "Hub default output language (applies to all projects)",
   "routing.langZhDefault": "简体中文 (zh-CN) — recommended default",
@@ -1878,22 +1910,42 @@ const ERROR_CODE_KEYS: Record<string, MessageKey> = {
   request_failed: "error.request_failed",
 };
 
-/** Localizes stable API error codes while keeping server-specific detail readable. */
-export function describeClientError(language: UiLanguage, err: unknown): string {
+/**
+ * Keeps the stable error message key and raw detail separate so already-visible
+ * feedback can be re-rendered in the language currently selected by the user.
+ */
+export interface LocalizedError {
+  key: MessageKey | null;
+  params?: MessageParams;
+  text: string;
+}
+
+export function describeClientErrorRef(err: unknown): LocalizedError {
   if (err instanceof ApiClientError) {
-    const baseKey = ERROR_CODE_KEYS[err.code];
-    const base = baseKey
-      ? t(language, baseKey)
-      : t(language, "error.request_failed");
+    const baseKey = ERROR_CODE_KEYS[err.code] ?? "error.request_failed";
     const detail = err.message?.trim();
-    if (!detail || detail === base || ERROR_CODE_KEYS_REQUIRING_DETAIL.has(err.code)) return base;
-    return t(language, "error.withDetail", { message: base, detail });
+    if (!detail || ERROR_CODE_KEYS_REQUIRING_DETAIL.has(err.code)) {
+      return { key: baseKey, text: detail ?? "" };
+    }
+    return {
+      key: "error.withDetail",
+      params: { message: { key: baseKey }, detail },
+      text: detail,
+    };
   }
   if (err instanceof Error && err.message) {
-    if (/fetch|network|load failed/i.test(err.message)) return t(language, "error.network");
-    return err.message;
+    if (/fetch|network|load failed/i.test(err.message)) {
+      return { key: "error.network", text: err.message };
+    }
+    return { key: null, text: err.message };
   }
-  return t(language, "toast.operationFailed");
+  return { key: "toast.operationFailed", text: "" };
+}
+
+/** Localizes stable API error codes while keeping server-specific detail readable. */
+export function describeClientError(language: UiLanguage, err: unknown): string {
+  const ref = describeClientErrorRef(err);
+  return ref.key ? t(language, ref.key, ref.params) : ref.text;
 }
 
 const ERROR_CODE_KEYS_REQUIRING_DETAIL = new Set(["revision_conflict", "unauthorized"]);

@@ -424,6 +424,15 @@ export interface ReviewReport {
 export type ScreenshotTrigger = "auto_submit" | "manual";
 export type ScreenshotBatchStatus = "captured" | "partial" | "skipped";
 
+/** Stable reason codes for workbench-generated screenshot skips; UI localizes them. */
+export type ScreenshotSkipReasonCode =
+  | "browser_missing"
+  | "chrome_path_missing"
+  | "puppeteer_path_missing"
+  | "server_unavailable"
+  | "browser_launch_failed"
+  | "no_shots";
+
 export interface ScreenshotShot {
   /** Stable shot ID such as S-<ts>-<uuid8>. */
   id: string;
@@ -446,6 +455,8 @@ export interface ScreenshotBatch {
   codeSnapshotHash: string;
   status: ScreenshotBatchStatus;
   skipReason: string | null;
+  /** Present for skips produced by the workbench itself; historical raw reason stays readable. */
+  reasonCode?: ScreenshotSkipReasonCode | null;
   shots: ScreenshotShot[];
   durationMs: number;
 }
@@ -454,6 +465,8 @@ export interface ScreenshotCaptureResult {
   status: ScreenshotBatchStatus;
   batchId: string | null;
   reason: string | null;
+  reasonCode?: ScreenshotSkipReasonCode | null;
+  reasonParams?: Record<string, string> | null;
   batch: ScreenshotBatch | null;
 }
 

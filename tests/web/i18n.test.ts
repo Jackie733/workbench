@@ -2,11 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { RequirementState, ValidityReport } from "../../src/core/types.ts";
 import { deriveActionBanner, evaluateAcceptanceGate } from "../../src/core/validity.ts";
 import { ApiClientError } from "../../src/web/api.ts";
+import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import {
   applyDocumentLanguage,
   CATALOGS,
   DEFAULT_UI_LANGUAGE,
   describeClientError,
+  describeClientErrorRef,
   formatDateTime,
   formatNumber,
   formatRelativeTime,
@@ -245,6 +247,53 @@ describe("status and error messages", () => {
     expect(detailed).toContain(t("en", "error.invalid_input"));
     expect(detailed).toContain("路径不能为空");
     expect(describeClientError("en", new TypeError("fetch failed"))).toBe(t("en", "error.network"));
+  });
+
+  test("already-visible client errors keep message keys so language switches re-render them", () => {
+    const detailed = describeClientErrorRef(new ApiClientError("invalid_input", "路径不能为空"));
+    expect(detailed.key).toBe("error.withDetail");
+    expect(t("en", detailed.key!, detailed.params)).toContain(t("en", "error.invalid_input"));
+    expect(t("en", detailed.key!, detailed.params)).toContain("路径不能为空");
+    expect(t("zh-CN", detailed.key!, detailed.params)).toContain(t("zh-CN", "error.invalid_input"));
+    expect(detailed.text).toBe("路径不能为空");
+
+    const pin = describeClientErrorRef(new ApiClientError("unauthorized", "invalid pin"));
+    expect(pin.key).toBe("error.unauthorized");
+    expect(t("en", "login.invalidPin")).toBe("Incorrect access PIN; try again");
+    expect(t("zh-CN", "login.invalidPin")).toBe("访问密码错误，请重试");
+
+    const network = describeClientErrorRef(new TypeError("fetch failed"));
+    expect(network.key).toBe("error.network");
+    expect(t("zh-CN", network.key!)).toContain("网络请求失败");
+
+    const unknown = describeClientErrorRef(new Error("upstream said no"));
+    expect(unknown.key).toBeNull();
+    expect(unknown.text).toBe("upstream said no");
+  });
+
+  test("screenshot skips expose stable reason codes with localized prompts", () => {
+    const original = process.env.WORKBENCH_CHROME_PATH;
+    process.env.WORKBENCH_CHROME_PATH = "/definitely/missing/chrome";
+    try {
+      const environment = resolveBrowserEnvironment();
+      expect(environment.ok).toBe(false);
+      expect(environment.reasonCode).toBe("chrome_path_missing");
+      expect(t("en", "shot.reason.chrome_path_missing", environment.reasonParams)).toContain("does not exist");
+      expect(t("zh-CN", "shot.reason.chrome_path_missing", environment.reasonParams)).toContain("不存在");
+    } finally {
+      if (original === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+      else process.env.WORKBENCH_CHROME_PATH = original;
+    }
+
+    for (const key of [
+      "shot.reason.browser_missing",
+      "shot.reason.puppeteer_path_missing",
+      "shot.reason.server_unavailable",
+      "shot.reason.browser_launch_failed",
+      "shot.reason.no_shots",
+    ] as const) {
+      expect(t("en", key)).not.toBe(t("zh-CN", key));
+    }
   });
 
   test("legacy evidence without message refs stays readable in English", () => {

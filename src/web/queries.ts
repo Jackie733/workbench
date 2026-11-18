@@ -3,8 +3,8 @@ import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
-import { describeClientError, type MessageKey } from "./i18n.ts";
-import { activeRunnerChoice, type Scope } from "./state.ts";
+import type { MessageKey } from "./i18n.ts";
+import { activeRunnerChoice, getModelEffortCapability, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
 import { useStreamStore } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
@@ -251,7 +251,7 @@ export async function runBusy<T>(fn: () => Promise<T>): Promise<T | null> {
       await invalidateAllWorkbenchQueries();
       return null;
     }
-    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
+    ui.showToastError(err);
     return null;
   } finally {
     useUiStore.getState().setBusy(false);
@@ -352,7 +352,7 @@ export async function openAddProjectModal(preferredNodeId?: string): Promise<voi
     });
   } catch (err) {
     ui.setModal({ kind: "add_project", nodeId, browse: null, pathInput: "", nameInput: "", initPrivacy: "local" });
-    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
+    ui.showToastError(err);
   }
 }
 
@@ -376,6 +376,13 @@ export async function triggerActiveRun(
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const { selectedRunnerKey, selectedEffort } = useDraftStore.getState();
   const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, action, selectedEffort);
+  const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
+  const effectiveEffort =
+    effortCap.mode === "configurable"
+      ? choice.effort && effortCap.efforts.includes(choice.effort)
+        ? choice.effort
+        : undefined
+      : undefined;
   const ui = useUiStore.getState();
 
   const res = await runBusy(async () => {
@@ -383,7 +390,7 @@ export async function triggerActiveRun(
       action,
       harness: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
       model: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
-      reasoningEffort: choice.effort,
+      reasoningEffort: effectiveEffort,
       message: opts?.message,
       anchor: opts?.anchor,
       anchorIds: opts?.anchorIds,
@@ -576,7 +583,7 @@ export async function toggleVerificationLog(reqId: string, vid: string): Promise
     const res = await api.getEvidence(reqId, vid);
     ui.setExpandedLog(vid, res.log);
   } catch (err) {
-    ui.showToast(describeClientError(useUiStore.getState().language, err), true);
+    ui.showToastError(err);
   }
 }
 

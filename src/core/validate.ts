@@ -58,6 +58,7 @@ import {
   type ScreenshotBatch,
   type ScreenshotBatchStatus,
   type ScreenshotShot,
+  type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
   type Stage,
   type TaskInput,
@@ -87,6 +88,14 @@ const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "sta
 const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
 const SCREENSHOT_TRIGGERS: ScreenshotTrigger[] = ["auto_submit", "manual"];
 const SCREENSHOT_STATUSES: ScreenshotBatchStatus[] = ["captured", "partial", "skipped"];
+const SCREENSHOT_SKIP_REASON_CODES: ScreenshotSkipReasonCode[] = [
+  "browser_missing",
+  "chrome_path_missing",
+  "puppeteer_path_missing",
+  "server_unavailable",
+  "browser_launch_failed",
+  "no_shots",
+];
 
 export function validateGitHubRepoSlug(repo: string): string {
   const trimmed = repo.trim();
@@ -639,9 +648,28 @@ export function validateScreenshotBatch(raw: unknown): ScreenshotBatch {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图批次必须是对象");
   assertAllowedKeys(
     raw,
-    ["id", "createdAt", "trigger", "actor", "specHash", "codeSnapshotHash", "status", "skipReason", "shots", "durationMs"],
+    [
+      "id",
+      "createdAt",
+      "trigger",
+      "actor",
+      "specHash",
+      "codeSnapshotHash",
+      "status",
+      "skipReason",
+      "reasonCode",
+      "shots",
+      "durationMs",
+    ],
     "screenshotBatch",
   );
+  if (
+    raw.reasonCode !== undefined &&
+    raw.reasonCode !== null &&
+    !SCREENSHOT_SKIP_REASON_CODES.includes(raw.reasonCode as ScreenshotSkipReasonCode)
+  ) {
+    throw new WorkbenchError("corrupt_record", "截图跳过原因码无效");
+  }
   if (
     typeof raw.id !== "string" ||
     !SCREENSHOT_BATCH_ID_RE.test(raw.id) ||

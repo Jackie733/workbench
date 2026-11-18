@@ -1,9 +1,13 @@
+import React from "react";
+import { toast } from "sonner";
 import { create } from "zustand";
 import type { OutputLanguage } from "../../core/types.ts";
 import {
   applyDocumentLanguage,
+  describeClientErrorRef,
   persistUiLanguage,
   readStoredUiLanguage,
+  t,
   type MessageKey,
   type MessageParams,
   type UiLanguage,
@@ -26,13 +30,6 @@ function initialDrawerWidth(): number {
     return Math.round(raw);
   }
   return DEFAULT_DRAWER_WIDTH;
-}
-
-export interface UiToast {
-  messageKey: MessageKey | null;
-  params?: MessageParams;
-  message: string;
-  isError: boolean;
 }
 
 export interface UiStoreState {
@@ -64,7 +61,6 @@ export interface UiStoreState {
   drawerTab: DrawerTab;
   moreMenuOpen: boolean;
   modal: ModalState;
-  toast: UiToast | null;
 
   toggleTheme: () => void;
   setLanguage: (language: UiLanguage) => void;
@@ -94,9 +90,8 @@ export interface UiStoreState {
   setModal: (modal: ModalState | ((prev: ModalState) => ModalState)) => void;
   showToast: (message: string, isError?: boolean) => void;
   showToastKey: (key: MessageKey, params?: MessageParams, isError?: boolean) => void;
+  showToastError: (err: unknown) => void;
 }
-
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
@@ -127,7 +122,6 @@ export const useUiStore = create<UiStoreState>((set) => ({
   drawerTab: "discuss",
   moreMenuOpen: false,
   modal: null,
-  toast: null,
 
   toggleTheme: () =>
     set((s) => {
@@ -190,17 +184,30 @@ export const useUiStore = create<UiStoreState>((set) => ({
       modal: typeof modalOrUpdater === "function" ? modalOrUpdater(s.modal) : modalOrUpdater,
     })),
   showToast: (message, isError = false) => {
-    if (toastTimer) clearTimeout(toastTimer);
-    set({ toast: { messageKey: null, message, isError } });
-    toastTimer = setTimeout(() => {
-      set({ toast: null });
-    }, 4000);
+    if (isError) toast.error(message);
+    else toast(message);
   },
   showToastKey: (key, params, isError = false) => {
-    if (toastTimer) clearTimeout(toastTimer);
-    set({ toast: { messageKey: key, params, message: "", isError } });
-    toastTimer = setTimeout(() => {
-      set({ toast: null });
-    }, 4000);
+    const message = React.createElement(LocalizedToastMessage, { messageKey: key, params });
+    if (isError) toast.error(message);
+    else toast(message);
+  },
+  showToastError: (err) => {
+    const ref = describeClientErrorRef(err);
+    if (ref.key) {
+      const message = React.createElement(LocalizedToastMessage, { messageKey: ref.key, params: ref.params });
+      toast.error(message);
+    } else {
+      toast.error(ref.text);
+    }
   },
 }));
+
+/**
+ * Toast 内容在渲染时读取当前界面语言，因此提示已显示期间切换语言也会同步更新。
+ * 保存消息键与参数而非已翻译字符串，避免即时反馈停留在旧语言。
+ */
+function LocalizedToastMessage({ messageKey, params }: { messageKey: MessageKey; params?: MessageParams }) {
+  const language = useUiStore((s) => s.language);
+  return React.createElement(React.Fragment, null, t(language, messageKey, params));
+}

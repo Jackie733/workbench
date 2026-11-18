@@ -14,8 +14,10 @@ import { captureRequirementScreenshots, SCREENSHOT_MATRIX } from "../../src/core
 import { readRequirementBundle } from "../../src/core/store.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import type { VerificationRecord } from "../../src/core/types.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_env.ts";
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -72,13 +74,13 @@ function makeVerification(id: string, specHash: string, codeSnapshotHash: string
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);
@@ -104,8 +106,8 @@ const suite = HAS_BROWSER ? describe : describe.skip;
 
 suite("REQ-011 real browser screenshot evidence", () => {
   test("AC-6: captures the default matrix, persists PNGs and shows thumbnails plus lightbox", async () => {
-    process.env.WORKBENCH_CHROME_PATH = CHROME_PATH;
-    process.env.WORKBENCH_PUPPETEER_PATH = PUPPETEER_PATH;
+    process.env.WORKBENCH_CHROME_PATH = browserEnv!.chromePath;
+    process.env.WORKBENCH_PUPPETEER_PATH = browserEnv!.puppeteerPath;
     delete process.env.WORKBENCH_RSI_DEPTH;
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-shot-browser-hub-"));
     tempDirs.push(hubDir);

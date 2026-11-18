@@ -16,6 +16,7 @@ import {
   type ScreenshotBatchStatus,
   type ScreenshotCaptureResult,
   type ScreenshotShot,
+  type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
 } from "./types.ts";
 import { ensureServerForProject } from "../server/runtime.ts";
@@ -102,6 +103,8 @@ export interface ResolvedBrowserEnvironment {
   chromePath: string | null;
   puppeteerPath: string | null;
   reason: string | null;
+  reasonCode?: ScreenshotSkipReasonCode | null;
+  reasonParams?: Record<string, string>;
 }
 
 function newestChromiumFromPlaywright(): string | null {
@@ -113,12 +116,15 @@ function newestChromiumFromPlaywright(): string | null {
     return null;
   }
   const versions = entries
-    .map((entry) => /^chromium-(\d+)$/.exec(entry))
+    .map((entry) => /^chromium(_headless_shell)?-(\d+)$/.exec(entry))
     .filter((match): match is RegExpExecArray => Boolean(match))
-    .map((match) => ({ dir: match[0], version: Number(match[1]) }))
-    .sort((a, b) => b.version - a.version);
+    .map((match) => ({ dir: match[0], version: Number(match[2]), headlessShell: Boolean(match[1]) }))
+    .sort((a, b) => b.version - a.version || Number(a.headlessShell) - Number(b.headlessShell));
   for (const candidate of versions) {
-    for (const relative of ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"]) {
+    const relatives = candidate.headlessShell
+      ? ["chrome-headless-shell-linux64/chrome-headless-shell", "chrome-headless-shell-linux/chrome-headless-shell"]
+      : ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"];
+    for (const relative of relatives) {
       const full = path.join(cacheDir, candidate.dir, relative);
       if (fs.existsSync(full)) return full;
     }
@@ -156,7 +162,12 @@ function resolvePuppeteerModule(): string | null {
     "puppeteer",
     "puppeteer-core.js",
   );
-  return fs.existsSync(globalPath) ? globalPath : null;
+  if (fs.existsSync(globalPath)) return globalPath;
+  try {
+    return Bun.resolveSync("puppeteer-core", path.resolve(import.meta.dir, "../.."));
+  } catch {
+    return null;
+  }
 }
 
 /** Resolves Chromium and puppeteer-core without adding dependencies; explicit env paths are authoritative. */
@@ -170,6 +181,7 @@ export function resolveBrowserEnvironment(): ResolvedBrowserEnvironment {
       puppeteerPath: null,
       reason:
         "未找到 Chromium/Chrome 浏览器，已跳过截图。可安装 Playwright Chromium，或设置 WORKBENCH_CHROME_PATH 指向 Chrome 可执行文件。",
+      reasonCode: "browser_missing",
     };
   }
   if (!fs.existsSync(chromePath)) {
@@ -178,6 +190,8 @@ export function resolveBrowserEnvironment(): ResolvedBrowserEnvironment {
       chromePath,
       puppeteerPath: null,
       reason: `WORKBENCH_CHROME_PATH 指向的浏览器不存在：${chromePath}`,
+      reasonCode: "chrome_path_missing",
+      reasonParams: { path: chromePath },
     };
   }
   const explicitPuppeteer = process.env.WORKBENCH_PUPPETEER_PATH?.trim();
@@ -187,6 +201,8 @@ export function resolveBrowserEnvironment(): ResolvedBrowserEnvironment {
       chromePath,
       puppeteerPath: explicitPuppeteer,
       reason: `WORKBENCH_PUPPETEER_PATH 指向的 puppeteer-core 不存在：${explicitPuppeteer}`,
+      reasonCode: "puppeteer_path_missing",
+      reasonParams: { path: explicitPuppeteer },
     };
   }
   const puppeteerPath = resolvePuppeteerModule();
@@ -235,6 +251,8 @@ async function persistSkippedBatch(
     specHash: string;
     codeSnapshotHash: string;
     reason: string;
+    reasonCode?: ScreenshotSkipReasonCode | null;
+    reasonParams?: Record<string, string>;
     startedAt: number;
     currentCodeSnapshotHash: string | null;
   },
@@ -248,6 +266,7 @@ async function persistSkippedBatch(
     codeSnapshotHash: input.codeSnapshotHash,
     status: "skipped",
     skipReason: input.reason,
+    reasonCode: input.reasonCode ?? null,
     shots: [],
     durationMs: Math.max(0, Date.now() - input.startedAt),
   };
@@ -255,7 +274,14 @@ async function persistSkippedBatch(
     batch,
     currentCodeSnapshotHash: input.currentCodeSnapshotHash,
   });
-  return { status: "skipped", batchId: batch.id, reason: input.reason, batch };
+  return {
+    status: "skipped",
+    batchId: batch.id,
+    reason: input.reason,
+    reasonCode: input.reasonCode ?? null,
+    reasonParams: input.reasonParams ?? null,
+    batch,
+  };
 }
 
 async function applyTheme(page: BrowserPageLike, theme: "light" | "dark", baseUrl: string, timeout: number): Promise<void> {
@@ -347,6 +373,8 @@ export async function captureRequirementScreenshots(
       specHash: state.specHash,
       codeSnapshotHash,
       reason: environment.reason ?? "浏览器环境不可用",
+      reasonCode: environment.reasonCode ?? null,
+      reasonParams: environment.reasonParams,
       startedAt,
       currentCodeSnapshotHash,
     });
@@ -379,6 +407,7 @@ export async function captureRequirementScreenshots(
       specHash: state.specHash,
       codeSnapshotHash,
       reason,
+      reasonCode: "server_unavailable",
       startedAt,
       currentCodeSnapshotHash,
     });
@@ -389,6 +418,7 @@ export async function captureRequirementScreenshots(
   const shots: ScreenshotShot[] = [];
   const pngs: Array<{ shotId: string; bytes: Buffer }> = [];
   const skipReasons: string[] = [];
+  let fatalSkipCode: ScreenshotSkipReasonCode | null = null;
 
   try {
     const modulePath = environment.puppeteerPath ?? "puppeteer-core";
@@ -445,6 +475,7 @@ export async function captureRequirementScreenshots(
       }
     }
   } catch (error) {
+    fatalSkipCode = "browser_launch_failed";
     skipReasons.push(
       `启动无头浏览器失败，已跳过截图：${error instanceof Error ? error.message : String(error)}。可安装 Playwright Chromium 或设置 WORKBENCH_CHROME_PATH。`,
     );
@@ -474,6 +505,7 @@ export async function captureRequirementScreenshots(
       specHash: state.specHash,
       codeSnapshotHash,
       reason,
+      reasonCode: fatalSkipCode ?? "no_shots",
       startedAt,
       currentCodeSnapshotHash,
     });

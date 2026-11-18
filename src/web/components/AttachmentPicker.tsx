@@ -7,7 +7,7 @@ import {
   type AttachmentMeta,
 } from "../../core/types.ts";
 import { api } from "../api.ts";
-import { describeClientError, t } from "../i18n.ts";
+import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
@@ -51,7 +51,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LocalizedError | null>(null);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const previewsRef = useRef<Record<string, string>>({});
 
@@ -80,18 +80,18 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
     setError(null);
     const remaining = MAX_ATTACHMENTS_PER_ITEM - value.length;
     if (remaining <= 0) {
-      setError(t(language, "attachment.maxOther", { count: MAX_ATTACHMENTS_PER_ITEM }));
+      setError({ key: "attachment.maxOther", params: { count: MAX_ATTACHMENTS_PER_ITEM }, text: "" });
       return;
     }
     const accepted: File[] = [];
     for (const file of incoming) {
       const ext = extensionOf(file.name);
       if (!CLIENT_ALLOWED_EXTS.has(ext)) {
-        setError(t(language, "attachment.unsupported", { name: file.name }));
+        setError({ key: "attachment.unsupported", params: { name: file.name }, text: "" });
         continue;
       }
       if (file.size > MAX_ATTACHMENT_BYTES) {
-        setError(t(language, "attachment.tooLarge", { name: file.name }));
+        setError({ key: "attachment.tooLarge", params: { name: file.name }, text: "" });
         continue;
       }
       accepted.push(file);
@@ -99,9 +99,11 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
     if (accepted.length === 0) return;
     const picked = accepted.slice(0, remaining);
     if (accepted.length > remaining) {
-      setError(
-        t(language, "attachment.truncated", { max: MAX_ATTACHMENTS_PER_ITEM, count: remaining }),
-      );
+      setError({
+        key: "attachment.truncated",
+        params: { max: MAX_ATTACHMENTS_PER_ITEM, count: remaining },
+        text: "",
+      });
     }
     setUploading(true);
     try {
@@ -109,7 +111,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       const next = [...value, ...res.attachments];
       const nextTotal = next.reduce((sum, meta) => sum + meta.size, 0);
       if (nextTotal > MAX_ATTACHMENT_TOTAL_BYTES) {
-        setError(t(language, "attachment.totalExceeded"));
+        setError({ key: "attachment.totalExceeded", text: "" });
         return;
       }
       for (let i = 0; i < res.attachments.length; i += 1) {
@@ -122,7 +124,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       setPreviews({ ...previewsRef.current });
       onChange(next);
     } catch (err) {
-      setError(describeClientError(useUiStore.getState().language, err));
+      setError(describeClientErrorRef(err));
     } finally {
       setUploading(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -206,7 +208,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
 
       {error && (
         <div className="callout danger xs" role="alert" data-testid="attachment-error" style={{ marginTop: 6 }}>
-          {error}
+          {error.key ? t(language, error.key, error.params) : error.text}
         </div>
       )}
 

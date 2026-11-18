@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { KeyRound, Lock } from "lucide-react";
 import { api, ApiClientError } from "../api.ts";
-import { describeClientError, t } from "../i18n.ts";
+import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { UiLanguageSelect } from "./Primitives.tsx";
@@ -10,7 +10,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
   const language = useUiStore((s) => s.language);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LocalizedError | null>(null);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -23,8 +23,8 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
     } catch (err) {
       setError(
         err instanceof ApiClientError && err.code === "unauthorized"
-          ? t(useUiStore.getState().language, "login.invalidPin")
-          : describeClientError(useUiStore.getState().language, err),
+          ? { key: "login.invalidPin", text: "" }
+          : describeClientErrorRef(err),
       );
     } finally {
       setBusy(false);
@@ -90,7 +90,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
 
         {error && (
           <div className="callout danger xs" style={{ marginBottom: 12 }} data-testid="login-error">
-            {error}
+            {error.key ? t(language, error.key, error.params) : error.text}
           </div>
         )}
 

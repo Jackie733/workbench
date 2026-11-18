@@ -16,7 +16,7 @@ import {
   activeRunnerChoice,
   collectModelOptions,
   effortLabel,
-  supportedEffortsForModel,
+  getModelEffortCapability,
 } from "../../state.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -63,10 +63,15 @@ export function ModelRunnerBar({
     return Array.from(groups.values());
   }, [modelOptions]);
 
-  const efforts = useMemo(
-    () => supportedEffortsForModel(harnesses, choice.harness, choice.model),
+  const effortCap = useMemo(
+    () => getModelEffortCapability(harnesses, choice.harness, choice.model),
     [harnesses, choice.harness, choice.model],
   );
+  const efforts = effortCap.efforts;
+  const lockedEffort = effortCap.defaultEffort ?? efforts[0];
+  const effectiveDefaultEffort = choice.effort ?? effortCap.defaultEffort;
+  const effortValue =
+    selectedEffort && efforts.includes(selectedEffort) ? selectedEffort : "";
 
   const currentDisplay =
     selectedRunnerKey === "manual_copy"
@@ -216,8 +221,8 @@ export function ModelRunnerBar({
         </PopoverPortal>
       </PopoverRoot>
 
-      {/* Reasoning Effort selector */}
-      {selectedRunnerKey !== "manual_copy" && (
+      {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
+      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (
         <div className="inline-flex items-center gap-1" title={t(language, "runner.effortTitle")}>
           <span className="hidden sm:inline-flex items-center text-[var(--muted)]">
             <Icon icon={Gauge} size={14} />
@@ -226,12 +231,12 @@ export function ModelRunnerBar({
             className="select xs font-mono"
             data-field="effort-select"
             data-testid={`${testId}-effort`}
-            value={selectedEffort}
+            value={effortValue}
             onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "")}
           >
             <option value="">
               {t(language, "runner.effortDefault")}
-              {choice.effort && !selectedEffort ? ` (${choice.effort})` : ""}
+              {effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}
             </option>
             {efforts.map((eff) => (
               <option key={eff} value={eff}>
@@ -239,6 +244,22 @@ export function ModelRunnerBar({
               </option>
             ))}
           </select>
+        </div>
+      )}
+      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "locked" && (
+        <div
+          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--surface-2,transparent)] text-[11px] font-mono text-[var(--muted)]"
+          data-testid={`${testId}-effort-locked`}
+          title={t(language, "runner.effortLockedTitle")}
+        >
+          <Icon icon={Gauge} size={14} />
+          <span>
+            {t(language, "runner.effortLockedLabel", {
+              effort: lockedEffort
+                ? effortLabel(language, lockedEffort)
+                : t(language, "runner.effortBuiltin"),
+            })}
+          </span>
         </div>
       )}
     </div>

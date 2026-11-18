@@ -7,9 +7,15 @@ import {
   Trigger as DropdownTrigger,
 } from "@radix-ui/react-dropdown-menu";
 import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
-import type { AgentRunRecord, RequirementDetail, ScreenshotBatch, Stage } from "../../core/types.ts";
+import type {
+  AgentRunRecord,
+  RequirementDetail,
+  ScreenshotBatch,
+  ScreenshotSkipReasonCode,
+  Stage,
+} from "../../core/types.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
-import { t, translateRef } from "../i18n.ts";
+import { t, translateRef, type MessageKey } from "../i18n.ts";
 import {
   captureUiScreenshots,
   cancelRun,
@@ -719,9 +725,17 @@ function pluralScreenshots(language: "zh-CN" | "en", count: number): string {
   return count === 1 ? t(language, "shot.countOne", { count }) : t(language, "shot.countOther", { count });
 }
 
+const SCREENSHOT_REASON_KEYS: Record<ScreenshotSkipReasonCode, MessageKey> = {
+  browser_missing: "shot.reason.browser_missing",
+  chrome_path_missing: "shot.reason.chrome_path_missing",
+  puppeteer_path_missing: "shot.reason.puppeteer_path_missing",
+  server_unavailable: "shot.reason.server_unavailable",
+  browser_launch_failed: "shot.reason.browser_launch_failed",
+  no_shots: "shot.reason.no_shots",
+};
+
 function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
   const language = useUiStore((s) => s.language);
-  const showToast = useUiStore((s) => s.showToast);
   const showToastKey = useUiStore((s) => s.showToastKey);
   const [capturing, setCapturing] = useState(false);
   const [lightbox, setLightbox] = useState<{ batchId: string; index: number } | null>(null);
@@ -764,7 +778,13 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
         } else if (capture.status === "partial") {
           showToastKey("shot.partial", { count: capture.batch?.shots.length ?? 0 }, true);
         } else {
-          showToast(capture.reason ?? t(useUiStore.getState().language, "shot.skippedReason"), true);
+          // 历史记录保留工作台生成的原文；当前操作只显示按界面语言本地化的提示。
+          const reasonKey = capture.reasonCode ? SCREENSHOT_REASON_KEYS[capture.reasonCode] : undefined;
+          showToastKey(
+            reasonKey ?? "shot.skippedReason",
+            reasonKey ? (capture.reasonParams ?? undefined) : undefined,
+            true,
+          );
         }
       }
     } finally {

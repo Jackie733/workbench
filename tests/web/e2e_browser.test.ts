@@ -3,14 +3,25 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
+import {
+  acceptRequirement,
+  approveDesign,
+  createRequirement,
+  getRequirement,
+  initProject,
+  propose,
+} from "../../src/core/engine.ts";
+import { observeGitSnapshot } from "../../src/core/git.ts";
+import { runVerification } from "../../src/core/runner.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, readHubConfig } from "../../src/hub/registry.ts";
+import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resetAuthPassword } from "../../src/server/auth.ts";
+import { resolveTestBrowser } from "./browser_env.ts";
 
-import { CHROME_PATH, HAS_BROWSER, PUPPETEER_PATH } from "./browser_env.ts";
+const browserEnv = resolveTestBrowser();
+const HAS_BROWSER = browserEnv !== null;
 
 interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
@@ -58,6 +69,24 @@ function initGitRepo(): string {
 async function clickReady(page: BrowserPage, selector: string, timeout = 5000): Promise<void> {
   const readySel = `${selector}:not([disabled])`;
   await page.waitForSelector(readySel, { timeout });
+  // 右下角 Sonner 提示可能短暂遮挡按钮中心；元素已在视口内时等待其真正可命中。
+  // Radix 弹窗/菜单打开时 body 为 pointer-events:none，命中检测不适用，直接放行。
+  await page.waitForFunction(
+    (sel: unknown) => {
+      const el = document.querySelector(String(sel));
+      if (!el) return false;
+      if (getComputedStyle(document.body).pointerEvents === "none") return true;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return true;
+      const hit = document.elementFromPoint(cx, cy);
+      return hit === el || el.contains(hit);
+    },
+    { timeout },
+    readySel,
+  );
   try {
     await page.click(readySel);
   } catch (err) {
@@ -71,13 +100,13 @@ async function clickReady(page: BrowserPage, selector: string, timeout = 5000): 
 }
 
 beforeAll(async () => {
-  if (!HAS_BROWSER) return;
-  const mod = (await import(PUPPETEER_PATH)) as {
+  if (!browserEnv) return;
+  const mod = (await import(browserEnv.puppeteerPath)) as {
     default: { launch(opts: Record<string, unknown>): Promise<BrowserInstance> };
   };
   browser = await mod.default.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
+    executablePath: browserEnv.chromePath,
+    headless: browserEnv.headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 }, 15_000);
@@ -230,6 +259,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="action-approve_and_implement"]', { timeout: 5000 });
 
       // Verify design version diff toggle works
+      // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
+      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 6000 });
       await page.click('[data-action="toggle-design-diff"]');
       await page.waitForSelector(".diff-code", { timeout: 5000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
@@ -460,7 +491,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
         designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
       }));
-      expect(firstReopen).toEqual({ designModel: "qodercn::DeepSeek-V4-Pro", designEffort: "xhigh" });
+      expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
       await page.select('[data-testid="route-effort-design"]', "high");
@@ -1169,7 +1200,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           subscription: "QoderCN",
           installed: true,
           executable: "qodercn",
-          models: [{ id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" }],
+          models: [
+            { id: "Qwen4-Max", tier: "sota", source: "detected" },
+            { id: "DeepSeek-V4-Pro", tier: "sota", source: "detected" },
+          ],
           defaultModel: "DeepSeek-V4-Pro",
           detectedAt: Date.now(),
         },
@@ -1443,6 +1477,352 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("REQ-004: 执行终端适配亮暗主题、折叠次要上下文、切换结构/原始视图并自动加载历史 Run 日志", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-console-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const repo = initGitRepo();
+    await initProject(repo, { name: "ConsoleRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "优化执行终端主题与结构化输出",
+      criteria: [{ id: "AC-1", description: "测试通过", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# 方案\n结构化终端输出。",
+      actor: "agent",
+    });
+
+    const richOutputScript = [
+      "cat <<'EOF'",
+      "OpenAI Codex v0.114.0 (research preview)",
+      "--------",
+      "workdir: /repo",
+      "model: gpt-6-astra",
+      "--------",
+      "user",
+      "请接力执行工作台需求 REQ-001",
+      "SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED",
+      "hook: SessionStart",
+      "hook: UserPromptSubmit",
+      "thinking",
+      "先分析终端渲染层次",
+      "SECRET_THINKING_LINE_2",
+      "exec",
+      "/bin/bash -lc 'ls' in /repo succeeded in 12ms:",
+      "line-1",
+      "line-2",
+      "line-3",
+      "line-4",
+      "line-5",
+      "line-6",
+      "line-7",
+      "codex",
+      "核心回复：终端渲染已完成。",
+      "[spawn error] 模拟错误告警",
+      "EOF",
+    ].join("\n");
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex CLI",
+          subscription: "ChatGPT Plus",
+          installed: true,
+          executable: "codex",
+          models: [{ id: "gpt-6-astra", tier: "sota", source: "detected" }],
+          defaultModel: "gpt-6-astra",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => ({
+        command: "bash",
+        args: ["-c", richOutputScript],
+        displayCommand: "codex exec -C /repo (model=gpt-6-astra)",
+      }),
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, executor });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-approve_only"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="action-approve_only"]');
+      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 5000 });
+
+      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")) &&
+          !document.querySelector('[data-testid="live-agent-banner"]'),
+        { timeout: 8000 },
+      );
+
+      // 1. 浅色与深色主题下的背景与文本对比适配
+      const lightColors = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="console-log-output"]')!;
+        const cs = getComputedStyle(el);
+        return {
+          theme: document.documentElement.getAttribute("data-theme"),
+          bg: cs.backgroundColor,
+          color: cs.color,
+        };
+      });
+      expect(lightColors.bg).toBe("rgb(248, 250, 252)");
+      expect(lightColors.color).toBe("rgb(30, 41, 59)");
+
+      await clickReady(page, '[data-action="toggle-theme"]');
+      const darkColors = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="console-log-output"]')!;
+        const cs = getComputedStyle(el);
+        return {
+          theme: document.documentElement.getAttribute("data-theme"),
+          bg: cs.backgroundColor,
+          color: cs.color,
+        };
+      });
+      expect(darkColors.theme).toBe("dark");
+      expect(darkColors.bg).toBe("rgb(15, 19, 26)");
+      expect(darkColors.color).toBe("rgb(226, 232, 240)");
+
+      // 2. 次要区块默认折叠，主要回复与错误告警默认展开
+      const initialState = await page.evaluate(() => {
+        const out = document.querySelector('[data-testid="console-log-output"]')?.textContent ?? "";
+        const foldStates = Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).map((el) => ({
+          testid: el.getAttribute("data-testid"),
+          expanded: el.getAttribute("aria-expanded"),
+        }));
+        return { out, foldStates };
+      });
+      expect(initialState.out).toContain("核心回复：终端渲染已完成");
+      expect(initialState.out).toContain("[spawn error] 模拟错误告警");
+      expect(initialState.out).not.toContain("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED");
+      expect(initialState.out).not.toContain("SECRET_THINKING_LINE_2");
+      for (const f of initialState.foldStates) {
+        expect(f.expanded).toBe("false");
+      }
+
+      // 3. 单独展开提示词折叠块，并验证一键展开全部 / 收起次要
+      await clickReady(page, '[data-testid="console-fold-prompt_context"]');
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="console-fold-prompt_context"]')?.getAttribute("aria-expanded") === "true" &&
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED")),
+        { timeout: 3000 },
+      );
+
+      await clickReady(page, '[data-testid="console-toggle-secondary-btn"]');
+      const allExpanded = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).every(
+          (el) => el.getAttribute("aria-expanded") === "true",
+        ),
+      );
+      expect(allExpanded).toBe(true);
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="console-log-output"]')?.textContent ?? ""),
+      ).toContain("SECRET_THINKING_LINE_2");
+
+      await clickReady(page, '[data-testid="console-toggle-secondary-btn"]');
+      const allCollapsed = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="console-fold-"]')).every(
+          (el) => el.getAttribute("aria-expanded") === "false",
+        ),
+      );
+      expect(allCollapsed).toBe(true);
+
+      // 4. 切换原始输出与结构视图
+      await clickReady(page, '[data-testid="console-mode-raw"]');
+      await page.waitForSelector('[data-testid="console-raw-pre"]', { timeout: 3000 });
+      const rawText = await page.evaluate(() => document.querySelector('[data-testid="console-raw-pre"]')?.textContent ?? "");
+      expect(rawText).toContain("SECRET_PROMPT_BODY_ONLY_WHEN_EXPANDED");
+      expect(rawText).toContain("hook: SessionStart");
+
+      await clickReady(page, '[data-testid="console-mode-structured"]');
+      await page.waitForSelector('[data-testid="console-blocks"]', { timeout: 3000 });
+
+      // 5. 页面刷新后重新进入需求并切到「执行终端」页签，自动加载历史 Run 日志
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
+      const drawerHidden = await page.evaluate(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("aria-hidden") === "true",
+      );
+      if (drawerHidden) {
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      }
+      await clickReady(page, '[data-testid="drawer-tab-console"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")),
+        { timeout: 5000 },
+      );
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 「更多」下拉菜单宽度随内容自适应且菜单项整行填满", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "MenuWidthRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "修复更多下拉菜单宽度异常",
+      criteria: [{ id: "AC-1", description: "菜单宽度随内容自适应", required: true, command: "echo ok" }],
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const menuGone = () =>
+      page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+    const openMenu = async () => {
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+      await Bun.sleep(300); // 等待 Radix 定位与入场动画（scale 0.96→1）结束再测量
+    };
+
+    try {
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 5000 });
+
+      for (const viewport of [
+        { width: 1280, height: 800 },
+        { width: 2514, height: 1348 },
+      ]) {
+        await page.setViewport(viewport);
+        await Bun.sleep(100);
+        await openMenu();
+        const metrics = await page.evaluate(() => {
+          const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
+          const trigger = document.querySelector('[data-testid="more-menu-btn"]')!.getBoundingClientRect();
+          const rect = menu.getBoundingClientRect();
+          const style = getComputedStyle(menu);
+          const contentWidth =
+            menu.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+          const items = Array.from(menu.querySelectorAll("button")).map((b) => (b as HTMLElement).offsetWidth);
+          return {
+            width: rect.width,
+            right: rect.right,
+            triggerRight: trigger.right,
+            contentWidth,
+            items,
+            viewportWidth: window.innerWidth,
+          };
+        });
+        // 菜单宽度随内容自适应：保留 170px 下限，最长菜单项量级不超过 320px，绝不 stretch 到视口宽度。
+        expect(metrics.width).toBeGreaterThanOrEqual(170);
+        expect(metrics.width).toBeLessThanOrEqual(320);
+        expect(metrics.width).toBeLessThan(metrics.viewportWidth / 2);
+        // 沿用 REQ-012 的右缘对齐约定。
+        expect(Math.abs(metrics.right - metrics.triggerRight)).toBeLessThan(4);
+        // 整行 hover 高亮依赖菜单项填满菜单内容宽度。
+        expect(metrics.items.length).toBeGreaterThanOrEqual(6);
+        for (const itemWidth of metrics.items) {
+          expect(Math.abs(itemWidth - metrics.contentWidth)).toBeLessThanOrEqual(1);
+        }
+        await page.keyboard.press("Escape");
+        await menuGone();
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("REQ-005: 侧栏节点徽标与算力路由配置按钮单行显示", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const remoteRepo = initGitRepo();
+    const localRepo = initGitRepo();
+    await initProject(localRepo, { name: "Workbench-Node", privacyMode: "local" });
+    registerHubProject(localRepo, { name: "Workbench-Node" });
+    registerHubProject(remoteRepo, {
+      name: "deepmdt-frontend-pc",
+      nodeId: "wsl-work",
+      nodeName: "Windows WSL2",
+      activate: true,
+    });
+
+    const server = await startWorkbenchServer({ root: localRepo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="sidebar-routing-btn"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[data-action="switch-project"]')).some((row) =>
+            (row.textContent ?? "").includes("deepmdt-frontend-pc"),
+          ),
+        { timeout: 5000 },
+      );
+      await Bun.sleep(150);
+
+      const metrics = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll('[data-action="switch-project"]'));
+        const remoteRow = rows.find((row) => (row.textContent ?? "").includes("deepmdt-frontend-pc"));
+        const badge = remoteRow?.querySelector(".sb-item-badges .sb-badge") as HTMLElement | null;
+        const projectName = remoteRow?.querySelector(".sb-item-name") as HTMLElement | null;
+        const routingBtn = document.querySelector('[data-testid="sidebar-routing-btn"]') as HTMLElement | null;
+        const routingHead = routingBtn?.closest(".sb-head") as HTMLElement | null;
+        const routingTitle = routingHead?.querySelector("span") as HTMLElement | null;
+        const height = (el: HTMLElement | null) => (el ? el.getBoundingClientRect().height : -1);
+        return {
+          badgeText: badge?.textContent ?? "",
+          badgeHeight: height(badge),
+          projectNameHeight: height(projectName),
+          routingBtnHeight: height(routingBtn),
+          routingTitleText: routingTitle?.textContent ?? "",
+          routingTitleHeight: height(routingTitle),
+        };
+      });
+
+      // 远程节点徽标单行（离线节点场景，修复前为两行 35px）。
+      expect(metrics.badgeText).toContain("Windows WSL2");
+      expect(metrics.badgeHeight).toBeGreaterThan(0);
+      expect(metrics.badgeHeight).toBeLessThanOrEqual(24);
+      // 项目名继续单行省略，不被徽标挤压换行。
+      expect(metrics.projectNameHeight).toBeLessThanOrEqual(24);
+      // 路由区头标题含长节点后缀仍单行（修复前两行 35px）。
+      expect(metrics.routingTitleText).toContain("Windows WSL2");
+      expect(metrics.routingTitleHeight).toBeLessThanOrEqual(24);
+      // 配置按钮图标与文本单行横排（修复前逐字竖排 46px）。
+      expect(metrics.routingBtnHeight).toBeGreaterThan(0);
+      expect(metrics.routingBtnHeight).toBeLessThanOrEqual(32);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
   test("REQ-003: bilingual interface keeps session, project, requirement, draft, and document language", async () => {
     const root = initGitRepo();
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-i18n-hub-"));
@@ -1454,6 +1834,22 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       criteria: [{ id: "AC-1", description: "中文验收条件原文", required: true, command: "echo ok" }],
     });
     await propose(root, "REQ-001", { designMarkdown: "# 中文方案标题\n\n方案正文原文保留。", actor: "agent" });
+    // 已验收需求：用于在英文界面打开已固化验收证据，并确认中文历史原文保持可读。
+    await createRequirement(root, {
+      goal: "已验收证据中文原文",
+      criteria: [
+        { id: "AC-1", description: "验收通过并保留中文输出", required: true, command: "echo 中文历史证据原文" },
+      ],
+    });
+    await propose(root, "REQ-002", { designMarkdown: "# 已验收方案", actor: "agent" });
+    const acceptBaseline = await observeGitSnapshot(root);
+    await approveDesign(root, "REQ-002", { baseline: acceptBaseline });
+    await runVerification(root, "REQ-002", {
+      command: "echo 中文历史证据原文",
+      criterionIds: ["AC-1"],
+    });
+    const acceptedSnapshot = await observeGitSnapshot(root);
+    await acceptRequirement(root, "REQ-002", { currentCodeSnapshotHash: acceptedSnapshot!.fingerprint });
 
     const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, hostname: "0.0.0.0" });
     servers.push(server);
@@ -1522,7 +1918,30 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ),
       ).toBe("Switch interface language");
 
-      // 3. 登录后仍为英文，并记录模型文档语言设置（应与界面语言相互独立）。
+      // 2b. 已显示的登录错误随界面语言切换即时更新，而不是停留在请求失败时的语言。
+      const wrongPin = password === "000000" ? "111111" : "000000";
+      await page.type('[data-testid="login-password-input"]', wrongPin);
+      await clickReady(page, '[data-testid="login-submit-btn"]');
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="login-error"]')?.textContent ?? "").includes(
+            "Incorrect access PIN",
+          ),
+        { timeout: 5000 },
+      );
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="login-error"]')?.textContent ?? "").includes(
+            "访问密码错误，请重试",
+          ),
+        { timeout: 5000 },
+      );
+
+      // 3. 重新加载清空错误与输入，切到英文后登录，并记录模型文档语言设置。
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="login-view"]', { timeout: 5000 });
+      await selectLang("en");
       await page.type('[data-testid="login-password-input"]', password);
       await clickReady(page, '[data-testid="login-submit-btn"]');
       await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
@@ -1544,6 +1963,21 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         "Awaiting approval",
       );
 
+      // 4b. 英文界面下的批注弹窗与控件。
+      await page.click('[data-action="annotate-anchor"]');
+      await page.waitForSelector('[data-testid="annotate-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Section annotation & question");
+      expect(await bodyText()).toContain("Add & ask now");
+      expect(
+        await page.evaluate(
+          () => (document.querySelector('[data-testid="annotate-msg"]') as HTMLTextAreaElement | null)?.placeholder,
+        ),
+      ).toContain("Enter a question about this section");
+      await clickModalAction("annotate-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="annotate-modal"]'), {
+        timeout: 5000,
+      });
+
       // 5. 编辑草稿在切换语言后保留，当前需求与视图不丢失。
       await clickReady(page, '[data-testid="start-edit-design-btn"]');
       await page.type('[data-testid="design-body-input"]', "\n未提交的设计草稿保留");
@@ -1553,6 +1987,30 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
         "待批准",
       );
+      // 5b. 中文界面下的批注、设置与报修文案同样完整。
+      await page.click('[data-action="annotate-anchor"]');
+      await page.waitForSelector('[data-testid="annotate-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("段落批注与提问");
+      expect(await bodyText()).toContain("加入并立即提问");
+      await clickModalAction("annotate-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="annotate-modal"]'), {
+        timeout: 5000,
+      });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("工作台设置");
+      await clickModalAction("routing-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), {
+        timeout: 5000,
+      });
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("随手报修与自进化反馈");
+      expect(await bodyText()).toContain("UI 异常 / 布局交互问题");
+      await clickModalAction("quick-report-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), {
+        timeout: 5000,
+      });
       const draftValue = await page.evaluate(
         () => (document.querySelector('[data-testid="design-body-input"]') as HTMLTextAreaElement | null)?.value ?? "",
       );
@@ -1573,6 +2031,32 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
       expect(await readLang()).toBe("zh-CN");
       expect(await readTitle()).toContain("规范与验证");
+
+      // 7b. 英文界面打开已固化的验收证据：界面标题本地化，中文历史命令与输出原文保留。
+      await selectLang("en");
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid^="ev-"]', { timeout: 5000 });
+      const acceptedEvidenceText = await bodyText();
+      expect(acceptedEvidenceText).toContain("Frozen acceptance snapshot");
+      expect(acceptedEvidenceText).toContain("echo 中文历史证据原文");
+      expect(acceptedEvidenceText).toContain("中文历史证据原文");
+      await page.click('[data-action="toggle-log"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(
+            document
+              .querySelector(".evidence-log")
+              ?.textContent?.includes("中文历史证据原文"),
+          ),
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      await page.click('[data-action="set-scope"][data-value="active"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
       // 8. 设置与报修弹窗随界面语言呈现，模型文档语言保持不变。
       await selectLang("en");
@@ -1601,7 +2085,27 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.click('[data-testid="tab-changes"]');
       await clickReady(page, '[data-testid="manual-verify-btn"]');
       await page.waitForFunction(
-        () => (document.querySelector(".toast")?.textContent ?? "").includes("Enter a verification command first"),
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "Enter a verification command first",
+          ),
+        { timeout: 5000 },
+      );
+      // 9b. 已显示的即时错误提示随语言切换重新渲染为当前语言。
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "请先输入验证命令",
+          ),
+        { timeout: 5000 },
+      );
+      await selectLang("en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "Enter a verification command first",
+          ),
         { timeout: 5000 },
       );
 

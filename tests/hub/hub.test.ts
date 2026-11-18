@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { getDaemonStatus, startDaemon, stopDaemon } from "../../src/cli/daemon.ts";
 import { approveDesign, createRequirement, getRequirement, initProject, propose, updateDesign } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { discoverHarnesses } from "../../src/hub/discovery.ts";
+import { classifyTier, discoverHarnesses } from "../../src/hub/discovery.ts";
 import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
@@ -23,6 +23,7 @@ import { buildPresetRouting, detectRateLimitOrQuotaError, resolveRouteCandidates
 import { clearModelCooldown, isModelCoolingDown, recordModelRunOutcome } from "../../src/hub/telemetry.ts";
 import type { HarnessInfo, ModelTarget } from "../../src/hub/types.ts";
 import type { AgentAction } from "../../src/core/types.ts";
+import { getModelEffortCapability } from "../../src/web/state.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
 const tempDirs: string[] = [];
@@ -256,7 +257,7 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
   test("applies presets, routing overrides, and rate-limit detection", () => {
     makeTempHub();
     const sota = buildPresetRouting("sota_first");
-    expect(sota.stages.design.primary.model).toBe("gpt-6.1-sol");
+    expect(sota.stages.design.primary.model).toBe("gpt-6.2-astra");
     expect(sota.stages.review.primary.harness).toBe("agy");
 
     const cfg = applyHubRoutingPreset("quota_saver");
@@ -269,6 +270,136 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     expect(candidates[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
     expect(detectRateLimitOrQuotaError("HTTP 429 Too Many Requests: quota exceeded", 1)).toBe(true);
     expect(detectRateLimitOrQuotaError("all tests passed", 0)).toBe(false);
+  });
+
+  test("accurately classifies model tiers, aggregates AGY effort variants, and dynamically adapts presets", async () => {
+    const fakeHome = makeTempHub();
+    // 1. Word-boundary tier classification fixes preview/minimax/intelligence misclassifications
+    expect(classifyTier("Qwen4-Max-Preview")).toBe("sota");
+    expect(classifyTier("Step-5-Preview")).toBe("balanced");
+    expect(classifyTier("Kimi-K2.8-Preview")).toBe("balanced");
+    expect(classifyTier("codex-auto-review")).toBe("review");
+    expect(classifyTier("opencode-go/minimax-m3", { intelligence: 18.9 })).toBe("fast");
+    expect(classifyTier("DeepSeek-V4-Pro", { intelligence: 23.1 })).toBe("balanced");
+    expect(classifyTier("gpt-6.2-astra")).toBe("sota");
+
+    // 2. AGY variant aggregation + single-variant lock + fixed-policy unsupported effort
+    const harnesses = await discoverHarnesses({
+      homeDir: fakeHome,
+      hubDir: null,
+      which: (cmd) => (cmd === "agy" || cmd === "qodercn" || cmd === "codex" ? `/usr/bin/${cmd}` : null),
+      runCmd: async (cmd) => {
+        if (cmd.includes("agy")) {
+          return {
+            code: 0,
+            stdout: [
+              "gemini-4-hydrogen-low           Gemini 4 Hydrogen (Low)",
+              "gemini-4-hydrogen-medium        Gemini 4 Hydrogen (Medium)",
+              "gemini-4-hydrogen-high          Gemini 4 Hydrogen (High)",
+              "gemini-4-hydrogen-xhigh         Gemini 4 Hydrogen (XHigh)",
+              "gemini-pro-orchestrator-g1-pro  Orchestrator (Argon)",
+              "gpt-oss-120b-medium             GPT-OSS 120B (Medium)",
+            ].join("\n"),
+          };
+        }
+        if (cmd.includes("qodercn")) {
+          return { code: 0, stdout: "MODEL\nAuto\nFast\nQwen4-Max\n" };
+        }
+        return { code: 1, stdout: "" };
+      },
+    });
+
+    const agy = harnesses.find((h) => h.id === "agy")!;
+    const hydrogen = agy.models.find((m) => m.id === "gemini-4-hydrogen")!;
+    expect(hydrogen).toBeDefined();
+    expect(hydrogen.supportedEfforts).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(hydrogen.effortVariants).toEqual({
+      low: "gemini-4-hydrogen-low",
+      medium: "gemini-4-hydrogen-medium",
+      high: "gemini-4-hydrogen-high",
+      xhigh: "gemini-4-hydrogen-xhigh",
+    });
+
+    const orch = agy.models.find((m) => m.id === "gemini-pro-orchestrator-g1-pro")!;
+    expect(orch.supportedEfforts).toEqual([]);
+
+    const oss = agy.models.find((m) => m.id === "gpt-oss-120b-medium")!;
+    expect(oss.effortLocked).toBe(true);
+    expect(oss.supportedEfforts).toEqual(["medium"]);
+
+    const qoder = harnesses.find((h) => h.id === "qodercn")!;
+    expect(qoder.models.find((m) => m.id === "Auto")?.supportedEfforts).toEqual([]);
+
+    // 3. Three-state UI capability helper
+    expect(getModelEffortCapability(harnesses, "agy", "gemini-4-hydrogen")).toEqual({
+      mode: "configurable",
+      efforts: ["low", "medium", "high", "xhigh"],
+      defaultEffort: "high",
+    });
+    expect(getModelEffortCapability(harnesses, "agy", "gemini-4-hydrogen-high")).toEqual({
+      mode: "locked",
+      efforts: ["high"],
+      defaultEffort: "high",
+    });
+    expect(getModelEffortCapability(harnesses, "agy", "gpt-oss-120b-medium")).toEqual({
+      mode: "locked",
+      efforts: ["medium"],
+      defaultEffort: "medium",
+    });
+    expect(getModelEffortCapability(harnesses, "agy", "gemini-pro-orchestrator-g1-pro")).toEqual({
+      mode: "unsupported",
+      efforts: [],
+    });
+    expect(getModelEffortCapability(harnesses, "qodercn", "Auto")).toEqual({
+      mode: "unsupported",
+      efforts: [],
+    });
+
+    // 4. buildHarnessCommand resolves aggregated AGY family + effort -> real variant ID, and strips invalid efforts
+    const agyAggCmd = buildHarnessCommand(
+      { harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "xhigh" },
+      { root: "/repo", action: "design", prompt: "design", harnesses },
+    );
+    expect(agyAggCmd.args).toContain("gemini-4-hydrogen-xhigh");
+    expect(agyAggCmd.args).toContain("xhigh");
+
+    const agyOrchCmd = buildHarnessCommand(
+      { harness: "agy", model: "gemini-pro-orchestrator-g1-pro", reasoningEffort: "high" },
+      { root: "/repo", action: "design", prompt: "design", harnesses },
+    );
+    expect(agyOrchCmd.args).not.toContain("--effort");
+
+    const agyLockedCmd = buildHarnessCommand(
+      { harness: "agy", model: "gpt-oss-120b-medium", reasoningEffort: "high" },
+      { root: "/repo", action: "design", prompt: "design", harnesses },
+    );
+    expect(agyLockedCmd.args).toContain("--effort");
+    expect(agyLockedCmd.args[agyLockedCmd.args.indexOf("--effort") + 1]).toBe("medium");
+
+    // 5. Dynamic preset adapts when vendor ships newer generation models and remaps retired models
+    const upgradedHarnesses: HarnessInfo[] = [
+      {
+        id: "codex",
+        label: "Codex CLI",
+        subscription: "Plus",
+        installed: true,
+        executable: "codex",
+        models: [
+          { id: "gpt-6.1-sol", tier: "sota", source: "detected", isLegacy: true, supportedEfforts: ["low", "medium", "high"] },
+          { id: "gpt-7.0-astra", tier: "sota", source: "detected", priority: 1, supportedEfforts: ["low", "medium", "high", "xhigh"] },
+        ],
+        defaultModel: "gpt-7.0-astra",
+        detectedAt: Date.now(),
+      },
+      agy,
+    ];
+    const dynamicSota = buildPresetRouting("sota_first", upgradedHarnesses);
+    expect(dynamicSota.stages.design.primary.model).toBe("gpt-7.0-astra");
+
+    const legacyRouting = buildPresetRouting("sota_first");
+    legacyRouting.stages.design.primary = { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "high" };
+    const normalizedResolved = resolveRouteCandidates(legacyRouting, upgradedHarnesses, "design");
+    expect(normalizedResolved[0]).toEqual({ harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" });
   });
 });
 
@@ -759,7 +890,7 @@ describe("REQ-008 selected model continuity at the Codex process boundary", () =
   const FAKE_SESSION_ID = "01a1e74e-98bb-7503-97dd-e8709f8e5022";
   const CLI_DEFAULT_MODEL = "gpt-6-astra";
   const CLI_DEFAULT_EFFORT = "low";
-  const SELECTED_MODEL = "gpt-6.1-sol";
+  const SELECTED_MODEL = "gpt-6.2-astra";
   const OPTION_LIKE_SENTINEL = "--force-not-a-real-flag=req008";
   const PROMPT = [
     "请接力执行工作台需求 REQ-001。",
@@ -1026,7 +1157,7 @@ printf 'done\\n'
     });
     const log1 = executor.getLiveLog(run1.run.id) ?? "";
     expect(log1.split("\n")[0]).toBe(`$ ${fake} exec -C ${codeRoot} --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`);
-    expect(log1).toContain("model: gpt-6.1-sol");
+    expect(log1).toContain(`model: ${SELECTED_MODEL}`);
     expect(log1).toContain("reasoning effort: medium");
     expect(log1).toContain(`warning: switching away from the recorded model ${CLI_DEFAULT_MODEL}`);
     expect(log1).not.toContain("请接力执行工作台需求");
@@ -1064,7 +1195,7 @@ printf 'done\\n'
     expect(log2.split("\n")[0]).toBe(`$ ${fake} exec resume ${FAKE_SESSION_ID} (model=${SELECTED_MODEL}, effort=medium)`);
     expect(log2).not.toContain(OPTION_LIKE_SENTINEL);
     expect(log2).toContain("mode: exec resume");
-    expect(log2).toContain("model: gpt-6.1-sol");
+    expect(log2).toContain(`model: ${SELECTED_MODEL}`);
 
     // 3. Same-harness model change resumes the session and dispatches the new model.
     const run3 = await executor.startRun({
@@ -1339,8 +1470,8 @@ printf 'done\\n'
       useFallback: true,
     });
     await waitFinished(fbRun.run.id);
-    expect(fbRun.target).toEqual({ harness: "qodercn", model: "Qwen4-Max" });
-    expect(lastDispatch()).toBe("qodercn/Qwen4-Max:none");
+    expect(fbRun.target).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
+    expect(lastDispatch()).toBe("qodercn/DeepSeek-V4-Pro:none");
   }, { timeout: 25000 });
 
   test("prioritizes an explicit selection over a conflicting preset and cooldown while automatic routing keeps stage semantics", () => {
@@ -1348,9 +1479,9 @@ printf 'done\\n'
     applyHubRoutingPreset("quota_saver");
     const harnesses = [fakeCodexHarness("codex"), qoderHarness()];
     const cfg = readHubConfig();
-    expect(cfg.routing.stages.design.primary).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
+    expect(cfg.routing.stages.design.primary).toEqual({ harness: "qodercn", model: "Qwen4-Max" });
 
-    // Automatic mode keeps action routing semantics: ask maps onto the design stage rule.
+    // Automatic mode keeps action routing semantics: ask maps onto the design stage rule (remapped to available qodercn model).
     const automatic = resolveRouteCandidates(cfg.routing, harnesses, "ask");
     expect(automatic[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
     expect(resolveRouteCandidates(cfg.routing, harnesses, "design")[0]).toEqual(automatic[0]);
