@@ -12,6 +12,7 @@ import {
   recordReviewReport,
   updateProjectConfig,
 } from "../core/engine.ts";
+import { discardStagedAttachments, stageUpload } from "../core/attachments.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot, readBoundedText } from "../core/fs.ts";
 import { getGitRemoteUrl, observeGitSnapshot } from "../core/git.ts";
@@ -46,11 +47,14 @@ interface ParsedArgs {
   command: string;
   positionals: string[];
   flags: Map<string, string | boolean>;
+  /** 可重复参数（目前仅 --attach） */
+  attachments: string[];
 }
 
 function parseCliArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string | boolean>();
   const positionals: string[] = [];
+  const attachments: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -61,7 +65,16 @@ function parseCliArgs(argv: string[]): ParsedArgs {
     if (token.startsWith("--")) {
       const eq = token.indexOf("=");
       if (eq !== -1) {
-        flags.set(token.slice(2, eq), token.slice(eq + 1));
+        const key = token.slice(2, eq);
+        const value = token.slice(eq + 1);
+        if (key === "attach") attachments.push(value);
+        else flags.set(key, value);
+      } else if (token === "--attach") {
+        const next = argv[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          attachments.push(next);
+          i += 1;
+        }
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
@@ -81,7 +94,7 @@ function parseCliArgs(argv: string[]): ParsedArgs {
   }
 
   const command = positionals.shift() ?? "help";
-  return { command, positionals, flags };
+  return { command, positionals, flags, attachments };
 }
 
 function resolveDefaultRoot(): string {
@@ -120,6 +133,24 @@ function parseJsonValue<T>(raw: string, label: string): T {
   }
 }
 
+function stageCliAttachments(paths: string[]): string[] {
+  if (paths.length === 0) return [];
+  const inputs = paths.map((raw) => {
+    const target = path.resolve(process.cwd(), raw);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(target);
+    } catch {
+      throw new WorkbenchError("invalid_input", `附件文件不存在: ${raw}`);
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new WorkbenchError("invalid_input", `附件必须是普通文件: ${raw}`);
+    }
+    return { name: path.basename(target), bytes: fs.readFileSync(target) };
+  });
+  return stageUpload(inputs).map((meta) => meta.id);
+}
+
 function printResult(data: unknown, asJson: boolean): void {
   if (asJson) {
     process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
@@ -155,17 +186,19 @@ function helpText(): string {
     "                                             GitHub 仓库探测、Issue 导入或关联",
     "  list [--scope active|done|cancelled|all]   列出需求摘要",
     "  get <REQ-ID> [--diff]                      查看需求详情与覆盖状态",
-    "  create <goal|@file> [--title <title>]      创建一条新需求草稿",
+    "  create <goal|@file> [--title <title>] [--attach <文件路径> ...]",
+    "                                             创建一条新需求草稿（--attach 可重复）",
     "  propose <REQ-ID> [--title] [--spec]        提交或更新规范、验收条件与技术方案",
     "                   [--design] [--criteria] [--summary] [--note] [--handoff-note] [--revision <n>]",
     "  tasks <REQ-ID> [--tasks <json|@file>]      查看或更新实施任务与提交待验收",
     "                 [--ready] [--note <text>] [--revision <n>]",
+    "  screenshot <REQ-ID> [--label <text>]       采集 UI 截图验收证据（浏览器缺失时记录跳过批次）",
     "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all) [--timeout <ms>]",
     "                                             运行真实验证命令并记录不可变证据",
     "  review <REQ-ID> --verdict <pass|concern|block> --summary <text> [--body <md|@file>]",
     "                                             提交跨模型代码审查结论（不绕过人工验收）",
     "  issue <title|@file> [--detail <text|@file>] [--category <cat>] [--req <REQ-ID>]",
-    "                                             向自进化收集箱上报工作台自身缺陷或痛点",
+    "        [--attach <文件路径> ...]             向自进化收集箱上报工作台自身缺陷或痛点（--attach 可重复）",
     "  mcp                                        启动标准 MCP Server (stdio)",
     "  serve [--hub] [--port <n>] [--host <addr>] 前台启动 HTTP/WS 服务与 Web UI",
     "",
@@ -552,11 +585,19 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (!goalRaw) throw new WorkbenchError("invalid_input", "请提供需求目标描述或 @文件路径");
         const goal = readValueOrFile(goalRaw);
         const titleFlag = parsed.flags.get("title");
-        const detail = await createRequirement(root, {
-          goal,
-          title: typeof titleFlag === "string" ? titleFlag : undefined,
-          track: parsed.flags.get("fast-track") === true ? "fast_track" : "plan_first",
-        });
+        const attachmentIds = stageCliAttachments(parsed.attachments);
+        let detail: Awaited<ReturnType<typeof createRequirement>>;
+        try {
+          detail = await createRequirement(root, {
+            goal,
+            title: typeof titleFlag === "string" ? titleFlag : undefined,
+            track: parsed.flags.get("fast-track") === true ? "fast_track" : "plan_first",
+            ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
+          });
+        } catch (error) {
+          discardStagedAttachments(attachmentIds);
+          throw error;
+        }
         printResult(
           {
             id: detail.state.id,
@@ -564,6 +605,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
             stage: detail.state.stage,
             track: detail.state.track,
             revision: detail.state.revision,
+            attachments: detail.state.attachments ?? [],
           },
           asJson,
         );
@@ -647,6 +689,18 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (typeof revision === "string") payload.expectedRevision = Number(revision);
 
         const res = await executeWorkbenchTool(root, "wb_update_tasks", payload);
+        printResult(res, asJson);
+        return 0;
+      }
+
+      case "screenshot": {
+        const id = parsed.positionals[0];
+        if (!id) throw new WorkbenchError("invalid_input", "请提供需求编号，例如: wb screenshot REQ-001 --label \"验收截图\"");
+        const label = parsed.flags.get("label");
+        const res = await executeWorkbenchTool(root, "wb_screenshot", {
+          id,
+          ...(typeof label === "string" && label.trim() ? { label: label.trim() } : {}),
+        });
         printResult(res, asJson);
         return 0;
       }
@@ -748,16 +802,25 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         }
         const category: PainPointCategory =
           typeof categoryFlag === "string" ? (categoryFlag as PainPointCategory) : "cli_ergonomics";
-        const recorded = reportPainPoint({
-          source: "cli_issue",
-          category,
-          title,
-          detail: typeof detailFlag === "string" ? readValueOrFile(detailFlag) : undefined,
-          context: {
-            projectRoot: root,
-            requirementId: typeof reqFlag === "string" ? reqFlag : process.env.WORKBENCH_REQ_ID,
-          },
-        });
+        const attachmentIds = stageCliAttachments(parsed.attachments);
+        let recorded: ReturnType<typeof reportPainPoint>;
+        try {
+          recorded = reportPainPoint({
+            source: "cli_issue",
+            category,
+            title,
+            detail: typeof detailFlag === "string" ? readValueOrFile(detailFlag) : undefined,
+            context: {
+              projectRoot: root,
+              requirementId: typeof reqFlag === "string" ? reqFlag : process.env.WORKBENCH_REQ_ID,
+            },
+            ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
+          });
+        } catch (error) {
+          discardStagedAttachments(attachmentIds);
+          throw error;
+        }
+        if (!recorded && attachmentIds.length > 0) discardStagedAttachments(attachmentIds);
         printResult(recorded, asJson);
         return 0;
       }

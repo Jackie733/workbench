@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -200,7 +200,17 @@ function createMockGhDeps(repoSlug = "Jackie733/workbench-demo") {
   return { deps, calls, prs, comments, issueStates };
 }
 
+const prevHubDir = process.env.WORKBENCH_HUB_DIR;
+
+beforeEach(() => {
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-gh-hub-"));
+  tempDirs.push(hubDir);
+  process.env.WORKBENCH_HUB_DIR = hubDir;
+});
+
 afterEach(() => {
+  if (prevHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
+  else process.env.WORKBENCH_HUB_DIR = prevHubDir;
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }

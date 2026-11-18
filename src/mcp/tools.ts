@@ -1,11 +1,12 @@
-import { getProjectStatus, getRequirement, getRequirementDiff, listRequirements, propose, updateTasks } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, getRequirementDiff, isUiRelatedRequirement, listRequirements, propose, updateTasks } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import { checkLanguageMismatchWarning, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { STAGES, TASK_STATUSES, type CriterionInput, type Stage, type TaskInput } from "../core/types.ts";
+import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { STAGES, TASK_STATUSES, type CriterionInput, type ScreenshotCaptureResult, type Stage, type TaskInput } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "../hub/registry.ts";
 
@@ -146,6 +147,20 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
     },
   },
   {
+    name: "wb_screenshot",
+    description:
+      "Capture the default UI screenshot evidence matrix (home + requirement tabs, light/dark themes, desktop/narrow viewports) for a requirement. Best-effort: missing browser records a skipped batch without blocking acceptance.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id"],
+      properties: {
+        id: { type: "string", pattern: "^REQ-\\d{3,}$", description: "Requirement ID." },
+        label: { type: "string", description: "Optional label prefix for captured shots." },
+      },
+    },
+  },
+  {
     name: "wb_verify",
     description:
       "Execute a real verification command in the project root, bind it to current git snapshot & specHash, and record immutable evidence.",
@@ -250,6 +265,8 @@ export async function executeWorkbenchTool(
         reviewReport: detail.state.reviewReport ?? null,
         lastFeedback: detail.state.lastFeedback,
         blockedReason: detail.state.blockedReason,
+        uiRelated: detail.state.uiRelated ?? false,
+        screenshotBatches: detail.state.screenshotBatches ?? [],
         approval: detail.validity.approval,
         coverage: detail.validity.coverage,
         tasks: detail.state.tasks,
@@ -401,13 +418,66 @@ export async function executeWorkbenchTool(
         actor: "agent",
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
+      let latestDetail = detail;
+      let screenshotCapture: ScreenshotCaptureResult | null = null;
+      if (args.readyForAcceptance === true && detail.state.stage === "awaiting_acceptance") {
+        try {
+          const codeRoot = resolveCodeRoot(base, args.id);
+          if (await isUiRelatedRequirement(detail.state, codeRoot)) {
+            screenshotCapture = await captureRequirementScreenshots(base, args.id, {
+              trigger: "auto_submit",
+              actor: "agent",
+              currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+            });
+            latestDetail = getRequirement(base, args.id, {
+              currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+            });
+          }
+        } catch (error) {
+          // Screenshot evidence is best effort and must never block human acceptance submission.
+          screenshotCapture = {
+            status: "skipped",
+            batchId: null,
+            reason: error instanceof Error ? error.message : String(error),
+            batch: null,
+          };
+        }
+      }
       return {
-        id: detail.state.id,
-        stage: detail.state.stage,
-        revision: detail.state.revision,
-        tasks: detail.state.tasks,
-        acceptanceGate: detail.validity.acceptanceGate,
-        nextHeadline: detail.validity.banner.headline,
+        id: latestDetail.state.id,
+        stage: latestDetail.state.stage,
+        revision: latestDetail.state.revision,
+        tasks: latestDetail.state.tasks,
+        acceptanceGate: latestDetail.validity.acceptanceGate,
+        nextHeadline: latestDetail.validity.banner.headline,
+        ...(screenshotCapture ? { screenshotCapture } : {}),
+      };
+    }
+
+    case "wb_screenshot": {
+      assertAllowedKeys(args, ["id", "label"], name);
+      if (typeof args.id !== "string") {
+        throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
+      }
+      if (args.label !== undefined && typeof args.label !== "string") {
+        throw new WorkbenchError("invalid_input", "label 必须是字符串");
+      }
+      if (typeof args.label === "string" && args.label.trim().length > 120) {
+        throw new WorkbenchError("invalid_input", "label 不能超过 120 字符");
+      }
+      const snapshot = await observeGitSnapshot(resolveCodeRoot(base, args.id));
+      const capture = await captureRequirementScreenshots(base, args.id, {
+        trigger: "manual",
+        actor: "agent",
+        ...(typeof args.label === "string" && args.label.trim() ? { label: args.label.trim() } : {}),
+        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+      });
+      return {
+        id: args.id,
+        status: capture.status,
+        batchId: capture.batchId,
+        reason: capture.reason,
+        screenshotCapture: capture,
       };
     }
 

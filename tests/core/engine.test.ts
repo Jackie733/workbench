@@ -401,4 +401,42 @@ describe("WB-01 core store and domain engine", () => {
     expect(sanitized.text).not.toContain("\x1b");
     expect(sanitized.truncated).toBe(true);
   });
+
+  test("preserves forward-compatible extension fields under same schemaVersion and isolates corrupt records in listRequirements", async () => {
+    const root = makeTempProject();
+    await initProject(root);
+    await createRequirement(root, { goal: "正常需求一" });
+    await createRequirement(root, { goal: "正常需求二" });
+
+    // Inject a future optional extension field into REQ-001/state.json and project.json.
+    const state1Path = path.join(root, ".workbench", "items", "REQ-001", "state.json");
+    const rawState1 = JSON.parse(fs.readFileSync(state1Path, "utf8")) as Record<string, unknown>;
+    rawState1.futureBranchExtension = { enabled: true, tags: ["rsi"] };
+    fs.writeFileSync(state1Path, JSON.stringify(rawState1, null, 2));
+
+    const projectPath = path.join(root, ".workbench", "project.json");
+    const rawProject = JSON.parse(fs.readFileSync(projectPath, "utf8")) as Record<string, unknown>;
+    rawProject.futureProjectField = "vNext";
+    fs.writeFileSync(projectPath, JSON.stringify(rawProject, null, 2));
+
+    // Mutating REQ-001 must succeed and preserve the unknown extension field verbatim.
+    await propose(root, "REQ-001", { designMarkdown: "# 设计", actor: "agent" });
+    const afterState1 = JSON.parse(fs.readFileSync(state1Path, "utf8")) as Record<string, unknown>;
+    expect(afterState1.futureBranchExtension).toEqual({ enabled: true, tags: ["rsi"] });
+
+    // Prototype-pollution keys are still rejected.
+    const state2Path = path.join(root, ".workbench", "items", "REQ-002", "state.json");
+    const rawState2 = JSON.parse(fs.readFileSync(state2Path, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(state2Path, JSON.stringify({ ...rawState2, constructor: { polluted: true } }, null, 2));
+
+    const corruptEntries: Array<{ id: string; code: string; message: string }> = [];
+    const list = listRequirements(root, {
+      scope: "all",
+      onCorrupt: (entry) => corruptEntries.push(entry),
+    });
+    expect(list.map((r) => r.id)).toEqual(["REQ-001"]);
+    expect(corruptEntries).toHaveLength(1);
+    expect(corruptEntries[0]!.id).toBe("REQ-002");
+    expect(corruptEntries[0]!.code).toBe("corrupt_record");
+  });
 });

@@ -304,6 +304,14 @@ export function buildRequirementIssueBody(detail: RequirementDetail): string {
       lines.push(`- [ ] **${c.id}** (${req}): ${sanitizeOutput(c.description, 800).text}${cmd}`);
     }
   }
+  if (state.attachments && state.attachments.length > 0) {
+    lines.push(
+      "",
+      "## 附件",
+      `本需求附带 ${state.attachments.length} 个附件（${state.attachments.map((a) => sanitizeOutput(a.name, 120).text).join("、")}）。`,
+      "二进制附件保存在 Workbench 本地工作区，请打开需求详情页查看或下载。",
+    );
+  }
   return sanitizeOutput(lines.join("\n"), 32_000).text;
 }
 

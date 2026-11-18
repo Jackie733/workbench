@@ -18,8 +18,32 @@ export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
 export const MAX_DISCUSSIONS = 200;
 export const MAX_AGENT_RUNS = 30;
+export const MAX_SCREENSHOT_BATCHES = 5;
+export const MAX_SCREENSHOTS_PER_BATCH = 12;
+export const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
+export const MAX_SCREENSHOT_TOTAL_MS = 90_000;
+export const MAX_SCREENSHOT_NAV_MS = 15_000;
 export const MAX_TITLE_CHARS = 120;
 export const MAX_REASON_CHARS = 2000;
+
+/** 附件能力限额（图片与普通文件共用） */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export const MAX_ATTACHMENTS_PER_ITEM = 8;
+export const MAX_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024;
+export const MAX_ATTACHMENT_NAME_CHARS = 120;
+
+/** 附件元数据：二进制独立落盘，此处只保存引用与摘要。 */
+export interface AttachmentMeta {
+  /** ATT-<timestamp36>-<rand6>，匹配 TOKEN_ID_RE */
+  id: string;
+  /** 清理后的原始文件名，仅用于展示 */
+  name: string;
+  /** 服务端按扩展名映射的 MIME，不信任客户端声明 */
+  mimeType: string;
+  size: number;
+  sha256: string;
+  addedAt: number;
+}
 
 export const AGENT_ACTIONS = ["ask", "design", "implement", "fix", "review"] as const;
 export type AgentAction = (typeof AGENT_ACTIONS)[number];
@@ -232,6 +256,8 @@ export interface AcceptanceSnapshot {
   verifications: AcceptanceVerificationEvidence[];
   omittedVerificationCount: number;
   git: AcceptanceGitEvidence;
+  /** Frozen screenshot metadata captured for this requirement; image bytes stay in screenshots/. */
+  screenshots?: ScreenshotBatch[];
   contentDigest: string;
 }
 
@@ -299,6 +325,7 @@ export type TimelineEventKind =
   | "changes_requested"
   | "tasks_updated"
   | "verified"
+  | "screenshots_captured"
   | "submitted_for_acceptance"
   | "accepted"
   | "delivered"
@@ -308,6 +335,8 @@ export type TimelineEventKind =
   | "cancelled"
   | "reopened"
   | "discussed"
+  | "attachment_added"
+  | "attachment_removed"
   | "review_submitted"
   | "github_issue_linked"
   | "github_issue_synced"
@@ -392,6 +421,42 @@ export interface ReviewReport {
   reviewedAt: number;
 }
 
+export type ScreenshotTrigger = "auto_submit" | "manual";
+export type ScreenshotBatchStatus = "captured" | "partial" | "skipped";
+
+export interface ScreenshotShot {
+  /** Stable shot ID such as S-<ts>-<uuid8>. */
+  id: string;
+  label: string;
+  urlPath: string;
+  viewport: string;
+  theme: "light" | "dark";
+  /** Requirement-relative PNG path such as screenshots/shot-<id>.png. */
+  path: string;
+  sha256: string;
+  sizeBytes: number;
+}
+
+export interface ScreenshotBatch {
+  id: string;
+  createdAt: number;
+  trigger: ScreenshotTrigger;
+  actor: "agent" | "human" | "system";
+  specHash: string;
+  codeSnapshotHash: string;
+  status: ScreenshotBatchStatus;
+  skipReason: string | null;
+  shots: ScreenshotShot[];
+  durationMs: number;
+}
+
+export interface ScreenshotCaptureResult {
+  status: ScreenshotBatchStatus;
+  batchId: string | null;
+  reason: string | null;
+  batch: ScreenshotBatch | null;
+}
+
 export interface TimelineEvent {
   id: string;
   at: number;
@@ -422,11 +487,17 @@ export interface RequirementState {
   lastFeedback: string | null;
   blockedFrom: Stage | null;
   blockedReason: string | null;
+  /** Explicit marker for UI-facing requirements; also used by source-driven pain point promotion. */
+  uiRelated?: boolean;
+  /** Bounded screenshot evidence batches, newest last; at most MAX_SCREENSHOT_BATCHES. */
+  screenshotBatches?: ScreenshotBatch[];
   handoffNote?: HandoffNote | null;
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
   reviewReport?: ReviewReport | null;
   github?: RequirementGitHubLink | null;
+  /** 可选附件元数据；旧数据无该字段时行为不变。 */
+  attachments?: AttachmentMeta[];
   createdAt: number;
   updatedAt: number;
 }
@@ -578,4 +649,6 @@ export interface RequirementDetail {
   handoffMarkdown: string;
   designHistoryVersions: number[];
   validity: ValidityReport;
+  /** Frozen acceptance artifact when available; lets the UI render immutable screenshot history. */
+  acceptanceSnapshot?: AcceptanceSnapshot | null;
 }

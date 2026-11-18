@@ -6,6 +6,7 @@ import type { ServerWebSocket } from "bun";
 import {
   acceptRequirement,
   addDiscussion,
+  addRequirementAttachments,
   approveDesign,
   authorizeFastTrack,
   blockRequirement,
@@ -24,6 +25,7 @@ import {
   listRequirements,
   markDesigning,
   recordRequirementGitHubSync,
+  removeRequirementAttachment,
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
@@ -31,7 +33,16 @@ import {
   updateDesign,
   updateProjectConfig,
   updateSpec,
+  type CorruptRequirementEntry,
 } from "../core/engine.ts";
+import {
+  discardStagedAttachments,
+  normalizeAttachments,
+  painPointAttachmentsDir,
+  readAttachmentForServe,
+  requirementAttachmentsDir,
+  stageUpload,
+} from "../core/attachments.ts";
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
@@ -50,8 +61,11 @@ import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, resolveEffectiveOutpu
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, readSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
+import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
+  MAX_ATTACHMENT_TOTAL_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
   type CriterionInput,
@@ -133,6 +147,8 @@ function httpStatusForError(code: WorkbenchErrorCode): number {
     case "invalid_path":
     case "symlink_not_allowed":
       return 400;
+    case "payload_too_large":
+      return 413;
     case "not_found":
       return 404;
     case "already_initialized":
@@ -182,6 +198,11 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
 // Bun 1.3.14 在同进程重复 Bun.build 且相关模块已被运行时加载时会抛出 EBADF/EISDIR，
 // 因此非开发模式下同一 webDir 的初始构建结果在进程内共享；开发模式与显式 reload 仍每次重新构建。
 const initialWebBundles = new Map<string, Promise<{ html: string; css: string; js: string } | null>>();
+
+function readStringArray(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.filter((v): v is string => typeof v === "string");
+}
 
 async function buildWebBundle(webDir: string): Promise<{ html: string; css: string; js: string } | null> {
   const htmlPath = path.join(webDir, "index.html");
@@ -367,11 +388,16 @@ export async function startWorkbenchServer(options: {
               scope: "active",
               currentCodeSnapshotHash: snap?.fingerprint ?? null,
               codeSnapshotsById: byReqId,
+              onCorrupt: (corrupt) => {
+                console.warn(`[workbench] 跳过损坏需求 ${entry.root}/${corrupt.id}: ${corrupt.message}`);
+              },
             });
             activeCount = items.length;
             decisionCount = items.filter((i) => i.needsDecision).length;
-          } catch {
-            // Keep resilient if a project is mid-migration.
+          } catch (error) {
+            console.warn(
+              `[workbench] 读取项目快照失败 ${entry.root}: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
         }
         const runningCount = executor.getActiveRuns(entry.root).length;
@@ -509,6 +535,39 @@ export async function startWorkbenchServer(options: {
 
     if (method === "GET" && pathname === "/api/health") {
       return jsonResponse({ ok: true, root: defaultRoot, serverPid: process.pid, hubMode });
+    }
+
+    if (method === "POST" && pathname === "/api/uploads") {
+      const contentLength = Number(req.headers.get("content-length") ?? "0");
+      if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_TOTAL_BYTES) {
+        throw new WorkbenchError(
+          "payload_too_large",
+          `附件上传内容超过 ${Math.round(MAX_ATTACHMENT_TOTAL_BYTES / (1024 * 1024))} MB 上限`,
+        );
+      }
+      const contentType = req.headers.get("content-type") ?? "";
+      if (!contentType.toLowerCase().includes("multipart/form-data")) {
+        throw new WorkbenchError("invalid_input", "附件上传必须使用 multipart/form-data");
+      }
+      let form: FormData;
+      try {
+        form = await req.formData();
+      } catch {
+        throw new WorkbenchError("invalid_input", "无法解析上传内容");
+      }
+      const rawFiles = form.getAll("files");
+      const files = rawFiles.filter((v): v is File => typeof v !== "string");
+      if (files.length === 0) {
+        throw new WorkbenchError("invalid_input", "请选择至少一个附件文件");
+      }
+      const inputs = await Promise.all(
+        files.map(async (file) => ({
+          name: file.name,
+          bytes: Buffer.from(await file.arrayBuffer()),
+        })),
+      );
+      const attachments = stageUpload(inputs);
+      return jsonResponse({ attachments }, 201);
     }
 
     // --- Hub & Global Discovery/Routing Routes ---
@@ -663,9 +722,24 @@ export async function startWorkbenchServer(options: {
           ? (body.category as PainPointCategory)
           : "ui_anomaly";
       const context = isRecord(body.context) ? (body.context as PainPointContext) : {};
-      const painPoint = reportPainPoint({ source, category, title, detail, context });
+      const attachmentIds = readStringArray(body.attachmentIds);
+      const painPoint = reportPainPoint({ source, category, title, detail, context, attachmentIds });
+      if (!painPoint && attachmentIds && attachmentIds.length > 0) {
+        discardStagedAttachments(attachmentIds);
+      }
       broadcastUi({ type: "hub.updated", reason: "evolution.reported", at: Date.now() });
       return jsonResponse({ painPoint }, 201);
+    }
+
+    const evoAttachmentMatch = /^\/api\/hub\/evolution\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname);
+    if (method === "GET" && evoAttachmentMatch) {
+      const painId = decodeURIComponent(evoAttachmentMatch[1]!);
+      const attId = decodeURIComponent(evoAttachmentMatch[2]!);
+      const pain = readPainPoints().find((p) => p.id === painId);
+      if (!pain) throw new WorkbenchError("not_found", "痛点记录不存在");
+      const metas = normalizeAttachments(pain.attachments) ?? [];
+      const served = readAttachmentForServe(painPointAttachmentsDir(painId), attId, metas);
+      return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
     }
 
     const evoPromoteMatch = /^\/api\/hub\/evolution\/([^/]+)\/promote$/.exec(pathname);
@@ -880,14 +954,20 @@ export async function startWorkbenchServer(options: {
       const scope = (url.searchParams.get("scope") ?? "active") as "active" | "done" | "cancelled" | "all";
       const stageParam = url.searchParams.get("stage");
       const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
+      const corruptItems: CorruptRequirementEntry[] = [];
       const items = listRequirements(base, {
         scope,
         stage: stageParam ? (stageParam as Stage) : undefined,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         codeSnapshotsById: byReqId,
+        onCorrupt: (corrupt) => {
+          console.warn(`[workbench] 跳过损坏需求 ${base}/${corrupt.id}: ${corrupt.message}`);
+          corruptItems.push(corrupt);
+        },
       });
       return jsonResponse({
         items,
+        ...(corruptItems.length > 0 ? { corruptItems } : {}),
         codeSnapshotHash: snapshot?.fingerprint ?? null,
         bridge: bridgeStatus,
       });
@@ -969,12 +1049,14 @@ export async function startWorkbenchServer(options: {
       const title = typeof body.title === "string" ? body.title : undefined;
       const track: Track = body.track === "fast_track" ? "fast_track" : "plan_first";
       const snapshot = await observeGitSnapshot(base);
+      const attachmentIds = readStringArray(body.attachmentIds);
       let detail = await createRequirement(base, {
         goal,
         title,
         criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
         track,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
       });
 
       const projectMeta = getProjectStatus(base).project;
@@ -1033,10 +1115,64 @@ export async function startWorkbenchServer(options: {
         return jsonResponse({ version, markdown });
       }
 
+      const attMatch = /^attachments\/([^/]+)$/.exec(sub);
+      if (method === "GET" && attMatch) {
+        const attId = decodeURIComponent(attMatch[1]!);
+        const state = getRequirement(base, id).state;
+        const metas = normalizeAttachments(state.attachments) ?? [];
+        const served = readAttachmentForServe(requirementAttachmentsDir(base, id), attId, metas);
+        return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
+      }
+
+      if (method === "DELETE" && attMatch) {
+        const attId = decodeURIComponent(attMatch[1]!);
+        const detail = await removeRequirementAttachment(base, id, attId);
+        broadcastUi({ type: "workbench.updated", reason: "attachment.removed", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "POST" && sub === "attachments") {
+        const body = await readBody(req);
+        const attachmentIds = readStringArray(body.attachmentIds) ?? [];
+        const detail = await addRequirementAttachments(base, id, attachmentIds, {
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: null,
+        });
+        broadcastUi({ type: "workbench.updated", reason: "attachment.added", root: base, id, at: Date.now() });
+        return jsonResponse({ detail }, 201);
+      }
+
       const evMatch = /^evidence\/([^/]+)$/.exec(sub);
       if (method === "GET" && evMatch) {
         const evidence = getVerificationEvidence(base, id, decodeURIComponent(evMatch[1]!));
         return jsonResponse(evidence);
+      }
+
+      const shotMatch = /^screenshots\/([^/]+)$/.exec(sub);
+      if (method === "GET" && shotMatch) {
+        const screenshot = readRequirementScreenshot(base, id, decodeURIComponent(shotMatch[1]!));
+        return new Response(new Uint8Array(screenshot.bytes), {
+          status: 200,
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(screenshot.bytes.length),
+            "Cache-Control": "private, max-age=31536000, immutable",
+          },
+        });
+      }
+
+      if (method === "POST" && sub === "screenshots/capture") {
+        const body = await readBody(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const capture = await captureRequirementScreenshots(base, id, {
+          trigger: "manual",
+          actor: "human",
+          ...(typeof body.label === "string" && body.label.trim() ? { label: body.label.trim() } : {}),
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        broadcastUi({ type: "workbench.updated", reason: "screenshots.captured", root: base, id, at: Date.now() });
+        return jsonResponse({ detail, screenshotCapture: capture });
       }
 
       if (method === "PATCH" && sub === "spec") {

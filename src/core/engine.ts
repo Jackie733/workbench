@@ -21,6 +21,13 @@ import {
   inspectGitHubEnvironment,
   type GitHubCommandDeps,
 } from "./github.ts";
+import {
+  claimAttachments,
+  copyAttachments,
+  normalizeAttachments,
+  removeAttachment as removeAttachmentFile,
+  requirementAttachmentsDir,
+} from "./attachments.ts";
 import { normalizeOutputLanguage } from "./language.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
@@ -49,6 +56,7 @@ import {
   type AcceptanceSnapshot,
   type AcceptanceVerificationEvidence,
   type AgentRunRecord,
+  type AttachmentMeta,
   type BaselineSnapshot,
   type CriterionInput,
   type DeliveryCandidateFile,
@@ -70,6 +78,8 @@ import {
   type RequirementSummary,
   type ReviewReport,
   type ReviewVerdict,
+  type ScreenshotBatch,
+  type ScreenshotCaptureResult,
   type Stage,
   type TaskInput,
   type TimelineEvent,
@@ -90,6 +100,7 @@ import {
   validateGitHubRepoSlug,
   validateMarkdownContent,
   validateProjectMetadata,
+  validateScreenshotBatch,
   validateVerificationRecord,
 } from "./validate.ts";
 import {
@@ -135,6 +146,7 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
       acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
       acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
     }),
+    acceptanceSnapshot: bundle.acceptanceSnapshot,
   };
 }
 
@@ -276,6 +288,12 @@ export async function updateProjectConfig(
   });
 }
 
+export interface CorruptRequirementEntry {
+  id: string;
+  code: string;
+  message: string;
+}
+
 export function listRequirements(
   root: string,
   options: {
@@ -283,6 +301,7 @@ export function listRequirements(
     stage?: Stage;
     currentCodeSnapshotHash?: string | null;
     codeSnapshotsById?: ReadonlyMap<string, string | null>;
+    onCorrupt?: (entry: CorruptRequirementEntry) => void;
   } = {},
 ): RequirementSummary[] {
   const ids = listRequirementIds(root);
@@ -291,7 +310,15 @@ export function listRequirements(
   const summaries: RequirementSummary[] = [];
 
   for (const id of ids) {
-    const bundle = readRequirementBundle(root, id);
+    let bundle: RequirementBundle;
+    try {
+      bundle = readRequirementBundle(root, id);
+    } catch (error) {
+      const code = error instanceof WorkbenchError ? error.code : "corrupt_record";
+      const message = error instanceof Error ? error.message : String(error);
+      options.onCorrupt?.({ id, code, message });
+      continue;
+    }
     const stage = bundle.state.stage;
     const scopeOk =
       scope === "all" ||
@@ -422,7 +449,12 @@ export async function createRequirement(
     title?: string;
     criteria?: CriterionInput[];
     track?: Track;
+    uiRelated?: boolean;
     currentCodeSnapshotHash?: string | null;
+    /** 暂存区附件 ID，创建时认领到 .workbench/items/<REQ>/attachments/ */
+    attachmentIds?: string[];
+    /** 已落盘附件来源（例如痛点转正），创建时复制到新需求目录 */
+    attachmentSource?: { dir: string; metas: AttachmentMeta[] };
   },
 ): Promise<RequirementDetail> {
   const specMarkdown = validateMarkdownContent(input.goal, "spec", false);
@@ -432,6 +464,16 @@ export async function createRequirement(
   const specHash = computeSpecHash(specMarkdown, criteria);
 
   const bundle = await createRequirementFiles(root, (id, now) => {
+    let attachments: AttachmentMeta[] = [];
+    if (input.attachmentIds && input.attachmentIds.length > 0) {
+      attachments = claimAttachments(input.attachmentIds, requirementAttachmentsDir(root, id));
+    } else if (input.attachmentSource && input.attachmentSource.metas.length > 0) {
+      attachments = copyAttachments(
+        input.attachmentSource.dir,
+        input.attachmentSource.metas,
+        requirementAttachmentsDir(root, id),
+      );
+    }
     const state: RequirementState = {
       schemaVersion: SCHEMA_VERSION,
       id,
@@ -448,10 +490,17 @@ export async function createRequirement(
       tasks: [],
       baseline: null,
       verifications: [],
-      timeline: [makeEvent(now, "created", "human", `创建需求 ${id}：${title}`)],
       lastFeedback: null,
       blockedFrom: null,
       blockedReason: null,
+      ...(input.uiRelated === true ? { uiRelated: true } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      timeline: [
+        makeEvent(now, "created", "human", `创建需求 ${id}：${title}`),
+        ...(attachments.length > 0
+          ? [makeEvent(now, "attachment_added", "human", `添加 ${attachments.length} 个附件`)]
+          : []),
+      ],
       createdAt: now,
       updatedAt: now,
     };
@@ -459,6 +508,77 @@ export async function createRequirement(
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/** 为已创建的需求补传附件（已最终验收的需求禁止变更）。 */
+export async function addRequirementAttachments(
+  root: string,
+  id: string,
+  attachmentIds: string[],
+  options: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  if (attachmentIds.length === 0) {
+    throw new WorkbenchError("invalid_input", "请先上传附件再添加到需求");
+  }
+  const bundle = await mutateRequirement(root, id, options.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.acceptance !== null || state.stage === "done") {
+      throw new WorkbenchError("invalid_transition", `需求 ${id} 已最终验收，禁止再添加附件`);
+    }
+    const existing = normalizeAttachments(state.attachments) ?? [];
+    const targetDir = requirementAttachmentsDir(root, id);
+    const added = claimAttachments(attachmentIds, targetDir, existing);
+    if (added.length === 0) return { state };
+    return {
+      state: {
+        ...state,
+        attachments: [...existing, ...added],
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "attachment_added",
+            "human",
+            `添加 ${added.length} 个附件：${added.map((a) => a.name).join("、")}`.slice(0, 500),
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+}
+
+/** 删除需求附件（已最终验收的需求禁止变更）。 */
+export async function removeRequirementAttachment(
+  root: string,
+  id: string,
+  attId: string,
+  options: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, options.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.acceptance !== null || state.stage === "done") {
+      throw new WorkbenchError("invalid_transition", `需求 ${id} 已最终验收，禁止删除附件`);
+    }
+    const existing = normalizeAttachments(state.attachments) ?? [];
+    const targetDir = requirementAttachmentsDir(root, id);
+    if (!fs.existsSync(targetDir)) {
+      throw new WorkbenchError("not_found", "附件不存在");
+    }
+    const remaining = removeAttachmentFile(targetDir, attId, existing);
+    const removed = existing.find((m) => m.id === attId);
+    return {
+      state: {
+        ...state,
+        attachments: remaining,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "attachment_removed", "human", `删除附件：${removed?.name ?? attId}`),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
 }
 
 export async function updateSpec(
@@ -924,6 +1044,66 @@ export async function recordVerification(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? record.codeSnapshotHash);
 }
 
+export async function isUiRelatedRequirement(state: RequirementState, codeRoot: string): Promise<boolean> {
+  if (state.uiRelated === true) return true;
+  try {
+    const observed = await observeGitChanges(codeRoot, { sinceHead: state.baseline?.head ?? null });
+    return observed.files.some((file) => file.path.startsWith("src/web/"));
+  } catch {
+    // Git observation is best effort: an unreadable repo should not block acceptance.
+    return false;
+  }
+}
+
+export async function recordScreenshotBatch(
+  root: string,
+  id: string,
+  input: {
+    batch: ScreenshotBatch;
+    files?: Array<{ shotId: string; bytes: Buffer }>;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const batch = validateScreenshotBatch(input.batch);
+  const files = input.files ?? [];
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled") {
+      throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能记录新的截图证据`);
+    }
+    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+      throw new WorkbenchError(
+        "approval_required",
+        `当前阶段（${state.stage}）不能记录截图证据；仅实施阶段或待验收阶段允许采集`,
+      );
+    }
+    const existing = state.screenshotBatches ?? [];
+    if (existing.some((item) => item.id === batch.id)) {
+      throw new WorkbenchError("invalid_input", `截图批次 ID 已存在: ${batch.id}`);
+    }
+    const nextBatches = [...existing, batch];
+    const summary =
+      batch.status === "skipped"
+        ? `已记录截图采集跳过：${batch.skipReason ?? "浏览器环境不可用"}`
+        : batch.status === "partial"
+          ? `截图证据部分完成（${batch.shots.length} 张），存在跳过项`
+          : `已采集 UI 截图证据（${batch.shots.length} 张）`;
+    return {
+      screenshotWrite: { batch, files },
+      state: {
+        ...state,
+        screenshotBatches: nextBatches,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "screenshots_captured", batch.actor, summary, batch.skipReason ?? undefined),
+        ),
+      },
+    };
+  });
+
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? batch.codeSnapshotHash);
+}
+
 function selectSnapshotVerifications(
   evaluated: ReturnType<typeof evaluateRequirement>["verifications"],
   selectedIds: Set<string>,
@@ -1190,6 +1370,14 @@ export async function acceptRequirement(
         omittedFiles: frozenOmitted.omittedFiles,
         capturedAt: gitObs.capturedAt,
       },
+      ...(state.screenshotBatches && state.screenshotBatches.length > 0
+        ? {
+            screenshots: state.screenshotBatches.map((batch) => ({
+              ...batch,
+              shots: batch.shots.map((shot) => ({ ...shot })),
+            })),
+          }
+        : {}),
       contentDigest: "0".repeat(64),
     };
 

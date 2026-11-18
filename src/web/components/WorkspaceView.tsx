@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Content as DropdownContent,
   Item as DropdownItem,
@@ -7,9 +7,10 @@ import {
   Trigger as DropdownTrigger,
 } from "@radix-ui/react-dropdown-menu";
 import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
-import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
-import { api } from "../api.ts";
+import type { AgentRunRecord, RequirementDetail, ScreenshotBatch, Stage } from "../../core/types.ts";
+import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
 import {
+  captureUiScreenshots,
   cancelRun,
   executeVerify,
   handleBannerAction,
@@ -42,8 +43,10 @@ import {
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { AttachmentGallery } from "./AttachmentGallery.tsx";
+import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { COVERAGE_ICONS, Icon, TASK_ICONS } from "./Icon.tsx";
-import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
+import { LiveTimer, MarkdownView, ModalShell, RunnerSelect } from "./Primitives.tsx";
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
   const stage = d.state.stage;
@@ -200,6 +203,32 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
 
   const openAnnotate = (anchor: string) => {
     setModal({ kind: "annotate_anchor", anchor, message: "", mode: "refine" });
+  };
+
+  const canEditAttachments = s.acceptance === null && s.stage !== "done";
+  const attachments = s.attachments ?? [];
+
+  const addAttachments = async (metas: Array<{ id: string }>) => {
+    if (metas.length === 0) return;
+    const res = await runBusy(async () => {
+      const out = await api.addRequirementAttachments(s.id, {
+        attachmentIds: metas.map((m) => m.id),
+        expectedRevision: s.revision,
+      });
+      await invalidateAllWorkbenchQueries();
+      return out;
+    });
+    if (res) showToast(`已添加 ${metas.length} 个附件`);
+  };
+
+  const deleteAttachment = async (attId: string) => {
+    if (typeof window !== "undefined" && !window.confirm("确认删除该附件？删除后不可恢复。")) return;
+    const res = await runBusy(async () => {
+      const out = await api.deleteRequirementAttachment(s.id, attId);
+      await invalidateAllWorkbenchQueries();
+      return out;
+    });
+    if (res) showToast("附件已删除");
   };
 
   const saveSpec = async () => {
@@ -446,6 +475,24 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
         )}
       </div>
 
+      <div className="card" data-testid="requirement-attachments-card">
+        <div className="card-head">
+          <h3>附件（{attachments.length}）</h3>
+          {!canEditAttachments && <span className="badge neutral">已验收冻结</span>}
+        </div>
+        <AttachmentGallery
+          attachments={attachments}
+          urlFor={(attId) => requirementAttachmentUrl(s.id, attId)}
+          onDelete={canEditAttachments ? (attId) => void deleteAttachment(attId) : undefined}
+          emptyText={canEditAttachments ? "暂无附件，可补充截图、日志或复现文件。" : "暂无附件。"}
+        />
+        {canEditAttachments && (
+          <div style={{ marginTop: 10 }}>
+            <AttachmentPicker value={[]} onChange={(metas) => void addAttachments(metas)} disabled={busy} />
+          </div>
+        )}
+      </div>
+
       <div className="card">
         <div className="card-head">
           <h3>
@@ -634,6 +681,194 @@ function SpecDesignTab({ d }: { d: RequirementDetail }) {
   );
 }
 
+function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
+  const showToast = useUiStore((s) => s.showToast);
+  const [capturing, setCapturing] = useState(false);
+  const [lightbox, setLightbox] = useState<{ batchId: string; index: number } | null>(null);
+  const isDone = d.state.stage === "done";
+  const frozen = d.acceptanceSnapshot?.screenshots;
+  const batches = (frozen && frozen.length > 0 ? frozen : d.state.screenshotBatches ?? []).slice().reverse();
+  const currentHash = d.validity.provenance.codeSnapshotHash;
+  const canCapture = d.state.stage === "implementing" || d.state.stage === "awaiting_acceptance";
+  const activeBatch = lightbox ? batches.find((batch) => batch.id === lightbox.batchId) ?? null : null;
+  const activeShot = activeBatch && lightbox ? activeBatch.shots[lightbox.index] ?? null : null;
+
+  useEffect(() => {
+    if (!lightbox || !activeBatch) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setLightbox(null);
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setLightbox((prev) =>
+          prev ? { ...prev, index: (prev.index - 1 + activeBatch.shots.length) % activeBatch.shots.length } : prev,
+        );
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setLightbox((prev) => (prev ? { ...prev, index: (prev.index + 1) % activeBatch.shots.length } : prev));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [lightbox, activeBatch]);
+
+  const recapture = async () => {
+    if (capturing) return;
+    setCapturing(true);
+    try {
+      const res = await captureUiScreenshots(d.state.id);
+      if (res) {
+        const capture = res.screenshotCapture;
+        if (capture.status === "captured") {
+          showToast(`截图证据已更新（${capture.batch?.shots.length ?? 0} 张）`);
+        } else if (capture.status === "partial") {
+          showToast(`截图部分完成（${capture.batch?.shots.length ?? 0} 张），存在跳过项`, true);
+        } else {
+          showToast(capture.reason ?? "截图采集已跳过", true);
+        }
+      }
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  return (
+    <div className="card" data-testid="screenshot-section">
+      <div className="card-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <h3>UI 截图证据</h3>
+          {isDone && <span className="badge success">已随验收快照固化</span>}
+        </div>
+        {canCapture && (
+          <button
+            className="btn xs"
+            type="button"
+            data-testid="screenshot-recapture"
+            disabled={capturing}
+            onClick={() => void recapture()}
+          >
+            <Icon icon={RefreshCw} size={14} /> {capturing ? "采集中…" : "重新采集"}
+          </button>
+        )}
+      </div>
+
+      {batches.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+          {isDone
+            ? "本次验收未固化截图证据。"
+            : "尚未采集截图证据。UI 相关需求在提交验收时会自动采集，也可点击「重新采集」立即补采。"}
+        </p>
+      ) : (
+        batches.map((batch) => {
+          const fingerprintMatch = Boolean(currentHash && batch.codeSnapshotHash === currentHash);
+          const statusMeta =
+            batch.status === "captured"
+              ? { label: "采集完整", tone: "success" }
+              : batch.status === "partial"
+                ? { label: "部分采集", tone: "warning" }
+                : { label: "已跳过", tone: "warning" };
+          return (
+            <div key={batch.id} className="screenshot-batch" data-testid={`screenshot-batch-${batch.id}`}>
+              <div className="screenshot-batch-head">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span className={`badge ${statusMeta.tone}`}>{statusMeta.label}</span>
+                  <span className="muted" style={{ fontSize: 12.5 }}>
+                    {formatDateTime(batch.createdAt)} · {batch.trigger === "auto_submit" ? "提交验收时自动采集" : "手动补采"} ·{" "}
+                    {batch.shots.length} 张
+                  </span>
+                  <span className={`badge ${fingerprintMatch ? "success" : "warning"}`} data-testid="screenshot-fingerprint-badge">
+                    {fingerprintMatch ? "与当前代码一致" : "基于旧代码采集"}
+                  </span>
+                </div>
+                <span className="muted" style={{ fontSize: 11.5 }}>
+                  {batch.codeSnapshotHash.slice(0, 8)}
+                </span>
+              </div>
+
+              {batch.skipReason && (
+                <div className="callout warning" style={{ margin: "8px 0", fontSize: 12.5 }} data-testid="screenshot-skip-reason">
+                  {batch.skipReason}
+                </div>
+              )}
+
+              {batch.shots.length > 0 && (
+                <div className="screenshot-grid">
+                  {batch.shots.map((shot, index) => (
+                    <button
+                      key={shot.id}
+                      type="button"
+                      className="screenshot-thumb"
+                      data-testid={`shot-${shot.id}`}
+                      onClick={() => setLightbox({ batchId: batch.id, index })}
+                    >
+                      <img src={screenshotUrl(d.state.id, shot.id)} alt={shot.label} loading="lazy" />
+                      <span className="screenshot-thumb-label">{shot.label}</span>
+                      <span className="muted" style={{ fontSize: 11 }}>
+                        {shot.viewport} · {shot.theme === "dark" ? "暗色" : "明色"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })
+      )}
+
+      {activeBatch && activeShot && lightbox && (
+        <ModalShell wide onClose={() => setLightbox(null)} testId="screenshot-lightbox">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 15 }}>{activeShot.label}</h3>
+            <span className="muted" style={{ fontSize: 12 }}>
+              第 {lightbox.index + 1}/{activeBatch.shots.length} 张 · {activeShot.viewport} ·{" "}
+              {activeShot.theme === "dark" ? "暗色" : "明色"}
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
+            <button
+              className="btn xs"
+              type="button"
+              data-testid="screenshot-lightbox-prev"
+              onClick={() =>
+                setLightbox((prev) =>
+                  prev
+                    ? { ...prev, index: (prev.index - 1 + activeBatch.shots.length) % activeBatch.shots.length }
+                    : prev,
+                )
+              }
+            >
+              上一张
+            </button>
+            <img
+              className="screenshot-lightbox-image"
+              data-testid="screenshot-lightbox-image"
+              src={screenshotUrl(d.state.id, activeShot.id)}
+              alt={activeShot.label}
+            />
+            <button
+              className="btn xs"
+              type="button"
+              data-testid="screenshot-lightbox-next"
+              onClick={() =>
+                setLightbox((prev) =>
+                  prev ? { ...prev, index: (prev.index + 1) % activeBatch.shots.length } : prev,
+                )
+              }
+            >
+              下一张
+            </button>
+          </div>
+          <div className="modal-actions">
+            <button className="btn" type="button" onClick={() => setLightbox(null)}>
+              关闭 (Esc)
+            </button>
+          </div>
+        </ModalShell>
+      )}
+    </div>
+  );
+}
+
 function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const busy = useUiStore((s) => s.busy);
@@ -814,6 +1049,8 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
           </div>
         )}
       </div>
+
+      <ScreenshotEvidenceSection d={d} />
 
       <div className="card">
         <div className="card-head">
