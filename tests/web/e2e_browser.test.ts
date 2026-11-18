@@ -27,6 +27,9 @@ interface BrowserPage {
     down(): Promise<void>;
     up(): Promise<void>;
   };
+  keyboard: {
+    press(key: string): Promise<void>;
+  };
   on(ev: string, fn: (...args: any[]) => void): void;
   close(): Promise<void>;
 }
@@ -1149,4 +1152,91 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 45_000);
+
+  test("REQ-012: 「更多」下拉菜单点击外部区域、Esc 与再次点击触发器均可自动关闭", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "MoreMenuRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "更多展开的下拉菜单需要支持点击外部区域自动关闭",
+      criteria: [{ id: "AC-1", description: "点击外部区域后菜单关闭", required: true, command: "echo ok" }],
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const menuGone = () =>
+      page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+    const openMenu = async () => {
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+    };
+    const clickMenuItem = (label: string) =>
+      page.evaluate((text: string) => {
+        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] button'));
+        const target = buttons.find((b) => (b.textContent ?? "").includes(text));
+        if (!target) throw new Error(`menu item not found: ${text}`);
+        (target as HTMLButtonElement).click();
+      }, label);
+
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 5000 });
+      expect(await page.evaluate(() => document.querySelector('[data-testid="more-menu"]'))).toBeNull();
+
+      // 1. 打开菜单：Portal 渲染并锚定在触发器下方、右缘对齐。
+      await openMenu();
+      const anchor = await page.evaluate(() => {
+        const trigger = document.querySelector('[data-testid="more-menu-btn"]')!.getBoundingClientRect();
+        const menu = document.querySelector('[data-testid="more-menu"]')!.getBoundingClientRect();
+        return { triggerBottom: trigger.bottom, triggerRight: trigger.right, menuTop: menu.top, menuRight: menu.right };
+      });
+      expect(anchor.menuTop).toBeGreaterThanOrEqual(anchor.triggerBottom);
+      expect(Math.abs(anchor.menuRight - anchor.triggerRight)).toBeLessThan(4);
+
+      // 2. 核心回归：真实鼠标点击菜单外部区域后菜单自动关闭。
+      await page.click(".ws-title");
+      await menuGone();
+
+      // 3. Esc 键关闭。
+      await openMenu();
+      await page.keyboard.press("Escape");
+      await menuGone();
+
+      // 4. 再次点击触发器切换关闭。
+      await openMenu();
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await menuGone();
+
+      // 5. 选择菜单项后菜单关闭，且动作正常打开 Radix Dialog（交接简报弹窗）。
+      await openMenu();
+      await clickMenuItem("查看交接简报");
+      await menuGone();
+      await page.waitForSelector('[data-testid="handoff-modal"]', { timeout: 5000 });
+      await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('[data-testid="handoff-modal"] button'));
+        (buttons.find((b) => (b.textContent ?? "").includes("关闭")) as HTMLButtonElement | undefined)?.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="handoff-modal"]'), { timeout: 5000 });
+
+      // 6. 编辑动作同样先关菜单再进入编辑态，可反复开合不残留状态。
+      await openMenu();
+      await clickMenuItem("编辑需求与验收条件");
+      await menuGone();
+      await page.waitForSelector('[data-testid="spec-editor"]', { timeout: 5000 });
+      await openMenu();
+      await page.click(".ws-title");
+      await menuGone();
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
 });

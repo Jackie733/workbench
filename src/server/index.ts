@@ -179,6 +179,10 @@ async function readBody(req: Request): Promise<Record<string, unknown>> {
   return parsed;
 }
 
+// Bun 1.3.14 在同进程重复 Bun.build 且相关模块已被运行时加载时会抛出 EBADF/EISDIR，
+// 因此非开发模式下同一 webDir 的初始构建结果在进程内共享；开发模式与显式 reload 仍每次重新构建。
+const initialWebBundles = new Map<string, Promise<{ html: string; css: string; js: string } | null>>();
+
 async function buildWebBundle(webDir: string): Promise<{ html: string; css: string; js: string } | null> {
   const htmlPath = path.join(webDir, "index.html");
   const cssPath = path.join(webDir, "styles.css");
@@ -224,8 +228,21 @@ export async function startWorkbenchServer(options: {
   const hubMode = options.hubMode === true;
   const hostname = options.hostname ?? "127.0.0.1";
   const webDir = options.webDir ?? path.resolve(import.meta.dir, "../web");
-  let cachedWeb = await buildWebBundle(webDir);
   const isDevWeb = process.env.WORKBENCH_DEV_WEB === "1";
+  let cachedWeb: { html: string; css: string; js: string } | null;
+  if (isDevWeb) {
+    cachedWeb = await buildWebBundle(webDir);
+  } else {
+    let initial = initialWebBundles.get(webDir);
+    if (!initial) {
+      initial = buildWebBundle(webDir).catch((err) => {
+        initialWebBundles.delete(webDir);
+        throw err;
+      });
+      initialWebBundles.set(webDir, initial);
+    }
+    cachedWeb = await initial;
+  }
   const executor = options.executor ?? new HubExecutor();
 
   if (hubMode && isAutoRegistrableProjectRoot(defaultRoot)) {
@@ -269,6 +286,7 @@ export async function startWorkbenchServer(options: {
     const rebuilt = await buildWebBundle(webDir);
     if (!rebuilt) return { reloaded: false };
     cachedWeb = rebuilt;
+    if (!isDevWeb) initialWebBundles.set(webDir, Promise.resolve(rebuilt));
     broadcastUi({ type: "workbench.reload_ui", at: Date.now() });
     return { reloaded: true };
   };

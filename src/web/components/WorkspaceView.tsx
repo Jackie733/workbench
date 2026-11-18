@@ -1,4 +1,11 @@
 import { useState } from "react";
+import {
+  Content as DropdownContent,
+  Item as DropdownItem,
+  Portal as DropdownPortal,
+  Root as DropdownRoot,
+  Trigger as DropdownTrigger,
+} from "@radix-ui/react-dropdown-menu";
 import { Ellipsis, GitPullRequest, Link2, MessageSquare, Plus, RefreshCw, Search, Zap } from "lucide-react";
 import type { AgentRunRecord, RequirementDetail, Stage } from "../../core/types.ts";
 import { api } from "../api.ts";
@@ -1142,144 +1149,149 @@ export function WorkspaceView() {
           {stageMeta.label}
         </span>
         <div className="more-wrap">
-          <button
-            className="btn"
-            type="button"
-            data-testid="more-menu-btn"
-            onClick={() => setMoreMenuOpen(!moreMenuOpen)}
-          >
-            <Icon icon={Ellipsis} /> 更多
-          </button>
-          {moreMenuOpen && (
-            <div className="more-menu" data-testid="more-menu">
-              <button
-                type="button"
-                onClick={() => {
-                  setMoreMenuOpen(false);
-                  startEditSpec(
-                    s.title,
-                    d.specMarkdown,
-                    s.criteria.map((c) => ({
-                      id: c.id,
-                      description: c.description,
-                      required: c.required,
-                      command: c.command ?? "",
-                    })),
-                  );
-                }}
-              >
-                编辑需求与验收条件
+          <DropdownRoot open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
+            <DropdownTrigger asChild>
+              <button className="btn" type="button" data-testid="more-menu-btn">
+                <Icon icon={Ellipsis} /> 更多
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMoreMenuOpen(false);
-                  startEditDesign(d.designMarkdown);
-                }}
-              >
-                直接编辑技术方案
-              </button>
-              <button type="button" onClick={() => void openHandoff(s.id)}>
-                查看交接简报 handoff.md
-              </button>
-              {!s.github?.issue ? (
-                <button
-                  type="button"
-                  data-testid="menu-link-issue-btn"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    setModal({ kind: "link_issue", requirementId: s.id, mode: "create", issueRef: "" });
-                  }}
-                >
-                  关联 / 创建 GitHub Issue…
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  data-testid="menu-sync-issue-btn"
-                  onClick={async () => {
-                    setMoreMenuOpen(false);
-                    const out = await runBusy(() => api.syncRequirementIssue(s.id));
-                    if (out) {
-                      await invalidateAllWorkbenchQueries();
-                      showToast(`已同步状态至 Issue #${s.github!.issue!.number}`);
-                    }
-                  }}
-                >
-                  同步当前状态到 Issue #{s.github.issue.number}
-                </button>
-              )}
-              {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    void handleBannerAction(d, "fast_track", bridgeConnected);
-                  }}
-                >
-                  切换快速通道
-                </button>
-              )}
-              {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    setModal({ kind: "lifecycle", action: "block", reason: "" });
-                  }}
-                >
-                  标记阻塞
-                </button>
-              )}
-              {s.stage !== "done" && s.stage !== "cancelled" && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    setModal({ kind: "lifecycle", action: "cancel", reason: "" });
-                  }}
-                >
-                  取消需求
-                </button>
-              )}
-              {(s.stage === "done" || s.stage === "cancelled") && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    setModal({ kind: "lifecycle", action: "reopen", reason: "" });
-                  }}
-                >
-                  重新打开
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setMoreMenuOpen(false);
-                  setModal({
-                    kind: "debug_info",
-                    text: JSON.stringify(
-                      {
-                        projectRoot: project?.root,
-                        projectId: project?.project?.projectId,
-                        id: s.id,
-                        revision: s.revision,
-                        specHash: s.specHash,
-                        designVersion: s.designVersion,
-                        designHash: s.designHash,
-                        baseline: s.baseline,
-                      },
-                      null,
-                      2,
-                    ),
-                  });
-                }}
-              >
-                查看调试信息
-              </button>
-            </div>
-          )}
+            </DropdownTrigger>
+            <DropdownPortal>
+              <DropdownContent className="more-menu" data-testid="more-menu" align="end" sideOffset={6}>
+                <DropdownItem asChild>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      startEditSpec(
+                        s.title,
+                        d.specMarkdown,
+                        s.criteria.map((c) => ({
+                          id: c.id,
+                          description: c.description,
+                          required: c.required,
+                          command: c.command ?? "",
+                        })),
+                      );
+                    }}
+                  >
+                    编辑需求与验收条件
+                  </button>
+                </DropdownItem>
+                <DropdownItem asChild>
+                  <button type="button" onClick={() => startEditDesign(d.designMarkdown)}>
+                    直接编辑技术方案
+                  </button>
+                </DropdownItem>
+                <DropdownItem asChild>
+                  <button type="button" onClick={() => void openHandoff(s.id)}>
+                    查看交接简报 handoff.md
+                  </button>
+                </DropdownItem>
+                {!s.github?.issue ? (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      data-testid="menu-link-issue-btn"
+                      onClick={() => {
+                        setModal({ kind: "link_issue", requirementId: s.id, mode: "create", issueRef: "" });
+                      }}
+                    >
+                      关联 / 创建 GitHub Issue…
+                    </button>
+                  </DropdownItem>
+                ) : (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      data-testid="menu-sync-issue-btn"
+                      onClick={async () => {
+                        const out = await runBusy(() => api.syncRequirementIssue(s.id));
+                        if (out) {
+                          await invalidateAllWorkbenchQueries();
+                          showToast(`已同步状态至 Issue #${s.github!.issue!.number}`);
+                        }
+                      }}
+                    >
+                      同步当前状态到 Issue #{s.github.issue.number}
+                    </button>
+                  </DropdownItem>
+                )}
+                {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleBannerAction(d, "fast_track", bridgeConnected);
+                      }}
+                    >
+                      切换快速通道
+                    </button>
+                  </DropdownItem>
+                )}
+                {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModal({ kind: "lifecycle", action: "block", reason: "" });
+                      }}
+                    >
+                      标记阻塞
+                    </button>
+                  </DropdownItem>
+                )}
+                {s.stage !== "done" && s.stage !== "cancelled" && (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModal({ kind: "lifecycle", action: "cancel", reason: "" });
+                      }}
+                    >
+                      取消需求
+                    </button>
+                  </DropdownItem>
+                )}
+                {(s.stage === "done" || s.stage === "cancelled") && (
+                  <DropdownItem asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModal({ kind: "lifecycle", action: "reopen", reason: "" });
+                      }}
+                    >
+                      重新打开
+                    </button>
+                  </DropdownItem>
+                )}
+                <DropdownItem asChild>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setModal({
+                        kind: "debug_info",
+                        text: JSON.stringify(
+                          {
+                            projectRoot: project?.root,
+                            projectId: project?.project?.projectId,
+                            id: s.id,
+                            revision: s.revision,
+                            specHash: s.specHash,
+                            designVersion: s.designVersion,
+                            designHash: s.designHash,
+                            baseline: s.baseline,
+                          },
+                          null,
+                          2,
+                        ),
+                      });
+                    }}
+                  >
+                    查看调试信息
+                  </button>
+                </DropdownItem>
+              </DropdownContent>
+            </DropdownPortal>
+          </DropdownRoot>
         </div>
       </div>
 
