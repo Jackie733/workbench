@@ -3,6 +3,7 @@ import type {
   AttachmentMeta,
   CriterionCoverageState,
   EffectiveVerificationState,
+  GitRemoteProvider,
   OutputLanguage,
   PrivacyMode,
   RequirementDetail,
@@ -17,7 +18,7 @@ import type {
 import type { PainPointCategory } from "../hub/evolution.ts";
 import { REASONING_EFFORTS, type DiscoveredModel, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
-import type { BrowseResponse } from "./api.ts";
+import type { BrowseResponse, GiteeIssueListItem } from "./api.ts";
 
 export type Scope = "active" | "done" | "cancelled" | "all";
 export type LayoutMode = "list" | "board";
@@ -44,6 +45,10 @@ export type ModalState =
       goal: string;
       mode?: "create" | "import_issue";
       issueRef?: string;
+      giteeFilter?: "assigned" | "created" | "all";
+      giteeState?: "active" | "open" | "progressing" | "closed" | "all";
+      giteeSearch?: string;
+      selectedGiteeIssue?: GiteeIssueListItem | null;
       createGitHubIssue?: boolean;
       attachments?: AttachmentMeta[];
     }
@@ -71,11 +76,17 @@ export type ModalState =
       tab?: "global" | "project";
       draft: RoutingConfig | null;
       hubLangDraft?: OutputLanguage;
+      giteeTokenDraft?: string;
+      clearGiteeToken?: boolean;
       projLangDraft?: OutputLanguage | "inherit";
+      projProviderDraft?: GitRemoteProvider;
       ghRepoDraft?: string;
       ghBaseBranchDraft?: string;
       ghAutoCreateDraft?: boolean;
       ghAutoSyncDraft?: boolean;
+      giteeRepoDraft?: string;
+      giteeEnterpriseDraft?: string;
+      giteeBaseBranchDraft?: string;
     }
   | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
   | { kind: "handoff_preview"; markdown: string }
@@ -104,6 +115,7 @@ export type ModalState =
   | {
       kind: "link_issue";
       requirementId: string;
+      provider?: GitRemoteProvider;
       mode: "create" | "link";
       issueRef: string;
     }

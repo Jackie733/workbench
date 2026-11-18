@@ -40,6 +40,17 @@ import {
 import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import {
+  detectGitRemoteProvider,
+  extractGiteeOwner,
+  inspectGiteeEnvironment,
+  listGiteeMyIssues,
+  parseGiteeRepoFromRemoteUrl,
+  viewGiteeIssue,
+  viewGiteePr,
+  type GiteeApiDeps,
+  type GiteeIssueItem,
+} from "../core/gitee.ts";
+import {
   buildRequirementIssueBody,
   commentOnGitHubIssue,
   createGitHubIssue,
@@ -55,18 +66,19 @@ import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../co
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
-import { readRequirementScreenshot } from "../core/store.ts";
+import { isProjectInitialized, readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
   type AgentAction,
   type CriterionInput,
   type OutputLanguage,
+  type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type RequirementDetail,
   type Stage,
   type Track,
 } from "../core/types.ts";
-import { isRecord } from "../core/validate.ts";
+import { isRecord, sanitizeOutput, validateGiteeIssueIdent } from "../core/validate.ts";
 import {
   inspectRsiSandboxDrift,
   reconcileRsiSandboxBaseline,
@@ -213,7 +225,9 @@ export interface ProjectApiDeps {
   ensureWatcherFor: (projectRoot: string) => void;
   reloadWebBundle: () => Promise<{ reloaded: boolean }>;
   getHubOutputLanguage: () => OutputLanguage | undefined;
+  getGiteeAccessToken?: () => string | null;
   githubDeps?: GitHubCommandDeps;
+  giteeDeps?: GiteeApiDeps;
 }
 
 /**
@@ -263,15 +277,28 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     }
   };
 
+  const resolveGiteeToken = (): string | null => {
+    const raw = deps.getGiteeAccessToken?.() ?? deps.giteeDeps?.token ?? process.env.GITEE_ACCESS_TOKEN ?? "";
+    const trimmed = raw.trim();
+    return trimmed || null;
+  };
+
+  const resolveRemoteUrl = async (projectRoot: string): Promise<string | null> => {
+    if (deps.giteeDeps?.getRemoteUrl) return deps.giteeDeps.getRemoteUrl(projectRoot);
+    if (deps.githubDeps?.getRemoteUrl) return deps.githubDeps.getRemoteUrl(projectRoot);
+    return getGitRemoteUrl(projectRoot);
+  };
+
   const trySyncIssueMilestone = async (
     projectRoot: string,
     detail: RequirementDetail,
     comment: string,
     opts?: { state?: "open" | "closed"; snapHash?: string | null },
   ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+    if (detail.state.github?.provider === "gitee") return { detail };
     const linked = detail.state.github?.issue;
     const repo = detail.state.github?.repo;
-    if (!linked || !repo) return { detail };
+    if (!linked || !repo || typeof linked.number !== "number") return { detail };
     try {
       if (opts?.state && opts.state !== linked.state) {
         await setGitHubIssueState(
@@ -307,7 +334,19 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     if (method === "GET" && pathname === "/api/project") {
       const status = getProjectStatus(base);
       const git = await observeGitSnapshot(base);
-      const remoteRepo = git ? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base)) : null;
+      const remoteUrl = git ? await resolveRemoteUrl(base) : null;
+      const remoteProvider =
+        status.project?.gitee?.repo || status.project?.gitee?.enterprise
+          ? "gitee"
+          : status.project?.github?.repo
+            ? "github"
+            : detectGitRemoteProvider(remoteUrl) ?? (status.project?.gitee ? "gitee" : null);
+      const remoteRepo =
+        remoteProvider === "gitee"
+          ? (status.project?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(remoteUrl))
+          : remoteProvider === "github"
+            ? (status.project?.github?.repo ?? parseGitHubRepoFromRemoteUrl(remoteUrl))
+            : null;
       const effectiveOutputLanguage = resolveEffectiveOutputLanguage({
         projectLanguage: status.project?.outputLanguage,
         hubLanguage: deps.getHubOutputLanguage(),
@@ -317,6 +356,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         root: base,
         bridge: bridgeStatus,
         effectiveOutputLanguage,
+        remoteProvider,
         remoteRepo,
         git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
       });
@@ -351,10 +391,23 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             : {}),
         };
       }
+      let giteePatch: ProjectGiteeConfig | null | undefined = undefined;
+      if (body.gitee === null) {
+        giteePatch = null;
+      } else if (isRecord(body.gitee)) {
+        giteePatch = {
+          ...(typeof body.gitee.repo === "string" ? { repo: body.gitee.repo } : {}),
+          ...(typeof body.gitee.enterprise === "string" ? { enterprise: body.gitee.enterprise } : {}),
+          ...(typeof body.gitee.defaultBaseBranch === "string"
+            ? { defaultBaseBranch: body.gitee.defaultBaseBranch }
+            : {}),
+        };
+      }
       const project = await updateProjectConfig(base, {
         ...(typeof body.name === "string" ? { name: body.name } : {}),
         ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
         ...(githubPatch !== undefined ? { github: githubPatch } : {}),
+        ...(giteePatch !== undefined ? { gitee: giteePatch } : {}),
       });
       deps.broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
       return jsonResponse({ project });
@@ -364,6 +417,56 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const status = getProjectStatus(base);
       const envStatus = await inspectGitHubEnvironment(base, status.project?.github, deps.githubDeps);
       return jsonResponse(envStatus);
+    }
+
+    if (method === "GET" && pathname === "/api/gitee/status") {
+      const status = getProjectStatus(base);
+      const envStatus = await inspectGiteeEnvironment(base, status.project?.gitee, resolveGiteeToken(), deps.giteeDeps);
+      return jsonResponse(envStatus);
+    }
+
+    if (method === "GET" && pathname === "/api/gitee/issues") {
+      const token = resolveGiteeToken();
+      if (!token) {
+        throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写");
+      }
+      const status = getProjectStatus(base);
+      const remoteRepo = status.project?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(await resolveRemoteUrl(base));
+      const enterprise =
+        url.searchParams.get("enterprise")?.trim() ||
+        status.project?.gitee?.enterprise ||
+        extractGiteeOwner(remoteRepo);
+      const rawFilter = url.searchParams.get("filter");
+      const filter =
+        rawFilter === "created" || rawFilter === "all" ? rawFilter : "assigned";
+      const rawState = url.searchParams.get("state");
+      const state =
+        rawState === "open" || rawState === "progressing" || rawState === "closed" || rawState === "all"
+          ? rawState
+          : "active";
+      const search = url.searchParams.get("q") ?? undefined;
+      const result = await listGiteeMyIssues(
+        { token, enterprise, filter, state, search },
+        deps.giteeDeps,
+      );
+      const existingReqs = isProjectInitialized(base)
+        ? listRequirements(base, { scope: "all" })
+        : [];
+      const importedByIdent = new Map<string, string>();
+      for (const reqItem of existingReqs) {
+        const num = reqItem.github?.issue?.number;
+        if (typeof num === "string" && num.trim()) {
+          importedByIdent.set(num.trim().toUpperCase(), reqItem.id);
+        }
+      }
+      return jsonResponse({
+        account: result.account,
+        enterprise: result.enterprise,
+        items: result.items.map((item) => ({
+          ...item,
+          importedRequirementId: importedByIdent.get(item.ident.toUpperCase()) ?? null,
+        })),
+      });
     }
 
     if (method === "GET" && pathname === "/api/project/playbook") {
@@ -449,13 +552,170 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
 
     if (method === "POST" && pathname === "/api/requirements/import-issue") {
       const body = await readBody(req);
+      const projectMeta = getProjectStatus(base).project;
+      const remoteUrl = await resolveRemoteUrl(base);
+      const detectedProvider =
+        projectMeta?.gitee?.repo || projectMeta?.gitee?.enterprise
+          ? "gitee"
+          : projectMeta?.github?.repo
+            ? "github"
+            : detectGitRemoteProvider(remoteUrl);
+      const rawIssueRef =
+        typeof body.issueRef === "string" || typeof body.issueRef === "number" ? String(body.issueRef).trim() : "";
+      const provider =
+        body.provider === "gitee"
+          ? "gitee"
+          : body.provider === "github"
+            ? "github"
+            : /gitee\.com/i.test(rawIssueRef)
+              ? "gitee"
+              : (detectedProvider ?? "github");
+
+      if (provider === "gitee") {
+        const token = resolveGiteeToken();
+        const remoteRepo = projectMeta?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(remoteUrl);
+        const enterprise =
+          (typeof body.enterprise === "string" && body.enterprise.trim()) ||
+          projectMeta?.gitee?.enterprise ||
+          extractGiteeOwner(remoteRepo);
+
+        let giteeIssue: GiteeIssueItem;
+        if (isRecord(body.giteeIssue) && typeof body.giteeIssue.ident === "string") {
+          const ident = validateGiteeIssueIdent(body.giteeIssue.ident);
+          const title = sanitizeOutput(String(body.giteeIssue.title ?? `工作项 #${ident}`), 360).text.trim();
+          const urlStr =
+            typeof body.giteeIssue.url === "string" && /^https?:\/\//i.test(body.giteeIssue.url)
+              ? body.giteeIssue.url
+              : enterprise
+                ? `https://e.gitee.com/${enterprise}/issues/list?issue=${encodeURIComponent(ident)}`
+                : "https://gitee.com";
+          const rawState = String(body.giteeIssue.state ?? "open").toLowerCase();
+          const state: GiteeIssueItem["state"] =
+            rawState === "progressing"
+              ? "progressing"
+              : rawState === "closed"
+                ? "closed"
+                : rawState === "rejected"
+                  ? "rejected"
+                  : "open";
+          giteeIssue = {
+            ident,
+            url: urlStr,
+            title: title || `工作项 #${ident}`,
+            body: sanitizeOutput(String(body.giteeIssue.body ?? ""), 64 * 1024).text.trim(),
+            state,
+            ...(typeof body.giteeIssue.stateName === "string" && body.giteeIssue.stateName.trim()
+              ? { stateName: sanitizeOutput(body.giteeIssue.stateName, 60).text }
+              : {}),
+            ...(typeof body.giteeIssue.issueType === "string" && body.giteeIssue.issueType.trim()
+              ? { issueType: sanitizeOutput(body.giteeIssue.issueType, 60).text }
+              : {}),
+            labels: Array.isArray(body.giteeIssue.labels)
+              ? body.giteeIssue.labels.filter((l): l is string => typeof l === "string" && l.trim().length > 0)
+              : [],
+            repository: typeof body.giteeIssue.repository === "string" ? body.giteeIssue.repository : null,
+            enterprise: typeof body.giteeIssue.enterprise === "string" ? body.giteeIssue.enterprise : enterprise,
+            programName: typeof body.giteeIssue.programName === "string" ? body.giteeIssue.programName : null,
+            updatedAt: typeof body.giteeIssue.updatedAt === "string" ? body.giteeIssue.updatedAt : new Date().toISOString(),
+          };
+        } else {
+          if (!rawIssueRef) {
+            throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL");
+          }
+          if (!token) {
+            throw new WorkbenchError(
+              "invalid_input",
+              "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写",
+            );
+          }
+          giteeIssue = await viewGiteeIssue(
+            { token, issueRef: rawIssueRef, enterprise, repo: remoteRepo },
+            deps.giteeDeps,
+          );
+        }
+
+        const snapshot = await observeGitSnapshot(base);
+        const existingList = listRequirements(base, {
+          scope: "all",
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const existingMatch = existingList.find(
+          (item) =>
+            typeof item.github?.issue?.number === "string" &&
+            item.github.issue.number.toUpperCase() === giteeIssue.ident.toUpperCase(),
+        );
+        if (existingMatch) {
+          const existingDetail = getRequirement(base, existingMatch.id, {
+            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          });
+          return jsonResponse(
+            { detail: existingDetail, alreadyExisted: true, issue: giteeIssue, provider: "gitee" },
+            200,
+          );
+        }
+
+        const metaParts = [
+          giteeIssue.issueType ? `类型：${giteeIssue.issueType}` : "",
+          giteeIssue.stateName ? `状态：${giteeIssue.stateName}` : `状态：${giteeIssue.state}`,
+          giteeIssue.programName ? `所属项目：${giteeIssue.programName}` : "",
+          giteeIssue.repository ? `关联仓库：${giteeIssue.repository}` : "未绑定仓库",
+        ].filter(Boolean);
+        const goal = [
+          `# ${giteeIssue.title}`,
+          "",
+          `> 导入自 Gitee 工作项: [#${giteeIssue.ident}](${giteeIssue.url})`,
+          metaParts.length > 0 ? `> ${metaParts.join(" · ")}` : "",
+          giteeIssue.labels.length > 0 ? `> 标签：${giteeIssue.labels.join(", ")}` : "",
+          "",
+          giteeIssue.body || giteeIssue.title,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        let detail = await createRequirement(base, {
+          goal,
+          title: giteeIssue.title,
+          track: body.track === "fast_track" ? "fast_track" : "plan_first",
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const targetRepo = remoteRepo ?? giteeIssue.repository ?? "";
+        const targetEnterprise = giteeIssue.enterprise ?? enterprise ?? extractGiteeOwner(targetRepo) ?? undefined;
+        detail = await linkRequirementGitHubIssue(base, detail.state.id, {
+          provider: "gitee",
+          repo: targetRepo,
+          enterprise: targetEnterprise,
+          issue: {
+            number: giteeIssue.ident,
+            url: giteeIssue.url,
+            title: giteeIssue.title,
+            state: giteeIssue.state,
+            ...(giteeIssue.issueType ? { issueType: giteeIssue.issueType } : {}),
+            ...(giteeIssue.programName ? { programName: giteeIssue.programName } : {}),
+            lastSyncedAt: Date.now(),
+          },
+          summary: `从 Gitee 工作项 #${giteeIssue.ident} 导入`,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+
+        let dispatch: DispatchOutcome | null = null;
+        if (body.dispatchAgent === true) {
+          detail = await markDesigning(base, detail.state.id, {
+            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          });
+          const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
+          dispatch = await deps.dispatchToBridge(detail.state.id, "design", "send", prompt);
+        }
+
+        deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
+        return jsonResponse({ detail, dispatch, alreadyExisted: false, issue: giteeIssue, provider: "gitee" }, 201);
+      }
+
       const issueRef =
         typeof body.issueRef === "string" || typeof body.issueRef === "number" ? body.issueRef : "";
       if (!String(issueRef).trim()) {
         throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL");
       }
-      const projectMeta = getProjectStatus(base).project;
-      const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
+      const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(remoteUrl);
       const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef }, deps.githubDeps);
       const snapshot = await observeGitSnapshot(base);
 
@@ -471,7 +731,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const existingDetail = getRequirement(base, existingMatch.id, {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        return jsonResponse({ detail: existingDetail, alreadyExisted: true, issue }, 200);
+        return jsonResponse({ detail: existingDetail, alreadyExisted: true, issue, provider: "github" }, 200);
       }
 
       const goal = [
@@ -492,6 +752,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
       detail = await linkRequirementGitHubIssue(base, detail.state.id, {
+        provider: "github",
         repo: issue.repo,
         issue: {
           number: issue.number,
@@ -514,7 +775,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, alreadyExisted: false, issue }, 201);
+      return jsonResponse({ detail, dispatch, alreadyExisted: false, issue, provider: "github" }, 201);
     }
 
     if (method === "POST" && pathname === "/api/requirements") {
@@ -865,7 +1126,11 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         await distillRequirementToPlaybook(base, detail).catch(() => {});
         const projectMeta = getProjectStatus(base).project;
         let githubSyncWarning: string | undefined;
-        if (detail.state.github?.issue && projectMeta?.github?.autoSyncIssue !== false) {
+        if (
+          detail.state.github?.provider !== "gitee" &&
+          detail.state.github?.issue &&
+          projectMeta?.github?.autoSyncIssue !== false
+        ) {
           const synced = await trySyncIssueMilestone(
             base,
             detail,
@@ -880,7 +1145,11 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       if (method === "GET" && sub === "delivery") {
-        const preview = await getRequirementDeliveryPreview(base, id, deps.githubDeps);
+        const preview = await getRequirementDeliveryPreview(base, id, {
+          ...deps.githubDeps,
+          giteeDeps: deps.giteeDeps,
+          giteeToken: resolveGiteeToken(),
+        });
         return jsonResponse(preview);
       }
 
@@ -902,7 +1171,11 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             prTitle: typeof body.prTitle === "string" ? body.prTitle : undefined,
             prBody: typeof body.prBody === "string" ? body.prBody : undefined,
           },
-          deps.githubDeps,
+          {
+            ...deps.githubDeps,
+            giteeDeps: deps.giteeDeps,
+            giteeToken: resolveGiteeToken(),
+          },
         );
         const reloadRes = !body.createPr && res.touchesWeb ? await deps.reloadWebBundle() : { reloaded: false };
         deps.broadcastUi({ type: "workbench.updated", reason: "delivered", root: base, id, at: Date.now() });
@@ -925,9 +1198,47 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         const projectMeta = getProjectStatus(base).project;
         if (typeof body.issueRef === "string" || typeof body.issueRef === "number") {
-          const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(await getGitRemoteUrl(base));
+          const remoteUrl = await resolveRemoteUrl(base);
+          const isGitee =
+            body.provider === "gitee" ||
+            projectMeta?.gitee?.repo ||
+            projectMeta?.gitee?.enterprise ||
+            detectGitRemoteProvider(remoteUrl) === "gitee";
+          if (isGitee && body.provider !== "github") {
+            const token = resolveGiteeToken();
+            if (!token) {
+              throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+            }
+            const remoteRepo = projectMeta?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(remoteUrl);
+            const enterprise = projectMeta?.gitee?.enterprise ?? extractGiteeOwner(remoteRepo);
+            const issue = await viewGiteeIssue(
+              { token, issueRef: String(body.issueRef), enterprise, repo: remoteRepo },
+              deps.giteeDeps,
+            );
+            const targetRepo = remoteRepo ?? issue.repository ?? "";
+            const updated = await linkRequirementGitHubIssue(base, id, {
+              provider: "gitee",
+              repo: targetRepo,
+              enterprise: issue.enterprise ?? enterprise ?? extractGiteeOwner(targetRepo),
+              issue: {
+                number: issue.ident,
+                url: issue.url,
+                title: issue.title,
+                state: issue.state,
+                ...(issue.issueType ? { issueType: issue.issueType } : {}),
+                ...(issue.programName ? { programName: issue.programName } : {}),
+                lastSyncedAt: Date.now(),
+              },
+              summary: `关联已有 Gitee 工作项 #${issue.ident}`,
+              currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+            });
+            deps.broadcastUi({ type: "workbench.updated", reason: "github.issue_linked", root: base, id, at: Date.now() });
+            return jsonResponse({ detail: updated });
+          }
+          const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(remoteUrl);
           const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef: body.issueRef }, deps.githubDeps);
           const updated = await linkRequirementGitHubIssue(base, id, {
+            provider: "github",
             repo: issue.repo,
             issue: {
               number: issue.number,
@@ -1014,7 +1325,28 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(base);
         const current = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         if (!current.state.github?.repo || !current.state.github?.pr) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub PR`);
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 PR`);
+        }
+        const isGiteePr =
+          current.state.github.provider === "gitee" || /gitee\.com/i.test(current.state.github.pr.url);
+        if (isGiteePr) {
+          const token = resolveGiteeToken();
+          if (!token) {
+            throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+          }
+          const latestPr = await viewGiteePr(
+            { repo: current.state.github.repo, prNumber: current.state.github.pr.number, token },
+            deps.giteeDeps,
+          );
+          const updated = await recordRequirementGitHubSync(base, id, {
+            prPatch: latestPr,
+            eventKind: "github_pr_synced",
+            summary: `同步 Gitee PR !${latestPr.number} 状态：${latestPr.state}`,
+            detail: latestPr.url,
+            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          });
+          deps.broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
+          return jsonResponse({ detail: updated, pr: latestPr, cleanedSandbox: false, mainUpdated: false, mainSyncReason: null });
         }
         const latestPr = await viewGitHubPr(
           { root: base, repo: current.state.github.repo, prNumber: current.state.github.pr.number },

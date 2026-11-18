@@ -19,7 +19,7 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import type { OutputLanguage, PrivacyMode } from "../../core/types.ts";
+import type { GitRemoteProvider, OutputLanguage, PrivacyMode } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   ROUTING_STAGES,
@@ -38,12 +38,15 @@ import {
   submitAcceptOverride,
   submitAnnotation,
   submitFeedback,
+  submitImportGiteeIssue,
   submitImportGitHubIssue,
   submitLifecycle,
   submitNewRequirement,
   syncSandboxBaseAction,
   useDeliveryQuery,
   useEvolutionQuery,
+  useGiteeIssuesQuery,
+  useGiteeStatusQuery,
   useGitHubStatusQuery,
   useHubStateQuery,
   usePlaybookQuery,
@@ -105,6 +108,30 @@ export function Modals() {
         (m.kind === "new_req" || m.kind === "routing" || m.kind === "link_issue" || m.kind === "deliver"),
     ),
   );
+  const { data: giteeStatus } = useGiteeStatusQuery(
+    activeProjectId,
+    Boolean(
+      !noHubProject &&
+        project?.initialized &&
+        m &&
+        (m.kind === "new_req" || m.kind === "routing" || m.kind === "link_issue" || m.kind === "deliver"),
+    ),
+  );
+  const isGiteeProject =
+    project?.remoteProvider === "gitee" || Boolean(project?.project?.gitee);
+  const giteeFilter = m?.kind === "new_req" ? (m.giteeFilter ?? "assigned") : "assigned";
+  const giteeState = m?.kind === "new_req" ? (m.giteeState ?? "active") : "active";
+  const giteeSearch = m?.kind === "new_req" ? (m.giteeSearch ?? "") : "";
+  const giteeIssuesQuery = useGiteeIssuesQuery(
+    activeProjectId,
+    { filter: giteeFilter, state: giteeState, q: giteeSearch },
+    Boolean(
+      m?.kind === "new_req" &&
+        m.mode === "import_issue" &&
+        isGiteeProject &&
+        giteeStatus?.authenticated,
+    ),
+  );
 
   const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
   if (!m) return null;
@@ -121,7 +148,7 @@ export function Modals() {
       m.createGitHubIssue ?? Boolean(project?.project?.github?.autoCreateIssue && githubStatus?.ready);
 
     return (
-      <ModalShell onClose={close} testId="new-req-modal">
+      <ModalShell onClose={close} wide={mode === "import_issue" && isGiteeProject} testId="new-req-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <h3 style={{ margin: 0 }}>新建需求</h3>
           <div className="segmented" role="tablist" aria-label="新建需求方式">
@@ -149,7 +176,7 @@ export function Modals() {
                 )
               }
             >
-              从 GitHub Issue 导入
+              {isGiteeProject ? "从 Gitee 工作项导入" : "从 GitHub Issue 导入"}
             </button>
           </div>
         </div>
@@ -177,24 +204,26 @@ export function Modals() {
               }
               disabled={busy}
             />
-            <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
-              <input
-                type="checkbox"
-                data-testid="new-req-create-issue"
-                checked={createIssueChecked}
-                disabled={githubStatus !== undefined && !githubStatus.ready}
-                onChange={(e) =>
-                  setModal((prev) =>
-                    prev?.kind === "new_req" ? { ...prev, createGitHubIssue: e.target.checked } : prev,
-                  )
-                }
-              />
-              <span>
-                同步在 GitHub 创建 Issue
-                {githubStatus?.repo ? ` (${githubStatus.repo})` : ""}
-                {githubStatus && !githubStatus.ready ? ` — ${githubStatus.reason}` : ""}
-              </span>
-            </label>
+            {!isGiteeProject && (
+              <label style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  data-testid="new-req-create-issue"
+                  checked={createIssueChecked}
+                  disabled={githubStatus !== undefined && !githubStatus.ready}
+                  onChange={(e) =>
+                    setModal((prev) =>
+                      prev?.kind === "new_req" ? { ...prev, createGitHubIssue: e.target.checked } : prev,
+                    )
+                  }
+                />
+                <span>
+                  同步在 GitHub 创建 Issue
+                  {githubStatus?.repo ? ` (${githubStatus.repo})` : ""}
+                  {githubStatus && !githubStatus.ready ? ` — ${githubStatus.reason}` : ""}
+                </span>
+              </label>
+            )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
                 取消
@@ -209,7 +238,7 @@ export function Modals() {
                     m.goal,
                     false,
                     bridgeConnected,
-                    createIssueChecked,
+                    isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
                   )
                 }
@@ -226,7 +255,7 @@ export function Modals() {
                     m.goal,
                     true,
                     bridgeConnected,
-                    createIssueChecked,
+                    isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
                   )
                 }
@@ -235,6 +264,247 @@ export function Modals() {
               </button>
             </div>
           </>
+        ) : isGiteeProject ? (
+          <div data-testid="gitee-import-pane">
+            {giteeStatus && !giteeStatus.authenticated ? (
+              <div className="callout warning xs" style={{ marginBottom: 10 }}>
+                <div style={{ marginBottom: 6 }}>{giteeStatus.reason ?? "尚未配置有效的 Gitee 私人令牌"}</div>
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="goto-gitee-settings-btn"
+                  onClick={() =>
+                    setModal({
+                      kind: "routing",
+                      tab: "global",
+                      draft: hub?.routing ?? null,
+                    })
+                  }
+                >
+                  前往全局设置配置 Gitee Token
+                </button>
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+                  <div className="segmented" role="tablist" aria-label="Gitee 工作项归属筛选">
+                    {(
+                      [
+                        ["assigned", "我负责的"],
+                        ["created", "我创建的"],
+                        ["all", "全部与我相关"],
+                      ] as const
+                    ).map(([val, label]) => (
+                      <button
+                        key={val}
+                        type="button"
+                        role="tab"
+                        aria-selected={giteeFilter === val}
+                        className={giteeFilter === val ? "active" : ""}
+                        data-testid={`gitee-filter-${val}`}
+                        onClick={() =>
+                          setModal((prev) =>
+                            prev?.kind === "new_req" ? { ...prev, giteeFilter: val, selectedGiteeIssue: null } : prev,
+                          )
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <select
+                    className="select"
+                    aria-label="工作项状态"
+                    data-testid="gitee-state-select"
+                    value={giteeState}
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "new_req"
+                          ? {
+                              ...prev,
+                              giteeState: e.target.value as "active" | "open" | "progressing" | "closed" | "all",
+                              selectedGiteeIssue: null,
+                            }
+                          : prev,
+                      )
+                    }
+                  >
+                    <option value="active">未完结（开启 / 进行中）</option>
+                    <option value="open">仅开启 (open)</option>
+                    <option value="progressing">仅进行中 (progressing)</option>
+                    <option value="closed">已关闭 (closed)</option>
+                    <option value="all">全部状态</option>
+                  </select>
+                  <button
+                    className="btn xs"
+                    type="button"
+                    data-testid="refresh-gitee-issues-btn"
+                    disabled={giteeIssuesQuery.isFetching}
+                    onClick={() => void giteeIssuesQuery.refetch()}
+                  >
+                    <Icon icon={RefreshCw} size={14} /> 刷新
+                  </button>
+                </div>
+
+                <input
+                  className="input"
+                  style={{ marginBottom: 8 }}
+                  data-testid="gitee-issue-search"
+                  value={giteeSearch}
+                  placeholder="按工作项编号（如 I8ABCD）、标题或所属项目过滤…"
+                  onChange={(e) =>
+                    setModal((prev) =>
+                      prev?.kind === "new_req" ? { ...prev, giteeSearch: e.target.value } : prev,
+                    )
+                  }
+                />
+
+                <div
+                  data-testid="gitee-issue-list"
+                  style={{
+                    maxHeight: 240,
+                    overflowY: "auto",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    padding: 6,
+                    marginBottom: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  {giteeIssuesQuery.isLoading ? (
+                    <div className="muted xs" style={{ padding: 12, textAlign: "center" }}>
+                      正在从 Gitee 拉取与你相关的工作项…
+                    </div>
+                  ) : giteeIssuesQuery.isError ? (
+                    <div className="callout danger xs">
+                      拉取 Gitee 工作项失败：
+                      {giteeIssuesQuery.error instanceof Error ? giteeIssuesQuery.error.message : "请求异常"}
+                    </div>
+                  ) : (giteeIssuesQuery.data?.items.length ?? 0) === 0 ? (
+                    <div className="muted xs" style={{ padding: 12, textAlign: "center" }}>
+                      当前筛选条件下暂无与你相关的 Gitee 工作项
+                      {giteeStatus?.enterprise ? `（企业空间：${giteeStatus.enterprise}）` : ""}
+                    </div>
+                  ) : (
+                    giteeIssuesQuery.data!.items.map((item) => {
+                      const isSelected = m.selectedGiteeIssue?.ident === item.ident;
+                      const stateTone =
+                        item.state === "closed" || item.state === "rejected"
+                          ? "neutral"
+                          : item.state === "progressing"
+                            ? "info"
+                            : "warning";
+                      return (
+                        <div
+                          key={item.ident}
+                          data-testid={`gitee-issue-item-${item.ident}`}
+                          onClick={() => {
+                            if (item.importedRequirementId) return;
+                            setModal((prev) =>
+                              prev?.kind === "new_req"
+                                ? { ...prev, selectedGiteeIssue: item, issueRef: item.ident }
+                                : prev,
+                            );
+                          }}
+                          style={{
+                            padding: "8px 10px",
+                            borderRadius: 6,
+                            border: isSelected ? "1.5px solid var(--accent)" : "1px solid var(--border)",
+                            background: isSelected ? "var(--bg-soft)" : "transparent",
+                            cursor: item.importedRequirementId ? "default" : "pointer",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: 8,
+                          }}
+                        >
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 2 }}>
+                              <code className="xs">#{item.ident}</code>
+                              {item.issueType && <span className="badge neutral">{item.issueType}</span>}
+                              <span className={`badge ${stateTone}`}>{item.stateName ?? item.state}</span>
+                              {item.programName && <span className="xs muted">{item.programName}</span>}
+                              <span className="xs muted">{item.repository ? item.repository : "未绑定仓库"}</span>
+                            </div>
+                            <div style={{ fontWeight: 500, fontSize: 13 }}>{item.title}</div>
+                          </div>
+                          {item.importedRequirementId && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              data-testid={`open-imported-gitee-${item.ident}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setModal(null);
+                                void openRequirement(item.importedRequirementId!);
+                              }}
+                            >
+                              已导入 ({item.importedRequirementId})
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </>
+            )}
+
+            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+              或直接输入 Gitee 工作项编号 / URL（支持无仓库工作项）
+            </label>
+            <input
+              className="input"
+              id="import-issue-ref"
+              data-testid="import-issue-ref"
+              value={m.issueRef ?? ""}
+              placeholder="例如 I8ABCD、#I8ABCD 或 https://e.gitee.com/openstring/issues/list?issue=I8ABCD"
+              onChange={(e) =>
+                setModal((prev) =>
+                  prev?.kind === "new_req"
+                    ? { ...prev, issueRef: e.target.value, selectedGiteeIssue: null }
+                    : prev,
+                )
+              }
+            />
+            <div className="modal-actions">
+              <button className="btn" type="button" onClick={close}>
+                取消
+              </button>
+              <button
+                className="btn"
+                type="button"
+                data-testid="import-issue-draft-btn"
+                disabled={busy || (!m.selectedGiteeIssue && !(m.issueRef ?? "").trim())}
+                onClick={() =>
+                  void submitImportGiteeIssue({
+                    issue: m.selectedGiteeIssue,
+                    issueRef: m.issueRef,
+                    dispatchAgent: false,
+                  })
+                }
+              >
+                仅导入草稿
+              </button>
+              <button
+                className="btn primary"
+                type="button"
+                data-testid="import-issue-dispatch-btn"
+                disabled={busy || (!m.selectedGiteeIssue && !(m.issueRef ?? "").trim())}
+                onClick={() =>
+                  void submitImportGiteeIssue({
+                    issue: m.selectedGiteeIssue,
+                    issueRef: m.issueRef,
+                    dispatchAgent: true,
+                  })
+                }
+              >
+                导入并让 Agent 整理方案
+              </button>
+            </div>
+          </div>
         ) : (
           <>
             <label className="muted" style={{ fontSize: 13, display: "block", marginBottom: 6 }}>
@@ -528,15 +798,24 @@ export function Modals() {
     const cfg = m.draft ?? routing;
     const hubLangValue = m.hubLangDraft ?? hub?.outputLanguage ?? "zh-CN";
     const savedHubLang = hub?.outputLanguage ?? "zh-CN";
+    const giteeTokenValue = m.giteeTokenDraft ?? "";
     const projLangValue = m.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
+    const projProviderValue: GitRemoteProvider = m.projProviderDraft ?? (isGiteeProject ? "gitee" : "github");
     const ghRepoValue = m.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
     const ghBaseValue =
       m.ghBaseBranchDraft ?? project?.project?.github?.defaultBaseBranch ?? githubStatus?.defaultBaseBranch ?? "main";
     const ghAutoCreateValue = m.ghAutoCreateDraft ?? Boolean(project?.project?.github?.autoCreateIssue);
     const ghAutoSyncValue = m.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
+    const giteeRepoValue = m.giteeRepoDraft ?? project?.project?.gitee?.repo ?? giteeStatus?.repo ?? "";
+    const giteeEnterpriseValue =
+      m.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
+    const giteeBaseValue =
+      m.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
 
     const syncHubStatePatch = async (
-      patch: Partial<Pick<HubStateResponse, "routing" | "harnesses" | "outputLanguage">>,
+      patch: Partial<
+        Pick<HubStateResponse, "routing" | "harnesses" | "outputLanguage" | "giteeTokenConfigured" | "giteeTokenMasked">
+      >,
     ) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
       queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
@@ -566,13 +845,29 @@ export function Modals() {
 
     const saveGlobal = async () => {
       if (!cfg) return;
+      const tokenPatch = m.clearGiteeToken
+        ? null
+        : giteeTokenValue.trim()
+          ? giteeTokenValue.trim()
+          : undefined;
       const res = await runBusy(async () => {
         const routingRes = await api.saveRouting(cfg);
-        const prefRes = await api.updateHubPreferences({ outputLanguage: hubLangValue });
+        const prefRes = await api.updateHubPreferences({
+          outputLanguage: hubLangValue,
+          ...(tokenPatch !== undefined ? { giteeAccessToken: tokenPatch } : {}),
+        });
         return { routingRes, prefRes };
       });
       if (res) {
-        await syncHubStatePatch({ routing: res.routingRes.routing, outputLanguage: res.prefRes.outputLanguage });
+        await syncHubStatePatch({
+          routing: res.routingRes.routing,
+          outputLanguage: res.prefRes.outputLanguage,
+          ...(res.prefRes.giteeTokenConfigured !== undefined
+            ? { giteeTokenConfigured: res.prefRes.giteeTokenConfigured }
+            : {}),
+          ...(res.prefRes.giteeTokenMasked !== undefined ? { giteeTokenMasked: res.prefRes.giteeTokenMasked } : {}),
+        });
+        await queryClient.invalidateQueries({ queryKey: ["gitee"] });
         setModal(null);
         showToast("全局设置已保存");
       }
@@ -582,12 +877,24 @@ export function Modals() {
       const out = await runBusy(() =>
         api.updateProjectSettings({
           outputLanguage: projLangValue,
-          github: {
-            repo: ghRepoValue.trim(),
-            defaultBaseBranch: ghBaseValue.trim() || "main",
-            autoCreateIssue: ghAutoCreateValue,
-            autoSyncIssue: ghAutoSyncValue,
-          },
+          ...(projProviderValue === "gitee"
+            ? {
+                gitee: {
+                  repo: giteeRepoValue.trim(),
+                  enterprise: giteeEnterpriseValue.trim(),
+                  defaultBaseBranch: giteeBaseValue.trim() || "master",
+                },
+                github: null,
+              }
+            : {
+                github: {
+                  repo: ghRepoValue.trim(),
+                  defaultBaseBranch: ghBaseValue.trim() || "main",
+                  autoCreateIssue: ghAutoCreateValue,
+                  autoSyncIssue: ghAutoSyncValue,
+                },
+                gitee: null,
+              }),
         }),
       );
       if (out) {
@@ -801,25 +1108,93 @@ export function Modals() {
               所有模型调度 Prompt、交接简报（handoff.md）与 MCP 工具描述将强制遵守此处配置的计划文档输出语言，避免不同模型出现中英文混杂。
             </div>
 
-            <div>
-              <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                Hub 全局默认输出语言（对所有项目生效）
-              </label>
-              <select
-                className="select"
-                data-testid="hub-output-language-select"
-                style={{ width: "100%" }}
-                value={hubLangValue}
-                onChange={(e) =>
-                  setModal((prev) =>
-                    prev?.kind === "routing" ? { ...prev, hubLangDraft: e.target.value as OutputLanguage } : prev,
-                  )
-                }
-              >
-                <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
-                <option value="en">English (en)</option>
-                <option value="auto">跟随需求输入语言 (auto)</option>
-              </select>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "end" }}>
+              <div>
+                <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                  Hub 全局默认输出语言（对所有项目生效）
+                </label>
+                <select
+                  className="select"
+                  data-testid="hub-output-language-select"
+                  style={{ width: "100%" }}
+                  value={hubLangValue}
+                  onChange={(e) =>
+                    setModal((prev) =>
+                      prev?.kind === "routing" ? { ...prev, hubLangDraft: e.target.value as OutputLanguage } : prev,
+                    )
+                  }
+                >
+                  <option value="zh-CN">简体中文 (zh-CN) — 推荐默认</option>
+                  <option value="en">English (en)</option>
+                  <option value="auto">跟随需求输入语言 (auto)</option>
+                </select>
+              </div>
+
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 6 }}>
+                  <label
+                    className="muted xs"
+                    htmlFor="hub-gitee-token-input"
+                    title="保存于主控机 ~/.workbench-hub/hub.json，并自动安全下发至在线远程节点（不写入项目仓库）"
+                  >
+                    Gitee 私人令牌 (Access Token)
+                  </label>
+                  <span
+                    className={`badge ${
+                      m.clearGiteeToken
+                        ? "neutral"
+                        : hub?.giteeTokenConfigured
+                          ? "success"
+                          : "warning"
+                    }`}
+                    data-testid="hub-gitee-token-status"
+                  >
+                    {m.clearGiteeToken
+                      ? "保存后清除"
+                      : hub?.giteeTokenConfigured
+                        ? `已配置 (${hub.giteeTokenMasked ?? "••••"})`
+                        : "未配置"}
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    id="hub-gitee-token-input"
+                    type="password"
+                    className="input"
+                    style={{ flex: 1 }}
+                    data-testid="hub-gitee-token-input"
+                    value={giteeTokenValue}
+                    placeholder={
+                      hub?.giteeTokenConfigured
+                        ? "输入新令牌以替换（留空保持）"
+                        : "粘贴 Gitee 私人令牌"
+                    }
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "routing"
+                          ? { ...prev, giteeTokenDraft: e.target.value, clearGiteeToken: false }
+                          : prev,
+                      )
+                    }
+                  />
+                  {hub?.giteeTokenConfigured && !m.clearGiteeToken && (
+                    <button
+                      className="btn xs"
+                      type="button"
+                      data-testid="hub-gitee-token-clear"
+                      onClick={() =>
+                        setModal((prev) =>
+                          prev?.kind === "routing"
+                            ? { ...prev, giteeTokenDraft: "", clearGiteeToken: true }
+                            : prev,
+                        )
+                      }
+                    >
+                      清除
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
 
             <div className="modal-actions">
@@ -871,76 +1246,191 @@ export function Modals() {
                   </div>
 
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                      <strong style={{ fontSize: 13 }}>当前项目 GitHub 集成设置</strong>
-                      {githubStatus && (
-                        <span className={`badge ${githubStatus.ready ? "success" : "warning"}`}>
-                          {githubStatus.ready
-                            ? `gh 已就绪 (${githubStatus.account ?? "authenticated"})`
-                            : githubStatus.reason ?? "未就绪"}
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 8, marginBottom: 8 }}>
-                      <div>
-                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                          GitHub 仓库（owner/repo，留空自动识别 origin）
-                        </label>
-                        <input
-                          className="input"
-                          data-testid="project-github-repo-input"
-                          value={ghRepoValue}
-                          placeholder="Jackie733/workbench"
-                          onChange={(e) =>
-                            setModal((prev) =>
-                              prev?.kind === "routing" ? { ...prev, ghRepoDraft: e.target.value } : prev,
-                            )
-                          }
-                        />
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 8,
+                        gap: 8,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <strong style={{ fontSize: 13 }}>代码托管平台</strong>
+                        <div className="segmented" role="tablist" aria-label="代码托管平台">
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={projProviderValue === "github"}
+                            className={projProviderValue === "github" ? "active" : ""}
+                            data-testid="project-provider-github"
+                            onClick={() =>
+                              setModal((prev) =>
+                                prev?.kind === "routing" ? { ...prev, projProviderDraft: "github" } : prev,
+                              )
+                            }
+                          >
+                            GitHub
+                          </button>
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={projProviderValue === "gitee"}
+                            className={projProviderValue === "gitee" ? "active" : ""}
+                            data-testid="project-provider-gitee"
+                            onClick={() =>
+                              setModal((prev) =>
+                                prev?.kind === "routing" ? { ...prev, projProviderDraft: "gitee" } : prev,
+                              )
+                            }
+                          >
+                            Gitee
+                          </button>
+                        </div>
                       </div>
-                      <div>
-                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                          PR 默认 Base 分支
-                        </label>
-                        <input
-                          className="input"
-                          data-testid="project-github-base-input"
-                          value={ghBaseValue}
-                          placeholder="main"
-                          onChange={(e) =>
-                            setModal((prev) =>
-                              prev?.kind === "routing" ? { ...prev, ghBaseBranchDraft: e.target.value } : prev,
-                            )
-                          }
-                        />
-                      </div>
+                      {projProviderValue === "gitee"
+                        ? giteeStatus && (
+                            <span className={`badge ${giteeStatus.ready ? "success" : "warning"}`}>
+                              {giteeStatus.ready
+                                ? `Gitee 已就绪 (@${giteeStatus.account ?? "authenticated"})`
+                                : giteeStatus.reason ?? "未就绪"}
+                            </span>
+                          )
+                        : githubStatus && (
+                            <span className={`badge ${githubStatus.ready ? "success" : "warning"}`}>
+                              {githubStatus.ready
+                                ? `gh 已就绪 (${githubStatus.account ?? "authenticated"})`
+                                : githubStatus.reason ?? "未就绪"}
+                            </span>
+                          )}
                     </div>
-                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6 }}>
-                      <input
-                        type="checkbox"
-                        data-testid="project-github-autocreate"
-                        checked={ghAutoCreateValue}
-                        onChange={(e) =>
-                          setModal((prev) =>
-                            prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: e.target.checked } : prev,
-                          )
-                        }
-                      />
-                      <span>新建需求或痛点转化需求时自动在 GitHub 创建对应 Issue</span>
-                    </label>
-                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-                      <input
-                        type="checkbox"
-                        data-testid="project-github-autosync"
-                        checked={ghAutoSyncValue}
-                        onChange={(e) =>
-                          setModal((prev) =>
-                            prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: e.target.checked } : prev,
-                          )
-                        }
-                      />
-                      <span>验收通过与创建 PR 时自动向已关联 GitHub Issue 同步评论进展</span>
-                    </label>
+
+                    {projProviderValue === "gitee" ? (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 150px", gap: 8, marginBottom: 6 }}>
+                          <div>
+                            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                              Gitee 仓库（owner/repo，留空自动识别）
+                            </label>
+                            <input
+                              className="input"
+                              data-testid="project-gitee-repo-input"
+                              value={giteeRepoValue}
+                              placeholder="openstring/deepmdt-frontend-pc"
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, giteeRepoDraft: e.target.value } : prev,
+                                )
+                              }
+                            />
+                          </div>
+                          <div>
+                            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                              企业空间路径（用于拉取无仓库工作项）
+                            </label>
+                            <input
+                              className="input"
+                              data-testid="project-gitee-enterprise-input"
+                              value={giteeEnterpriseValue}
+                              placeholder="openstring"
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, giteeEnterpriseDraft: e.target.value } : prev,
+                                )
+                              }
+                            />
+                          </div>
+                          <div>
+                            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                              PR 默认 Base 分支
+                            </label>
+                            <input
+                              className="input"
+                              data-testid="project-gitee-base-input"
+                              value={giteeBaseValue}
+                              placeholder="master"
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, giteeBaseBranchDraft: e.target.value } : prev,
+                                )
+                              }
+                            />
+                          </div>
+                        </div>
+                        {!giteeRepoValue.trim() && !giteeStatus?.repo && (
+                          <div className="xs muted" style={{ marginBottom: 4, color: "var(--warning)" }}>
+                            未自动识别到 gitee.com 远端（例如使用了自定义 SSH Host 别名），请手动填写上方「Gitee 仓库 (owner/repo)」。
+                          </div>
+                        )}
+                        <div className="xs muted">
+                          导入 Gitee 工作项及提交 PR 时，仅通过 PR 描述关联工作项（不会自动向工作项发送评论或修改其状态）。
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 8, marginBottom: 8 }}>
+                          <div>
+                            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                              GitHub 仓库（owner/repo，留空自动识别 origin）
+                            </label>
+                            <input
+                              className="input"
+                              data-testid="project-github-repo-input"
+                              value={ghRepoValue}
+                              placeholder="Jackie733/workbench"
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, ghRepoDraft: e.target.value } : prev,
+                                )
+                              }
+                            />
+                          </div>
+                          <div>
+                            <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                              PR 默认 Base 分支
+                            </label>
+                            <input
+                              className="input"
+                              data-testid="project-github-base-input"
+                              value={ghBaseValue}
+                              placeholder="main"
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, ghBaseBranchDraft: e.target.value } : prev,
+                                )
+                              }
+                            />
+                          </div>
+                        </div>
+                        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6 }}>
+                          <input
+                            type="checkbox"
+                            data-testid="project-github-autocreate"
+                            checked={ghAutoCreateValue}
+                            onChange={(e) =>
+                              setModal((prev) =>
+                                prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: e.target.checked } : prev,
+                              )
+                            }
+                          />
+                          <span>新建需求或痛点转化需求时自动在 GitHub 创建对应 Issue</span>
+                        </label>
+                        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                          <input
+                            type="checkbox"
+                            data-testid="project-github-autosync"
+                            checked={ghAutoSyncValue}
+                            onChange={(e) =>
+                              setModal((prev) =>
+                                prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: e.target.checked } : prev,
+                              )
+                            }
+                          />
+                          <span>验收通过与创建 PR 时自动向已关联 GitHub Issue 同步评论进展</span>
+                        </label>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -1820,47 +2310,58 @@ export function Modals() {
   }
 
   if (m.kind === "link_issue") {
+    const linkProvider = m.provider ?? (isGiteeProject ? "gitee" : "github");
+    const isGiteeLink = linkProvider === "gitee";
+    const remoteReady = isGiteeLink ? giteeStatus?.authenticated : githubStatus?.ready;
+    const remoteReason = isGiteeLink ? giteeStatus?.reason : githubStatus?.reason;
+
     const submitLinkIssue = async () => {
-      if (m.mode === "link" && !m.issueRef.trim()) {
-        showToast("请输入 GitHub Issue 编号或 URL", true);
+      if ((isGiteeLink || m.mode === "link") && !m.issueRef.trim()) {
+        showToast(isGiteeLink ? "请输入 Gitee 工作项编号或 URL" : "请输入 GitHub Issue 编号或 URL", true);
         return;
       }
       const res = await runBusy(() =>
         api.linkRequirementIssue(
           m.requirementId,
-          m.mode === "link" ? { issueRef: m.issueRef.trim() } : {},
+          isGiteeLink
+            ? { provider: "gitee", issueRef: m.issueRef.trim() }
+            : m.mode === "link"
+              ? { provider: "github", issueRef: m.issueRef.trim() }
+              : { provider: "github" },
         ),
       );
       if (res) {
         setModal(null);
         await invalidateAllWorkbenchQueries();
         const num = res.detail.state.github?.issue?.number;
-        showToast(num ? `已关联 GitHub Issue #${num}` : "已关联 GitHub Issue");
+        showToast(num ? `已关联工作项 #${num}` : "已关联远端工作项");
       }
     };
 
     return (
       <ModalShell onClose={close} testId="link-issue-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>关联 GitHub Issue</h3>
-          <div className="segmented" role="tablist">
-            <button
-              type="button"
-              className={m.mode === "create" ? "active" : ""}
-              onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "create" } : prev))}
-            >
-              新建并关联 Issue
-            </button>
-            <button
-              type="button"
-              className={m.mode === "link" ? "active" : ""}
-              onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "link" } : prev))}
-            >
-              绑定已有 Issue
-            </button>
-          </div>
+          <h3 style={{ margin: 0 }}>{isGiteeLink ? "关联 Gitee 工作项" : "关联 GitHub Issue"}</h3>
+          {!isGiteeLink && (
+            <div className="segmented" role="tablist">
+              <button
+                type="button"
+                className={m.mode === "create" ? "active" : ""}
+                onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "create" } : prev))}
+              >
+                新建并关联 Issue
+              </button>
+              <button
+                type="button"
+                className={m.mode === "link" ? "active" : ""}
+                onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "link" } : prev))}
+              >
+                绑定已有 Issue
+              </button>
+            </div>
+          )}
         </div>
-        {m.mode === "create" ? (
+        {!isGiteeLink && m.mode === "create" ? (
           <div className="callout info xs">
             将根据当前需求 <strong>{m.requirementId}</strong> 的标题、目标正文与验收条件在 GitHub 仓库
             {githubStatus?.repo ? ` (${githubStatus.repo}) ` : " "}创建新 Issue 并双向绑定。
@@ -1868,23 +2369,27 @@ export function Modals() {
         ) : (
           <>
             <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-              GitHub Issue 编号或完整 URL
+              {isGiteeLink ? "Gitee 工作项编号或完整 URL（支持无仓库工作项）" : "GitHub Issue 编号或完整 URL"}
             </label>
             <input
               className="input"
               data-testid="link-issue-ref-input"
               autoFocus
               value={m.issueRef}
-              placeholder="例如 #42 或 https://github.com/owner/repo/issues/42"
+              placeholder={
+                isGiteeLink
+                  ? "例如 I8ABCD、#I8ABCD 或 https://e.gitee.com/openstring/issues/list?issue=I8ABCD"
+                  : "例如 #42 或 https://github.com/owner/repo/issues/42"
+              }
               onChange={(e) =>
                 setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, issueRef: e.target.value } : prev))
               }
             />
           </>
         )}
-        {githubStatus && !githubStatus.ready && (
+        {(isGiteeLink ? giteeStatus && !giteeStatus.authenticated : githubStatus && !githubStatus.ready) && (
           <div className="callout warning xs" style={{ marginTop: 8 }}>
-            {githubStatus.reason}
+            {remoteReason}
           </div>
         )}
         <div className="modal-actions">
@@ -1895,10 +2400,10 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="submit-link-issue-btn"
-            disabled={busy || (githubStatus !== undefined && !githubStatus.ready)}
+            disabled={busy || remoteReady === false}
             onClick={() => void submitLinkIssue()}
           >
-            <Icon icon={Link2} size={14} /> {m.mode === "create" ? "创建并绑定" : "绑定 Issue"}
+            <Icon icon={Link2} size={14} /> {!isGiteeLink && m.mode === "create" ? "创建并绑定" : "绑定工作项"}
           </button>
         </div>
       </ModalShell>
@@ -1912,7 +2417,11 @@ export function Modals() {
     const sandboxActive = Boolean(deliveryPreview?.sandboxActive);
     const createPr = sandboxActive ? true : Boolean(m.createPr);
     const canSubmitExistingCommits = createPr && candidates.length === 0 && (deliveryPreview?.aheadCommitsCount ?? 0) > 0;
-    const prAvailable = Boolean(deliveryPreview?.canCreatePr || githubStatus?.ready);
+    const isGiteeDelivery = deliveryPreview?.remoteProvider === "gitee" || isGiteeProject;
+    const prPlatformLabel = isGiteeDelivery ? "Gitee" : "GitHub";
+    const prAvailable = Boolean(
+      deliveryPreview?.canCreatePr || (isGiteeDelivery ? giteeStatus?.ready : githubStatus?.ready),
+    );
 
     const toggleFile = (filePath: string) => {
       setModal((prev) => {
@@ -1983,7 +2492,7 @@ export function Modals() {
     return (
       <ModalShell onClose={close} testId="deliver-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>{createPr ? "标准化交付 · 提交并创建 GitHub PR" : "交付收尾 · 提交代码到 Git"}</h3>
+          <h3 style={{ margin: 0 }}>{createPr ? `标准化交付 · 提交并创建 ${prPlatformLabel} PR` : "交付收尾 · 提交代码到 Git"}</h3>
           {!sandboxActive && (
             <div className="segmented" role="tablist" aria-label="交付方式">
               <button
@@ -2132,7 +2641,7 @@ export function Modals() {
             </div>
             <div>
               <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                GitHub PR 标题
+                {prPlatformLabel} PR 标题
               </label>
               <input
                 className="input"
@@ -2145,7 +2654,8 @@ export function Modals() {
             </div>
             {detail.state.github?.issue && (
               <div className="xs muted">
-                PR 正文将自动附带验证证据、审查结论及 <code>Closes #{detail.state.github.issue.number}</code>。
+                PR 正文将自动附带验证证据、审查结论及 <code>Closes #{detail.state.github.issue.number}</code>
+                {isGiteeDelivery ? "（自动关联 Gitee 工作项，不发送工作项评论）。" : "。"}
               </div>
             )}
           </div>
@@ -2174,7 +2684,7 @@ export function Modals() {
             disabled={busy || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onClick={() => void submitDeliver()}
           >
-            {createPr ? "提交并创建 GitHub PR" : "确认提交 Git"}
+            {createPr ? `提交并创建 ${prPlatformLabel} PR` : "确认提交 Git"}
           </button>
         </div>
       </ModalShell>

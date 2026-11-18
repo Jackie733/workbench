@@ -94,6 +94,7 @@ export interface HubConfig {
   projects: HubProjectEntry[];
   routing: RoutingConfig;
   outputLanguage?: OutputLanguage;
+  giteeAccessToken?: string;
 }
 
 export interface DaemonInfo {

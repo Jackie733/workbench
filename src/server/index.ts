@@ -14,6 +14,7 @@ import {
 import { getProjectStatus, getRequirement, initProject } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
+import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
@@ -52,10 +53,12 @@ import {
   isAutoRegistrableProjectRoot,
   isLocalNodeId,
   LOCAL_NODE_ID,
+  maskAccessToken,
   readHubConfig,
   registerHubProject,
   removeDaemonInfo,
   removeHubProject,
+  resolveEffectiveGiteeToken,
   resolveHubDir,
   setActiveHubProject,
   updateHubPreferences,
@@ -172,6 +175,7 @@ export async function startWorkbenchServer(options: {
   webDir?: string;
   executor?: HubExecutor;
   githubDeps?: GitHubCommandDeps;
+  giteeDeps?: GiteeApiDeps;
 }): Promise<WorkbenchServerHandle> {
   const defaultRoot = canonicalRoot(options.root);
   const hubMode = options.hubMode === true;
@@ -484,7 +488,9 @@ export async function startWorkbenchServer(options: {
     ensureWatcherFor,
     reloadWebBundle,
     getHubOutputLanguage: () => readHubConfig().outputLanguage,
+    getGiteeAccessToken: () => resolveEffectiveGiteeToken(readHubConfig()),
     githubDeps: options.githubDeps,
+    giteeDeps: options.giteeDeps,
   });
 
   const handleApi = async (req: Request, url: URL): Promise<Response> => {
@@ -562,6 +568,7 @@ export async function startWorkbenchServer(options: {
           : localHarnesses;
       const activeRuns = nodes.flatMap((n) => n.activeRuns);
 
+      const effectiveGiteeToken = resolveEffectiveGiteeToken(cfg);
       return jsonResponse({
         hubMode,
         activeProjectId: activeId,
@@ -571,6 +578,8 @@ export async function startWorkbenchServer(options: {
         harnesses: effectiveHarnesses,
         routing: cfg.routing,
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        giteeTokenConfigured: Boolean(effectiveGiteeToken),
+        giteeTokenMasked: maskAccessToken(effectiveGiteeToken),
         activeRuns,
         evolutionOpenCount,
         cooldownCount: telemetry.activeCooldowns.length,
@@ -583,10 +592,21 @@ export async function startWorkbenchServer(options: {
       if (body.outputLanguage !== undefined && !outputLanguage) {
         throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
       }
-      const cfg = updateHubPreferences({ outputLanguage });
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
+      const giteeAccessToken =
+        body.giteeAccessToken === null
+          ? null
+          : typeof body.giteeAccessToken === "string"
+            ? body.giteeAccessToken
+            : undefined;
+      const cfg = updateHubPreferences({ outputLanguage, giteeAccessToken });
+      const effectiveToken = resolveEffectiveGiteeToken(cfg);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken);
       broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
-      return jsonResponse({ outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE });
+      return jsonResponse({
+        outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        giteeTokenConfigured: Boolean(effectiveToken),
+        giteeTokenMasked: maskAccessToken(effectiveToken),
+      });
     }
 
     if (method === "POST" && pathname === "/api/hub/projects") {
@@ -890,6 +910,7 @@ export async function startWorkbenchServer(options: {
         url,
         cfg.routing,
         cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        resolveEffectiveGiteeToken(cfg),
       );
     }
 
@@ -1077,6 +1098,7 @@ export async function startWorkbenchServer(options: {
             workbenchVersion: ws.data.nodeMeta?.workbenchVersion,
             routing: cfg.routing,
             outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+            giteeAccessToken: resolveEffectiveGiteeToken(cfg),
           });
           broadcastUi({ type: "hub.updated", reason: "node.connected", nodeId: ws.data.nodeId, at: Date.now() });
         } else {

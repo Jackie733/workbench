@@ -319,8 +319,14 @@ export function buildRequirementPrBody(detail: RequirementDetail, note?: string)
   const { state, specMarkdown, designMarkdown, validity } = detail;
   const lines: string[] = [];
 
-  if (state.github?.issue?.number) {
-    lines.push(`Closes #${state.github.issue.number}`, "");
+  if (state.github?.issue?.number !== undefined && state.github.issue.number !== "") {
+    lines.push(`Closes #${state.github.issue.number}`);
+    if (state.github.provider === "gitee" && state.github.issue.url) {
+      lines.push(
+        `> 关联 Gitee 工作项：[${sanitizeOutput(state.github.issue.title, 200).text} (#${state.github.issue.number})](${state.github.issue.url})`,
+      );
+    }
+    lines.push("");
   }
 
   lines.push(`> 由 **Workbench** 需求 \`${state.id}\` 验收通过后标准化提交（Snapshot: \`${state.acceptance?.snapshot?.id ?? state.acceptance?.codeSnapshotHash.slice(0, 12) ?? "-"}\`）`, "");

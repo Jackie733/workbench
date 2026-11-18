@@ -1455,11 +1455,18 @@ export function WorkspaceView() {
   const { banner } = validity;
   const bridgeConnected = Boolean(project?.bridge.connected);
 
+  const isGiteeProject =
+    project?.remoteProvider === "gitee" ||
+    Boolean(project?.project?.gitee) ||
+    s.github?.provider === "gitee";
+  const prPlatformLabel = isGiteeProject ? "Gitee" : "GitHub";
+
   const openDeliverModal = (preferPr?: boolean) => {
     const candidates = deliveryPreview?.candidates ?? [];
     const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
     const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
-    const usePr = preferPr ?? Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr);
+    const usePr =
+      preferPr ?? Boolean((reqData?.sandbox || !deliveryPreview?.canCommit) && deliveryPreview?.canCreatePr);
     setModal({
       kind: "deliver",
       commitMessage: deliveryPreview?.suggestedMessage ?? `feat(${s.id.toLowerCase()}): ${s.title}`,
@@ -1467,7 +1474,7 @@ export function WorkspaceView() {
       note: "",
       createPr: usePr,
       branchName: deliveryPreview?.suggestedBranch ?? `feat/${s.id.toLowerCase()}`,
-      baseBranch: deliveryPreview?.baseBranch ?? "main",
+      baseBranch: deliveryPreview?.baseBranch ?? (isGiteeProject ? "master" : "main"),
       prTitle: `${s.id}: ${s.title}`,
     });
   };
@@ -1594,13 +1601,19 @@ export function WorkspaceView() {
                       type="button"
                       data-testid="menu-link-issue-btn"
                       onClick={() => {
-                        setModal({ kind: "link_issue", requirementId: s.id, mode: "create", issueRef: "" });
+                        setModal({
+                          kind: "link_issue",
+                          requirementId: s.id,
+                          provider: isGiteeProject ? "gitee" : "github",
+                          mode: isGiteeProject ? "link" : "create",
+                          issueRef: "",
+                        });
                       }}
                     >
-                      关联 / 创建 GitHub Issue…
+                      {isGiteeProject ? "关联 Gitee 工作项…" : "关联 / 创建 GitHub Issue…"}
                     </button>
                   </DropdownItem>
-                ) : (
+                ) : s.github.provider !== "gitee" ? (
                   <DropdownItem asChild>
                     <button
                       type="button"
@@ -1616,7 +1629,7 @@ export function WorkspaceView() {
                       同步当前状态到 Issue #{s.github.issue.number}
                     </button>
                   </DropdownItem>
-                )}
+                ) : null}
                 {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
                   <DropdownItem asChild>
                     <button
@@ -1793,8 +1806,8 @@ export function WorkspaceView() {
           {s.stage === "done" && deliveryPreview?.sandboxActive && !s.github?.pr && (
             <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-sandbox-hint">
               {deliveryPreview.canCreatePr
-                ? `改动位于沙箱分支 ${deliveryPreview.branch ?? reqData?.sandbox?.branch}，建议推送分支并创建标准化 GitHub PR（也可本地应急应用）。`
-                : "改动仍在隔离沙箱中，可点击「应用沙箱改动」合并到主干，或配置 GitHub 远端后提交 PR。"}
+                ? `改动位于沙箱分支 ${deliveryPreview.branch ?? reqData?.sandbox?.branch}，建议推送分支并创建标准化 ${prPlatformLabel} PR（也可本地应急应用）。`
+                : `改动仍在隔离沙箱中，可点击「应用沙箱改动」合并到主干，或配置 ${prPlatformLabel} 远端后提交 PR。`}
             </div>
           )}
           {canRunModel && (
@@ -1863,7 +1876,7 @@ export function WorkspaceView() {
               {reqData?.sandbox && deliveryPreview?.canCreatePr
                 ? s.github?.pr
                   ? "追加提交 / 更新 PR…"
-                  : "提交并创建 GitHub PR…"
+                  : `提交并创建 ${prPlatformLabel} PR…`
                 : s.delivery
                   ? "补充交付提交…"
                   : "提交代码交付…"}

@@ -75,10 +75,22 @@ export type PrivacyMode = "local" | "tracked";
 export const OUTPUT_LANGUAGES = ["zh-CN", "en", "auto"] as const;
 export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
 
+export const GIT_REMOTE_PROVIDERS = ["github", "gitee"] as const;
+export type GitRemoteProvider = (typeof GIT_REMOTE_PROVIDERS)[number];
+
 export interface ProjectGitHubConfig {
   repo?: string;
   autoCreateIssue?: boolean;
   autoSyncIssue?: boolean;
+  defaultBaseBranch?: string;
+}
+
+export interface ProjectGiteeConfig {
+  /** Gitee repository slug (owner/repo); auto-detected from origin remote when omitted. */
+  repo?: string;
+  /** Gitee enterprise path (e.g. openstring) used to list enterprise issues without a repository binding. */
+  enterprise?: string;
+  /** Default PR target branch (e.g. master). */
   defaultBaseBranch?: string;
 }
 
@@ -90,6 +102,7 @@ export interface ProjectMetadata {
   privacyMode: PrivacyMode;
   outputLanguage?: OutputLanguage;
   github?: ProjectGitHubConfig;
+  gitee?: ProjectGiteeConfig;
   createdAt: number;
   updatedAt: number;
 }
@@ -314,6 +327,7 @@ export interface DeliveryPreview {
   aheadCommitsCount: number;
   canCommit: boolean;
   canCreatePr: boolean;
+  remoteProvider: GitRemoteProvider | null;
   baseBranch: string | null;
   githubRepo: string | null;
   githubReady: boolean;
@@ -355,10 +369,13 @@ export type TimelineEventKind =
   | "github_pr_synced";
 
 export interface RequirementGitHubIssueLink {
-  number: number;
+  /** GitHub uses positive integer numbers (e.g. 42); Gitee uses alphanumeric ident (e.g. "I8ABCD"). */
+  number: number | string;
   url: string;
   title: string;
-  state: "open" | "closed";
+  state: "open" | "progressing" | "closed" | "rejected";
+  issueType?: string;
+  programName?: string;
   lastSyncedStage?: Stage;
   lastSyncedAt: number;
 }
@@ -375,7 +392,9 @@ export interface RequirementGitHubPrLink {
 }
 
 export interface RequirementGitHubLink {
+  provider?: GitRemoteProvider;
   repo: string;
+  enterprise?: string;
   issue?: RequirementGitHubIssueLink | null;
   pr?: RequirementGitHubPrLink | null;
 }

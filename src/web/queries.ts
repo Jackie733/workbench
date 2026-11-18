@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
+import type { GiteeIssueItem } from "../core/gitee.ts";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import type { SandboxDriftInfo } from "../hub/evolution.ts";
@@ -26,6 +27,9 @@ export const queryKeys = {
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
   githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
+  giteeStatus: (projectId: string | null) => ["gitee", "status", projectId] as const,
+  giteeIssues: (projectId: string | null, filter: string, state: string, q: string) =>
+    ["gitee", "issues", projectId, filter, state, q] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
@@ -44,6 +48,30 @@ export function useGitHubStatusQuery(activeProjectId: string | null, enabled: bo
   return useQuery({
     queryKey: queryKeys.githubStatus(activeProjectId),
     queryFn: () => api.getGitHubStatus(),
+    enabled,
+  });
+}
+
+export function useGiteeStatusQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.giteeStatus(activeProjectId),
+    queryFn: () => api.getGiteeStatus(),
+    enabled,
+  });
+}
+
+export function useGiteeIssuesQuery(
+  activeProjectId: string | null,
+  params: {
+    filter: "assigned" | "created" | "all";
+    state: "active" | "open" | "progressing" | "closed" | "all";
+    q: string;
+  },
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: queryKeys.giteeIssues(activeProjectId, params.filter, params.state, params.q),
+    queryFn: () => api.listGiteeIssues(params),
     enabled,
   });
 }
@@ -798,6 +826,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
   const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.importGitHubIssue({
+      provider: "github",
       issueRef,
       dispatchAgent: dispatchAgent && !useCli,
     }),
@@ -808,7 +837,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
     if (res.alreadyExisted) {
-      ui.showToast(`Issue #${res.issue.number} 已关联至现有需求 ${res.detail.state.id}`);
+      ui.showToast(`Issue #${res.detail.state.github?.issue?.number ?? ""} 已关联至现有需求 ${res.detail.state.id}`);
       return;
     }
     if (dispatchAgent) {
@@ -818,7 +847,48 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
         handleDispatchOutcome(res.dispatch ?? null, "导入 Issue 并发送给 Agent");
       }
     } else {
-      ui.showToast(`已从 Issue #${res.issue.number} 创建需求 ${res.detail.state.id}`);
+      ui.showToast(`已从 Issue #${res.detail.state.github?.issue?.number ?? ""} 创建需求 ${res.detail.state.id}`);
+    }
+  }
+}
+
+export async function submitImportGiteeIssue(opts: {
+  issue?: GiteeIssueItem | null;
+  issueRef?: string;
+  dispatchAgent: boolean;
+}): Promise<void> {
+  const ui = useUiStore.getState();
+  const issueRef = opts.issueRef?.trim() ?? "";
+  if (!opts.issue && !issueRef) {
+    ui.showToast("请先选择一条 Gitee 工作项，或输入工作项编号 / URL", true);
+    return;
+  }
+  const useCli = opts.dispatchAgent && shouldUseCliRunner("design");
+  const res = await runBusy(() =>
+    api.importGitHubIssue({
+      provider: "gitee",
+      ...(opts.issue ? { giteeIssue: opts.issue } : { issueRef }),
+      dispatchAgent: opts.dispatchAgent && !useCli,
+    }),
+  );
+  if (res) {
+    ui.setModal(null);
+    ui.setSelectedId(res.detail.state.id);
+    ui.setWorkspaceTab("spec");
+    await invalidateAllWorkbenchQueries();
+    const ident = res.detail.state.github?.issue?.number ?? opts.issue?.ident ?? issueRef;
+    if (res.alreadyExisted) {
+      ui.showToast(`工作项 #${ident} 已关联至现有需求 ${res.detail.state.id}`);
+      return;
+    }
+    if (opts.dispatchAgent) {
+      if (useCli) {
+        await triggerActiveRun(res.detail.state.id, "design");
+      } else {
+        handleDispatchOutcome(res.dispatch ?? null, "导入工作项并发送给 Agent");
+      }
+    } else {
+      ui.showToast(`已从 Gitee 工作项 #${ident} 创建需求 ${res.detail.state.id}`);
     }
   }
 }
