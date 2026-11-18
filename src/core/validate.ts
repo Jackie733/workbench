@@ -130,10 +130,24 @@ export function isSafeInt(value: unknown, min = 0): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= min;
 }
 
+const FORBIDDEN_EXTENSION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function assertAllowedKeys(obj: Record<string, unknown>, allowed: readonly string[], label: string): void {
   for (const key of Object.keys(obj)) {
     if (!allowed.includes(key)) {
       throw new WorkbenchError("corrupt_record", `${label} 包含未知字段: ${key}`);
+    }
+  }
+}
+
+/**
+ * Validates object keys on versioned persisted records while allowing forward-compatible
+ * optional extension fields under the same schemaVersion (e.g. written by an RSI branch).
+ */
+function assertSafeExtensionKeys(obj: Record<string, unknown>, label: string): void {
+  for (const key of Object.keys(obj)) {
+    if (FORBIDDEN_EXTENSION_KEYS.has(key) || !isSafeText(key, 128)) {
+      throw new WorkbenchError("corrupt_record", `${label} 包含非法字段名`);
     }
   }
 }
@@ -293,11 +307,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   if (raw.schemaVersion !== SCHEMA_VERSION) {
     throw new WorkbenchError("unsupported_schema", `不支持的 project.json 版本: ${String(raw.schemaVersion)}`);
   }
-  assertAllowedKeys(
-    raw,
-    ["schemaVersion", "projectId", "name", "nextNumber", "privacyMode", "outputLanguage", "github", "createdAt", "updatedAt"],
-    "project.json",
-  );
+  assertSafeExtensionKeys(raw, "project.json");
   if (
     typeof raw.projectId !== "string" ||
     !TOKEN_ID_RE.test(raw.projectId) ||
@@ -680,30 +690,7 @@ export function validateScreenshotBatches(raw: unknown): ScreenshotBatch[] {
 /** Validates one frozen acceptance artifact; guarantees the stored bytes can be trusted as history. */
 export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?: string): AcceptanceSnapshot {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "验收快照必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "schemaVersion",
-      "id",
-      "requirementId",
-      "capturedAt",
-      "acceptedAt",
-      "specHash",
-      "designHash",
-      "codeSnapshotHash",
-      "codeRootKind",
-      "criteria",
-      "coverage",
-      "requiredTotal",
-      "requiredPassed",
-      "verifications",
-      "omittedVerificationCount",
-      "git",
-      "screenshots",
-      "contentDigest",
-    ],
-    "验收快照",
-  );
+  assertSafeExtensionKeys(raw, "验收快照");
   if (
     raw.schemaVersion !== ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION ||
     typeof raw.id !== "string" ||
@@ -924,42 +911,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   if (raw.schemaVersion !== SCHEMA_VERSION) {
     throw new WorkbenchError("unsupported_schema", `不支持的 state.json 版本: ${String(raw.schemaVersion)}`);
   }
-  assertAllowedKeys(
-    raw,
-    [
-      "schemaVersion",
-      "id",
-      "title",
-      "stage",
-      "track",
-      "revision",
-      "specHash",
-      "designVersion",
-      "designHash",
-      "criteria",
-      "approval",
-      "acceptance",
-      "delivery",
-      "tasks",
-      "baseline",
-      "verifications",
-      "timeline",
-      "lastFeedback",
-      "blockedFrom",
-      "blockedReason",
-      "uiRelated",
-      "screenshotBatches",
-      "handoffNote",
-      "discussions",
-      "agentRuns",
-      "reviewReport",
-      "github",
-      "attachments",
-      "createdAt",
-      "updatedAt",
-    ],
-    "state.json",
-  );
+  assertSafeExtensionKeys(raw, "state.json");
   if (
     typeof raw.id !== "string" ||
     !REQUIREMENT_ID_RE.test(raw.id) ||

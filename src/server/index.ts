@@ -33,6 +33,7 @@ import {
   updateDesign,
   updateProjectConfig,
   updateSpec,
+  type CorruptRequirementEntry,
 } from "../core/engine.ts";
 import {
   discardStagedAttachments,
@@ -369,11 +370,16 @@ export async function startWorkbenchServer(options: {
               scope: "active",
               currentCodeSnapshotHash: snap?.fingerprint ?? null,
               codeSnapshotsById: byReqId,
+              onCorrupt: (corrupt) => {
+                console.warn(`[workbench] 跳过损坏需求 ${entry.root}/${corrupt.id}: ${corrupt.message}`);
+              },
             });
             activeCount = items.length;
             decisionCount = items.filter((i) => i.needsDecision).length;
-          } catch {
-            // Keep resilient if a project is mid-migration.
+          } catch (error) {
+            console.warn(
+              `[workbench] 读取项目快照失败 ${entry.root}: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
         }
         const runningCount = executor.getActiveRuns(entry.root).length;
@@ -930,14 +936,20 @@ export async function startWorkbenchServer(options: {
       const scope = (url.searchParams.get("scope") ?? "active") as "active" | "done" | "cancelled" | "all";
       const stageParam = url.searchParams.get("stage");
       const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
+      const corruptItems: CorruptRequirementEntry[] = [];
       const items = listRequirements(base, {
         scope,
         stage: stageParam ? (stageParam as Stage) : undefined,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         codeSnapshotsById: byReqId,
+        onCorrupt: (corrupt) => {
+          console.warn(`[workbench] 跳过损坏需求 ${base}/${corrupt.id}: ${corrupt.message}`);
+          corruptItems.push(corrupt);
+        },
       });
       return jsonResponse({
         items,
+        ...(corruptItems.length > 0 ? { corruptItems } : {}),
         codeSnapshotHash: snapshot?.fingerprint ?? null,
         bridge: bridgeStatus,
       });

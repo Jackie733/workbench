@@ -1074,8 +1074,11 @@ export class HubExecutor {
         if (codeRoot !== base) {
           syncRequirementMirrorToSandbox(base, id, codeRoot);
         }
-      } catch {
-        // Keep daemon alive even if workspace disappeared during run.
+      } catch (error) {
+        // Keep daemon alive even if workspace disappeared during run, but surface the failure.
+        console.error(
+          `[workbench] finalize failed for ${id}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
 
       this.emit({

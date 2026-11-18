@@ -288,6 +288,12 @@ export async function updateProjectConfig(
   });
 }
 
+export interface CorruptRequirementEntry {
+  id: string;
+  code: string;
+  message: string;
+}
+
 export function listRequirements(
   root: string,
   options: {
@@ -295,6 +301,7 @@ export function listRequirements(
     stage?: Stage;
     currentCodeSnapshotHash?: string | null;
     codeSnapshotsById?: ReadonlyMap<string, string | null>;
+    onCorrupt?: (entry: CorruptRequirementEntry) => void;
   } = {},
 ): RequirementSummary[] {
   const ids = listRequirementIds(root);
@@ -303,7 +310,15 @@ export function listRequirements(
   const summaries: RequirementSummary[] = [];
 
   for (const id of ids) {
-    const bundle = readRequirementBundle(root, id);
+    let bundle: RequirementBundle;
+    try {
+      bundle = readRequirementBundle(root, id);
+    } catch (error) {
+      const code = error instanceof WorkbenchError ? error.code : "corrupt_record";
+      const message = error instanceof Error ? error.message : String(error);
+      options.onCorrupt?.({ id, code, message });
+      continue;
+    }
     const stage = bundle.state.stage;
     const scopeOk =
       scope === "all" ||

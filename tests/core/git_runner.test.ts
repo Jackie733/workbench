@@ -184,4 +184,36 @@ describe("WB-02 git observer and verification runner", () => {
     const done = await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: postEditSnap.fingerprint });
     expect(done.state.stage).toBe("done");
   });
+
+  test("strips inherited WORKBENCH_ROOT and WORKBENCH_REQ_ID from verification command env", async () => {
+    const repo = initGitRepo(true);
+    await initProject(repo);
+    await createRequirement(repo, {
+      goal: "验证子进程环境变量隔离",
+      criteria: [
+        {
+          id: "AC-1",
+          description: "子进程不继承 WORKBENCH_ROOT/WORKBENCH_REQ_ID",
+          required: true,
+          command: "bun -e 'console.log(JSON.stringify({root: process.env.WORKBENCH_ROOT ?? null, req: process.env.WORKBENCH_REQ_ID ?? null}))'",
+        },
+      ],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const prevRoot = process.env.WORKBENCH_ROOT;
+    const prevReq = process.env.WORKBENCH_REQ_ID;
+    process.env.WORKBENCH_ROOT = "/tmp/leaked-host-root";
+    process.env.WORKBENCH_REQ_ID = "REQ-999";
+    try {
+      const res = await runAllVerifications(repo, "REQ-001");
+      expect(res.runs[0]!.record.passed).toBe(true);
+      expect(res.runs[0]!.log).toContain('"root":null,"req":null');
+    } finally {
+      if (prevRoot === undefined) delete process.env.WORKBENCH_ROOT;
+      else process.env.WORKBENCH_ROOT = prevRoot;
+      if (prevReq === undefined) delete process.env.WORKBENCH_REQ_ID;
+      else process.env.WORKBENCH_REQ_ID = prevReq;
+    }
+  });
 });

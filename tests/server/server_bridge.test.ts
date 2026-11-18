@@ -590,4 +590,31 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
       else process.env.WORKBENCH_HUB_DIR = origHubDir;
     }
   }, 15_000);
+
+  test("GET /api/requirements isolates a single corrupt record instead of failing the whole list", async () => {
+    const root = initGitRepo();
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
+    runningServers.push(server);
+
+    await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({}) });
+    await apiJson(`${server.url}/api/requirements`, {
+      method: "POST",
+      body: JSON.stringify({ goal: "健康需求" }),
+    });
+    await apiJson(`${server.url}/api/requirements`, {
+      method: "POST",
+      body: JSON.stringify({ goal: "待损坏需求" }),
+    });
+
+    const corruptPath = path.join(root, ".workbench", "items", "REQ-002", "state.json");
+    fs.writeFileSync(corruptPath, "{broken-json", "utf8");
+
+    const listRes = await apiJson(`${server.url}/api/requirements?scope=all`);
+    expect(listRes.status).toBe(200);
+    const items = listRes.body.items as Array<{ id: string }>;
+    const corruptItems = listRes.body.corruptItems as Array<{ id: string; code: string }>;
+    expect(items.map((i) => i.id)).toEqual(["REQ-001"]);
+    expect(corruptItems).toHaveLength(1);
+    expect(corruptItems[0]!.id).toBe("REQ-002");
+  });
 });
