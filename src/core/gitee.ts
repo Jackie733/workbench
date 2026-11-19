@@ -487,6 +487,41 @@ export async function inspectGiteeEnvironment(
   };
 }
 
+/** Maps Gitee readiness diagnostics into structured error details preserving upstream HTTP status & detail. */
+export function buildGiteeReasonMessageDetails(
+  status: Pick<
+    GiteeEnvironmentStatus,
+    "tokenConfigured" | "authenticated" | "repo" | "reasonCode" | "reasonDetail" | "httpStatus"
+  >,
+): { messageKey: string; messageParams?: Record<string, string | number> } {
+  if (status.reasonCode === "token_missing" || !status.tokenConfigured) {
+    return { messageKey: "gitee.reasonTokenMissing" };
+  }
+  if (status.reasonCode === "auth_invalid_response") {
+    return { messageKey: "gitee.reasonAuthInvalid" };
+  }
+  if (status.reasonCode === "network_failed") {
+    const detail = status.reasonDetail?.trim();
+    return detail
+      ? { messageKey: "gitee.reasonNetworkFailedWithDetail", messageParams: { detail } }
+      : { messageKey: "gitee.reasonNetworkFailed" };
+  }
+  if (status.reasonCode === "auth_failed" || !status.authenticated) {
+    const detail = status.reasonDetail?.trim();
+    if (typeof status.httpStatus === "number" && detail) {
+      return {
+        messageKey: "gitee.reasonAuthHttpFailedWithDetail",
+        messageParams: { status: status.httpStatus, detail },
+      };
+    }
+    if (detail) {
+      return { messageKey: "gitee.reasonAuthFailedWithDetail", messageParams: { detail } };
+    }
+    return { messageKey: "gitee.reasonAuthFailed" };
+  }
+  return { messageKey: "gitee.reasonRepoMissing" };
+}
+
 /**
  * Fetches Gitee issues relevant to the authenticated user.
  * Combines `/v5/user/issues` and `/v5/enterprises/{enterprise}/issues` so issues with

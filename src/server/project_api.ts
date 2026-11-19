@@ -37,7 +37,7 @@ import {
   readAttachmentForServe,
   requirementAttachmentsDir,
 } from "../core/attachments.ts";
-import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
+import { extractMessageRef, WorkbenchError, type StructuredMessageRef, type WorkbenchErrorCode } from "../core/errors.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import {
   detectGitRemoteProvider,
@@ -51,6 +51,7 @@ import {
   type GiteeIssueItem,
 } from "../core/gitee.ts";
 import {
+  buildGitHubReasonMessageDetails,
   buildRequirementIssueBody,
   commentOnGitHubIssue,
   createGitHubIssue,
@@ -249,12 +250,17 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     detail: RequirementDetail,
     snapHash: string | null,
     labels?: string[],
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+  ): Promise<{ detail: RequirementDetail; warning?: string; warningRef?: StructuredMessageRef }> => {
     try {
       const projectMeta = getProjectStatus(projectRoot).project;
       const ghEnv = await inspectGitHubEnvironment(projectRoot, projectMeta?.github, deps.githubDeps);
       if (!ghEnv.ready || !ghEnv.repo) {
-        return { detail, warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue" };
+        const msgDetails = buildGitHubReasonMessageDetails(ghEnv);
+        return {
+          detail,
+          warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue",
+          warningRef: { key: msgDetails.messageKey },
+        };
       }
       const issue = await createGitHubIssue(
         {
@@ -273,7 +279,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
       return { detail: updated };
     } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
+      const warningRef = extractMessageRef(err) ?? undefined;
+      return {
+        detail,
+        warning: err instanceof Error ? err.message : String(err),
+        ...(warningRef ? { warningRef } : {}),
+      };
     }
   };
 
@@ -294,7 +305,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     detail: RequirementDetail,
     comment: string,
     opts?: { state?: "open" | "closed"; snapHash?: string | null },
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+  ): Promise<{ detail: RequirementDetail; warning?: string; warningRef?: StructuredMessageRef }> => {
     if (detail.state.github?.provider === "gitee") return { detail };
     const linked = detail.state.github?.issue;
     const repo = detail.state.github?.repo;
@@ -322,7 +333,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
       return { detail: updated };
     } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
+      const warningRef = extractMessageRef(err) ?? undefined;
+      return {
+        detail,
+        warning: err instanceof Error ? err.message : String(err),
+        ...(warningRef ? { warningRef } : {}),
+      };
     }
   };
 
@@ -806,10 +822,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         body.createGitHubIssue === true ||
         (body.createGitHubIssue !== false && projectMeta?.github?.autoCreateIssue === true);
       let githubWarning: string | undefined;
+      let githubWarningRef: StructuredMessageRef | undefined;
       if (shouldCreateIssue) {
         const linked = await tryCreateAndLinkIssue(base, detail, snapshot?.fingerprint ?? null);
         detail = linked.detail;
         githubWarning = linked.warning;
+        githubWarningRef = linked.warningRef;
       }
 
       let dispatch: DispatchOutcome | null = null;
@@ -822,7 +840,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, ...(githubWarning ? { githubWarning } : {}) }, 201);
+      return jsonResponse(
+        {
+          detail,
+          dispatch,
+          ...(githubWarning ? { githubWarning } : {}),
+          ...(githubWarningRef ? { githubWarningRef } : {}),
+        },
+        201,
+      );
     }
 
     // Routes matching /api/requirements/:id[/...]
@@ -1133,6 +1159,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         await distillRequirementToPlaybook(base, detail).catch(() => {});
         const projectMeta = getProjectStatus(base).project;
         let githubSyncWarning: string | undefined;
+        let githubSyncWarningRef: StructuredMessageRef | undefined;
         if (
           detail.state.github?.provider !== "gitee" &&
           detail.state.github?.issue &&
@@ -1146,9 +1173,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           );
           detail = synced.detail;
           githubSyncWarning = synced.warning;
+          githubSyncWarningRef = synced.warningRef;
         }
         deps.broadcastUi({ type: "workbench.updated", reason: "accepted", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, ...(githubSyncWarning ? { githubSyncWarning } : {}) });
+        return jsonResponse({
+          detail,
+          ...(githubSyncWarning ? { githubSyncWarning } : {}),
+          ...(githubSyncWarningRef ? { githubSyncWarningRef } : {}),
+        });
       }
 
       if (method === "GET" && sub === "delivery") {
@@ -1194,6 +1226,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           delivery: res.delivery,
           ...(res.pr ? { pr: res.pr } : {}),
           ...(res.githubSyncWarning ? { githubSyncWarning: res.githubSyncWarning } : {}),
+          ...(res.githubSyncWarningRef ? { githubSyncWarningRef: res.githubSyncWarningRef } : {}),
           webReloaded: reloadRes.reloaded,
           restartRecommended: !body.createPr && res.touchesBackend,
         });
@@ -1317,7 +1350,16 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           snapHash: snapshot?.fingerprint ?? null,
         });
         if (synced.warning) {
-          throw new WorkbenchError("execution_failed", synced.warning);
+          throw new WorkbenchError(
+            "execution_failed",
+            synced.warning,
+            synced.warningRef
+              ? {
+                  messageKey: synced.warningRef.key,
+                  ...(synced.warningRef.params ? { messageParams: synced.warningRef.params } : {}),
+                }
+              : undefined,
+          );
         }
         deps.broadcastUi({ type: "workbench.updated", reason: "github.issue_synced", root: base, id, at: Date.now() });
         return jsonResponse({ detail: synced.detail });

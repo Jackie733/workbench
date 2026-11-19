@@ -5,7 +5,7 @@ import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/typ
 import type { DispatchOutcome } from "../server/index.ts";
 import type { SandboxDriftInfo } from "../hub/evolution.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
-import type { MessageKey } from "./i18n.ts";
+import { resolveWarningParam, type MessageKey } from "./i18n.ts";
 import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
 import { useStreamStore } from "./stores/streamStore.ts";
@@ -824,7 +824,10 @@ export async function submitNewRequirement(
     if (res.githubWarning) {
       ui.showToastKey(
         "toast.createdWithIssueWarn",
-        { id: res.detail.state.id, warning: res.githubWarning },
+        {
+          id: res.detail.state.id,
+          warning: resolveWarningParam(res.githubWarning, res.githubWarningRef),
+        },
         true,
       );
     }

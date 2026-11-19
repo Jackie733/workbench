@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { WorkbenchError } from "./errors.ts";
+import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "./errors.ts";
 import { atomicWriteJson, canonicalRoot, resolveSafePath, withProjectWriteLock } from "./fs.ts";
 import {
   commitFilesInGit,
@@ -16,12 +16,14 @@ import {
   pushBranchToRemote,
 } from "./git.ts";
 import {
+  buildGiteeReasonMessageDetails,
   createOrUpdateGiteePr,
   detectGitRemoteProvider,
   inspectGiteeEnvironment,
   type GiteeApiDeps,
 } from "./gitee.ts";
 import {
+  buildGitHubReasonMessageDetails,
   buildRequirementPrBody,
   commentOnGitHubIssue,
   createOrUpdateGitHubPr,
@@ -1736,6 +1738,7 @@ export async function deliverRequirement(
   delivery: DeliveryRecord;
   pr?: RequirementGitHubPrLink;
   githubSyncWarning?: string;
+  githubSyncWarningRef?: StructuredMessageRef;
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
@@ -1857,17 +1860,11 @@ export async function deliverRequirement(
     giteeToken = (deps?.giteeToken ?? deps?.giteeDeps?.token ?? process.env.GITEE_ACCESS_TOKEN ?? "").trim();
     const giteeEnv = await inspectGiteeEnvironment(base, projectMeta.gitee, giteeToken, deps?.giteeDeps);
     if (!giteeEnv.ready || !giteeEnv.repo) {
-      const reasonKey =
-        giteeEnv.reasonCode === "token_missing"
-          ? "gitee.reasonTokenMissing"
-          : giteeEnv.reasonCode === "repo_missing"
-            ? "gitee.reasonRepoMissing"
-            : giteeEnv.reasonCode === "network_failed"
-              ? "gitee.reasonNetworkFailed"
-              : "gitee.reasonAuthFailed";
-      throw new WorkbenchError("execution_failed", giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR", {
-        messageKey: reasonKey,
-      });
+      throw new WorkbenchError(
+        "execution_failed",
+        giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR",
+        buildGiteeReasonMessageDetails(giteeEnv),
+      );
     }
     repo = giteeEnv.repo;
     giteeEnterprise = giteeEnv.enterprise;
@@ -1877,15 +1874,11 @@ export async function deliverRequirement(
   } else {
     const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
     if (!ghEnv.ready || !ghEnv.repo) {
-      const reasonKey =
-        ghEnv.reasonCode === "gh_missing"
-          ? "github.reasonGhMissing"
-          : ghEnv.reasonCode === "gh_unauthenticated"
-            ? "github.reasonGhUnauthenticated"
-            : "github.reasonRepoMissing";
-      throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR", {
-        messageKey: reasonKey,
-      });
+      throw new WorkbenchError(
+        "execution_failed",
+        ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR",
+        buildGitHubReasonMessageDetails(ghEnv),
+      );
     }
     repo = ghEnv.repo;
     baseBranch = validateGitBranchName(
@@ -2040,6 +2033,7 @@ export async function deliverRequirement(
   });
 
   let githubSyncWarning: string | undefined;
+  let githubSyncWarningRef: StructuredMessageRef | undefined;
   const linkedIssue = bundle.state.github?.issue;
   if (
     remoteProvider !== "gitee" &&
@@ -2059,6 +2053,7 @@ export async function deliverRequirement(
       );
     } catch (err) {
       githubSyncWarning = err instanceof Error ? err.message : String(err);
+      githubSyncWarningRef = extractMessageRef(err) ?? undefined;
     }
   }
 
@@ -2077,6 +2072,7 @@ export async function deliverRequirement(
     delivery: recordedDelivery!,
     pr: prLink,
     ...(githubSyncWarning ? { githubSyncWarning } : {}),
+    ...(githubSyncWarningRef ? { githubSyncWarningRef } : {}),
     touchesWeb,
     touchesBackend,
   };

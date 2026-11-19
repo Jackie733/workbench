@@ -58,6 +58,7 @@ import {
   describeClientErrorRef,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
+  resolveWarningParam,
   t,
   translateRef,
   type MessageKey,
@@ -2583,7 +2584,10 @@ export function Modals() {
           if (res.githubSyncWarning) {
             showToastKey(
               "deliver.prCreatedWarn",
-              { num: res.pr.number, warning: res.githubSyncWarning },
+              {
+                num: res.pr.number,
+                warning: resolveWarningParam(res.githubSyncWarning, res.githubSyncWarningRef),
+              },
               true,
             );
           } else {

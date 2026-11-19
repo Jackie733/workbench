@@ -309,6 +309,19 @@ export async function inspectGitHubEnvironment(
   };
 }
 
+/** Maps GitHub CLI readiness diagnostics into structured error message details. */
+export function buildGitHubReasonMessageDetails(
+  status: Pick<GitHubEnvironmentStatus, "ghInstalled" | "authenticated" | "repo" | "reasonCode">,
+): { messageKey: string } {
+  if (!status.ghInstalled || status.reasonCode === "gh_missing") {
+    return { messageKey: "github.reasonGhMissing" };
+  }
+  if (!status.authenticated || status.reasonCode === "gh_unauthenticated") {
+    return { messageKey: "github.reasonGhUnauthenticated" };
+  }
+  return { messageKey: "github.reasonRepoMissing" };
+}
+
 export function buildRequirementIssueBody(detail: RequirementDetail): string {
   const { state, specMarkdown } = detail;
   const lines: string[] = [

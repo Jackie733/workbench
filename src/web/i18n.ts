@@ -1,3 +1,4 @@
+import type { StructuredMessageRef } from "../core/errors.ts";
 import type { GiteeEnvironmentStatus } from "../core/gitee.ts";
 import type { GitHubEnvironmentStatus } from "../core/github.ts";
 import { ApiClientError } from "./api.ts";
@@ -2523,6 +2524,17 @@ export function formatGitHubStatusReason(
     return t(language, "github.reasonRepoMissing");
   }
   return status.reasonDetail?.trim() || status.reason || t(language, "gitee.statusNotReady");
+}
+
+/** Returns a reactive nested UiMessageRef when the warning key exists in the catalog, falling back to plain text. */
+export function resolveWarningParam(
+  warning: string,
+  ref?: StructuredMessageRef | UiMessageRef | null,
+): string | UiMessageRef {
+  if (ref && hasMessage(ref.key)) {
+    return { key: ref.key, ...(ref.params ? { params: ref.params } : {}) };
+  }
+  return warning;
 }
 
 export function applyDocumentLanguage(language: UiLanguage, doc: Document | null = typeof document !== "undefined" ? document : null): void {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { RequirementState, ValidityReport } from "../../src/core/types.ts";
 import { deriveActionBanner, evaluateAcceptanceGate } from "../../src/core/validity.ts";
 import { ApiClientError } from "../../src/web/api.ts";
+import { buildGiteeReasonMessageDetails } from "../../src/core/gitee.ts";
 import { resolveBrowserEnvironment } from "../../src/core/screenshots.ts";
 import {
   applyDocumentLanguage,
@@ -18,6 +19,7 @@ import {
   persistUiLanguage,
   pluralMessage,
   readStoredUiLanguage,
+  resolveWarningParam,
   t,
   translateRef,
   UI_LANGUAGE_STORAGE_KEY,
@@ -574,5 +576,53 @@ describe("status and error messages", () => {
         }),
       ),
     ).toBe("Local branch feat/demo already exists; use another branch name or switch to it first");
+
+    const giteeAuthDetails = buildGiteeReasonMessageDetails({
+      tokenConfigured: true,
+      authenticated: false,
+      repo: "owner/repo",
+      reasonCode: "auth_failed",
+      httpStatus: 401,
+      reasonDetail: "Unauthorized",
+    });
+    expect(
+      describeClientError("en", new ApiClientError("execution_failed", "Gitee API 请求失败 (401): Unauthorized", giteeAuthDetails)),
+    ).toBe("Gitee Access Token verification failed (HTTP 401): Unauthorized");
+    const giteeNetDetails = buildGiteeReasonMessageDetails({
+      tokenConfigured: true,
+      authenticated: false,
+      repo: "owner/repo",
+      reasonCode: "network_failed",
+      reasonDetail: "ECONNREFUSED",
+    });
+    expect(
+      describeClientError("en", new ApiClientError("execution_failed", "连接 Gitee API 失败: ECONNREFUSED", giteeNetDetails)),
+    ).toBe("Failed to connect to Gitee API: ECONNREFUSED");
+    expect(
+      buildGiteeReasonMessageDetails({
+        tokenConfigured: true,
+        authenticated: false,
+        repo: null,
+        reasonCode: "auth_invalid_response",
+      }).messageKey,
+    ).toBe("gitee.reasonAuthInvalid");
+
+    const nestedWarn = resolveWarningParam("创建 GitHub Issue 失败: API quota exceeded", {
+      key: "github.errCreateIssueFailedDetail",
+      params: { detail: "API quota exceeded" },
+    });
+    expect(t("en", "toast.createdWithIssueWarn", { id: "REQ-009", warning: nestedWarn })).toBe(
+      "Requirement REQ-009 created (GitHub issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
+    );
+    expect(t("zh-CN", "toast.createdWithIssueWarn", { id: "REQ-009", warning: nestedWarn })).toBe(
+      "需求 REQ-009 已创建（GitHub Issue 未同步：创建 GitHub Issue 失败：API quota exceeded）",
+    );
+    const syncWarn = resolveWarningParam("向 Issue #12 发送评论失败: Upstream sync blocked", {
+      key: "github.errCommentIssueFailedDetail",
+      params: { number: 12, detail: "Upstream sync blocked" },
+    });
+    expect(t("en", "deliver.prCreatedWarn", { num: 42, warning: syncWarn })).toBe(
+      "Created PR #42 (issue sync warning: Failed to comment on Issue #12: Upstream sync blocked)",
+    );
   });
 });

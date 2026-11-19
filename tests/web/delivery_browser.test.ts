@@ -8,6 +8,7 @@ import {
   approveDesign,
   createRequirement,
   initProject,
+  linkRequirementGitHubIssue,
   propose,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
@@ -26,6 +27,7 @@ interface BrowserPage {
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
   click(sel: string): Promise<void>;
   select(sel: string, ...values: string[]): Promise<string[]>;
+  type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
 }
@@ -311,6 +313,150 @@ describe("post-acceptance delivery wrap-up UI", () => {
             .find((txt) => txt.includes("Failed to query PR #42 status")) ?? "",
       );
       expect(/[\u4e00-\u9fff]/.test(syncErrToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes GitHub Issue warnings on create, manual issue sync, and PR delivery in English UI", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-del-warn-remote-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "GitHubWarnRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Ship PR with linked issue sync warning",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await linkRequirementGitHubIssue(repo, "REQ-001", {
+      repo: "acme/demo",
+      issue: { number: 12, url: "https://github.com/acme/demo/issues/12", title: "Linked", state: "open", lastSyncedAt: Date.now() },
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const accSnap = await observeGitSnapshot(repo);
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: accSnap!.fingerprint });
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/demo.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          return { code: 1, stdout: "", stderr: "API quota exceeded" };
+        }
+        if (args[0] === "issue" && args[1] === "comment") {
+          return { code: 1, stdout: "", stderr: "Upstream sync blocked" };
+        }
+        if (args[0] === "pr" && args[1] === "list") {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "create") {
+          return { code: 0, stdout: "https://github.com/acme/demo/pull/42\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 1. New requirement with "Also create a GitHub issue" when gh issue create fails -> localized warning toast.
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 10_000 });
+      await page.type('[data-testid="new-req-goal"]', "Create issue warning test");
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="new-req-create-issue"]') as HTMLInputElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="new-req-create-issue"]');
+      await page.click('[data-testid="save-draft-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "GitHub issue sync warning: Failed to create GitHub Issue: API quota exceeded",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const createWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("GitHub issue sync warning")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(createWarnToast)).toBe(false);
+
+      // 2. Manual "Sync current status to issue #12" failure on REQ-001 -> localized comment error toast.
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="menu-sync-issue-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="menu-sync-issue-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Failed to comment on Issue #12: Upstream sync blocked"),
+          ),
+        { timeout: 10_000 },
+      );
+      const manualSyncToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Failed to comment on Issue #12")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(manualSyncToast)).toBe(false);
+
+      // 3. Deliver PR #42 when linked issue comment sync fails -> localized PR sync warning toast.
+      await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-deliver-btn"]');
+      await page.waitForSelector('[data-testid="deliver-mode-pr"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="deliver-mode-pr"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="deliver-mode-pr"]');
+      await page.click('[data-testid="submit-deliver-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "Created PR #42 (issue sync warning: Failed to comment on Issue #12: Upstream sync blocked)",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const deliverWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Created PR #42")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(deliverWarnToast)).toBe(false);
     } finally {
       await page.close();
     }
