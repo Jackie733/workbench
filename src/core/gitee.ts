@@ -153,7 +153,9 @@ export function parseGiteeIssueRef(
 ): { ident: string; enterprise: string | null; repo: string | null } {
   const trimmed = rawRef.trim();
   if (!trimmed) {
-    throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL");
+    throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL", {
+      messageKey: "gitee.errIssueRefRequired",
+    });
   }
 
   const fallbackEnterprise = fallback?.enterprise ? validateGiteeEnterpriseSlug(fallback.enterprise) : null;
@@ -237,6 +239,7 @@ export function parseGiteeIssueRef(
   throw new WorkbenchError(
     "invalid_input",
     "请输入有效的 Gitee 工作项编号（如 I8ABCD 或 #I8ABCD）或完整 Gitee 工作项 URL",
+    { messageKey: "gitee.errInvalidIssueRef" },
   );
 }
 
@@ -502,7 +505,9 @@ export async function listGiteeMyIssues(
 ): Promise<{ account: string; enterprise: string | null; items: GiteeIssueItem[] }> {
   const token = input.token.trim();
   if (!token) {
-    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+      messageKey: "gitee.errTokenMissing",
+    });
   }
 
   const filter = input.filter ?? "assigned";
@@ -513,7 +518,9 @@ export async function listGiteeMyIssues(
   const { data: user } = await giteeRequest<RawGiteeUser>("/user", token, {}, deps);
   const account = user?.login?.trim();
   if (!account) {
-    throw new WorkbenchError("execution_failed", "无法识别当前 Gitee 登录账号");
+    throw new WorkbenchError("execution_failed", "无法识别当前 Gitee 登录账号", {
+      messageKey: "gitee.errUnrecognizedAccount",
+    });
   }
 
   const apiStates: Array<"open" | "progressing" | "closed" | "all"> =
@@ -626,7 +633,9 @@ export async function viewGiteeIssue(
 ): Promise<GiteeIssueItem> {
   const token = input.token.trim();
   if (!token) {
-    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+      messageKey: "gitee.errTokenMissing",
+    });
   }
 
   const parsed = parseGiteeIssueRef(input.issueRef, {
@@ -664,6 +673,7 @@ export async function viewGiteeIssue(
     throw new WorkbenchError(
       "invalid_input",
       "无法确定 Gitee 企业或仓库路径，请提供完整工作项 URL 或在项目设置中配置企业空间标识",
+      { messageKey: "gitee.errMissingScope" },
     );
   }
 
@@ -680,7 +690,10 @@ export async function viewGiteeIssue(
 
   throw lastErr instanceof Error
     ? lastErr
-    : new WorkbenchError("execution_failed", `读取 Gitee 工作项 #${parsed.ident} 失败`);
+    : new WorkbenchError("execution_failed", `读取 Gitee 工作项 #${parsed.ident} 失败`, {
+        messageKey: "gitee.errViewIssueFailed",
+        messageParams: { ident: parsed.ident },
+      });
 }
 
 function mapRawGiteePr(raw: RawGiteePr, repo: string, fallbackHead: string, fallbackBase: string): RequirementGitHubPrLink {
@@ -763,16 +776,23 @@ export async function createOrUpdateGiteePr(
   const headBranch = validateGitBranchName(input.headBranch);
   const baseBranch = validateGitBranchName(input.baseBranch);
   if (headBranch === baseBranch) {
-    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`);
+    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`, {
+      messageKey: "gitee.errSameBranch",
+      messageParams: { baseBranch },
+    });
   }
   const token = input.token.trim();
   if (!token) {
-    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+      messageKey: "gitee.errTokenMissing",
+    });
   }
   const cleanTitle = sanitizeOutput(input.title.trim(), 240).text.replace(/[\r\n]+/g, " ").trim();
   const cleanBody = sanitizeOutput(input.body.trim(), 40_000).text;
   if (!cleanTitle) {
-    throw new WorkbenchError("invalid_input", "PR 标题不能为空");
+    throw new WorkbenchError("invalid_input", "PR 标题不能为空", {
+      messageKey: "gitee.errPrTitleRequired",
+    });
   }
 
   const [owner, repoName] = repo.split("/") as [string, string];
@@ -813,7 +833,9 @@ export async function createOrUpdateGiteePr(
   );
 
   if (!data || typeof data.number !== "number") {
-    throw new WorkbenchError("execution_failed", "Gitee PR 已请求创建但未返回有效 PR 编号");
+    throw new WorkbenchError("execution_failed", "Gitee PR 已请求创建但未返回有效 PR 编号", {
+      messageKey: "gitee.errPrMissingNumber",
+    });
   }
   return {
     ...mapRawGiteePr(data, repo, headBranch, baseBranch),
@@ -827,11 +849,16 @@ export async function viewGiteePr(
 ): Promise<RequirementGitHubPrLink> {
   const repo = validateGiteeRepoSlug(input.repo);
   if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) {
-    throw new WorkbenchError("invalid_input", `无效的 PR 编号: ${input.prNumber}`);
+    throw new WorkbenchError("invalid_input", `无效的 PR 编号: ${input.prNumber}`, {
+      messageKey: "gitee.errInvalidPrNumber",
+      messageParams: { prNumber: String(input.prNumber) },
+    });
   }
   const token = input.token.trim();
   if (!token) {
-    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+    throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+      messageKey: "gitee.errTokenMissing",
+    });
   }
   const [owner, repoName] = repo.split("/") as [string, string];
   const { data } = await giteeRequest<RawGiteePr>(

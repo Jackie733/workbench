@@ -428,7 +428,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     if (method === "GET" && pathname === "/api/gitee/issues") {
       const token = resolveGiteeToken();
       if (!token) {
-        throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写");
+        throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写", {
+          messageKey: "gitee.reasonTokenMissing",
+        });
       }
       const status = getProjectStatus(base);
       const remoteRepo = status.project?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(await resolveRemoteUrl(base));
@@ -620,12 +622,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           };
         } else {
           if (!rawIssueRef) {
-            throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL");
+            throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL", {
+              messageKey: "gitee.errIssueRefRequired",
+            });
           }
           if (!token) {
             throw new WorkbenchError(
               "invalid_input",
               "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写",
+              { messageKey: "gitee.reasonTokenMissing" },
             );
           }
           giteeIssue = await viewGiteeIssue(
@@ -1207,7 +1212,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           if (isGitee && body.provider !== "github") {
             const token = resolveGiteeToken();
             if (!token) {
-              throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+              throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+                messageKey: "gitee.errTokenMissing",
+              });
             }
             const remoteRepo = projectMeta?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(remoteUrl);
             const enterprise = projectMeta?.gitee?.enterprise ?? extractGiteeOwner(remoteRepo);
@@ -1332,7 +1339,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         if (isGiteePr) {
           const token = resolveGiteeToken();
           if (!token) {
-            throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+            throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+              messageKey: "gitee.errTokenMissing",
+            });
           }
           const latestPr = await viewGiteePr(
             { repo: current.state.github.repo, prNumber: current.state.github.pr.number, token },

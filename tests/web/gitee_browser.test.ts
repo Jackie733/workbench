@@ -361,4 +361,65 @@ describe("Gitee Web UI workflow", () => {
       await page.close();
     }
   }, { timeout: 30_000 });
+
+  test("localizes manual invalid Gitee work item ref validation in both English and Chinese", async () => {
+    makeTempHub();
+    const { repo } = makeGiteeGitRepo();
+    await initProject(repo, { name: "deepmdt-frontend-pc", privacyMode: "local" });
+    await updateProjectConfig(repo, {
+      gitee: { repo: "openstring/deepmdt-frontend-pc", enterprise: "openstring", defaultBaseBranch: "master" },
+    });
+
+    const { giteeDeps } = createMockGiteeDeps();
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, giteeDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+
+      // 1. Configure valid token so manual import pane submits to backend validation.
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
+      await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
+      await page.click('[data-testid="save-routing-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
+
+      // 2. Submit invalid work item ref in English -> localized validation toast without Chinese text.
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+      await page.click('[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
+      await page.click('[data-testid="new-req-mode-import"]');
+      await page.waitForSelector('[data-testid="import-issue-ref"]', { timeout: 10_000 });
+      await page.type('[data-testid="import-issue-ref"]', "invalid-gitee-ref!!");
+      await page.click('[data-testid="import-issue-draft-btn"]');
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "Please enter a valid Gitee work item ID",
+          ),
+        { timeout: 10_000 },
+      );
+      const enToast = await page.evaluate(
+        () => document.querySelector("[data-sonner-toast]")?.textContent ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(enToast)).toBe(false);
+
+      // 3. Switch to Simplified Chinese and confirm the same validation toast renders localized Chinese text.
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "请输入有效的 Gitee 工作项编号",
+          ),
+        { timeout: 10_000 },
+      );
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
 });

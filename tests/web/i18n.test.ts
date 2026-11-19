@@ -485,5 +485,32 @@ describe("status and error messages", () => {
         reason: "当前项目尚未配置 GitHub 仓库",
       }),
     ).toContain("No GitHub repository configured");
+
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("invalid_input", "请输入有效的 Gitee 工作项编号", {
+          messageKey: "gitee.errInvalidIssueRef",
+        }),
+      ),
+    ).toBe("Please enter a valid Gitee work item ID (such as I8ABCD or #I8ABCD) or full Gitee work item URL");
+    expect(
+      describeClientError(
+        "zh-CN",
+        new ApiClientError("invalid_input", "无效的 Gitee 工作项编号: bad!", {
+          messageKey: "gitee.errInvalidIssueIdent",
+          messageParams: { ident: "bad!" },
+        }),
+      ),
+    ).toBe("无效的 Gitee 工作项编号：bad!");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("invalid_input", "无效的 Gitee 工作项编号: bad!", {
+          messageKey: "gitee.errInvalidIssueIdent",
+          messageParams: { ident: "bad!" },
+        }),
+      ),
+    ).toBe("Invalid Gitee work item ID: bad!");
   });
 });

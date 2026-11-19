@@ -1002,6 +1002,19 @@ const zhCN = {
   "gitee.reasonNetworkFailedWithDetail": "连接 Gitee API 失败：{detail}",
   "gitee.apiHttpError": "Gitee API 请求失败 (HTTP {status})：{detail}",
   "gitee.networkError": "连接 Gitee API 失败：{detail}",
+  "gitee.errIssueRefRequired": "请提供 Gitee 工作项编号或 URL",
+  "gitee.errInvalidIssueRef": "请输入有效的 Gitee 工作项编号（如 I8ABCD 或 #I8ABCD）或完整 Gitee 工作项 URL",
+  "gitee.errInvalidIssueIdent": "无效的 Gitee 工作项编号：{ident}",
+  "gitee.errInvalidRepo": "无效的 Gitee 仓库标识（应为 owner/repo）：{repo}",
+  "gitee.errInvalidEnterprise": "无效的 Gitee 企业空间标识：{enterprise}",
+  "gitee.errTokenMissing": "尚未配置 Gitee 私人令牌 (Access Token)",
+  "gitee.errUnrecognizedAccount": "无法识别当前 Gitee 登录账号",
+  "gitee.errMissingScope": "无法确定 Gitee 企业或仓库路径，请提供完整工作项 URL 或在项目设置中配置企业空间标识",
+  "gitee.errViewIssueFailed": "读取 Gitee 工作项 #{ident} 失败",
+  "gitee.errSameBranch": "源分支与目标分支不能同为 {baseBranch}，请先创建特性分支",
+  "gitee.errPrTitleRequired": "PR 标题不能为空",
+  "gitee.errPrMissingNumber": "Gitee PR 已请求创建但未返回有效 PR 编号",
+  "gitee.errInvalidPrNumber": "无效的 PR 编号：{prNumber}",
   "gitee.reasonRepoMissing": "当前项目尚未配置 Gitee 仓库（未检测到 gitee.com origin 远端，可在项目设置中手动指定 owner/repo）",
   "github.reasonGhMissing": "本机未安装 gh CLI，无法执行 GitHub Issue / PR 同步",
   "github.reasonGhUnauthenticated": "gh CLI 尚未登录，请先在终端运行 gh auth login",
@@ -2051,6 +2064,19 @@ const en: Record<MessageKey, string> = {
   "gitee.reasonNetworkFailedWithDetail": "Failed to connect to Gitee API: {detail}",
   "gitee.apiHttpError": "Gitee API request failed (HTTP {status}): {detail}",
   "gitee.networkError": "Failed to connect to Gitee API: {detail}",
+  "gitee.errIssueRefRequired": "Please enter a Gitee work item ID or URL",
+  "gitee.errInvalidIssueRef": "Please enter a valid Gitee work item ID (such as I8ABCD or #I8ABCD) or full Gitee work item URL",
+  "gitee.errInvalidIssueIdent": "Invalid Gitee work item ID: {ident}",
+  "gitee.errInvalidRepo": "Invalid Gitee repository slug (expected owner/repo): {repo}",
+  "gitee.errInvalidEnterprise": "Invalid Gitee enterprise slug: {enterprise}",
+  "gitee.errTokenMissing": "Gitee Access Token is not configured yet",
+  "gitee.errUnrecognizedAccount": "Unable to identify the authenticated Gitee account",
+  "gitee.errMissingScope": "Cannot determine the Gitee enterprise or repository; provide a full work item URL or configure an enterprise slug in Project Settings",
+  "gitee.errViewIssueFailed": "Failed to fetch Gitee work item #{ident}",
+  "gitee.errSameBranch": "Source and base branch cannot both be {baseBranch}; create a feature branch first",
+  "gitee.errPrTitleRequired": "PR title cannot be empty",
+  "gitee.errPrMissingNumber": "Gitee PR request succeeded but returned no valid PR number",
+  "gitee.errInvalidPrNumber": "Invalid PR number: {prNumber}",
   "gitee.reasonRepoMissing": "No Gitee repository configured for this project (no gitee.com origin remote detected; specify owner/repo in Project Settings)",
   "github.reasonGhMissing": "gh CLI is not installed on this machine, so GitHub Issue / PR sync is unavailable",
   "github.reasonGhUnauthenticated": "gh CLI is not authenticated. Run gh auth login in a terminal first",
@@ -2290,6 +2316,23 @@ export interface LocalizedError {
 
 export function describeClientErrorRef(err: unknown): LocalizedError {
   if (err instanceof ApiClientError) {
+    const msgKey = typeof err.details?.messageKey === "string" ? err.details.messageKey : null;
+    if (msgKey && hasMessage(msgKey)) {
+      const rawParams = err.details?.messageParams;
+      const msgParams: MessageParams | undefined =
+        rawParams && typeof rawParams === "object"
+          ? Object.fromEntries(
+              Object.entries(rawParams as Record<string, unknown>).filter(
+                ([, v]) => typeof v === "string" || typeof v === "number" || v === null || v === undefined,
+              ),
+            ) as MessageParams
+          : undefined;
+      return {
+        key: msgKey,
+        params: msgParams,
+        text: err.message?.trim() ?? "",
+      };
+    }
     const upstreamCode = err.details?.upstreamErrorCode;
     if (upstreamCode === "gitee_api_http_error") {
       const status = Number(err.details?.upstreamStatus ?? err.details?.httpStatus ?? 0);

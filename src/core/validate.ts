@@ -117,7 +117,10 @@ export function validateGitHubRepoSlug(repo: string): string {
 export function validateGiteeRepoSlug(repo: string): string {
   const trimmed = repo.trim();
   if (!GITHUB_REPO_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 仓库标识（应为 owner/repo）: ${repo}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 仓库标识（应为 owner/repo）: ${repo}`, {
+      messageKey: "gitee.errInvalidRepo",
+      messageParams: { repo },
+    });
   }
   return trimmed;
 }
@@ -125,7 +128,10 @@ export function validateGiteeRepoSlug(repo: string): string {
 export function validateGiteeEnterpriseSlug(enterprise: string): string {
   const trimmed = enterprise.trim();
   if (!GITEE_ENTERPRISE_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 企业空间标识: ${enterprise}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 企业空间标识: ${enterprise}`, {
+      messageKey: "gitee.errInvalidEnterprise",
+      messageParams: { enterprise },
+    });
   }
   return trimmed;
 }
@@ -133,7 +139,10 @@ export function validateGiteeEnterpriseSlug(enterprise: string): string {
 export function validateGiteeIssueIdent(ident: string): string {
   const trimmed = ident.trim().replace(/^#/, "");
   if (!GITEE_ISSUE_IDENT_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 工作项编号: ${ident}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 工作项编号: ${ident}`, {
+      messageKey: "gitee.errInvalidIssueIdent",
+      messageParams: { ident },
+    });
   }
   return trimmed.toUpperCase();
 }
