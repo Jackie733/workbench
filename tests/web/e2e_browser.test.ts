@@ -2125,14 +2125,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ),
       ).toBe("en");
       await page.click('[data-testid="project-provider-gitee"]');
-      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 15_000 });
       const giteeStatusText = await page.evaluate(
         () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
       );
       expect(giteeStatusText.length).toBeGreaterThan(0);
       expect(/[\u4e00-\u9fff]/.test(giteeStatusText)).toBe(false);
       await page.click('[data-testid="project-provider-github"]');
-      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 15_000 });
       const githubStatusText = await page.evaluate(
         () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
       );

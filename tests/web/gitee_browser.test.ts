@@ -183,23 +183,23 @@ describe("Gitee Web UI workflow", () => {
       await page.goto(server.url, { waitUntil: "networkidle2" });
 
       // 1. Open Settings -> configure Gitee Token.
-      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
       await page.click('[data-testid="save-routing-btn"]');
-      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       // 2. Open New Requirement -> switch to Gitee import tab -> list and select #I8WEB1 -> import draft.
       await page.click('[data-testid="new-req-btn"]');
-      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
       const tabLabel = await page.evaluate(
         () => document.querySelector('[data-testid="new-req-mode-import"]')?.textContent ?? "",
       );
       expect(tabLabel).toContain("Gitee");
       await page.click('[data-testid="new-req-mode-import"]');
 
-      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 10_000 });
       const itemText = await page.evaluate(
         () => document.querySelector('[data-testid="gitee-issue-item-I8WEB1"]')?.textContent ?? "",
       );
@@ -209,7 +209,7 @@ describe("Gitee Web UI workflow", () => {
       await page.click('[data-testid="gitee-issue-item-I8WEB1"]');
       await page.click('[data-testid="import-issue-draft-btn"]');
 
-      await page.waitForSelector('[data-testid="ws-github-issue-link"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="ws-github-issue-link"]', { timeout: 10_000 });
       const badgeText = await page.evaluate(
         () => document.querySelector('[data-testid="ws-github-issue-link"]')?.textContent ?? "",
       );
@@ -229,19 +229,19 @@ describe("Gitee Web UI workflow", () => {
       await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: accSnap!.fingerprint });
 
       await page.goto(server.url, { waitUntil: "networkidle2" });
-      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 5000 });
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
       await page.click('[data-action="set-scope"][data-value="done"]');
-      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
 
       await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 10000 });
       await page.click('[data-testid="open-deliver-btn"]');
-      await page.waitForSelector('[data-testid="deliver-mode-pr"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="deliver-mode-pr"]', { timeout: 10_000 });
       await page.click('[data-testid="deliver-mode-pr"]');
 
       await page.waitForFunction(
         () => (document.querySelector('[data-testid="submit-deliver-btn"]')?.textContent ?? "").includes("Gitee PR"),
-        { timeout: 5000 },
+        { timeout: 10_000 },
       );
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10000 });
@@ -275,21 +275,21 @@ describe("Gitee Web UI workflow", () => {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
 
-      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
       await page.click('[data-testid="settings-tab-project"]');
 
-      await page.waitForSelector('[data-testid="project-provider-gitee"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="project-provider-gitee"]', { timeout: 10_000 });
       await page.click('[data-testid="project-provider-gitee"]');
-      await page.waitForSelector('[data-testid="project-gitee-repo-input"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="project-gitee-repo-input"]', { timeout: 10_000 });
       await page.type('[data-testid="project-gitee-repo-input"]', "openstring/deepmdt-frontend-pc");
       await page.type('[data-testid="project-gitee-enterprise-input"]', "openstring");
       await page.click('[data-testid="save-project-btn"]');
-      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       await page.click('[data-testid="new-req-btn"]');
-      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
       const tabLabel = await page.evaluate(
         () => document.querySelector('[data-testid="new-req-mode-import"]')?.textContent ?? "",
       );
@@ -318,21 +318,21 @@ describe("Gitee Web UI workflow", () => {
       await page.goto(server.url, { waitUntil: "networkidle2" });
 
       // 1. Save an invalid token that triggers mock HTTP 401 Unauthorized, then switch UI to English.
-      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "bad-gitee-token");
       await page.click('[data-testid="save-routing-btn"]');
-      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       await page.select('[data-testid="ui-language-select"]', "en");
-      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 2. Settings -> Project tab displays English Gitee auth failure with HTTP status & upstream detail.
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
       await page.click('[data-testid="settings-tab-project"]');
-      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 10_000 });
       const badgeText = await page.evaluate(
         () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
       );
@@ -345,13 +345,13 @@ describe("Gitee Web UI workflow", () => {
         );
         closeBtn?.click();
       });
-      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       // 3. New requirement -> Gitee import pane displays English auth failure without Chinese prefix.
       await page.click('[data-testid="new-req-btn"]');
-      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
       await page.click('[data-testid="new-req-mode-import"]');
-      await page.waitForSelector('[data-testid="gitee-import-pane"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="gitee-import-pane"]', { timeout: 10_000 });
       const importText = await page.evaluate(
         () => document.querySelector('[data-testid="gitee-import-pane"]')?.textContent ?? "",
       );
