@@ -8,9 +8,11 @@ import {
 } from "@radix-ui/react-dropdown-menu";
 import {
   AlertTriangle,
+  ArrowUp,
   Check,
   Ellipsis,
   GitBranch,
+  GitFork,
   GitPullRequest,
   Link2,
   MessageSquare,
@@ -47,6 +49,7 @@ import {
   handleBannerAction,
   invalidateAllWorkbenchQueries,
   openHandoff,
+  openRequirement,
   openRunConsole,
   queryClient,
   queryKeys,
@@ -201,6 +204,46 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
       </div>
     </section>
   );
+}
+
+function buildSpawnDrafts(d: RequirementDetail): Array<{ title: string; goal: string }> {
+  if (d.state.tasks.length > 0) {
+    return d.state.tasks.slice(0, 12).map((t) => ({
+      title: t.title,
+      goal: t.note ? `${t.title}\n\n${t.note}` : t.title,
+    }));
+  }
+  const md = d.designMarkdown.trim();
+  if (!md) return [{ title: "", goal: "" }];
+  const skipRe = /^(?:总体思路|背景|概述|目标|验收|验证|目录|风险|回滚|overview|background|verification|testing|risks?)$/i;
+  const out: Array<{ title: string; goal: string }> = [];
+  let curTitle: string | null = null;
+  let curLines: string[] = [];
+  let inFence = false;
+  const flush = () => {
+    if (!curTitle) return;
+    const clean = curTitle.replace(/^\d+(?:\.\d+)*[.)、\s]+/, "").trim() || curTitle;
+    if (!skipRe.test(clean)) {
+      const body = curLines.join("\n").trim();
+      out.push({ title: clean.slice(0, 100), goal: body ? body.slice(0, 1200) : clean });
+    }
+    curTitle = null;
+    curLines = [];
+  };
+  for (const line of md.split(/\r?\n/)) {
+    if (line.trim().startsWith("```")) inFence = !inFence;
+    if (!inFence) {
+      const m = /^##\s+(.+?)\s*#*$/.exec(line.trim());
+      if (m) {
+        flush();
+        curTitle = m[1]!.trim();
+        continue;
+      }
+    }
+    if (curTitle) curLines.push(line);
+  }
+  flush();
+  return out.length > 0 ? out.slice(0, 12) : [{ title: "", goal: "" }];
 }
 
 function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
@@ -775,6 +818,23 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
             })}
           </h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {(d.designMarkdown.trim() || s.tasks.length > 0) && s.stage !== "cancelled" && !editingDesign && (
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="spawn-children-btn"
+                onClick={() =>
+                  setModal({
+                    kind: "spawn_children",
+                    parentId: s.id,
+                    items: buildSpawnDrafts(d),
+                    track: "plan_first",
+                  })
+                }
+              >
+                <Icon icon={GitFork} size={14} /> {t(language, "spec.spawnBtn")}
+              </button>
+            )}
             {historyVers.length > 1 && (
               <button
                 className="btn xs"
@@ -853,6 +913,42 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
           </p>
         )}
       </div>
+
+      {d.subRequirements && d.subRequirements.length > 0 && (
+        <div className="card" data-testid="sub-requirements-card">
+          <div className="card-head">
+            <h3>
+              {t(language, "spec.subReqsTitle", {
+                done: d.subRequirements.filter((c) => c.stage === "done").length,
+                total: d.subRequirements.length,
+              })}
+            </h3>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {d.subRequirements.map((child) => {
+              const meta = STAGE_META[child.stage];
+              return (
+                <button
+                  key={child.id}
+                  type="button"
+                  className="btn ghost"
+                  data-testid={`sub-req-link-${child.id}`}
+                  style={{ justifyContent: "space-between", textAlign: "left", padding: "6px 8px" }}
+                  onClick={() => void openRequirement(child.id)}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                    <span className="req-id">{child.id}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {child.title}
+                    </span>
+                  </span>
+                  <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1652,6 +1748,17 @@ export function WorkspaceView() {
         <span className="req-id" style={{ fontSize: 14 }}>
           {s.id}
         </span>
+        {s.parentId && (
+          <button
+            type="button"
+            className="badge info"
+            data-testid="ws-parent-link"
+            style={{ cursor: "pointer", border: "none" }}
+            onClick={() => void openRequirement(s.parentId!)}
+          >
+            <Icon icon={ArrowUp} size={14} /> {t(language, "ws.parentLink", { id: s.parentId })}
+          </button>
+        )}
         <h1 className="ws-title">{s.title}</h1>
         {reqData?.sandbox && (
           <span

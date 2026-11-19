@@ -12,6 +12,7 @@ import type {
   ProjectGiteeConfig,
   ProjectGitHubConfig,
   ProjectMetadata,
+  ProjectVerificationConfig,
   RequirementDetail,
   RequirementDiffView,
   RequirementGitHubLink,
@@ -19,8 +20,10 @@ import type {
   RequirementSummary,
   ScreenshotCaptureResult,
   Stage,
+  Track,
   VerificationRecord,
 } from "../core/types.ts";
+import type { ProjectContextSummary } from "../core/context.ts";
 import type { StructuredMessageRef } from "../core/errors.ts";
 import type { GitObservation } from "../core/git.ts";
 import type { GiteeEnvironmentStatus, GiteeIssueItem } from "../core/gitee.ts";
@@ -58,6 +61,7 @@ export interface ProjectInfoResponse {
   effectiveOutputLanguage?: "zh-CN" | "en";
   remoteProvider?: GitRemoteProvider | null;
   remoteRepo?: string | null;
+  context?: ProjectContextSummary;
   git: { isGitRepo: boolean; head?: string; dirty?: boolean; fingerprint?: string | null };
 }
 
@@ -340,6 +344,7 @@ export const api = {
     outputLanguage?: OutputLanguage | "inherit" | null;
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
+    verification?: ProjectVerificationConfig | null;
   }) =>
     requestJson<{ project: ProjectMetadata }>(withProjectParam("/api/project/settings"), {
       method: "PATCH",
@@ -370,6 +375,7 @@ export const api = {
   createRequirement: (input: {
     goal: string;
     title?: string;
+    parentId?: string;
     dispatchAgent?: boolean;
     createGitHubIssue?: boolean;
     attachmentIds?: string[];
@@ -385,6 +391,14 @@ export const api = {
         method: "POST",
         body: JSON.stringify(input),
       },
+    ),
+  spawnSubRequirements: (
+    id: string,
+    input?: { items?: Array<{ title: string; goal?: string; track?: Track }>; track?: Track },
+  ) =>
+    requestJson<{ parent: RequirementDetail; created: RequirementDetail[] }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/spawn`),
+      { method: "POST", body: JSON.stringify(input ?? {}) },
     ),
   importGitHubIssue: (input: {
     issueRef?: string;

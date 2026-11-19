@@ -78,19 +78,28 @@ export function buildAgentPrompt(
   const criteriaLines = state.criteria.map(
     (c) => `- ${c.id} (${c.required ? "必需" : "参考"}): ${c.description}${c.command ? ` [命令: ${c.command}]` : ""}`,
   );
+  const isFastTrack = state.track === "fast_track";
   return [
     header,
     "",
     langDirective,
     "",
-    `当前阶段：${state.stage} · 轨道：${state.track === "fast_track" ? "快速通道" : "方案已批准"}`,
+    `当前阶段：${state.stage} · 轨道：${isFastTrack ? "快速通道" : "方案已批准"}`,
     criteriaLines.length > 0 ? `\n验收条件：\n${criteriaLines.join("\n")}` : "",
-    designMarkdown.trim() ? `\n已批准方案摘要（完整内容请通过 wb_get 读取）：\n${designMarkdown.trim().slice(0, 1200)}` : "",
+    designMarkdown.trim() ? `\n已批准方案摘要（完整内容见 .workbench/items/${state.id}/design.md）：\n${designMarkdown.trim().slice(0, 1200)}` : "",
     "",
     "请执行以下步骤：",
-    `1. 先调用 wb_get({ id: "${state.id}" }) 读取完整需求与方案，使用 wb_update_tasks 拆解并实时维护实施任务进度。`,
-    "2. 在代码库完成开发修改，并通过 wb_verify 运行真实的验证命令绑定对应 criterionIds。",
-    `3. 全部必需验收条件在最新代码快照下通过后，调用 wb_update_tasks({ id: "${state.id}", readyForAcceptance: true }) 提交人工验收。`,
+    ...(isFastTrack
+      ? [
+          "1. 根据需求目标与验收条件在代码库完成修改（快速通道无需额外拆解 tasks）。",
+          "2. 通过 wb_verify 运行真实测试/检查命令绑定对应 criterionIds。",
+          `3. 全部必需验收条件通过后，调用 wb_update_tasks({ id: "${state.id}", readyForAcceptance: true }) 提交人类验收。`,
+        ]
+      : [
+          `1. 如需完整上下文可调用 wb_get({ id: "${state.id}" })，使用 wb_update_tasks 拆解并实时维护实施任务进度。`,
+          "2. 在代码库完成开发修改，并通过 wb_verify 运行真实的验证命令绑定对应 criterionIds。",
+          `3. 全部必需验收条件在最新代码快照下通过后，调用 wb_update_tasks({ id: "${state.id}", readyForAcceptance: true }) 提交人工验收。`,
+        ]),
   ]
     .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
     .join("\n");

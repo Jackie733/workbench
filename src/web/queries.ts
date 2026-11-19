@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { GiteeIssueItem } from "../core/gitee.ts";
-import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
+import type { AgentAction, AgentRunRecord, RequirementDetail, Stage } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import type { SandboxDriftInfo } from "../hub/evolution.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
@@ -1066,15 +1066,39 @@ export async function runAskFromDrawer(reqId: string): Promise<void> {
   await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
 }
 
+function resolveRefineActionForStage(stage?: Stage): "design" | "fix" | "readonly" {
+  if (stage === "done" || stage === "cancelled" || stage === "blocked") {
+    return "readonly";
+  }
+  if (stage === "implementing" || stage === "awaiting_acceptance") {
+    return "fix";
+  }
+  return "design";
+}
+
+function readCachedRequirementStage(reqId: string): Stage | undefined {
+  const ui = useUiStore.getState();
+  const cached = queryClient.getQueryData<{ detail?: RequirementDetail }>(
+    queryKeys.requirement(ui.activeProjectId, reqId),
+  );
+  return cached?.detail?.state.stage;
+}
+
 export async function runRefineFromDrawer(reqId: string): Promise<void> {
   const draft = useDraftStore.getState();
   const ui = useUiStore.getState();
+  const stage = readCachedRequirementStage(reqId);
+  const targetAction = resolveRefineActionForStage(stage);
+  if (targetAction === "readonly") {
+    ui.showToastKey("drawer.stageReadonly", undefined, true);
+    return;
+  }
   const msg = draft.discussDraft.trim();
   const anchorIds = draft.pendingAnnotations.map((a) => a.id);
   const summary =
     msg ||
     (draft.pendingAnnotations.length > 0
-      ? `请结合以下 ${draft.pendingAnnotations.length} 条批注修订技术方案：\n${draft.pendingAnnotations
+      ? `请结合以下 ${draft.pendingAnnotations.length} 条批注${targetAction === "fix" ? "修改代码并验证" : "修订技术方案"}：\n${draft.pendingAnnotations
           .map((a) => `- [${a.anchor}] ${a.message}`)
           .join("\n")}`
       : "");
@@ -1085,12 +1109,22 @@ export async function runRefineFromDrawer(reqId: string): Promise<void> {
   draft.setDiscussDraft("");
   draft.setDiscussAnchor(null);
   draft.clearPendingAnnotations();
-  await triggerActiveRun(reqId, "design", { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
+  await triggerActiveRun(reqId, targetAction, { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
 }
 
 export async function adoptDiscussion(reqId: string, discId: string, message: string): Promise<void> {
-  await triggerActiveRun(reqId, "design", {
-    message: `请采纳并落实此研讨结论：\n${message}`,
+  const ui = useUiStore.getState();
+  const stage = readCachedRequirementStage(reqId);
+  const targetAction = resolveRefineActionForStage(stage);
+  if (targetAction === "readonly") {
+    ui.showToastKey("drawer.stageReadonly", undefined, true);
+    return;
+  }
+  await triggerActiveRun(reqId, targetAction, {
+    message:
+      targetAction === "fix"
+        ? `请采纳此研讨结论并修改代码、运行验证：\n${message}`
+        : `请采纳并落实此研讨结论：\n${message}`,
     anchorIds: [discId],
     mode: "refine",
   });

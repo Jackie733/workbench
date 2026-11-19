@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { attachmentFileName, formatAttachmentSize } from "../core/attachments.ts";
+import { discoverProjectContext } from "../core/context.ts";
 import { getProjectStatus, getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
 import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
@@ -87,6 +88,7 @@ export async function synthesizeHandoffPacket(
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
   const { state, specMarkdown, designMarkdown, validity } = detail;
   const projectMeta = getProjectStatus(root).project;
+  const projectContext = discoverProjectContext(codeRoot, projectMeta);
   const hubLanguage = options.hubOutputLanguage ?? readHubConfig().outputLanguage;
   const outputLanguage = resolveEffectiveOutputLanguage({
     projectLanguage: projectMeta?.outputLanguage,
@@ -104,6 +106,26 @@ export async function synthesizeHandoffPacket(
       ? "- **Output Language Policy**：`English (en)` — Write all titles, specs, designs, criteria descriptions, tasks, reviews, and handoff memos strictly in English."
       : "- **输出语言规范**：`简体中文 (zh-CN)` — 所有提交的标题、规范、方案、验收条件描述、任务、审查意见与交接备忘必须严格使用简体中文（代码符号与命令原文除外）。",
   ];
+  if (state.parentId) {
+    headerLines.push(
+      `- **父架构需求**：\`${state.parentId}\`（父方案参考：\`${WORKBENCH_DIR}/items/${state.parentId}/design.md\`）`,
+    );
+  }
+  if (projectContext.archDocs.length > 0) {
+    const docSummary = projectContext.archDocs
+      .map((doc) =>
+        doc.headings.length > 0 ? `\`${doc.path}\`（${doc.headings.slice(0, 4).join(" / ")}）` : `\`${doc.path}\``,
+      )
+      .join("；");
+    headerLines.push(`- **项目架构参考**：${docSummary}`);
+  }
+  if (projectContext.fastCommand || projectContext.fullCommand) {
+    const tierParts = [
+      projectContext.fastCommand ? `快速 \`${projectContext.fastCommand}\`` : "",
+      projectContext.fullCommand ? `全量 \`${projectContext.fullCommand}\`` : "",
+    ].filter(Boolean);
+    headerLines.push(`- **项目验证画像**：${tierParts.join(" · ")}`);
+  }
   if (codeRoot !== root) {
     const sandboxHint =
       options.action === "implement" || options.action === "fix"
@@ -155,8 +177,12 @@ export async function synthesizeHandoffPacket(
     });
   }
 
-  // 1. Highest-priority steering: Cross-model Review findings, human feedback, and unresolved annotations
-  const pendingNotes = (state.discussions ?? []).filter((d) => !d.resolved);
+  // 1. Highest-priority steering: Cross-model Review findings, human feedback, unresolved annotations, and recent Ask Q&A
+  const allDiscussions = state.discussions ?? [];
+  const unresolvedRefineNotes = allDiscussions.filter((d) => d.mode === "refine" && !d.resolved);
+  const recentAskNotes = allDiscussions.filter((d) => d.mode === "ask").slice(-4);
+  const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
+  const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));
   const review = state.reviewReport;
   const includeReviewDetail =
     Boolean(review) &&
@@ -323,17 +349,17 @@ export async function synthesizeHandoffPacket(
     });
   }
 
-  // 4. Contract summary (Spec, Design, Criteria, Attachments)
+  // 4. Contract summary (Pointer-first Spec, Design, Criteria, Attachments)
   const contractLines: string[] = [
     hasSteering ? "## 4. 权威目标、方案与验收条件" : "## 1. 权威目标、方案与验收条件",
-    "### 需求目标（spec.md 摘要）",
-    clipTextByBytes(specMarkdown.trim() || "（暂无）", 2200, `\n> …（完整规范见 \`${itemDirHint}/spec.md\`）`),
+    `### 需求目标（完整规范见 \`${itemDirHint}/spec.md\`）`,
+    clipTextByBytes(specMarkdown.trim() || "（暂无）", 1400, `\n> …（完整规范见 \`${itemDirHint}/spec.md\`）`),
     "",
   ];
   if (designMarkdown.trim()) {
-    contractLines.push("### 当前技术方案（design.md 摘要）");
+    contractLines.push(`### 当前技术方案（完整方案见 \`${itemDirHint}/design.md\`）`);
     contractLines.push(
-      clipTextByBytes(designMarkdown.trim(), 3200, `\n> …（完整方案见 \`${itemDirHint}/design.md\`）`),
+      clipTextByBytes(designMarkdown.trim(), 1800, `\n> …（完整方案见 \`${itemDirHint}/design.md\`）`),
     );
     contractLines.push("");
   }

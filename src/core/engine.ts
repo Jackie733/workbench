@@ -67,6 +67,7 @@ import {
   type AgentRunRecord,
   type AttachmentMeta,
   type BaselineSnapshot,
+  type Criterion,
   type CriterionInput,
   type DeliveryCandidateFile,
   type DeliveryPreview,
@@ -80,6 +81,7 @@ import {
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
+  type ProjectVerificationConfig,
   type RequirementDetail,
   type RequirementDiffView,
   type RequirementGitHubIssueLink,
@@ -101,6 +103,7 @@ import {
   type VerificationRecord,
 } from "./types.ts";
 import {
+  assertRequirementId,
   deriveTitleFromGoal,
   isSafeText,
   normalizeCriteria,
@@ -221,6 +224,7 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
   const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
   return {
     id: state.id,
+    ...(state.parentId ? { parentId: state.parentId } : {}),
     title: state.title,
     stage: state.stage,
     track: state.track,
@@ -266,6 +270,7 @@ export async function updateProjectConfig(
     outputLanguage?: OutputLanguage | null;
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
+    verification?: ProjectVerificationConfig | null;
   },
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
@@ -348,6 +353,30 @@ export async function updateProjectConfig(
       }
     }
 
+    if (patch.verification === null) {
+      delete next.verification;
+    } else if (patch.verification !== undefined) {
+      const mergedVer: ProjectVerificationConfig = { ...(current.verification ?? {}) };
+      if (patch.verification.fastCommand !== undefined) {
+        const cleanFast = patch.verification.fastCommand.trim();
+        if (cleanFast) mergedVer.fastCommand = cleanFast;
+        else delete mergedVer.fastCommand;
+      }
+      if (patch.verification.fullCommand !== undefined) {
+        const cleanFull = patch.verification.fullCommand.trim();
+        if (cleanFull) mergedVer.fullCommand = cleanFull;
+        else delete mergedVer.fullCommand;
+      }
+      if (patch.verification.autoScreenshots !== undefined) {
+        mergedVer.autoScreenshots = Boolean(patch.verification.autoScreenshots);
+      }
+      if (Object.keys(mergedVer).length > 0) {
+        next.verification = mergedVer;
+      } else {
+        delete next.verification;
+      }
+    }
+
     const validated = validateProjectMetadata(next);
     atomicWriteJson(projectPath, validated);
     return validated;
@@ -408,7 +437,13 @@ export function getRequirement(
   options: { currentCodeSnapshotHash?: string | null } = {},
 ): RequirementDetail {
   const bundle = readRequirementBundle(root, id);
-  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+  const detail = toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+  const subRequirements = listRequirements(root, {
+    scope: "all",
+    currentCodeSnapshotHash: options.currentCodeSnapshotHash ?? null,
+    onCorrupt: () => {},
+  }).filter((item) => item.parentId === id);
+  return subRequirements.length > 0 ? { ...detail, subRequirements } : detail;
 }
 
 export function getDesignHistoryVersion(root: string, id: string, version: number): string {
@@ -513,6 +548,7 @@ export async function createRequirement(
   input: {
     goal: string;
     title?: string;
+    parentId?: string;
     criteria?: CriterionInput[];
     track?: Track;
     uiRelated?: boolean;
@@ -528,6 +564,11 @@ export async function createRequirement(
   const criteria = input.criteria ? normalizeCriteria(input.criteria) : [];
   const track: Track = input.track === "fast_track" ? "fast_track" : "plan_first";
   const specHash = computeSpecHash(specMarkdown, criteria);
+  const parentId = input.parentId?.trim() ? assertRequirementId(input.parentId.trim()) : undefined;
+  if (parentId) {
+    // Ensure parent exists before linking.
+    readRequirementBundle(root, parentId);
+  }
 
   const bundle = await createRequirementFiles(root, (id, now) => {
     let attachments: AttachmentMeta[] = [];
@@ -543,6 +584,7 @@ export async function createRequirement(
     const state: RequirementState = {
       schemaVersion: SCHEMA_VERSION,
       id,
+      ...(parentId ? { parentId } : {}),
       title,
       stage: "draft",
       track,
@@ -729,6 +771,18 @@ export async function markDesigning(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
+function isNonBreakingCriteriaUpdate(prev: Criterion[], next: Criterion[]): boolean {
+  const nextById = new Map(next.map((c) => [c.id, c]));
+  for (const c of prev) {
+    if (!c.required) continue;
+    const matched = nextById.get(c.id);
+    if (!matched || !matched.required) return false;
+    if (matched.description !== c.description) return false;
+    if (c.command && matched.command !== c.command) return false;
+  }
+  return true;
+}
+
 export async function propose(
   root: string,
   id: string,
@@ -800,6 +854,22 @@ export async function propose(
         nextApproval = {
           ...state.approval,
           specHash: nextSpecHash,
+        };
+      } else if (
+        state.stage === "implementing" &&
+        actor === "agent" &&
+        nextSpec === current.specMarkdown &&
+        nextTitle === state.title &&
+        !(state.track === "plan_first" && nextDesignHash === "") &&
+        isNonBreakingCriteriaUpdate(state.criteria, nextCriteria)
+      ) {
+        // Non-breaking implementation refinements (fixing verify commands, adding tests, or updating design notes) keep approval active.
+        nextStage = "implementing";
+        nextApproval = {
+          ...nextApproval,
+          specHash: nextSpecHash,
+          designVersion: nextDesignVersion,
+          designHash: nextDesignHash,
         };
       } else {
         // Any change to spec/criteria/design invalidates prior approval and forces human re-check.
@@ -903,6 +973,9 @@ export async function authorizeFastTrack(
     currentCodeSnapshotHash?: string | null;
   } = {},
 ): Promise<RequirementDetail> {
+  const projectMeta = getProjectStatus(root).project;
+  const configuredFastCmd = projectMeta?.verification?.fastCommand?.trim() || null;
+
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
     if (state.stage !== "draft" && state.stage !== "designing" && state.stage !== "awaiting_approval") {
@@ -910,18 +983,32 @@ export async function authorizeFastTrack(
     }
     const note = input.note?.trim() ? normalizeReason(input.note, "授权说明") : undefined;
     const baseline = input.baseline ?? state.baseline;
+    const autoCriteria =
+      state.criteria.length === 0 && configuredFastCmd
+        ? [
+            {
+              id: "AC-1",
+              description: "项目快速基线验证通过",
+              required: true,
+              command: configuredFastCmd,
+            },
+          ]
+        : state.criteria;
+    const nextSpecHash = autoCriteria !== state.criteria ? computeSpecHash(current.specMarkdown, autoCriteria) : state.specHash;
     return {
       snapshotSpecRevision: state.revision,
       state: {
         ...state,
         track: "fast_track",
         stage: "implementing",
+        criteria: autoCriteria,
+        specHash: nextSpecHash,
         baseline,
         lastFeedback: null,
         approval: {
           approvedAt: now,
           track: "fast_track",
-          specHash: state.specHash,
+          specHash: nextSpecHash,
           designVersion: state.designVersion,
           designHash: state.designHash,
           baselineHead: baseline?.head ?? null,
@@ -937,6 +1024,137 @@ export async function authorizeFastTrack(
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+export interface SpawnSubRequirementItem {
+  title: string;
+  goal?: string;
+  track?: Track;
+}
+
+const SPAWN_SKIP_HEADING_RE = /^(?:总体思路|背景|概述|目标|验收|验证|目录|风险|回滚|overview|background|verification|testing|risks?)$/i;
+
+export function extractSpawnCandidatesFromRequirement(detail: RequirementDetail): SpawnSubRequirementItem[] {
+  if (detail.state.tasks.length > 0) {
+    return detail.state.tasks.slice(0, 12).map((t) => ({
+      title: t.title,
+      goal: t.note ? `${t.title}\n\n${t.note}` : t.title,
+    }));
+  }
+  const md = detail.designMarkdown.trim();
+  if (!md) return [];
+  const candidates: SpawnSubRequirementItem[] = [];
+  const lines = md.split(/\r?\n/);
+  let currentTitle: string | null = null;
+  let currentBody: string[] = [];
+  let inFence = false;
+  const flush = () => {
+    if (!currentTitle) return;
+    const body = currentBody.join("\n").trim();
+    const cleanTitle = currentTitle.replace(/^\d+(?:\.\d+)*[.)、\s]+/, "").trim() || currentTitle;
+    if (!SPAWN_SKIP_HEADING_RE.test(cleanTitle)) {
+      candidates.push({
+        title: cleanTitle.slice(0, 100),
+        goal: body ? body.slice(0, 2000) : cleanTitle,
+      });
+    }
+    currentTitle = null;
+    currentBody = [];
+  };
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      inFence = !inFence;
+    }
+    if (!inFence) {
+      const m = /^##\s+(.+?)\s*#*$/.exec(line.trim());
+      if (m) {
+        flush();
+        currentTitle = m[1]!.trim();
+        continue;
+      }
+    }
+    if (currentTitle) {
+      currentBody.push(line);
+    }
+  }
+  flush();
+  return candidates.slice(0, 12);
+}
+
+export async function spawnSubRequirements(
+  root: string,
+  parentId: string,
+  input: {
+    items?: SpawnSubRequirementItem[];
+    track?: Track;
+    currentCodeSnapshotHash?: string | null;
+  } = {},
+): Promise<{ parent: RequirementDetail; created: RequirementDetail[] }> {
+  const base = canonicalRoot(root);
+  const parent = getRequirement(base, parentId, { currentCodeSnapshotHash: input.currentCodeSnapshotHash });
+  if (parent.state.stage === "cancelled") {
+    throw new WorkbenchError("invalid_transition", "已取消的需求不能派生子需求");
+  }
+  const rawItems =
+    input.items && input.items.length > 0
+      ? input.items
+      : extractSpawnCandidatesFromRequirement(parent);
+  const items = rawItems
+    .map((item) => ({
+      title: item.title?.trim() ?? "",
+      goal: item.goal?.trim() || item.title?.trim() || "",
+      track: item.track ?? input.track ?? "plan_first",
+    }))
+    .filter((item) => item.title.length > 0)
+    .slice(0, 12);
+
+  if (items.length === 0) {
+    throw new WorkbenchError("invalid_input", "请提供至少一条子需求条目，或先在父需求生成任务/方案章节");
+  }
+
+  const keyDecisions = (parent.state.handoffNote?.keyDecisions ?? []).slice(0, 4);
+  const created: RequirementDetail[] = [];
+  for (const item of items) {
+    const goalLines: string[] = [
+      `# ${item.title}`,
+      "",
+      `> 派生自父架构需求 \`${parent.state.id}\`（${parent.state.title}）`,
+      `> 父方案参考：\`.workbench/items/${parent.state.id}/design.md\``,
+      "",
+      item.goal,
+    ];
+    if (keyDecisions.length > 0) {
+      goalLines.push("", "## 父架构关键约束", ...keyDecisions.map((d) => `- ${d}`));
+    }
+    const child = await createRequirement(base, {
+      title: item.title,
+      goal: goalLines.join("\n"),
+      parentId: parent.state.id,
+      track: item.track,
+      currentCodeSnapshotHash: input.currentCodeSnapshotHash ?? null,
+    });
+    created.push(child);
+  }
+
+  await mutateRequirement(base, parent.state.id, undefined, (current, now) => ({
+    state: {
+      ...current.state,
+      timeline: appendTimeline(
+        current.state.timeline,
+        makeEvent(
+          now,
+          "sub_requirements_spawned",
+          "human",
+          `派生 ${created.length} 条子需求：${created.map((c) => c.state.id).join("、")}`,
+        ),
+      ),
+    },
+  }));
+
+  const updatedParent = getRequirement(base, parent.state.id, {
+    currentCodeSnapshotHash: input.currentCodeSnapshotHash ?? null,
+  });
+  return { parent: updatedParent, created };
 }
 
 export async function requestChanges(

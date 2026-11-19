@@ -617,4 +617,58 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     expect(corruptItems).toHaveLength(1);
     expect(corruptItems[0]!.id).toBe("REQ-002");
   });
+
+  test("M3/M4 exposes project context, verification settings, parentId, and POST /api/requirements/:id/spawn", async () => {
+    const root = initGitRepo();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "# Arch\n\n## Layering\nStrict core/server split.");
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
+    runningServers.push(server);
+
+    await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({ name: "M4Test" }) });
+
+    const projRes = await apiJson(`${server.url}/api/project`);
+    expect(projRes.status).toBe(200);
+    const context = projRes.body.context as { archDocs: Array<{ path: string }> };
+    expect(context.archDocs.some((d) => d.path === "AGENTS.md")).toBe(true);
+
+    const patchRes = await apiJson(`${server.url}/api/project/settings`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        verification: { fastCommand: "bun run typecheck", fullCommand: "bun test", autoScreenshots: false },
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+
+    const updatedProj = await apiJson(`${server.url}/api/project`);
+    expect((updatedProj.body.project as { verification?: Record<string, unknown> }).verification).toEqual({
+      fastCommand: "bun run typecheck",
+      fullCommand: "bun test",
+      autoScreenshots: false,
+    });
+
+    await apiJson(`${server.url}/api/requirements`, {
+      method: "POST",
+      body: JSON.stringify({ goal: "拆分系统重构子需求" }),
+    });
+    await executeWorkbenchTool(root, "wb_propose", {
+      id: "REQ-001",
+      design: "# 整体设计\n\n## 拆分核心引擎模块\n核心层实现。\n\n## 增加前端抽屉适配\n抽屉交互优化。",
+      criteria: [{ id: "AC-1", description: "typecheck passes", command: "bun run typecheck", required: true }],
+    });
+
+    const spawnRes = await apiJson(`${server.url}/api/requirements/REQ-001/spawn`, {
+      method: "POST",
+      body: JSON.stringify({ track: "fast_track" }),
+    });
+    expect(spawnRes.status).toBe(201);
+    const created = spawnRes.body.created as Array<{ state: { id: string; parentId?: string; track: string } }>;
+    expect(created).toHaveLength(2);
+    expect(created[0]!.state.parentId).toBe("REQ-001");
+    expect(created[0]!.state.track).toBe("fast_track");
+
+    const parentGet = await apiJson(`${server.url}/api/requirements/REQ-001`);
+    expect(parentGet.status).toBe(200);
+    const subReqs = (parentGet.body.detail as { subRequirements?: Array<{ id: string }> }).subRequirements ?? [];
+    expect(subReqs.map((s) => s.id).sort()).toEqual(["REQ-002", "REQ-003"]);
+  });
 });

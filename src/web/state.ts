@@ -13,6 +13,7 @@ import type {
   ReviewVerdict,
   Stage,
   TaskStatus,
+  Track,
   ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
@@ -107,6 +108,15 @@ export type ModalState =
       giteeRepoDraft?: string;
       giteeEnterpriseDraft?: string;
       giteeBaseBranchDraft?: string;
+      fastCmdDraft?: string;
+      fullCmdDraft?: string;
+      autoScreenshotsDraft?: boolean;
+    }
+  | {
+      kind: "spawn_children";
+      parentId: string;
+      items: Array<{ title: string; goal: string }>;
+      track: Track;
     }
   | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
   | { kind: "handoff_preview"; markdown: string }
