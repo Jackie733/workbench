@@ -26,12 +26,15 @@ import {
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
+  spawnSubRequirements,
   unblockRequirement,
   updateDesign,
   updateProjectConfig,
   updateSpec,
   type CorruptRequirementEntry,
+  type SpawnSubRequirementItem,
 } from "../core/engine.ts";
+import { discoverProjectContext } from "../core/context.ts";
 import {
   normalizeAttachments,
   readAttachmentForServe,
@@ -75,6 +78,7 @@ import {
   type OutputLanguage,
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
+  type ProjectVerificationConfig,
   type RequirementDetail,
   type Stage,
   type Track,
@@ -230,7 +234,7 @@ export interface ProjectApiDeps {
   ) => Promise<DispatchOutcome>;
   broadcastUi: (event: Record<string, unknown>) => void;
   ensureWatcherFor: (projectRoot: string) => void;
-  reloadWebBundle: () => Promise<{ reloaded: boolean }>;
+  reloadWebBundle: (opts?: { manual?: boolean }) => Promise<{ reloaded: boolean }>;
   getHubOutputLanguage: () => OutputLanguage | undefined;
   getGiteeAccessToken?: () => string | null;
   githubDeps?: GitHubCommandDeps;
@@ -380,6 +384,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         effectiveOutputLanguage,
         remoteProvider,
         remoteRepo,
+        context: discoverProjectContext(base, status.project),
         git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
       });
     }
@@ -425,11 +430,24 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             : {}),
         };
       }
+      let verificationPatch: ProjectVerificationConfig | null | undefined = undefined;
+      if (body.verification === null) {
+        verificationPatch = null;
+      } else if (isRecord(body.verification)) {
+        verificationPatch = {
+          ...(typeof body.verification.fastCommand === "string" ? { fastCommand: body.verification.fastCommand } : {}),
+          ...(typeof body.verification.fullCommand === "string" ? { fullCommand: body.verification.fullCommand } : {}),
+          ...(typeof body.verification.autoScreenshots === "boolean"
+            ? { autoScreenshots: body.verification.autoScreenshots }
+            : {}),
+        };
+      }
       const project = await updateProjectConfig(base, {
         ...(typeof body.name === "string" ? { name: body.name } : {}),
         ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
         ...(githubPatch !== undefined ? { github: githubPatch } : {}),
         ...(giteePatch !== undefined ? { gitee: giteePatch } : {}),
+        ...(verificationPatch !== undefined ? { verification: verificationPatch } : {}),
       });
       deps.broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
       return jsonResponse({ project });
@@ -817,6 +835,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       let detail = await createRequirement(base, {
         goal,
         title,
+        ...(typeof body.parentId === "string" && body.parentId.trim() ? { parentId: body.parentId.trim() } : {}),
         criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
         track,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
@@ -883,6 +902,29 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           sandbox,
           ...(sandboxDrift ? { sandboxDrift } : {}),
         });
+      }
+
+      if (method === "POST" && sub === "spawn") {
+        const body = await readBody(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const items: SpawnSubRequirementItem[] | undefined = Array.isArray(body.items)
+          ? body.items
+              .filter((x): x is Record<string, unknown> => isRecord(x) && typeof x.title === "string")
+              .map((x) => ({
+                title: String(x.title),
+                ...(typeof x.goal === "string" ? { goal: x.goal } : {}),
+                ...(x.track === "fast_track" || x.track === "plan_first" ? { track: x.track } : {}),
+              }))
+          : undefined;
+        const track: Track | undefined =
+          body.track === "fast_track" || body.track === "plan_first" ? body.track : undefined;
+        const out = await spawnSubRequirements(base, id, {
+          items,
+          track,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        deps.broadcastUi({ type: "workbench.updated", reason: "requirement.spawned", root: base, id, at: Date.now() });
+        return jsonResponse(out, 201);
       }
 
       if (method === "GET" && sub === "diff") {

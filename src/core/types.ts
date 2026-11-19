@@ -94,6 +94,12 @@ export interface ProjectGiteeConfig {
   defaultBaseBranch?: string;
 }
 
+export interface ProjectVerificationConfig {
+  fastCommand?: string;
+  fullCommand?: string;
+  autoScreenshots?: boolean;
+}
+
 export interface ProjectMetadata {
   schemaVersion: typeof SCHEMA_VERSION;
   projectId: string;
@@ -103,6 +109,7 @@ export interface ProjectMetadata {
   outputLanguage?: OutputLanguage;
   github?: ProjectGitHubConfig;
   gitee?: ProjectGiteeConfig;
+  verification?: ProjectVerificationConfig;
   createdAt: number;
   updatedAt: number;
 }
@@ -368,7 +375,8 @@ export type TimelineEventKind =
   | "github_issue_linked"
   | "github_issue_synced"
   | "github_pr_created"
-  | "github_pr_synced";
+  | "github_pr_synced"
+  | "sub_requirements_spawned";
 
 export interface RequirementGitHubIssueLink {
   /** GitHub uses positive integer numbers (e.g. 42); Gitee uses alphanumeric ident (e.g. "I8ABCD"). */
@@ -528,6 +536,7 @@ export interface TimelineEvent {
 export interface RequirementState {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
+  parentId?: string;
   title: string;
   stage: Stage;
   track: Track;
@@ -714,6 +723,7 @@ export interface ValidityReport {
 
 export interface RequirementSummary {
   id: string;
+  parentId?: string;
   title: string;
   stage: Stage;
   track: Track;
@@ -746,4 +756,6 @@ export interface RequirementDetail {
   validity: ValidityReport;
   /** Frozen acceptance artifact when available; lets the UI render immutable screenshot history. */
   acceptanceSnapshot?: AcceptanceSnapshot | null;
+  /** Child requirements spawned from this requirement (populated on detail reads). */
+  subRequirements?: RequirementSummary[];
 }

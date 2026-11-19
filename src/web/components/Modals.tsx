@@ -20,7 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { StructuredMessageRef } from "../../core/errors.ts";
-import type { GitRemoteProvider, OutputLanguage, PrivacyMode } from "../../core/types.ts";
+import type { GitRemoteProvider, OutputLanguage, PrivacyMode, Track } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   ROUTING_STAGES,
@@ -839,6 +839,10 @@ export function Modals() {
       m.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
     const giteeBaseValue =
       m.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
+    const fastCmdValue = m.fastCmdDraft ?? project?.project?.verification?.fastCommand ?? "";
+    const fullCmdValue = m.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
+    const existingAutoScreenshots = project?.project?.verification?.autoScreenshots;
+    const autoScreenshotsValue = m.autoScreenshotsDraft ?? (existingAutoScreenshots === true);
 
     const syncHubStatePatch = async (
       patch: Partial<
@@ -905,6 +909,15 @@ export function Modals() {
       const out = await runBusy(() =>
         api.updateProjectSettings({
           outputLanguage: projLangValue,
+          verification: {
+            fastCommand: fastCmdValue.trim(),
+            fullCommand: fullCmdValue.trim(),
+            ...(m.autoScreenshotsDraft !== undefined
+              ? { autoScreenshots: m.autoScreenshotsDraft }
+              : existingAutoScreenshots !== undefined
+                ? { autoScreenshots: existingAutoScreenshots }
+                : {}),
+          },
           ...(projProviderValue === "gitee"
             ? {
                 gitee: {
@@ -1464,6 +1477,80 @@ export function Modals() {
                         </label>
                       </>
                     )}
+                  </div>
+
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                    <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+                      {t(language, "routing.verificationTitle")}
+                    </strong>
+                    <div style={{ marginBottom: 10 }}>
+                      <span className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                        {t(language, "routing.archDocsLabel")}
+                      </span>
+                      {project.context?.archDocs && project.context.archDocs.length > 0 ? (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {project.context.archDocs.map((doc) => (
+                            <span
+                              key={doc.path}
+                              className="badge info"
+                              title={doc.headings.join(" / ")}
+                              data-testid={`proj-arch-doc-${doc.path}`}
+                            >
+                              {doc.path}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="xs muted">{t(language, "routing.archDocsNone")}</span>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          {t(language, "routing.fastCmdLabel")}
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-fast-cmd-input"
+                          value={fastCmdValue}
+                          placeholder={project.context?.fastCommand ?? t(language, "routing.fastCmdPlaceholder")}
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, fastCmdDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          {t(language, "routing.fullCmdLabel")}
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-full-cmd-input"
+                          value={fullCmdValue}
+                          placeholder={project.context?.fullCommand ?? t(language, "routing.fullCmdPlaceholder")}
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, fullCmdDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="project-auto-screenshots"
+                        checked={autoScreenshotsValue}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, autoScreenshotsDraft: e.target.checked } : prev,
+                          )
+                        }
+                      />
+                      <span>{t(language, "routing.autoScreenshotsLabel")}</span>
+                    </label>
                   </div>
                 </div>
 
@@ -2842,6 +2929,142 @@ export function Modals() {
             {createPr
               ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
               : t(language, "deliver.submitLocal")}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "spawn_children") {
+    const validItems = m.items.filter((it) => it.title.trim().length > 0);
+    const submitSpawn = async () => {
+      if (validItems.length === 0) {
+        showToastKey("spawn.emptyError", undefined, true);
+        return;
+      }
+      const res = await runBusy(() =>
+        api.spawnSubRequirements(m.parentId, {
+          items: validItems.map((it) => ({ title: it.title.trim(), goal: it.goal.trim() || it.title.trim() })),
+          track: m.track,
+        }),
+      );
+      if (res) {
+        await invalidateAllWorkbenchQueries();
+        setModal(null);
+        showToastKey("spawn.createdToast", { count: res.created.length });
+      }
+    };
+    return (
+      <ModalShell onClose={close} wide testId="spawn-children-modal">
+        <h3>{t(language, "spawn.title")}</h3>
+        <p className="xs muted" style={{ margin: "0 0 10px" }}>
+          {t(language, "spawn.desc")}
+        </p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <span className="muted xs">{t(language, "spawn.trackLabel")}</span>
+            <select
+              className="select xs"
+              data-testid="spawn-track-select"
+              value={m.track}
+              onChange={(e) =>
+                setModal((prev) =>
+                  prev?.kind === "spawn_children" ? { ...prev, track: e.target.value as Track } : prev,
+                )
+              }
+            >
+              <option value="plan_first">{t(language, "spawn.trackPlan")}</option>
+              <option value="fast_track">{t(language, "spawn.trackFast")}</option>
+            </select>
+          </label>
+          <button
+            className="btn xs"
+            type="button"
+            data-testid="spawn-add-item-btn"
+            onClick={() =>
+              setModal((prev) =>
+                prev?.kind === "spawn_children"
+                  ? { ...prev, items: [...prev.items, { title: "", goal: "" }] }
+                  : prev,
+              )
+            }
+          >
+            + {t(language, "spawn.addItem")}
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+          {m.items.map((item, idx) => (
+            <div
+              key={idx}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: 8,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input
+                  className="input"
+                  data-testid={`spawn-item-title-${idx}`}
+                  value={item.title}
+                  placeholder={t(language, "spawn.itemTitlePlaceholder")}
+                  onChange={(e) =>
+                    setModal((prev) => {
+                      if (prev?.kind !== "spawn_children") return prev;
+                      const next = [...prev.items];
+                      next[idx] = { ...next[idx]!, title: e.target.value };
+                      return { ...prev, items: next };
+                    })
+                  }
+                />
+                <button
+                  className="btn ghost xs"
+                  type="button"
+                  aria-label={t(language, "common.delete")}
+                  onClick={() =>
+                    setModal((prev) =>
+                      prev?.kind === "spawn_children"
+                        ? { ...prev, items: prev.items.filter((_, i) => i !== idx) }
+                        : prev,
+                    )
+                  }
+                >
+                  <Icon icon={Trash2} size={14} />
+                </button>
+              </div>
+              <textarea
+                className="textarea"
+                rows={2}
+                data-testid={`spawn-item-goal-${idx}`}
+                value={item.goal}
+                placeholder={t(language, "spawn.itemGoalPlaceholder")}
+                onChange={(e) =>
+                  setModal((prev) => {
+                    if (prev?.kind !== "spawn_children") return prev;
+                    const next = [...prev.items];
+                    next[idx] = { ...next[idx]!, goal: e.target.value };
+                    return { ...prev, items: next };
+                  })
+                }
+              />
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            {t(language, "common.cancel")}
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="spawn-submit-btn"
+            disabled={busy || validItems.length === 0}
+            onClick={() => void submitSpawn()}
+          >
+            {t(language, "spawn.submit", { count: validItems.length })}
           </button>
         </div>
       </ModalShell>
