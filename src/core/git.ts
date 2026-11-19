@@ -596,10 +596,12 @@ export async function resolveDefaultBaseBranch(root: string, remote = "origin"):
   return null;
 }
 
+const GIT_REF_RE = /^[0-9a-zA-Z._/-]{2,128}$/;
+
 /** Counts commits reachable from headRef that are not in baseRef. */
 export async function countCommitsBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<number> {
   const base = canonicalRoot(root);
-  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return 0;
+  if (!baseRef || baseRef.includes("..") || !GIT_REF_RE.test(baseRef)) return 0;
   try {
     const res = await execGit(base, ["rev-list", "--count", `${baseRef}..${headRef}`]);
     if (res.code !== 0) return 0;
@@ -613,7 +615,7 @@ export async function countCommitsBetween(root: string, baseRef: string, headRef
 /** Lists non-workbench files changed between baseRef and headRef. */
 export async function listCommittedFilesBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<string[]> {
   const base = canonicalRoot(root);
-  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return [];
+  if (!baseRef || baseRef.includes("..") || !GIT_REF_RE.test(baseRef)) return [];
   try {
     const res = await execGit(base, [
       "diff",

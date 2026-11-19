@@ -286,7 +286,13 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       expect(/[\u4e00-\u9fff]/.test(prErrToast)).toBe(false);
 
-      // 3. Retry PR creation (succeeds as #42), then PR status sync failure renders localized English error.
+      // 3. Wait for preview refresh after commit+push, retry PR creation (succeeds as #42), then test PR status sync failure.
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('[data-testid="deliver-file-app.ts"]') &&
+          !(document.querySelector('[data-testid="submit-deliver-btn"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="deliver-modal"]'), { timeout: 10_000 });
       await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });

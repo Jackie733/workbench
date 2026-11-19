@@ -1857,7 +1857,17 @@ export async function deliverRequirement(
     giteeToken = (deps?.giteeToken ?? deps?.giteeDeps?.token ?? process.env.GITEE_ACCESS_TOKEN ?? "").trim();
     const giteeEnv = await inspectGiteeEnvironment(base, projectMeta.gitee, giteeToken, deps?.giteeDeps);
     if (!giteeEnv.ready || !giteeEnv.repo) {
-      throw new WorkbenchError("execution_failed", giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR");
+      const reasonKey =
+        giteeEnv.reasonCode === "token_missing"
+          ? "gitee.reasonTokenMissing"
+          : giteeEnv.reasonCode === "repo_missing"
+            ? "gitee.reasonRepoMissing"
+            : giteeEnv.reasonCode === "network_failed"
+              ? "gitee.reasonNetworkFailed"
+              : "gitee.reasonAuthFailed";
+      throw new WorkbenchError("execution_failed", giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR", {
+        messageKey: reasonKey,
+      });
     }
     repo = giteeEnv.repo;
     giteeEnterprise = giteeEnv.enterprise;
@@ -1867,7 +1877,15 @@ export async function deliverRequirement(
   } else {
     const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
     if (!ghEnv.ready || !ghEnv.repo) {
-      throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR");
+      const reasonKey =
+        ghEnv.reasonCode === "gh_missing"
+          ? "github.reasonGhMissing"
+          : ghEnv.reasonCode === "gh_unauthenticated"
+            ? "github.reasonGhUnauthenticated"
+            : "github.reasonRepoMissing";
+      throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR", {
+        messageKey: reasonKey,
+      });
     }
     repo = ghEnv.repo;
     baseBranch = validateGitBranchName(
@@ -1911,11 +1929,15 @@ export async function deliverRequirement(
     const aheadRef = sandbox?.baseHead || baseBranch;
     const aheadCount = await countCommitsBetween(codeRoot, aheadRef, "HEAD");
     if (aheadCount <= 0) {
-      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交");
+      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交", {
+        messageKey: "deliver.errNoFilesOrCommits",
+      });
     }
     const headInfo = await getHeadCommitInfo(codeRoot);
     if (!headInfo) {
-      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息");
+      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息", {
+        messageKey: "deliver.errNoHeadInfo",
+      });
     }
     commitHash = headInfo.commitHash;
     shortHash = headInfo.shortHash;

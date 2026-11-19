@@ -2599,6 +2599,9 @@ export function Modals() {
             { hash: res.delivery.shortHash, count: res.delivery.files.length },
           );
         }
+      } else {
+        // Commit or branch push may have already succeeded before PR creation failed; refresh preview so retry works cleanly.
+        await invalidateAllWorkbenchQueries();
       }
     };
 
