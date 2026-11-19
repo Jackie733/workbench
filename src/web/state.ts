@@ -1,5 +1,6 @@
 import type {
   AgentAction,
+  AgentRunRecord,
   AttachmentMeta,
   CriterionCoverageState,
   EffectiveVerificationState,
@@ -162,6 +163,15 @@ export const TASK_META: Record<TaskStatus, StatusMeta> = {
   in_progress: { labels: { "zh-CN": "进行中", en: "In progress" }, tone: "info" },
   done: { labels: { "zh-CN": "已完成", en: "Done" }, tone: "success" },
   blocked: { labels: { "zh-CN": "受阻", en: "Blocked" }, tone: "danger" },
+};
+
+export type AgentRunTone = "info" | "success" | "danger" | "neutral";
+
+export const AGENT_RUN_TONE: Record<AgentRunRecord["status"], AgentRunTone> = {
+  running: "info",
+  succeeded: "success",
+  failed: "danger",
+  cancelled: "neutral",
 };
 
 export const COVERAGE_META: Record<CriterionCoverageState, StatusMeta> = {

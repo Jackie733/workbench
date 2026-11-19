@@ -62,6 +62,7 @@ import {
 } from "../queries.ts";
 import { parseUnifiedDiff, renderDiffLinesHtml, renderSimpleLineDiff } from "../render.ts";
 import {
+  AGENT_RUN_TONE,
   collectModelOptions,
   COVERAGE_META,
   defaultActionForRequirement,
@@ -1476,7 +1477,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
   );
 }
 
-function TimelineRunsTab({ d }: { d: RequirementDetail }) {
+export function TimelineRunsTab({ d }: { d: RequirementDetail }) {
   const language = useUiStore((s) => s.language);
   const events = [...d.state.timeline].reverse();
   const runs = [...(d.state.agentRuns ?? [])].reverse();
@@ -1498,11 +1499,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
               style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
             >
               <div>
-                <span
-                  className={`badge ${
-                    r.status === "succeeded" ? "success" : r.status === "cancelled" ? "neutral" : "danger"
-                  }`}
-                >
+                <span className={`badge ${AGENT_RUN_TONE[r.status]}`}>
                   {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
                 </span>
                 <strong style={{ fontSize: 13, marginLeft: 6 }}>
