@@ -216,6 +216,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
   const revValid = validity.reviewValidity;
+  const isReviewCurrent = revValid.effectiveState === "current";
   const findings = review?.findings ?? [];
 
   const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>(() =>
@@ -334,7 +335,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
               {s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && review.verdict !== "pass" && (
                 <>
                   <button
-                    className="btn primary xs"
+                    className={isReviewCurrent ? "btn primary xs" : "btn xs"}
                     type="button"
                     data-testid="review-fix-btn"
                     disabled={busy}
@@ -345,9 +346,11 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     }
                   >
                     <Icon icon={Wrench} size={14} />{" "}
-                    {findings.length > 0 && selectedFindingIds.length > 0
-                      ? `按选中的 ${selectedFindingIds.length} 项修复`
-                      : "按审查意见修复"}
+                    {isReviewCurrent
+                      ? findings.length > 0 && selectedFindingIds.length > 0
+                        ? `按选中的 ${selectedFindingIds.length} 项修复`
+                        : "按审查意见修复"
+                      : "仍按旧审查修复"}
                   </button>
                   <button
                     className="btn xs"
@@ -358,7 +361,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   >
                     打回修改…
                   </button>
-                  {validity.acceptanceGate.ok && (
+                  {isReviewCurrent && validity.acceptanceGate.ok && (
                     <button
                       className="btn xs"
                       type="button"
@@ -372,7 +375,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 </>
               )}
               <button
-                className="btn xs"
+                className={!isReviewCurrent ? "btn primary xs" : "btn xs"}
                 type="button"
                 data-testid="review-rerun-btn"
                 disabled={busy}

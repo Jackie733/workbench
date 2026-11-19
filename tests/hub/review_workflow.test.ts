@@ -24,6 +24,7 @@ import {
   createOrReuseWorktree,
   inspectRsiSandboxDrift,
   reconcileRsiSandboxBaseline,
+  syncRequirementMirrorToSandbox,
   syncRsiSandboxBase,
 } from "../../src/hub/evolution.ts";
 import { buildExecutionPrompt, HubExecutor } from "../../src/hub/executor.ts";
@@ -248,6 +249,11 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
       action: "fix",
     });
     expect(fixPrompt).toContain("Code Review");
+    // When review is stale and fresh human feedback exists, human steering precedes stale review history
+    expect(packet.markdown.indexOf("人类最新指令与未解决批注（当前最高优先级）")).toBeLessThan(
+      packet.markdown.indexOf("历史跨模型 Code Review"),
+    );
+    expect(fixPrompt).toContain("历史 Code Review 意见已过期仅供参考");
   });
 
   test("executor parses structured findings, ignores non-header session_id lines, and auto-triggers review on submit", async () => {
@@ -481,5 +487,46 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(postDrift?.baseHead).toBe(mainHead);
     expect(postDrift?.behindCount).toBe(0);
     expect(postDrift?.conflictFiles).toEqual([]);
+  });
+
+  test("syncRsiSandboxBase ignores worktree node_modules symlink when aheadCount > 0 and mirrors evidence files", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("sync-node-modules");
+    await initProject(repo, { name: "workbench", privacyMode: "local" });
+    fs.mkdirSync(path.join(repo, "node_modules"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "node_modules", "marker.txt"), "dep");
+
+    await createRequirement(repo, {
+      goal: "Sync worktree with node_modules symlink and mirror evidence",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nClean.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+
+    const sb = await createOrReuseWorktree(repo, "REQ-001");
+    const wt = sb.worktreePath;
+    expect(fs.existsSync(path.join(wt, "node_modules"))).toBe(true);
+
+    // Advance sandbox branch with its own commit (aheadCount = 1)
+    fs.writeFileSync(path.join(wt, "app.ts"), "export const v = 20;\n");
+    execFileSync("git", ["add", "app.ts"], { cwd: wt, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "sandbox commit"], { cwd: wt, stdio: "ignore" });
+
+    // Advance main on a non-conflicting file (behindCount = 1)
+    fs.writeFileSync(path.join(repo, "other.ts"), "export const other = 2;\n");
+    execFileSync("git", ["add", "other.ts"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main commit"], { cwd: repo, stdio: "ignore" });
+
+    const syncRes = await syncRsiSandboxBase(repo, "REQ-001");
+    expect(syncRes.synced).toBe(true);
+    expect(syncRes.drift.behindCount).toBe(0);
+    expect(fs.readFileSync(path.join(wt, "other.ts"), "utf8")).toBe("export const other = 2;\n");
+
+    const verified = await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    syncRequirementMirrorToSandbox(repo, "REQ-001", wt);
+    const mirroredLog = path.join(wt, ".workbench", "items", "REQ-001", verified.record.outputPath);
+    const mirroredMeta = mirroredLog.replace(/\.log$/, ".json");
+    expect(fs.existsSync(mirroredLog)).toBe(true);
+    expect(fs.existsSync(mirroredMeta)).toBe(true);
   });
 });

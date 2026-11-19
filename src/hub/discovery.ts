@@ -381,7 +381,6 @@ function parseOmpDefaultModel(homeDir: string): string | null {
 
 interface OmpSqliteCatalog {
   ompModels: RawModelSpec[];
-  opencodeGoModels: RawModelSpec[];
   capabilityIndex: CapabilityIndex;
 }
 
@@ -468,7 +467,6 @@ function upsertCapability(
 
 function readOmpSqliteCatalog(homeDir: string): OmpSqliteCatalog {
   const ompModels: RawModelSpec[] = [];
-  const opencodeGoModels: RawModelSpec[] = [];
   const capabilityIndex: CapabilityIndex = {
     byProviderAndId: new Map(),
     byCanonicalId: new Map(),
@@ -580,15 +578,6 @@ function readOmpSqliteCatalog(homeDir: string): OmpSqliteCatalog {
           };
           upsertCapability(capabilityIndex, baseProvider, m.id, meta);
 
-          if (baseProvider === "opencode-go") {
-            opencodeGoModels.push({
-              id: `opencode-go/${m.id}`,
-              label: m.name || m.id,
-              provider: "opencode-go",
-              ...(meta.supportedEfforts ? { supportedEfforts: meta.supportedEfforts } : {}),
-            });
-          }
-
           const isActive =
             activeProviders.has(baseProvider) ||
             (baseProvider === "deepseek" && usedModelKeys.some((k) => k.startsWith("deepseek/")));
@@ -613,7 +602,7 @@ function readOmpSqliteCatalog(homeDir: string): OmpSqliteCatalog {
     }
   }
 
-  return { ompModels, opencodeGoModels, capabilityIndex };
+  return { ompModels, capabilityIndex };
 }
 
 function parseAgyCliOutput(stdout: string): RawModelSpec[] {
@@ -836,10 +825,7 @@ export function discoverHarnessesQuick(
       ? snapQoder.models
       : mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), "builtin", capIndex, "qoder-cn");
 
-  const opencodeFallbackList: Array<string | RawModelSpec> = [
-    ...OPENCODE_DEFAULT_MODELS,
-    ...sqliteCatalog.opencodeGoModels,
-  ];
+  const opencodeFallbackList: Array<string | RawModelSpec> = [...OPENCODE_DEFAULT_MODELS];
   const opencodeModels =
     snapOpencode && snapOpencode.models.length > 0 && snapOpencode.executable === opencodeBin
       ? snapOpencode.models
@@ -961,7 +947,6 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
   const opencodeFromCli = opencodeRes.code === 0 && opencodeCliModels.length > 0;
   const opencodeCombined: Array<string | RawModelSpec> = [
     ...(opencodeFromCli ? opencodeCliModels : OPENCODE_DEFAULT_MODELS),
-    ...sqliteCatalog.opencodeGoModels,
   ];
 
   const agyCliParsed = agyRes.code === 0 ? parseAgyCliOutput(agyRes.stdout) : [];

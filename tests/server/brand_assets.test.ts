@@ -1,14 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
 const ROOT = path.resolve(import.meta.dir, "../..");
 const SOURCE_BRAND_DIR = path.join(ROOT, "src/web/brand");
 
-// 在仓库内复制一份 src，让 Bun.build 既能解析相对导入与 node_modules，
-// 又能在独立副本上模拟素材缺失，不触碰真实文件。
-const tempRoot = fs.mkdtempSync(path.join(import.meta.dir, ".brand-assets-"));
+// 在系统临时目录中复制一份 src 并链接 node_modules，让 Bun.build 既能解析相对导入与依赖，
+// 又能在独立副本上模拟素材缺失，避免在被中断时在仓库内留下未跟踪临时目录。
+const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "wb-brand-assets-"));
 const tempSrc = path.join(tempRoot, "src");
 const webDir = path.join(tempSrc, "web");
 const brandDir = path.join(webDir, "brand");
@@ -25,6 +26,7 @@ const ASSETS = [
 const remoteHeaders = { host: "workbench-remote.example" };
 
 beforeAll(async () => {
+  fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(tempRoot, "node_modules"), "dir");
   fs.cpSync(path.join(ROOT, "src"), tempSrc, { recursive: true });
   const projectRoot = path.join(tempRoot, "project");
   fs.mkdirSync(projectRoot);

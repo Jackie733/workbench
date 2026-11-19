@@ -517,8 +517,8 @@ export async function dispatchSyncBaseWithAgent(
   const msg =
     `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标提交 ${drift.mainHead.slice(0, 7)} 共 ${drift.behindCount} 个提交` +
     (conflicts ? `，重叠冲突文件：${conflicts}` : "") +
-    `。同步主干步骤：\n` +
-    `1. 检查 git status：若存在未提交改动，先 git add -A && git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；\n` +
+    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已过期的旧审查意见。同步主干步骤：\n` +
+    `1. 检查 git status：若存在未提交业务/测试改动，使用 git add -u 与显式业务文件路径暂存后 git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；严禁提交 node_modules 或临时目录；\n` +
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
     `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
   const useCli = shouldUseCliRunner("fix");

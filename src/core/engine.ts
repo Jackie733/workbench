@@ -1027,6 +1027,7 @@ export async function updateTasks(
         ...state,
         tasks: nextTasks,
         stage: nextStage,
+        ...(input.readyForAcceptance === true ? { lastFeedback: null } : {}),
         ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
         timeline: nextTimeline,
       },

@@ -42,7 +42,7 @@ import {
 } from "./evolution.ts";
 import { synthesizeHandoffPacket } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
-import { detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
+import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
 import { recordModelRunOutcome } from "./telemetry.ts";
 import type { HarnessInfo, ModelTarget, RoutingConfig } from "./types.ts";
 
@@ -84,6 +84,8 @@ export interface StartRunInput {
   anchorIds?: string[];
   mode?: "ask" | "refine";
   useFallback?: boolean;
+  autoFallbackAttempt?: number;
+  isAutoReview?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
 }
@@ -156,6 +158,9 @@ function ensureWbShim(cliEntryPath: string): string {
   }
   return binDir;
 }
+
+const QODER_PRINT_MODE_GUARD =
+  "Non-interactive -p print mode: NEVER run Bash/shell commands in the background (never set run_in_background=true, never trail commands with &), and NEVER end your turn waiting for a background notification (ending the turn immediately exits the CLI and kills running child processes). Execute checks synchronously and output the complete final response in this turn.";
 
 export function buildHarnessCommand(
   target: ModelTarget,
@@ -232,6 +237,8 @@ export function buildHarnessCommand(
         "-o",
         "stream-json",
         ...permissionFlags,
+        "--append-system-prompt",
+        QODER_PRINT_MODE_GUARD,
         ...(model && model !== "default" && model !== "Auto" ? ["-m", model] : []),
         ...(effort && effortAllowed ? ["--reasoning-effort", effort] : []),
         ...(ctx.nativeSessionId && ctx.action !== "review" ? ["-r", ctx.nativeSessionId] : []),
@@ -416,6 +423,10 @@ export function buildExecutionPrompt(
       `请你作为独立的代码与交付审查者（Cross-Model Reviewer），审查工作台需求 ${reqId}（${detail.state.title}）。`,
       "重要约束：",
       "- 严禁修改仓库业务代码或调用 wb propose / wb tasks；只读检查 Git Diff、测试证据与 Spec 一致性。",
+      "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
+      "- 优先复用匹配证据：先核验 `.workbench/items/" +
+        reqId +
+        "/evidence/` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行 `bun run typecheck` 及针对本次改动模块的轻量测试，无需重复运行全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。",
       "- 注：若当前处于只读沙箱且需要可写临时目录的浏览器/Puppeteer 用例因 EROFS 无法启动，请直接核验 `.workbench/items/" + reqId + "/evidence/` 既有真实运行日志并执行 `tsc --noEmit` 与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
       buildOutputLanguageDirective(lang, "review"),
       "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下（`findings` 为可选结构化问题列表，有具体问题时建议填写以便前端逐条定位修复）：",
@@ -429,19 +440,25 @@ export function buildExecutionPrompt(
   }
 
   const hasReviewToFix = Boolean(detail.state.reviewReport && detail.state.reviewReport.verdict !== "pass");
+  const isCurrentReview = detail.validity.reviewValidity.effectiveState === "current";
+  const hasHumanFeedback = Boolean(detail.state.lastFeedback) || Boolean(input.message?.trim());
   const modeVerb =
     input.action === "design"
       ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，例如若已有全量 \`bun test\`，仅在需独立隔离时保留子集测试以节省验证耗时），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
       : input.action === "fix"
-        ? hasReviewToFix || Boolean(detail.state.lastFeedback)
+        ? hasReviewToFix && isCurrentReview
           ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-          : `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+          : hasReviewToFix && hasHumanFeedback
+            ? `请优先执行交接简报第 1 节中的人类最新指令/打回反馈（如同步主干、解决冲突或专项调整）；历史 Code Review 意见已过期仅供参考，切勿重复返工已修复项，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+            : hasReviewToFix || hasHumanFeedback
+              ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+              : `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
         : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
 
   const boundaryGuard =
     input.action === "design"
       ? "注意：你无权也无需执行批准或最终验收操作；本轮只产出方案，提交后立即停止，不要继续实施。"
-      : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证。";
+      : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证，勿留下后台未完成命令即结束本轮。";
 
   const screenshotHint =
     input.action === "implement" || input.action === "fix"
@@ -871,8 +888,12 @@ export class HubExecutor {
       if (next) target = next;
     }
 
-    // Persist human discussion/annotation if supplied before execution
-    if (input.message?.trim() && (input.action === "ask" || input.mode === "refine" || input.action === "design")) {
+    // Persist human discussion/annotation if supplied before execution (skip on automatic fallback retry)
+    if (
+      input.message?.trim() &&
+      !(input.autoFallbackAttempt && input.autoFallbackAttempt > 0) &&
+      (input.action === "ask" || input.mode === "refine" || input.action === "design")
+    ) {
       await addDiscussion(base, id, {
         actor: "human",
         mode: input.action === "ask" ? "ask" : "refine",
@@ -1128,6 +1149,7 @@ export class HubExecutor {
       const durationMs = Math.max(0, endedAt - startedAt);
       const rawLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
       const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
+      const modelUnavailable = !job.cancelled && !job.timedOut && detectModelUnavailableError(rawLog, exitCode);
       let status: AgentRunRecord["status"] = job.cancelled
         ? "cancelled"
         : exitCode === 0 && !spawnErr && !job.timedOut
@@ -1174,9 +1196,11 @@ export class HubExecutor {
               ? job.timeoutReason === "max_duration"
                 ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
                 : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-              : rateLimited
-                ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-                : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+              : modelUnavailable
+                ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
+                : rateLimited
+                  ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                  : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
 
       try {
@@ -1189,6 +1213,7 @@ export class HubExecutor {
           rateLimited,
           timedOut: job.timedOut,
           modelFallback: job.modelFallback === true,
+          modelUnavailable,
           now: endedAt,
         };
         if (this.onTelemetryOutcome) {
@@ -1317,6 +1342,9 @@ export class HubExecutor {
         at: endedAt,
       });
 
+      const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
+        availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
+
       // Auto-trigger cross-model review once implement/fix succeeds and submits for acceptance.
       if (
         status === "succeeded" &&
@@ -1332,16 +1360,14 @@ export class HubExecutor {
           if (latestRouting.autoReview !== false) {
             const availHarnesses = await this.getHarnesses(false);
             const reviewTarget = resolveRouteCandidates(latestRouting, availHarnesses, "review")[0];
-            const canAutoRun =
-              Boolean(reviewTarget) &&
-              (availHarnesses.some((h) => h.id === reviewTarget!.harness && h.installed) ||
-                Boolean(this.commandBuilder));
+            const canAutoRun = Boolean(reviewTarget) && isHarnessRunnable(reviewTarget!.harness, availHarnesses);
             const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
             if (canAutoRun && !alreadyRunning) {
               void this.startRun({
                 root: base,
                 requirementId: id,
                 action: "review",
+                isAutoReview: true,
               }).catch((err) => {
                 console.error(
                   `[workbench] auto-review failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1351,6 +1377,48 @@ export class HubExecutor {
           }
         } catch {
           // Never crash finalize if auto-review dispatch encounters a routing error.
+        }
+      }
+
+      // Bounded single-hop automatic fallback on unavailable model, fast rate-limit, or auto-review parse failure.
+      const attempt = input.autoFallbackAttempt ?? 0;
+      const isExplicitOverride = Boolean(input.harness && input.model);
+      const shouldAutoFallback =
+        status === "failed" &&
+        !job.cancelled &&
+        !job.timedOut &&
+        attempt < 1 &&
+        ((!isExplicitOverride && (modelUnavailable || (rateLimited && durationMs < 60_000))) ||
+          (input.isAutoReview === true && (reviewParseFailed || modelUnavailable || rateLimited)));
+
+      if (shouldAutoFallback) {
+        try {
+          const latestPrefs = this.getHubPreferences?.();
+          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
+          const availHarnesses = await this.getHarnesses(false);
+          const candidates = resolveRouteCandidates(latestRouting, availHarnesses, input.action);
+          const fallbackCandidate = candidates.find(
+            (c) =>
+              `${c.harness}::${c.model}` !== `${target.harness}::${target.model}` &&
+              isHarnessRunnable(c.harness, availHarnesses),
+          );
+          const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
+          if (fallbackCandidate && !alreadyRunning) {
+            void this.startRun({
+              ...input,
+              harness: undefined,
+              model: undefined,
+              reasoningEffort: undefined,
+              useFallback: true,
+              autoFallbackAttempt: attempt + 1,
+            }).catch((err) => {
+              console.error(
+                `[workbench] auto-fallback failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+          }
+        } catch {
+          // Never crash finalize if auto-fallback dispatch encounters a routing error.
         }
       }
     };

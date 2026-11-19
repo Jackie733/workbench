@@ -246,7 +246,8 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     expect(codex.models[0]?.supportedEfforts).toContain("xhigh");
     expect(qoder.installed).toBe(false);
     expect(qoder.models.some((m) => m.id === "DeepSeek-Flash")).toBe(true);
-    expect(oc.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
+    expect(oc.models.some((m) => m.id === "opencode/deepseek-v4.1-flash-free")).toBe(true);
+    expect(oc.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(false);
     expect(agy.installed).toBe(true);
     expect(agy.models.some((m) => m.id === "gemini-4-hydrogen-xhigh")).toBe(true);
     expect(omp.installed).toBe(true);

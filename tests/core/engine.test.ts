@@ -329,7 +329,9 @@ describe("WB-01 core store and domain engine", () => {
       code: "acceptance_gate_failed",
     });
 
-    // Re-run verification on snap2 + submit + accept
+    // Re-run verification on snap2 + submit + accept (clears stale lastFeedback on submit)
+    await requestChanges(root, "REQ-001", { feedback: "同步主干" });
+    expect(getRequirement(root, "REQ-001").state.lastFeedback).toBe("同步主干");
     await recordVerification(root, "REQ-001", {
       record: makeVerification("V-3", active.state.specHash, snap2, ["AC-1"], true),
       rawLog: "ok log 2",
@@ -344,6 +346,7 @@ describe("WB-01 core store and domain engine", () => {
       currentCodeSnapshotHash: snap2,
     });
     expect(submitted.state.stage).toBe("awaiting_acceptance");
+    expect(submitted.state.lastFeedback).toBeNull();
     expect(submitted.state.tasks.map((t) => t.id)).toEqual(["T-1", "T-2"]);
 
     const done = await acceptRequirement(root, "REQ-001", { currentCodeSnapshotHash: snap2, note: "LGTM" });
