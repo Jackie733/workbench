@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
 import { api } from "../api.ts";
-import { t } from "../i18n.ts";
+import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
   adoptDiscussion,
@@ -469,11 +469,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       >
                         {runs.map((r) => (
                           <option key={r.id} value={r.id}>
-                            {r.action} · {r.harness}/{r.model}
+                            {formatAgentActionLabel(language, r.action)} · {r.harness}/{r.model}
                             {r.modelFallback && r.effectiveModel
                               ? ` → ${t(language, "drawer.actual", { model: r.effectiveModel })}`
                               : ""}{" "}
-                            ({r.status})
+                            ({formatAgentStatusLabel(language, r.status)})
                           </option>
                         ))}
                       </select>
@@ -493,13 +493,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                   : "danger"
                             }`}
                           >
-                            {currentRun.status === "running"
-                              ? t(language, "drawer.status.running")
-                              : currentRun.status === "succeeded"
-                                ? t(language, "drawer.status.succeeded")
-                                : currentRun.status === "cancelled"
-                                  ? t(language, "drawer.status.cancelled")
-                                  : t(language, "drawer.status.failed")}
+                            {formatAgentStatusLabel(language, currentRun.status)}
                           </span>
                           <span className="xs" style={{ marginLeft: 6 }}>
                             <strong>{currentRun.harness}</strong> · {currentRun.model}

@@ -224,6 +224,16 @@ export function describeEvidenceContext(
       ? t(language, (p.scopeNoteKey ?? diffView?.scopeNoteKey) as MessageKey)
       : (diffView?.scopeNote ?? p.scopeNote);
 
+  const resolveEvidenceReason = (): string | null => {
+    if (diffView?.reasonKey) {
+      return localizedReason(diffView.reasonKey, diffView.reason ?? p.reason ?? null, language, diffView.reasonParams);
+    }
+    if (diffView?.status === "unavailable" && diffView.reason) {
+      return localizedReason(undefined, diffView.reason, language, undefined);
+    }
+    return localizedReason(p.reasonKey, p.reason ?? diffView?.reason ?? null, language, p.reasonParams);
+  };
+
   if (p.context === "accepted") {
     const shortSpec = p.specHash ? p.specHash.slice(0, 8) : "-";
     const shortSnap = p.codeSnapshotHash ? p.codeSnapshotHash.slice(0, 8) : "-";
@@ -238,15 +248,7 @@ export function describeEvidenceContext(
         code: shortSnap,
         count: formatNumber(language, p.verificationIds.length),
       }),
-      unavailableReason:
-        diffView?.status === "unavailable"
-          ? localizedReason(
-              diffView?.reasonKey ?? p.reasonKey,
-              diffView?.reason ?? p.reason,
-              language,
-              diffView?.reasonParams,
-            )
-          : null,
+      unavailableReason: diffView?.status === "unavailable" ? resolveEvidenceReason() : null,
       truncationFlags,
       scopeNote,
     };
@@ -255,8 +257,7 @@ export function describeEvidenceContext(
   if (p.context === "legacy-unavailable") {
     const shortSpec = p.specHash ? p.specHash.slice(0, 8) : "-";
     const shortSnap = p.codeSnapshotHash ? p.codeSnapshotHash.slice(0, 8) : "-";
-    const rawReason = diffView?.status === "unavailable" ? (diffView?.reason ?? p.reason) : p.reason;
-    const reason = localizedReason(diffView?.reasonKey ?? p.reasonKey, rawReason, language, diffView?.reasonParams);
+    const reason = resolveEvidenceReason();
     const coverageSuffix = p.coverageReasonKey
       ? `${language === "en" ? "; " : "；"}${t(language, p.coverageReasonKey as MessageKey)}`
       : "";
@@ -294,10 +295,7 @@ export function describeEvidenceContext(
       spec: p.specHash?.slice(0, 8) ?? "-",
       code: p.codeSnapshotHash?.slice(0, 8) ?? (language === "en" ? "unknown" : "未知"),
     }),
-    unavailableReason:
-      diffView?.status === "unavailable"
-        ? localizedReason(diffView?.reasonKey ?? p.reasonKey, diffView.reason ?? null, language, diffView?.reasonParams)
-        : null,
+    unavailableReason: diffView?.status === "unavailable" ? resolveEvidenceReason() : null,
     truncationFlags,
     scopeNote,
   };

@@ -10,6 +10,8 @@ import {
   DEFAULT_UI_LANGUAGE,
   describeClientError,
   describeClientErrorRef,
+  formatAgentActionLabel,
+  formatAgentStatusLabel,
   formatDateTime,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
@@ -703,6 +705,21 @@ describe("status and error messages", () => {
       expect(t("zh-CN", k)).not.toBe(t("en", k));
     }
 
+    const shotMissingValidity = {
+      ...legacyValidity,
+      provenance: {
+        ...legacyValidity.provenance,
+        reasonKey: "core.evidence.screenshotMissing",
+        reasonParams: { shotId: "SHOT-1" },
+        reason: "截图证据不存在：SHOT-1",
+      },
+    };
+    const shotMissingBannerEn = describeEvidenceContext(shotMissingValidity, null, "en");
+    expect(shotMissingBannerEn.unavailableReason).toContain("SHOT-1");
+    expect(/[\u4e00-\u9fff]/.test(shotMissingBannerEn.unavailableReason ?? "")).toBe(false);
+    const shotMissingBannerZh = describeEvidenceContext(shotMissingValidity, null, "zh-CN");
+    expect(shotMissingBannerZh.unavailableReason).toContain("SHOT-1");
+
     const shotMissing = describeEvidenceContext(
       legacyValidity,
       {
@@ -715,6 +732,17 @@ describe("status and error messages", () => {
     );
     expect(shotMissing.unavailableReason).toContain("SHOT-1");
     expect(/[\u4e00-\u9fff]/.test(shotMissing.unavailableReason ?? "")).toBe(false);
+
+    for (const action of ["ask", "design", "implement", "fix", "review"] as const) {
+      expect(/[\u4e00-\u9fff]/.test(formatAgentActionLabel("en", action))).toBe(false);
+      expect(formatAgentActionLabel("zh-CN", action)).not.toBe(action);
+      expect(formatAgentActionLabel("en", action)).not.toBe(action);
+    }
+    for (const status of ["running", "succeeded", "cancelled", "failed"] as const) {
+      expect(/[\u4e00-\u9fff]/.test(formatAgentStatusLabel("en", status))).toBe(false);
+      expect(formatAgentStatusLabel("zh-CN", status)).not.toBe(status);
+      expect(formatAgentStatusLabel("en", status)).not.toBe(status);
+    }
 
     const ffBranchSkip = resolveWarningParam("主仓库当前位于分支 feat/x（非 main），已保留主仓库现状", {
       key: "git.ff.branchMismatch",

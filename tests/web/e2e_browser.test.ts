@@ -1386,6 +1386,35 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         "codex/gpt-6.1-sol",
         `${presetDesign.harness}/${presetDesign.model}`,
       ]);
+
+      // 4. Console run selector and Timeline runs badge localize action & status cleanly across language switches.
+      await page.waitForSelector('[data-testid="console-pane"] select option', { timeout: 5000 });
+      const zhOptionText = await page.evaluate(
+        () => document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "",
+      );
+      expect(zhOptionText).toContain("设计 ·");
+      expect(zhOptionText).toContain("(已完成)");
+
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="workspace-tab-scroll"]')?.textContent ?? "").includes("设计 · 已完成"),
+        { timeout: 5000 },
+      );
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+            "Design ·",
+          ) &&
+          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+            "(Completed)",
+          ) &&
+          (document.querySelector('[data-testid="workspace-tab-scroll"]')?.textContent ?? "").includes(
+            "Design · Completed",
+          ),
+        { timeout: 5000 },
+      );
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();

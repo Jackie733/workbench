@@ -28,7 +28,16 @@ import type {
   Stage,
 } from "../../core/types.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
-import { formatPrStateLabel, prStateRef, resolveWarningParam, t, translateRef, type MessageKey } from "../i18n.ts";
+import {
+  formatAgentActionLabel,
+  formatAgentStatusLabel,
+  formatPrStateLabel,
+  prStateRef,
+  resolveWarningParam,
+  t,
+  translateRef,
+  type MessageKey,
+} from "../i18n.ts";
 import {
   captureUiScreenshots,
   cancelRun,
@@ -1494,7 +1503,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
                     r.status === "succeeded" ? "success" : r.status === "cancelled" ? "neutral" : "danger"
                   }`}
                 >
-                  {r.action} · {r.status}
+                  {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
                 </span>
                 <strong style={{ fontSize: 13, marginLeft: 6 }}>
                   {r.harness} / {r.model}

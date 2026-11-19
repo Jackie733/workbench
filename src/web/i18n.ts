@@ -455,6 +455,11 @@ const zhCN = {
   "drawer.refine": "让 Agent 修订",
   "drawer.handoff": "交接简报 handoff.md",
   "drawer.actual": "实际 {model}",
+  "drawer.action.ask": "问答",
+  "drawer.action.design": "设计",
+  "drawer.action.implement": "实施",
+  "drawer.action.fix": "修复",
+  "drawer.action.review": "审查",
   "drawer.status.running": "执行中",
   "drawer.status.succeeded": "已完成",
   "drawer.status.cancelled": "已终止",
@@ -1591,6 +1596,11 @@ const en: Record<MessageKey, string> = {
   "drawer.refine": "Let the agent revise",
   "drawer.handoff": "Handoff brief (handoff.md)",
   "drawer.actual": "actual {model}",
+  "drawer.action.ask": "Ask",
+  "drawer.action.design": "Design",
+  "drawer.action.implement": "Implement",
+  "drawer.action.fix": "Fix",
+  "drawer.action.review": "Review",
   "drawer.status.running": "Running",
   "drawer.status.succeeded": "Completed",
   "drawer.status.cancelled": "Cancelled",
@@ -2641,6 +2651,33 @@ export function prStateRef(state: string): UiMessageRef | string {
 export function formatPrStateLabel(language: UiLanguage, state: string): string {
   const key = PR_STATE_KEYS[state.toLowerCase()];
   return key ? t(language, key) : state;
+}
+
+const AGENT_ACTION_KEYS: Record<string, MessageKey> = {
+  ask: "drawer.action.ask",
+  design: "drawer.action.design",
+  implement: "drawer.action.implement",
+  fix: "drawer.action.fix",
+  review: "drawer.action.review",
+};
+
+const AGENT_STATUS_KEYS: Record<string, MessageKey> = {
+  running: "drawer.status.running",
+  succeeded: "drawer.status.succeeded",
+  cancelled: "drawer.status.cancelled",
+  failed: "drawer.status.failed",
+};
+
+/** Localizes agent run action names for badges and console selectors. */
+export function formatAgentActionLabel(language: UiLanguage, action: string): string {
+  const key = AGENT_ACTION_KEYS[action];
+  return key ? t(language, key) : action;
+}
+
+/** Localizes agent run lifecycle statuses for badges and console selectors. */
+export function formatAgentStatusLabel(language: UiLanguage, status: string): string {
+  const key = AGENT_STATUS_KEYS[status];
+  return key ? t(language, key) : status;
 }
 
 export function applyDocumentLanguage(language: UiLanguage, doc: Document | null = typeof document !== "undefined" ? document : null): void {
