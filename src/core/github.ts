@@ -28,6 +28,8 @@ export interface GitHubCommandDeps {
   resolveDefaultBaseBranch?: (root: string) => Promise<string | null>;
 }
 
+export type GitHubStatusReasonCode = "gh_missing" | "gh_unauthenticated" | "repo_missing";
+
 export interface GitHubEnvironmentStatus {
   ghInstalled: boolean;
   authenticated: boolean;
@@ -37,6 +39,8 @@ export interface GitHubEnvironmentStatus {
   defaultBaseBranch: string | null;
   ready: boolean;
   reason: string | null;
+  reasonCode?: GitHubStatusReasonCode | null;
+  reasonDetail?: string | null;
 }
 
 export interface ImportedGitHubIssue {
@@ -237,6 +241,8 @@ export async function inspectGitHubEnvironment(
       defaultBaseBranch,
       ready: false,
       reason: "本机未安装 gh CLI，无法执行 GitHub Issue / PR 同步",
+      reasonCode: "gh_missing",
+      reasonDetail: null,
     };
   }
 
@@ -270,10 +276,13 @@ export async function inspectGitHubEnvironment(
   }
 
   let reason: string | null = null;
+  let reasonCode: GitHubStatusReasonCode | null = null;
   if (!authenticated) {
     reason = "gh CLI 尚未登录，请先在终端运行 gh auth login";
+    reasonCode = "gh_unauthenticated";
   } else if (!repo) {
     reason = "当前项目尚未配置 GitHub 仓库（未检测到 github.com origin 远端，也可在项目设置中手动指定 owner/repo）";
+    reasonCode = "repo_missing";
   }
 
   return {
@@ -285,6 +294,8 @@ export async function inspectGitHubEnvironment(
     defaultBaseBranch: defaultBaseBranch ?? "main",
     ready: authenticated && Boolean(repo),
     reason,
+    reasonCode,
+    reasonDetail: null,
   };
 }
 

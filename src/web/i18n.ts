@@ -1,3 +1,5 @@
+import type { GiteeEnvironmentStatus } from "../core/gitee.ts";
+import type { GitHubEnvironmentStatus } from "../core/github.ts";
 import { ApiClientError } from "./api.ts";
 
 export const UI_LANGUAGES = ["zh-CN", "en"] as const;
@@ -991,6 +993,14 @@ const zhCN = {
   "gitee.statusReady": "Gitee 已就绪 (@{account})",
   "gitee.statusGhReady": "gh 已就绪 ({account})",
   "gitee.statusNotReady": "未就绪",
+  "gitee.reasonTokenMissing": "尚未配置 Gitee 私人令牌 (Access Token)，请在「工作台设置 -> 全局设置」中填写",
+  "gitee.reasonAuthInvalid": "Gitee 私人令牌验证未返回有效账号信息",
+  "gitee.reasonAuthFailed": "Gitee 私人令牌无效或连接失败",
+  "gitee.reasonAuthFailedWithDetail": "Gitee 私人令牌验证失败：{detail}",
+  "gitee.reasonRepoMissing": "当前项目尚未配置 Gitee 仓库（未检测到 gitee.com origin 远端，可在项目设置中手动指定 owner/repo）",
+  "github.reasonGhMissing": "本机未安装 gh CLI，无法执行 GitHub Issue / PR 同步",
+  "github.reasonGhUnauthenticated": "gh CLI 尚未登录，请先在终端运行 gh auth login",
+  "github.reasonRepoMissing": "当前项目尚未配置 GitHub 仓库（未检测到 github.com origin 远端，也可在项目设置中手动指定 owner/repo）",
   "gitee.repoLabel": "Gitee 仓库（owner/repo，留空自动识别）",
   "gitee.enterpriseLabel": "企业空间路径（用于拉取无仓库工作项）",
   "gitee.baseBranchLabel": "PR 默认 Base 分支",
@@ -2027,6 +2037,14 @@ const en: Record<MessageKey, string> = {
   "gitee.statusReady": "Gitee ready (@{account})",
   "gitee.statusGhReady": "gh ready ({account})",
   "gitee.statusNotReady": "Not ready",
+  "gitee.reasonTokenMissing": "Gitee Access Token is not configured yet. Set it in Workbench Settings -> Global Settings.",
+  "gitee.reasonAuthInvalid": "Gitee Access Token verification did not return a valid account",
+  "gitee.reasonAuthFailed": "Gitee Access Token is invalid or connection failed",
+  "gitee.reasonAuthFailedWithDetail": "Gitee Access Token verification failed: {detail}",
+  "gitee.reasonRepoMissing": "No Gitee repository configured for this project (no gitee.com origin remote detected; specify owner/repo in Project Settings)",
+  "github.reasonGhMissing": "gh CLI is not installed on this machine, so GitHub Issue / PR sync is unavailable",
+  "github.reasonGhUnauthenticated": "gh CLI is not authenticated. Run gh auth login in a terminal first",
+  "github.reasonRepoMissing": "No GitHub repository configured for this project (no github.com origin remote detected; specify owner/repo in Project Settings)",
   "gitee.repoLabel": "Gitee repository (owner/repo, blank to auto-detect)",
   "gitee.enterpriseLabel": "Enterprise slug (for repo-less work items)",
   "gitee.baseBranchLabel": "Default PR base branch",
@@ -2289,6 +2307,53 @@ export function describeClientError(language: UiLanguage, err: unknown): string 
 }
 
 const ERROR_CODE_KEYS_REQUIRING_DETAIL = new Set(["revision_conflict", "unauthorized"]);
+
+const KNOWN_GITEE_FALLBACK_REASONS = new Set([
+  "Gitee 私人令牌验证未返回有效账号信息",
+  "Gitee 私人令牌无效或已过期",
+  "Gitee 私人令牌无效或连接失败",
+]);
+
+/** Localizes Gitee readiness diagnostics from structured fields while preserving raw upstream errors. */
+export function formatGiteeStatusReason(
+  language: UiLanguage,
+  status: Pick<GiteeEnvironmentStatus, "tokenConfigured" | "authenticated" | "repo" | "reason" | "reasonCode" | "reasonDetail">,
+): string {
+  if (!status.tokenConfigured || status.reasonCode === "token_missing") {
+    return t(language, "gitee.reasonTokenMissing");
+  }
+  if (!status.authenticated || status.reasonCode === "auth_failed" || status.reasonCode === "auth_invalid_response") {
+    const rawDetail =
+      status.reasonDetail?.trim() ||
+      (status.reasonCode ? "" : status.reason && !KNOWN_GITEE_FALLBACK_REASONS.has(status.reason) ? status.reason.trim() : "");
+    if (rawDetail) return t(language, "gitee.reasonAuthFailedWithDetail", { detail: rawDetail });
+    if (status.reasonCode === "auth_invalid_response" || status.reason === "Gitee 私人令牌验证未返回有效账号信息") {
+      return t(language, "gitee.reasonAuthInvalid");
+    }
+    return t(language, "gitee.reasonAuthFailed");
+  }
+  if (!status.repo || status.reasonCode === "repo_missing") {
+    return t(language, "gitee.reasonRepoMissing");
+  }
+  return status.reason ?? t(language, "gitee.statusNotReady");
+}
+
+/** Localizes GitHub CLI readiness diagnostics from structured status fields. */
+export function formatGitHubStatusReason(
+  language: UiLanguage,
+  status: Pick<GitHubEnvironmentStatus, "ghInstalled" | "authenticated" | "repo" | "reason" | "reasonCode" | "reasonDetail">,
+): string {
+  if (!status.ghInstalled || status.reasonCode === "gh_missing") {
+    return t(language, "github.reasonGhMissing");
+  }
+  if (!status.authenticated || status.reasonCode === "gh_unauthenticated") {
+    return t(language, "github.reasonGhUnauthenticated");
+  }
+  if (!status.repo || status.reasonCode === "repo_missing") {
+    return t(language, "github.reasonRepoMissing");
+  }
+  return status.reasonDetail?.trim() || status.reason || t(language, "gitee.statusNotReady");
+}
 
 export function applyDocumentLanguage(language: UiLanguage, doc: Document | null = typeof document !== "undefined" ? document : null): void {
   if (!doc) return;

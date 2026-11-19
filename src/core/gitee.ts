@@ -23,6 +23,8 @@ export interface GiteeApiDeps {
   token?: string | null;
 }
 
+export type GiteeStatusReasonCode = "token_missing" | "auth_invalid_response" | "auth_failed" | "repo_missing";
+
 export interface GiteeEnvironmentStatus {
   tokenConfigured: boolean;
   authenticated: boolean;
@@ -34,6 +36,8 @@ export interface GiteeEnvironmentStatus {
   defaultBaseBranch: string | null;
   ready: boolean;
   reason: string | null;
+  reasonCode?: GiteeStatusReasonCode | null;
+  reasonDetail?: string | null;
 }
 
 export interface GiteeIssueItem {
@@ -395,6 +399,8 @@ export async function inspectGiteeEnvironment(
       defaultBaseBranch,
       ready: false,
       reason: "尚未配置 Gitee 私人令牌 (Access Token)，请在「工作台设置 -> 全局设置」中填写",
+      reasonCode: "token_missing",
+      reasonDetail: null,
     };
   }
 
@@ -402,6 +408,8 @@ export async function inspectGiteeEnvironment(
   let account: string | null = null;
   let accountName: string | null = null;
   let authReason: string | null = null;
+  let authReasonCode: GiteeStatusReasonCode | null = null;
+  let authReasonDetail: string | null = null;
   try {
     const { data } = await giteeRequest<RawGiteeUser>("/user", token, { timeoutMs: 8_000 }, deps);
     if (data && typeof data.login === "string" && data.login.trim()) {
@@ -410,17 +418,25 @@ export async function inspectGiteeEnvironment(
       accountName = typeof data.name === "string" && data.name.trim() ? data.name.trim() : account;
     } else {
       authReason = "Gitee 私人令牌验证未返回有效账号信息";
+      authReasonCode = "auth_invalid_response";
     }
   } catch (err) {
     authenticated = false;
-    authReason = err instanceof Error ? err.message : "Gitee 私人令牌无效或已过期";
+    authReasonCode = "auth_failed";
+    authReasonDetail = err instanceof Error ? err.message : null;
+    authReason = authReasonDetail ?? "Gitee 私人令牌无效或已过期";
   }
 
   let reason: string | null = null;
+  let reasonCode: GiteeStatusReasonCode | null = null;
+  let reasonDetail: string | null = null;
   if (!authenticated) {
     reason = authReason ?? "Gitee 私人令牌无效或连接失败";
+    reasonCode = authReasonCode ?? "auth_failed";
+    reasonDetail = authReasonDetail;
   } else if (!repo) {
     reason = "当前项目尚未配置 Gitee 仓库（未检测到 gitee.com origin 远端，可在项目设置中手动指定 owner/repo）";
+    reasonCode = "repo_missing";
   }
 
   return {
@@ -434,6 +450,8 @@ export async function inspectGiteeEnvironment(
     defaultBaseBranch,
     ready: authenticated && Boolean(repo),
     reason,
+    reasonCode,
+    reasonDetail,
   };
 }
 

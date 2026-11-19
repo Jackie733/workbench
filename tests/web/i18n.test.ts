@@ -10,6 +10,8 @@ import {
   describeClientError,
   describeClientErrorRef,
   formatDateTime,
+  formatGiteeStatusReason,
+  formatGitHubStatusReason,
   formatNumber,
   formatRelativeTime,
   normalizeUiLanguage,
@@ -378,5 +380,70 @@ describe("status and error messages", () => {
     expect(description.title).toBe("Legacy acceptance record (no diff snapshot)");
     expect(description.unavailableReason).toContain("历史验收记录");
     expect(description.provenanceText).toContain("coverage source unavailable");
+  });
+
+  test("localizes Gitee and GitHub status reasons while preserving upstream error details", () => {
+    expect(
+      formatGiteeStatusReason("en", {
+        tokenConfigured: false,
+        authenticated: false,
+        repo: null,
+        reason: "尚未配置 Gitee 私人令牌",
+        reasonCode: "token_missing",
+      }),
+    ).toContain("Gitee Access Token is not configured yet");
+    expect(
+      formatGiteeStatusReason("zh-CN", {
+        tokenConfigured: false,
+        authenticated: false,
+        repo: null,
+        reason: null,
+      }),
+    ).toContain("尚未配置 Gitee 私人令牌");
+
+    expect(
+      formatGiteeStatusReason("en", {
+        tokenConfigured: true,
+        authenticated: false,
+        repo: null,
+        reason: "HTTP 401: invalid token",
+        reasonCode: "auth_failed",
+        reasonDetail: "HTTP 401: invalid token",
+      }),
+    ).toBe("Gitee Access Token verification failed: HTTP 401: invalid token");
+    expect(
+      formatGiteeStatusReason("en", {
+        tokenConfigured: true,
+        authenticated: true,
+        repo: null,
+        reason: "当前项目尚未配置 Gitee 仓库",
+      }),
+    ).toContain("No Gitee repository configured");
+
+    expect(
+      formatGitHubStatusReason("en", {
+        ghInstalled: false,
+        authenticated: false,
+        repo: null,
+        reason: "本机未安装 gh CLI",
+        reasonCode: "gh_missing",
+      }),
+    ).toContain("gh CLI is not installed");
+    expect(
+      formatGitHubStatusReason("en", {
+        ghInstalled: true,
+        authenticated: false,
+        repo: null,
+        reason: "gh CLI 尚未登录",
+      }),
+    ).toContain("gh CLI is not authenticated");
+    expect(
+      formatGitHubStatusReason("en", {
+        ghInstalled: true,
+        authenticated: true,
+        repo: null,
+        reason: "当前项目尚未配置 GitHub 仓库",
+      }),
+    ).toContain("No GitHub repository configured");
   });
 });

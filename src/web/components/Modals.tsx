@@ -53,7 +53,14 @@ import {
   useProjectQuery,
   useRequirementQuery,
 } from "../queries.ts";
-import { describeClientErrorRef, t, translateRef, type MessageKey } from "../i18n.ts";
+import {
+  describeClientErrorRef,
+  formatGiteeStatusReason,
+  formatGitHubStatusReason,
+  t,
+  translateRef,
+  type MessageKey,
+} from "../i18n.ts";
 import { effortLabel, formatDateTime, formatReviewFixFeedback, getModelEffortCapability, parseRunnerKey } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
@@ -223,7 +230,7 @@ export function Modals() {
                 <span>
                   {t(language, "newReq.syncIssue")}
                   {githubStatus?.repo ? ` (${githubStatus.repo})` : ""}
-                  {githubStatus && !githubStatus.ready ? ` — ${githubStatus.reason}` : ""}
+                  {githubStatus && !githubStatus.ready ? ` — ${formatGitHubStatusReason(language, githubStatus)}` : ""}
                 </span>
               </label>
             )}
@@ -271,7 +278,7 @@ export function Modals() {
           <div data-testid="gitee-import-pane">
             {giteeStatus && !giteeStatus.authenticated ? (
               <div className="callout warning xs" style={{ marginBottom: 10 }}>
-                <div style={{ marginBottom: 6 }}>{giteeStatus.reason ?? t(language, "gitee.needTokenFallback")}</div>
+                <div style={{ marginBottom: 6 }}>{formatGiteeStatusReason(language, giteeStatus)}</div>
                 <button
                   className="btn xs"
                   type="button"
@@ -534,7 +541,7 @@ export function Modals() {
             />
             {githubStatus && !githubStatus.ready && (
               <div className="callout warning xs" style={{ marginTop: 8 }}>
-                {githubStatus.reason}
+                {formatGitHubStatusReason(language, githubStatus)}
               </div>
             )}
             <div className="modal-actions">
@@ -1327,17 +1334,23 @@ export function Modals() {
                       </div>
                       {projProviderValue === "gitee"
                         ? giteeStatus && (
-                            <span className={`badge ${giteeStatus.ready ? "success" : "warning"}`}>
+                            <span
+                              className={`badge ${giteeStatus.ready ? "success" : "warning"}`}
+                              data-testid="project-provider-status"
+                            >
                               {giteeStatus.ready
                                 ? t(language, "gitee.statusReady", { account: giteeStatus.account ?? "authenticated" })
-                                : giteeStatus.reason ?? t(language, "gitee.statusNotReady")}
+                                : formatGiteeStatusReason(language, giteeStatus)}
                             </span>
                           )
                         : githubStatus && (
-                            <span className={`badge ${githubStatus.ready ? "success" : "warning"}`}>
+                            <span
+                              className={`badge ${githubStatus.ready ? "success" : "warning"}`}
+                              data-testid="project-provider-status"
+                            >
                               {githubStatus.ready
                                 ? t(language, "gitee.statusGhReady", { account: githubStatus.account ?? "authenticated" })
-                                : githubStatus.reason ?? t(language, "gitee.statusNotReady")}
+                                : formatGitHubStatusReason(language, githubStatus)}
                             </span>
                           )}
                     </div>
@@ -2393,7 +2406,13 @@ export function Modals() {
     const linkProvider = m.provider ?? (isGiteeProject ? "gitee" : "github");
     const isGiteeLink = linkProvider === "gitee";
     const remoteReady = isGiteeLink ? giteeStatus?.authenticated : githubStatus?.ready;
-    const remoteReason = isGiteeLink ? giteeStatus?.reason : githubStatus?.reason;
+    const remoteReason = isGiteeLink
+      ? giteeStatus
+        ? formatGiteeStatusReason(language, giteeStatus)
+        : null
+      : githubStatus
+        ? formatGitHubStatusReason(language, githubStatus)
+        : null;
 
     const submitLinkIssue = async () => {
       if ((isGiteeLink || m.mode === "link") && !m.issueRef.trim()) {

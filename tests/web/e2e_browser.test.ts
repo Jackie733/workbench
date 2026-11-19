@@ -2016,6 +2016,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await selectLang("zh-CN");
       expect(await readTitle()).toContain("规范与验证");
       expect(await bodyText()).toContain("Agent 已提交技术方案 v1");
+      expect(await bodyText()).toContain("尚未运行验证");
       expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
         "待批准",
       );
@@ -2123,6 +2124,20 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           () => (document.querySelector('[data-testid="project-output-language-select"]') as HTMLSelectElement | null)?.value,
         ),
       ).toBe("en");
+      await page.click('[data-testid="project-provider-gitee"]');
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      const giteeStatusText = await page.evaluate(
+        () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
+      );
+      expect(giteeStatusText.length).toBeGreaterThan(0);
+      expect(/[\u4e00-\u9fff]/.test(giteeStatusText)).toBe(false);
+      await page.click('[data-testid="project-provider-github"]');
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      const githubStatusText = await page.evaluate(
+        () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
+      );
+      expect(githubStatusText.length).toBeGreaterThan(0);
+      expect(/[\u4e00-\u9fff]/.test(githubStatusText)).toBe(false);
       await clickModalAction("routing-modal", "Cancel");
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="open-quick-report-btn"]');
