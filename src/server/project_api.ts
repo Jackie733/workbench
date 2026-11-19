@@ -228,7 +228,7 @@ export interface ProjectApiDeps {
   ) => Promise<DispatchOutcome>;
   broadcastUi: (event: Record<string, unknown>) => void;
   ensureWatcherFor: (projectRoot: string) => void;
-  reloadWebBundle: () => Promise<{ reloaded: boolean }>;
+  reloadWebBundle: (opts?: { manual?: boolean }) => Promise<{ reloaded: boolean }>;
   getHubOutputLanguage: () => OutputLanguage | undefined;
   getGiteeAccessToken?: () => string | null;
   githubDeps?: GitHubCommandDeps;

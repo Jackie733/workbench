@@ -18,6 +18,8 @@ import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Sc
 
 export const DEFAULT_DRAWER_WIDTH = 720;
 export const MIN_DRAWER_WIDTH = 320;
+/** 暂缓热刷新提示的固定 id：重复事件只更新同一条提示，不堆叠。 */
+export const RELOAD_PENDING_TOAST_ID = "web-reload-pending";
 
 function initialDesktopSidebarOpen(): boolean {
   const saved = readStorageItem("wb-sidebar-open");
@@ -46,6 +48,8 @@ export interface UiStoreState {
   layout: LayoutMode;
   query: string;
   homeScrollY: number;
+  /** 有热刷新被暂缓（弹窗/忙碌/输入中），等待空闲后补刷；仅内存态。 */
+  pendingWebReload: boolean;
 
   selectedId: string | null;
   workspaceTab: WorkspaceTab;
@@ -75,6 +79,7 @@ export interface UiStoreState {
   setLayout: (layout: LayoutMode) => void;
   setQuery: (query: string) => void;
   setHomeScrollY: (y: number) => void;
+  setPendingWebReload: (pending: boolean) => void;
   setSelectedId: (id: string | null) => void;
   setWorkspaceTab: (tab: WorkspaceTab) => void;
   setSelectedDiffFile: (file: string | null) => void;
@@ -91,6 +96,8 @@ export interface UiStoreState {
   showToast: (message: string, isError?: boolean) => void;
   showToastKey: (key: MessageKey, params?: MessageParams, isError?: boolean) => void;
   showToastError: (err: unknown) => void;
+  showReloadPendingToast: () => void;
+  dismissReloadPendingToast: () => void;
 }
 
 export const useUiStore = create<UiStoreState>((set) => ({
@@ -107,6 +114,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   layout: "list",
   query: "",
   homeScrollY: 0,
+  pendingWebReload: false,
 
   selectedId: null,
   workspaceTab: "spec",
@@ -151,6 +159,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setLayout: (layout) => set({ layout }),
   setQuery: (query) => set({ query }),
   setHomeScrollY: (homeScrollY) => set({ homeScrollY }),
+  setPendingWebReload: (pendingWebReload) => set({ pendingWebReload }),
   setSelectedId: (selectedId) => set({ selectedId }),
   setWorkspaceTab: (workspaceTab) => set({ workspaceTab }),
   setSelectedDiffFile: (selectedDiffFile) => set({ selectedDiffFile }),
@@ -194,6 +203,19 @@ export const useUiStore = create<UiStoreState>((set) => ({
     } else {
       toast.error(ref.text);
     }
+  },
+  showReloadPendingToast: () => {
+    toast(React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadPending" }), {
+      id: RELOAD_PENDING_TOAST_ID,
+      duration: Number.POSITIVE_INFINITY,
+      action: {
+        label: React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadAction" }),
+        onClick: () => window.location.reload(),
+      },
+    });
+  },
+  dismissReloadPendingToast: () => {
+    toast.dismiss(RELOAD_PENDING_TOAST_ID);
   },
 }));
 

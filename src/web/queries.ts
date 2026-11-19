@@ -171,10 +171,89 @@ export async function invalidateAllWorkbenchQueries(): Promise<void> {
   await queryClient.invalidateQueries();
 }
 
+export type ReloadUiAction = "reload-now" | "defer";
+
+/**
+ * 决定收到 `workbench.reload_ui` 后是立即热刷新还是暂缓。
+ * 纯函数便于单测：手动触发的热重建优先；弹窗/忙碌/输入中一律暂缓，避免打断用户操作。
+ */
+export function resolveReloadUiAction(input: {
+  manual: boolean;
+  modalOpen: boolean;
+  busy: boolean;
+  activeTag?: string | null;
+  contentEditable?: boolean;
+}): ReloadUiAction {
+  if (input.manual) return "reload-now";
+  if (input.modalOpen || input.busy) return "defer";
+  const tag = input.activeTag?.toUpperCase();
+  if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return "defer";
+  if (input.contentEditable === true) return "defer";
+  return "reload-now";
+}
+
 export function useWorkbenchWsSync(enabled = true): void {
   useEffect(() => {
     if (!enabled) return;
     const finishedSeen = new Set<string>();
+
+    let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const readReloadGate = (manual: boolean): ReloadUiAction => {
+      const ui = useUiStore.getState();
+      const active = typeof document !== "undefined" ? document.activeElement : null;
+      return resolveReloadUiAction({
+        manual,
+        modalOpen: ui.modal !== null,
+        busy: ui.busy,
+        activeTag: active?.tagName,
+        contentEditable: active instanceof HTMLElement ? active.isContentEditable : false,
+      });
+    };
+
+    const deferReload = () => {
+      if (reloadTimer !== undefined) {
+        clearTimeout(reloadTimer);
+        reloadTimer = undefined;
+      }
+      const ui = useUiStore.getState();
+      ui.setPendingWebReload(true);
+      ui.showReloadPendingToast();
+    };
+
+    const scheduleReload = (manual: boolean) => {
+      const ui = useUiStore.getState();
+      ui.setPendingWebReload(false);
+      ui.dismissReloadPendingToast();
+      clearTimeout(reloadTimer);
+      ui.showToastKey("toast.reloadNow");
+      reloadTimer = setTimeout(() => {
+        reloadTimer = undefined;
+        // 定时器内复核：180ms 内若用户打开弹窗或开始输入，则转为暂缓而不是打断。
+        if (readReloadGate(manual) === "reload-now") {
+          window.location.reload();
+          return;
+        }
+        deferReload();
+      }, 180);
+    };
+
+    const requestReload = (manual: boolean) => {
+      if (readReloadGate(manual) === "reload-now") scheduleReload(manual);
+      else deferReload();
+    };
+
+    const drainPendingReload = () => {
+      if (!useUiStore.getState().pendingWebReload) return;
+      if (reloadTimer !== undefined) return;
+      if (readReloadGate(false) !== "reload-now") return;
+      scheduleReload(false);
+    };
+
+    const unsubscribeReloadDrain = useUiStore.subscribe(drainPendingReload);
+    const onFocusOut = () => drainPendingReload();
+    if (typeof document !== "undefined") document.addEventListener("focusout", onFocusOut);
+
     const disconnect = connectUiWebSocket((ev) => {
       const type = ev.type;
       if (type === "agent.run.started") {
@@ -250,13 +329,7 @@ export function useWorkbenchWsSync(enabled = true): void {
       }
 
       if (type === "workbench.reload_ui") {
-        const tag = document.activeElement?.tagName;
-        if (tag === "TEXTAREA" || tag === "INPUT") {
-          useUiStore.getState().showToastKey("toast.reloadPending");
-        } else {
-          useUiStore.getState().showToastKey("toast.reloadNow");
-          setTimeout(() => window.location.reload(), 180);
-        }
+        requestReload(ev.manual === true);
         return;
       }
 
@@ -264,7 +337,12 @@ export function useWorkbenchWsSync(enabled = true): void {
         void queryClient.invalidateQueries();
       }
     });
-    return disconnect;
+    return () => {
+      clearTimeout(reloadTimer);
+      unsubscribeReloadDrain();
+      if (typeof document !== "undefined") document.removeEventListener("focusout", onFocusOut);
+      disconnect();
+    };
   }, [enabled]);
 }
 
