@@ -538,5 +538,41 @@ describe("status and error messages", () => {
         }),
       ),
     ).toBe("Invalid Git branch name: bad branch");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("execution_failed", "创建 GitHub Issue 失败: API rate limit exceeded", {
+          messageKey: "github.errCreateIssueFailedDetail",
+          messageParams: { detail: "API rate limit exceeded" },
+        }),
+      ),
+    ).toBe("Failed to create GitHub Issue: API rate limit exceeded");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("execution_failed", "创建 GitHub PR 失败: Permission denied", {
+          messageKey: "github.errCreatePrFailedDetail",
+          messageParams: { detail: "Permission denied" },
+        }),
+      ),
+    ).toBe("Failed to create GitHub PR: Permission denied");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("execution_failed", "查询 PR #42 状态失败: Could not resolve", {
+          messageKey: "github.errViewPrFailedDetail",
+          messageParams: { number: 42, detail: "Could not resolve" },
+        }),
+      ),
+    ).toBe("Failed to query PR #42 status: Could not resolve");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("revision_conflict", "本地分支 feat/demo 已存在", {
+          messageKey: "git.errBranchExists",
+          messageParams: { branch: "feat/demo" },
+        }),
+      ),
+    ).toBe("Local branch feat/demo already exists; use another branch name or switch to it first");
   });
 });

@@ -489,18 +489,26 @@ export async function commitFilesInGit(
 ): Promise<{ commitHash: string; shortHash: string; branch: string | null }> {
   const base = canonicalRoot(root);
   if (files.length === 0) {
-    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件");
+    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件", {
+      messageKey: "git.errCommitNoFiles",
+    });
   }
   const addRes = await execGit(base, ["add", "--", ...files], 30_000);
   if (addRes.code !== 0) {
     const msg = addRes.stderr.toString("utf8").trim() || addRes.stdout.toString("utf8").trim();
-    throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`, {
+      messageKey: msg ? "git.errStageFailedDetail" : "git.errStageFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const commitRes = await execGit(base, ["commit", "--only", "-F", "-", "--", ...files], 30_000, commitMessage);
   if (commitRes.code !== 0) {
     const msg = commitRes.stderr.toString("utf8").trim() || commitRes.stdout.toString("utf8").trim();
-    throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`, {
+      messageKey: msg ? "git.errCommitFailedDetail" : "git.errCommitFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const headRes = await execGit(base, ["rev-parse", "HEAD"]);
@@ -511,7 +519,9 @@ export async function commitFilesInGit(
   const rawBranch = branchRes.code === 0 ? branchRes.stdout.toString("utf8").trim() : "";
   const branch = rawBranch && rawBranch !== "HEAD" ? rawBranch : null;
   if (!commitHash) {
-    throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希");
+    throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希", {
+      messageKey: "git.errCommitNoHash",
+    });
   }
   return { commitHash, shortHash, branch };
 }
@@ -632,12 +642,18 @@ export async function createFeatureBranchAtHead(root: string, branchName: string
 
   const exists = await execGit(base, ["rev-parse", "--verify", `refs/heads/${safeBranch}`]);
   if (exists.code === 0) {
-    throw new WorkbenchError("revision_conflict", `本地分支 ${safeBranch} 已存在，请换用其他分支名或先切换过去`);
+    throw new WorkbenchError("revision_conflict", `本地分支 ${safeBranch} 已存在，请换用其他分支名或先切换过去`, {
+      messageKey: "git.errBranchExists",
+      messageParams: { branch: safeBranch },
+    });
   }
   const createRes = await execGit(base, ["checkout", "-b", safeBranch], 15_000);
   if (createRes.code !== 0) {
     const msg = sanitizeOutput(createRes.stderr.toString("utf8").trim() || createRes.stdout.toString("utf8").trim(), 512).text;
-    throw new WorkbenchError("execution_failed", `创建分支 ${safeBranch} 失败: ${msg || "git checkout -b 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建分支 ${safeBranch} 失败: ${msg || "git checkout -b 返回非零"}`, {
+      messageKey: msg ? "git.errCreateBranchFailedDetail" : "git.errCreateBranchFailed",
+      messageParams: msg ? { branch: safeBranch, detail: msg } : { branch: safeBranch },
+    });
   }
   return safeBranch;
 }
@@ -650,7 +666,10 @@ export async function pushBranchToRemote(root: string, branchName: string, remot
   if (res.code !== 0) {
     const raw = res.stderr.toString("utf8").trim() || res.stdout.toString("utf8").trim();
     const msg = sanitizeOutput(raw, 800).text;
-    throw new WorkbenchError("execution_failed", `推送分支 ${safeBranch} 至 ${remote} 失败: ${msg || "git push 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `推送分支 ${safeBranch} 至 ${remote} 失败: ${msg || "git push 返回非零"}`, {
+      messageKey: msg ? "git.errPushFailedDetail" : "git.errPushFailed",
+      messageParams: msg ? { branch: safeBranch, remote, detail: msg } : { branch: safeBranch, remote },
+    });
   }
 }
 

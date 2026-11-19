@@ -1297,7 +1297,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         if (!detail.state.github?.issue || !detail.state.github?.repo) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`);
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`, {
+            messageKey: "github.errIssueNotLinked",
+            messageParams: { id },
+          });
         }
         const targetState =
           body.state === "closed" || body.state === "open"
@@ -1342,7 +1345,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(base);
         const current = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         if (!current.state.github?.repo || !current.state.github?.pr) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 PR`);
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 PR`, {
+            messageKey: "github.errPrNotLinked",
+            messageParams: { id },
+          });
         }
         const isGiteePr =
           current.state.github.provider === "gitee" || /gitee\.com/i.test(current.state.github.pr.url);
