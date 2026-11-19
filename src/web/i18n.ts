@@ -8,7 +8,7 @@ export type UiLanguage = (typeof UI_LANGUAGES)[number];
 export const DEFAULT_UI_LANGUAGE: UiLanguage = "zh-CN";
 export const UI_LANGUAGE_STORAGE_KEY = "wb-ui-language";
 
-export type MessageParamValue = string | number | UiMessageRef | undefined | null;
+export type MessageParamValue = string | number | UiMessageRef | UiMessageRef[] | undefined | null;
 export type MessageParams = Record<string, MessageParamValue>;
 export interface UiMessageRef {
   key: string;
@@ -1061,6 +1061,18 @@ const zhCN = {
   "git.errPushFailedDetail": "推送分支 {branch} 至 {remote} 失败：{detail}",
   "deliver.errNoFilesOrCommits": "请至少选择 1 个要提交的文件，或确保分支已有未推送提交",
   "deliver.errNoHeadInfo": "无法读取分支最新提交信息",
+  "accept.errMissingSnapshotHash": "缺少有效的当前代码快照指纹，无法完成验收",
+  "accept.errMissingCodeRoot": "代码根目录不存在，无法捕获验收快照",
+  "accept.errRevisionConflict": "版本冲突：期望修订为 {expected}，当前为 {actual}",
+  "accept.errInvalidStage": "当前阶段（{stage}）无法执行验收通过",
+  "accept.errGateBlocked": "验收门禁未通过：{blockers}",
+  "accept.errReviewBlockRequiresOverride": "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由",
+  "accept.errBaselineUnavailable": "验收基线在当前仓库中不可用，无法捕获可信的基线相对 Diff",
+  "accept.errDiffUnavailable": "无法捕获验收代码差异快照",
+  "accept.errWorkspaceChanged": "代码工作区在验收采集期间发生变化，请刷新状态与 Diff 后重试",
+  "accept.errNotGitRepo": "目标目录已不再是 Git 仓库，无法捕获验收快照",
+  "accept.errBaselineChanged": "需求基线在验收期间发生变化，请刷新后重试",
+  "accept.errWorkspaceChangedOnSave": "代码工作区在验收提交期间发生变化，已拒绝落盘，请刷新后重试",
   "gitee.repoLabel": "Gitee 仓库（owner/repo，留空自动识别）",
   "gitee.enterpriseLabel": "企业空间路径（用于拉取无仓库工作项）",
   "gitee.baseBranchLabel": "PR 默认 Base 分支",
@@ -2164,6 +2176,18 @@ const en: Record<MessageKey, string> = {
   "git.errPushFailedDetail": "Failed to push branch {branch} to {remote}: {detail}",
   "deliver.errNoFilesOrCommits": "Select at least 1 file to commit, or ensure the branch has unpushed commits",
   "deliver.errNoHeadInfo": "Unable to read the latest commit on the branch",
+  "accept.errMissingSnapshotHash": "Missing a valid code snapshot fingerprint; cannot complete acceptance",
+  "accept.errMissingCodeRoot": "Code root directory does not exist; cannot capture acceptance snapshot",
+  "accept.errRevisionConflict": "Revision conflict: expected {expected}, found {actual}",
+  "accept.errInvalidStage": "Current stage ({stage}) does not allow acceptance",
+  "accept.errGateBlocked": "Acceptance gate failed: {blockers}",
+  "accept.errReviewBlockRequiresOverride": "A current cross-model review has blocking findings; provide an override reason to accept",
+  "accept.errBaselineUnavailable": "Acceptance baseline is unavailable in this repository; cannot capture reliable baseline-relative diff",
+  "accept.errDiffUnavailable": "Unable to capture acceptance code diff snapshot",
+  "accept.errWorkspaceChanged": "Workspace files changed while capturing acceptance state; refresh status & diff and try again",
+  "accept.errNotGitRepo": "Target directory is no longer a Git repository; cannot capture acceptance snapshot",
+  "accept.errBaselineChanged": "Requirement baseline changed during acceptance; refresh and try again",
+  "accept.errWorkspaceChangedOnSave": "Workspace changed while saving acceptance; rejected write — refresh and try again",
   "gitee.repoLabel": "Gitee repository (owner/repo, blank to auto-detect)",
   "gitee.enterpriseLabel": "Enterprise slug (for repo-less work items)",
   "gitee.baseBranchLabel": "Default PR base branch",
@@ -2282,6 +2306,13 @@ function interpolate(template: string, params?: MessageParams, language: UiLangu
   return template.replace(/\{(\w+)\}/g, (match, name: string) => {
     const value = params[name];
     if (value === undefined || value === null) return match;
+    if (Array.isArray(value)) {
+      const sep = language === "en" ? "; " : "；";
+      return value
+        .map((item) => (hasMessage(item.key) ? t(language, item.key, item.params) : (item.key ?? "")))
+        .filter(Boolean)
+        .join(sep);
+    }
     if (typeof value === "object") {
       return hasMessage(value.key) ? t(language, value.key, value.params) : (value.key ?? match);
     }
@@ -2436,6 +2467,22 @@ export function describeClientErrorRef(err: unknown): LocalizedError {
           key: "gitee.networkError",
           params: { detail },
           text: detail,
+        };
+      }
+    }
+    if (err.code === "acceptance_gate_failed" && Array.isArray(err.details?.blockerRefs)) {
+      const validRefs = (err.details.blockerRefs as unknown[]).filter(
+        (r): r is UiMessageRef =>
+          Boolean(r) &&
+          typeof r === "object" &&
+          typeof (r as { key?: unknown }).key === "string" &&
+          hasMessage((r as { key: string }).key),
+      );
+      if (validRefs.length > 0) {
+        return {
+          key: "accept.errGateBlocked",
+          params: { blockers: validRefs },
+          text: err.message?.trim() ?? "",
         };
       }
     }

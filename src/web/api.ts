@@ -267,6 +267,7 @@ export const api = {
       workbenchProjectId: string;
       sandbox: SandboxRecord | null;
       githubIssueWarning?: string;
+      githubIssueWarningRef?: StructuredMessageRef;
     }>(`/api/hub/evolution/${encodeURIComponent(id)}/promote`, {
       method: "POST",
       body: JSON.stringify(input ?? {}),

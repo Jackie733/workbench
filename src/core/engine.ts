@@ -1032,7 +1032,10 @@ export async function updateTasks(
         throw new WorkbenchError(
           "acceptance_gate_failed",
           `尚不满足提交验收条件：${validity.acceptanceGate.blockers.join("；")}`,
-          { blockers: validity.acceptanceGate.blockers },
+          {
+            blockers: validity.acceptanceGate.blockers,
+            ...(validity.acceptanceGate.blockerRefs ? { blockerRefs: validity.acceptanceGate.blockerRefs } : {}),
+          },
         );
       }
       nextStage = "awaiting_acceptance";
@@ -1296,14 +1299,18 @@ export async function acceptRequirement(
   },
 ): Promise<RequirementDetail> {
   if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
-    throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收");
+    throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收", {
+      messageKey: "accept.errMissingSnapshotHash",
+    });
   }
   const base = canonicalRoot(root);
   const snapshotHash = input.currentCodeSnapshotHash;
   const codeRoot = resolveCodeRoot(base, id);
   const codeRootKind = codeRoot !== base ? "sandbox" : "project";
   if (!fs.existsSync(codeRoot)) {
-    throw new WorkbenchError("acceptance_gate_failed", "代码根目录不存在，无法捕获验收快照");
+    throw new WorkbenchError("acceptance_gate_failed", "代码根目录不存在，无法捕获验收快照", {
+      messageKey: "accept.errMissingCodeRoot",
+    });
   }
 
   // Pre-flight gate & baseline-relative change capture outside the lock to keep lock hold minimal.
@@ -1312,18 +1319,32 @@ export async function acceptRequirement(
     throw new WorkbenchError(
       "revision_conflict",
       `版本冲突：期望 revision=${input.expectedRevision}，实际 revision=${preBundle.state.revision}`,
-      { expectedRevision: input.expectedRevision, actualRevision: preBundle.state.revision },
+      {
+        expectedRevision: input.expectedRevision,
+        actualRevision: preBundle.state.revision,
+        messageKey: "accept.errRevisionConflict",
+        messageParams: {
+          expected: input.expectedRevision,
+          actual: preBundle.state.revision,
+        },
+      },
     );
   }
   if (preBundle.state.stage !== "implementing" && preBundle.state.stage !== "awaiting_acceptance") {
-    throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`);
+    throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`, {
+      messageKey: "accept.errInvalidStage",
+      messageParams: { stage: preBundle.state.stage },
+    });
   }
   const preValidity = evaluateRequirement(preBundle.state, snapshotHash);
   if (!preValidity.acceptanceGate.ok) {
     throw new WorkbenchError(
       "acceptance_gate_failed",
       `验收门禁未通过：${preValidity.acceptanceGate.blockers.join("；")}`,
-      { blockers: preValidity.acceptanceGate.blockers },
+      {
+        blockers: preValidity.acceptanceGate.blockers,
+        ...(preValidity.acceptanceGate.blockerRefs ? { blockerRefs: preValidity.acceptanceGate.blockerRefs } : {}),
+      },
     );
   }
   const overrideReason = input.overrideReason?.trim()
@@ -1337,7 +1358,10 @@ export async function acceptRequirement(
     throw new WorkbenchError(
       "acceptance_gate_failed",
       "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
-      { reviewVerdict: "block" },
+      {
+        reviewVerdict: "block",
+        messageKey: "accept.errReviewBlockRequiresOverride",
+      },
     );
   }
 
@@ -1352,22 +1376,27 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "验收基线在当前仓库中不可用，无法捕获可信的基线相对 Diff",
+        { messageKey: "accept.errBaselineUnavailable" },
       );
     }
     if (gitObs.diffStatus === "unavailable") {
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "无法捕获验收代码差异快照",
+        { messageKey: "accept.errDiffUnavailable" },
       );
     }
     if (gitObs.fingerprint !== snapshotHash) {
       throw new WorkbenchError(
         "revision_conflict",
         "代码工作区在验收采集期间发生变化，请刷新状态与 Diff 后重试",
+        { messageKey: "accept.errWorkspaceChanged" },
       );
     }
   } else if (baselineHead) {
-    throw new WorkbenchError("acceptance_gate_failed", "目标目录已不再是 Git 仓库，无法捕获验收快照");
+    throw new WorkbenchError("acceptance_gate_failed", "目标目录已不再是 Git 仓库，无法捕获验收快照", {
+      messageKey: "accept.errNotGitRepo",
+    });
   }
 
   const sanitized = sanitizeOutput(gitObs.diff, MAX_ACCEPTANCE_DIFF_BYTES);
@@ -1379,10 +1408,15 @@ export async function acceptRequirement(
   const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
     const { state } = current;
     if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
-      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`);
+      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`, {
+        messageKey: "accept.errInvalidStage",
+        messageParams: { stage: state.stage },
+      });
     }
     if ((state.baseline?.head ?? null) !== baselineHead) {
-      throw new WorkbenchError("revision_conflict", "需求基线在验收期间发生变化，请刷新后重试");
+      throw new WorkbenchError("revision_conflict", "需求基线在验收期间发生变化，请刷新后重试", {
+        messageKey: "accept.errBaselineChanged",
+      });
     }
 
     const validity = evaluateRequirement(state, snapshotHash);
@@ -1390,7 +1424,10 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         `验收门禁未通过：${validity.acceptanceGate.blockers.join("；")}`,
-        { blockers: validity.acceptanceGate.blockers },
+        {
+          blockers: validity.acceptanceGate.blockers,
+          ...(validity.acceptanceGate.blockerRefs ? { blockerRefs: validity.acceptanceGate.blockerRefs } : {}),
+        },
       );
     }
     if (
@@ -1401,7 +1438,10 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
-        { reviewVerdict: "block" },
+        {
+          reviewVerdict: "block",
+          messageKey: "accept.errReviewBlockRequiresOverride",
+        },
       );
     }
 
@@ -1411,6 +1451,7 @@ export async function acceptRequirement(
         throw new WorkbenchError(
           "revision_conflict",
           "代码工作区在验收提交期间发生变化，已拒绝落盘，请刷新后重试",
+          { messageKey: "accept.errWorkspaceChangedOnSave" },
         );
       }
     }

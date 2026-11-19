@@ -19,6 +19,7 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
+import type { StructuredMessageRef } from "../../core/errors.ts";
 import type { GitRemoteProvider, OutputLanguage, PrivacyMode } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
@@ -1803,7 +1804,12 @@ export function Modals() {
             urlPath: typeof window !== "undefined" ? window.location.pathname : undefined,
           },
         });
-        let promoted: { id: string; projectId: string; warning?: string } | null = null;
+        let promoted: {
+          id: string;
+          projectId: string;
+          warning?: string;
+          warningRef?: StructuredMessageRef;
+        } | null = null;
         if (m.autoPromote && rep.painPoint) {
           const out = await api.promotePainPoint(rep.painPoint.id, {
             createSandbox: true,
@@ -1813,6 +1819,7 @@ export function Modals() {
             id: out.requirement.state.id,
             projectId: out.workbenchProjectId,
             warning: out.githubIssueWarning,
+            warningRef: out.githubIssueWarningRef,
           };
         }
         return { painPoint: rep.painPoint, promoted };
@@ -1825,7 +1832,14 @@ export function Modals() {
           setActiveProjectId(res.promoted.projectId);
           await openRequirement(res.promoted.id);
           if (res.promoted.warning) {
-            showToastKey("report.promotedWarn", { id: res.promoted.id, warning: res.promoted.warning }, true);
+            showToastKey(
+              "report.promotedWarn",
+              {
+                id: res.promoted.id,
+                warning: resolveWarningParam(res.promoted.warning, res.promoted.warningRef),
+              },
+              true,
+            );
           } else {
             showToastKey("report.promoted", { id: res.promoted.id });
           }
@@ -1983,10 +1997,21 @@ export function Modals() {
       const out = await runBusy(() => api.promotePainPoint(painId, { createSandbox: true }));
       if (out) {
         await invalidateAllWorkbenchQueries();
-        showToastKey(
-          out.sandbox ? "evo.createdSandbox" : "evo.created",
-          { id: out.requirement.state.id },
-        );
+        if (out.githubIssueWarning) {
+          showToastKey(
+            "report.promotedWarn",
+            {
+              id: out.requirement.state.id,
+              warning: resolveWarningParam(out.githubIssueWarning, out.githubIssueWarningRef),
+            },
+            true,
+          );
+        } else {
+          showToastKey(
+            out.sandbox ? "evo.createdSandbox" : "evo.created",
+            { id: out.requirement.state.id },
+          );
+        }
         await openWorkbenchReq(out.requirement.state.id, out.workbenchProjectId);
       }
     };

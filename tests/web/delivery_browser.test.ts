@@ -10,6 +10,7 @@ import {
   initProject,
   linkRequirementGitHubIssue,
   propose,
+  updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
@@ -460,6 +461,131 @@ describe("post-acceptance delivery wrap-up UI", () => {
             .find((txt) => txt.includes("Created PR #42")) ?? "",
       );
       expect(/[\u4e00-\u9fff]/.test(deliverWarnToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes quick report issue sync warnings and acceptance gate blocker errors in English UI", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "workbench", version: "5.0.0" }, null, 2));
+    execFileSync("git", ["add", "package.json"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add package.json"], { cwd: repo, stdio: "ignore" });
+    await initProject(repo, { name: "workbench", privacyMode: "local" });
+
+    // Prepare REQ-001 ready for acceptance so we can trigger a server-side gate blocker via snapshot drift.
+    await createRequirement(repo, {
+      goal: "Verify acceptance error localization",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    await updateTasks(repo, "REQ-001", {
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: (await observeGitSnapshot(repo))?.fingerprint ?? null,
+    });
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/workbench.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          return { code: 1, stdout: "", stderr: "API quota exceeded" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 1. Acceptance gate blocker error from UI Accept click localizes blockers in English & re-renders in Chinese.
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
+      // Dirty tracked file right before Accept so server observes stale verification against current snapshot.
+      fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 99;\n");
+      await page.click('[data-testid="action-accept"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+            (el) =>
+              (el.textContent ?? "").includes("Acceptance gate failed:") &&
+              (el.textContent ?? "").includes("AC-1"),
+          ),
+        { timeout: 10_000 },
+      );
+      const enAcceptErr = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Acceptance gate failed:")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(enAcceptErr)).toBe(false);
+
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+            (el) =>
+              (el.textContent ?? "").includes("验收门禁未通过：") &&
+              (el.textContent ?? "").includes("AC-1"),
+          ),
+        { timeout: 10_000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 2. Quick report auto-promote with GitHub issue creation failing -> localized English warning toast.
+      await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-title"]', { timeout: 10_000 });
+      await page.type('[data-testid="quick-report-title"]', "Broken alignment");
+      const autoPromoteChecked = await page.evaluate(
+        () => Boolean((document.querySelector('[data-testid="quick-report-autopromote"]') as HTMLInputElement | null)?.checked),
+      );
+      if (!autoPromoteChecked) await page.click('[data-testid="quick-report-autopromote"]');
+      await page.waitForSelector('[data-testid="quick-report-create-issue"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      const createIssueChecked = await page.evaluate(
+        () => Boolean((document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.checked),
+      );
+      if (!createIssueChecked) await page.click('[data-testid="quick-report-create-issue"]');
+      await page.click('[data-testid="submit-quick-report-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "Created requirement REQ-002 with a sandbox (issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const quickWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("issue sync warning: Failed to create GitHub Issue")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(quickWarnToast)).toBe(false);
     } finally {
       await page.close();
     }

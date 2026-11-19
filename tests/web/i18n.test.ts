@@ -624,5 +624,46 @@ describe("status and error messages", () => {
     expect(t("en", "deliver.prCreatedWarn", { num: 42, warning: syncWarn })).toBe(
       "Created PR #42 (issue sync warning: Failed to comment on Issue #12: Upstream sync blocked)",
     );
+
+    const reportWarn = resolveWarningParam("创建 GitHub Issue 失败: API quota exceeded", {
+      key: "github.errCreateIssueFailedDetail",
+      params: { detail: "API quota exceeded" },
+    });
+    expect(t("en", "report.promotedWarn", { id: "REQ-010", warning: reportWarn })).toBe(
+      "Created requirement REQ-010 with a sandbox (issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
+    );
+
+    const gateErr = new ApiClientError("acceptance_gate_failed", "验收门禁未通过", {
+      blockers: ["尚未获得实施授权", "仍有 1 项必需验收条件未在当前代码快照下通过（AC-1）"],
+      blockerRefs: [
+        { key: "core.approval.notApproved" },
+        { key: "core.gate.missing", params: { count: 1, ids: "AC-1" } },
+      ],
+    });
+    const enGate = describeClientError("en", gateErr);
+    expect(enGate).toContain("Acceptance gate failed:");
+    expect(enGate).toContain("The design is not approved yet");
+    expect(enGate).toContain("AC-1");
+    expect(/[\u4e00-\u9fff]/.test(enGate)).toBe(false);
+    const zhGate = describeClientError("zh-CN", gateErr);
+    expect(zhGate).toContain("验收门禁未通过：");
+    expect(zhGate).toContain("AC-1");
+
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收", {
+          messageKey: "accept.errMissingSnapshotHash",
+        }),
+      ),
+    ).toBe("Missing a valid code snapshot fingerprint; cannot complete acceptance");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("acceptance_gate_failed", "需要 overrideReason", {
+          messageKey: "accept.errReviewBlockRequiresOverride",
+        }),
+      ),
+    ).toContain("blocking findings");
   });
 });
