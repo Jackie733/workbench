@@ -5,12 +5,10 @@ import {
   Root as PopoverRoot,
   Trigger as PopoverTrigger,
 } from "@radix-ui/react-popover";
-import { Command } from "cmdk";
-import { Check, ChevronsUpDown, Cpu, Gauge, Search } from "lucide-react";
+import { ChevronsUpDown, Cpu, Gauge } from "lucide-react";
 import type { AgentAction } from "../../../core/types.ts";
 import type { ReasoningEffort } from "../../../hub/types.ts";
 import { t } from "../../i18n.ts";
-import { cn } from "../../lib/utils.ts";
 import { useHubStateQuery } from "../../queries.ts";
 import {
   activeRunnerChoice,
@@ -21,6 +19,7 @@ import {
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { Icon } from "../Icon.tsx";
+import { ModelPickerMenu, type ModelPickerShortcut } from "./ModelPickerMenu.tsx";
 
 export function ModelRunnerBar({
   stageAction,
@@ -51,19 +50,6 @@ export function ModelRunnerBar({
       ? "manual_copy"
       : selectedRunnerKey || (choice.harness && choice.model ? `${choice.harness}::${choice.model}` : "");
 
-  const groupedOptions = useMemo(() => {
-    const groups = new Map<string, { label: string; items: typeof modelOptions }>();
-    for (const o of modelOptions) {
-      let g = groups.get(o.harnessId);
-      if (!g) {
-        g = { label: o.harnessLabel, items: [] };
-        groups.set(o.harnessId, g);
-      }
-      g.items.push(o);
-    }
-    return Array.from(groups.values());
-  }, [modelOptions]);
-
   const effortCap = useMemo(
     () => getModelEffortCapability(harnesses, choice.harness, choice.model),
     [harnesses, choice.harness, choice.model],
@@ -74,6 +60,36 @@ export function ModelRunnerBar({
   const effortValue =
     selectedEffort && efforts.includes(selectedEffort) ? selectedEffort : "";
 
+  const shortcuts = useMemo<ModelPickerShortcut[]>(() => {
+    const items: ModelPickerShortcut[] = [
+      {
+        key: "default",
+        value: "__auto__ 默认路由 自动路由 auto routing default",
+        content: `${t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}${
+          choice.harness ? ` (${choice.harness}/${choice.model ?? ""})` : ""
+        }`,
+        selected: selectedRunnerKey === "",
+        onSelect: () => {
+          setSelectedRunnerKey("", stageAction);
+          setOpen(false);
+        },
+      },
+    ];
+    if (includeManualCopy) {
+      items.push({
+        key: "manual_copy",
+        value: "manual_copy 仅生成提示词 手动复制 manual copy prompt",
+        content: t(language, "runner.manual"),
+        selected: selectedRunnerKey === "manual_copy",
+        onSelect: () => {
+          setSelectedRunnerKey("manual_copy", stageAction);
+          setOpen(false);
+        },
+      });
+    }
+    return items;
+  }, [language, includeManualCopy, choice.harness, choice.model, selectedRunnerKey, setSelectedRunnerKey, stageAction]);
+
   const currentDisplay =
     selectedRunnerKey === "manual_copy"
       ? t(language, "runner.manual")
@@ -82,13 +98,6 @@ export function ModelRunnerBar({
         : choice.harness
           ? `${t(language, includeManualCopy ? "runner.auto" : "runner.default")} (${choice.harness}/${choice.model ?? ""})`
           : t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute");
-
-  const tierTone = (tier: string) => {
-    if (tier === "sota") return "bg-blue-500/10 text-blue-600 dark:text-blue-400";
-    if (tier === "fast") return "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-    if (tier === "review") return "bg-amber-500/10 text-amber-600 dark:text-amber-400";
-    return "bg-zinc-500/10 text-zinc-500 dark:text-zinc-400";
-  };
 
   return (
     <div className="inline-flex items-center gap-1.5 flex-wrap">
@@ -135,85 +144,16 @@ export function ModelRunnerBar({
             sideOffset={6}
             className="z-[80] w-[340px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
           >
-            <Command className="flex flex-col max-h-[360px]">
-              <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
-                <Icon icon={Search} size={14} className="text-[var(--muted)] shrink-0" />
-                <Command.Input
-                  placeholder={t(language, "runner.searchPlaceholder")}
-                  className="w-full bg-transparent text-[12.5px] outline-none placeholder:text-[var(--muted)]"
-                />
-              </div>
-              <Command.List className="overflow-y-auto p-1.5 flex-1">
-                <Command.Empty className="py-6 text-center text-xs text-[var(--muted)]">
-                  {t(language, "runner.noMatch")}
-                </Command.Empty>
-                <Command.Group heading={t(language, "runner.quickPresets")} className="cmdk-group">
-                  <Command.Item
-                    value="__auto__ 默认路由 自动路由 auto routing default"
-                    onSelect={() => {
-                      setSelectedRunnerKey("", stageAction);
-                      setOpen(false);
-                    }}
-                    className={cn(
-                      "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer aria-selected:bg-[var(--accent-soft)]",
-                      selectedRunnerKey === "" && "font-semibold text-[var(--accent)]",
-                    )}
-                  >
-                    <span>
-                      {t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}
-                      {choice.harness ? ` (${choice.harness}/${choice.model})` : ""}
-                    </span>
-                    {selectedRunnerKey === "" && <Icon icon={Check} size={14} />}
-                  </Command.Item>
-                  {includeManualCopy && (
-                    <Command.Item
-                      value="manual_copy 仅生成提示词 手动复制 manual copy prompt"
-                      onSelect={() => {
-                        setSelectedRunnerKey("manual_copy", stageAction);
-                        setOpen(false);
-                      }}
-                      className={cn(
-                        "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer aria-selected:bg-[var(--accent-soft)]",
-                        selectedRunnerKey === "manual_copy" && "font-semibold text-[var(--accent)]",
-                      )}
-                    >
-                      <span>{t(language, "runner.manual")}</span>
-                      {selectedRunnerKey === "manual_copy" && <Icon icon={Check} size={14} />}
-                    </Command.Item>
-                  )}
-                </Command.Group>
-
-                {groupedOptions.map((g) => (
-                  <Command.Group key={g.label} heading={g.label} className="cmdk-group">
-                    {g.items.map((o) => (
-                      <Command.Item
-                        key={o.key}
-                        value={`${o.harnessId} ${o.harnessLabel} ${o.modelId} ${o.displayLabel} ${o.provider ?? ""}`}
-                        onSelect={() => {
-                          setSelectedRunnerKey(o.key, stageAction);
-                          setOpen(false);
-                        }}
-                        className={cn(
-                          "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer aria-selected:bg-[var(--accent-soft)]",
-                          selectedKey === o.key && "font-semibold text-[var(--accent)]",
-                        )}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-mono text-[11.5px]">{o.modelId}</div>
-                          {o.displayLabel !== o.modelId && (
-                            <div className="truncate text-[10.5px] text-[var(--muted)]">{o.displayLabel}</div>
-                          )}
-                        </div>
-                        <span className={cn("px-1.5 py-0.5 rounded text-[10px] uppercase shrink-0", tierTone(o.tier))}>
-                          {o.tier}
-                        </span>
-                        {selectedKey === o.key && <Icon icon={Check} size={14} className="shrink-0" />}
-                      </Command.Item>
-                    ))}
-                  </Command.Group>
-                ))}
-              </Command.List>
-            </Command>
+            <ModelPickerMenu
+              options={modelOptions}
+              selectedKey={selectedKey}
+              shortcuts={shortcuts}
+              testIdPrefix={testId}
+              onSelect={(option) => {
+                setSelectedRunnerKey(option.key, stageAction);
+                setOpen(false);
+              }}
+            />
           </PopoverContent>
         </PopoverPortal>
       </PopoverRoot>

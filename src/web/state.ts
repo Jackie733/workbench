@@ -16,6 +16,7 @@ import type {
   ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
+import { defaultFilter } from "cmdk";
 import { REASONING_EFFORTS, type DiscoveredModel, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
 import type { BrowseResponse, GiteeIssueListItem } from "./api.ts";
@@ -542,32 +543,65 @@ export function supportedEffortsForModel(
   return getModelEffortCapability(harnesses, harnessId, modelId).efforts;
 }
 
-export function collectModelOptions(
-  harnesses: HarnessInfo[],
-): Array<{
+export interface RunnerModelOption {
   key: string;
   label: string;
-  harnessId: HarnessId;
+  harnessId: string;
   harnessLabel: string;
   modelId: string;
   displayLabel: string;
-  tier: DiscoveredModel["tier"];
+  tier: DiscoveredModel["tier"] | "custom";
   provider?: string;
   intelligence?: number;
   isLegacy?: boolean;
-}> {
-  const opts: Array<{
-    key: string;
-    label: string;
-    harnessId: HarnessId;
-    harnessLabel: string;
-    modelId: string;
-    displayLabel: string;
-    tier: DiscoveredModel["tier"];
-    provider?: string;
-    intelligence?: number;
-    isLegacy?: boolean;
-  }> = [];
+  /** 配置弹窗中标记尚未真实探测验证的模型 */
+  unverified?: boolean;
+  /** 配置弹窗中保留的、不在当前 Harness 列表内的已配置模型 */
+  preserved?: boolean;
+}
+
+export interface RunnerModelGroup {
+  key: string;
+  label: string;
+  items: RunnerModelOption[];
+}
+
+export interface RunnerModelSections {
+  favorites: RunnerModelOption[];
+  groups: RunnerModelGroup[];
+}
+
+export function runnerModelSearchText(option: RunnerModelOption): string {
+  return [
+    option.harnessId,
+    option.harnessLabel,
+    option.modelId,
+    option.displayLabel,
+    option.provider ?? "",
+    option.unverified ? "未验证 unverified" : "",
+    option.preserved ? "保留 preserved" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+export function matchesModelQuery(text: string, query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+  return defaultFilter(text, trimmed) > 0;
+}
+
+export function filterRunnerModelOptions(
+  options: RunnerModelOption[],
+  query: string,
+): RunnerModelOption[] {
+  const trimmed = query.trim();
+  if (!trimmed) return options;
+  return options.filter((option) => matchesModelQuery(runnerModelSearchText(option), trimmed));
+}
+
+export function collectModelOptions(harnesses: HarnessInfo[]): RunnerModelOption[] {
+  const opts: RunnerModelOption[] = [];
   for (const h of harnesses) {
     if (!h.installed) continue;
     for (const m of h.models) {
@@ -586,6 +620,78 @@ export function collectModelOptions(
     }
   }
   return opts;
+}
+
+/**
+ * 配置弹窗入口的模型列表：包含未安装 Harness，并保留不在列表中的当前配置值。
+ * 收藏只移动展示位置，不会凭收藏记录凭空生成这里没有的选项。
+ */
+export function collectRoutingModelOptions(
+  harnesses: HarnessInfo[],
+  currentKey?: string,
+  language: UiLanguage = "zh-CN",
+): RunnerModelOption[] {
+  const opts: RunnerModelOption[] = [];
+  for (const h of harnesses) {
+    const harnessLabel = `${h.label} (${h.installed ? h.subscription : t(language, "common.uninstalled")})`;
+    for (const m of h.models) {
+      opts.push({
+        key: `${h.id}::${m.id}`,
+        label: `${h.id} · ${m.id}`,
+        harnessId: h.id,
+        harnessLabel,
+        modelId: m.id,
+        displayLabel: m.label ?? m.id,
+        tier: m.tier,
+        ...(m.provider ? { provider: m.provider } : {}),
+        ...(m.source === "builtin" ? { unverified: true } : {}),
+      });
+    }
+  }
+  if (currentKey && !opts.some((option) => option.key === currentKey)) {
+    const parsed = parseRunnerKey(currentKey);
+    if (parsed) {
+      opts.push({
+        key: currentKey,
+        label: `${parsed.harness} · ${parsed.model}`,
+        harnessId: parsed.harness,
+        harnessLabel: `${parsed.harness} (${t(language, "routing.preservedConfig")})`,
+        modelId: parsed.model,
+        displayLabel: parsed.model,
+        tier: "custom",
+        preserved: true,
+      });
+    }
+  }
+  return opts;
+}
+
+export function groupRunnerModelOptions(options: RunnerModelOption[]): RunnerModelGroup[] {
+  const groups = new Map<string, RunnerModelGroup>();
+  for (const option of options) {
+    let group = groups.get(option.harnessId);
+    if (!group) {
+      group = { key: option.harnessId, label: option.harnessLabel, items: [] };
+      groups.set(option.harnessId, group);
+    }
+    group.items.push(option);
+  }
+  return Array.from(groups.values());
+}
+
+/** 将收藏项提取到独立分组并保持各自原有顺序；未收藏项按 Harness 分组，收藏项不再重复出现。 */
+export function splitFavoriteRunnerModelOptions(
+  options: RunnerModelOption[],
+  favorites: Iterable<string>,
+): RunnerModelSections {
+  const favoriteSet = favorites instanceof Set ? favorites : new Set(favorites);
+  const favoriteItems: RunnerModelOption[] = [];
+  const ordinary: RunnerModelOption[] = [];
+  for (const option of options) {
+    if (favoriteSet.has(option.key)) favoriteItems.push(option);
+    else ordinary.push(option);
+  }
+  return { favorites: favoriteItems, groups: groupRunnerModelOptions(ordinary) };
 }
 
 export function bridgeStatusLabel(bridge: BridgeStatus | undefined, language: UiLanguage = "zh-CN"): string {

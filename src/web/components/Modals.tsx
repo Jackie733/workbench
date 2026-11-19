@@ -74,6 +74,7 @@ import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell } from "./Primitives.tsx";
+import { RoutingModelPicker } from "./ui/RoutingModelPicker.tsx";
 
 const STAGE_LABEL_KEYS: Record<RoutingStage, MessageKey> = {
   design: "routing.stage.design",
@@ -996,12 +997,37 @@ export function Modals() {
                 {ROUTING_STAGES.map((stg) => {
                   const rule = cfg.stages[stg];
                   const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
-                  const customInList = harnesses.some(
-                    (h) => h.id === rule.primary.harness && h.models.some((x) => x.id === rule.primary.model),
-                  );
                   const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
                   const efforts = effortCap.efforts;
                   const lockedEffort = effortCap.defaultEffort ?? efforts[0];
+
+                  const changePrimaryModel = (key: string) => {
+                    const parsed = parseRunnerKey(key);
+                    if (!parsed || !cfg) return;
+                    const { harness, model } = parsed;
+                    const nextCap = getModelEffortCapability(harnesses, harness, model);
+                    const keepEffort =
+                      nextCap.mode === "configurable" &&
+                      rule.primary.reasoningEffort &&
+                      nextCap.efforts.includes(rule.primary.reasoningEffort)
+                        ? rule.primary.reasoningEffort
+                        : undefined;
+                    const nextCfg = {
+                      ...cfg,
+                      stages: {
+                        ...cfg.stages,
+                        [stg]: {
+                          ...cfg.stages[stg],
+                          primary: {
+                            harness: harness as HarnessId,
+                            model,
+                            ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
+                          },
+                        },
+                      },
+                    };
+                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                  };
 
                   return (
                     <div key={stg} className="routing-row">
@@ -1016,60 +1042,13 @@ export function Modals() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <select
-                          className="select min-w-[230px]"
-                          data-testid={`route-select-${stg}`}
+                        <RoutingModelPicker
+                          testId={`route-select-${stg}`}
+                          harnesses={harnesses}
                           value={selectedVal}
-                          onChange={(e) => {
-                            const parsed = parseRunnerKey(e.target.value);
-                            if (!parsed || !cfg) return;
-                            const { harness, model } = parsed;
-                            const nextCap = getModelEffortCapability(harnesses, harness, model);
-                            const keepEffort =
-                              nextCap.mode === "configurable" &&
-                              rule.primary.reasoningEffort &&
-                              nextCap.efforts.includes(rule.primary.reasoningEffort)
-                                ? rule.primary.reasoningEffort
-                                : undefined;
-                            const nextCfg = {
-                              ...cfg,
-                              stages: {
-                                ...cfg.stages,
-                                [stg]: {
-                                  ...cfg.stages[stg],
-                                  primary: {
-                                    harness: harness as HarnessId,
-                                    model,
-                                    ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
-                                  },
-                                },
-                              },
-                            };
-                            setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                          }}
-                        >
-                          {!customInList && (
-                            <option value={selectedVal}>
-                              {rule.primary.harness} · {rule.primary.model}
-                            </option>
-                          )}
-                          {harnesses.map((h) => (
-                            <optgroup
-                              key={h.id}
-                              label={`${h.label} (${h.installed ? h.subscription : t(language, "common.uninstalled")})`}
-                            >
-                              {h.models.map((mod) => {
-                                const val = `${h.id}::${mod.id}`;
-                                return (
-                                  <option key={val} value={val}>
-                                    {h.id} · {mod.id}
-                                    {mod.source === "builtin" ? ` · ${t(language, "routing.unverified")}` : ""}
-                                  </option>
-                                );
-                              })}
-                            </optgroup>
-                          ))}
-                        </select>
+                          onChange={changePrimaryModel}
+                          ariaLabel={t(language, "routing.primaryModelAria", { stage: t(language, STAGE_LABEL_KEYS[stg]) })}
+                        />
                         {effortCap.mode === "configurable" ? (
                           <select
                             className="select font-mono w-[135px]"
