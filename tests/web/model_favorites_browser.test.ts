@@ -443,6 +443,27 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       expect(enPickerText.favLabel).toContain("Unfavorite");
       await page.keyboard.press("Escape");
 
+      // 工作台模型选择器选中模型并设置推理强度后，重复点选同一模型保留已选推理强度
+      await openRunnerPicker(page);
+      await clickReady(page, '[data-testid="banner-runner-select-option-codex::gpt-6.1-sol"]');
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="banner-runner-select-search"]'),
+        { timeout: 5000 },
+      );
+      expect(await readSelectValue(page, "banner-runner-select")).toBe("codex::gpt-6.1-sol");
+      await page.waitForSelector('[data-testid="banner-runner-select-effort"]', { timeout: 5000 });
+      await page.select('[data-testid="banner-runner-select-effort"]', "medium");
+      expect(await readSelectValue(page, "banner-runner-select-effort")).toBe("medium");
+
+      await openRunnerPicker(page);
+      await clickReady(page, '[data-testid="banner-runner-select-option-codex::gpt-6.1-sol"]');
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="banner-runner-select-search"]'),
+        { timeout: 5000 },
+      );
+      expect(await readSelectValue(page, "banner-runner-select")).toBe("codex::gpt-6.1-sol");
+      expect(await readSelectValue(page, "banner-runner-select-effort")).toBe("medium");
+
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();

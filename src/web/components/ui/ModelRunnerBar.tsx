@@ -70,7 +70,9 @@ export function ModelRunnerBar({
         }`,
         selected: selectedRunnerKey === "",
         onSelect: () => {
-          setSelectedRunnerKey("", stageAction);
+          if (selectedRunnerKey !== "") {
+            setSelectedRunnerKey("", stageAction);
+          }
           setOpen(false);
         },
       },
@@ -82,7 +84,9 @@ export function ModelRunnerBar({
         content: t(language, "runner.manual"),
         selected: selectedRunnerKey === "manual_copy",
         onSelect: () => {
-          setSelectedRunnerKey("manual_copy", stageAction);
+          if (selectedRunnerKey !== "manual_copy") {
+            setSelectedRunnerKey("manual_copy", stageAction);
+          }
           setOpen(false);
         },
       });
@@ -150,7 +154,9 @@ export function ModelRunnerBar({
               shortcuts={shortcuts}
               testIdPrefix={testId}
               onSelect={(option) => {
-                setSelectedRunnerKey(option.key, stageAction);
+                if (option.key !== selectedRunnerKey) {
+                  setSelectedRunnerKey(option.key, stageAction);
+                }
                 setOpen(false);
               }}
             />
