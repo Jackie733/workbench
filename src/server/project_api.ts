@@ -718,7 +718,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const issueRef =
         typeof body.issueRef === "string" || typeof body.issueRef === "number" ? body.issueRef : "";
       if (!String(issueRef).trim()) {
-        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL");
+        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL", {
+          messageKey: "github.errIssueRefRequired",
+        });
       }
       const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(remoteUrl);
       const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef }, deps.githubDeps);
@@ -1262,7 +1264,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         }
         const ghEnv = await inspectGitHubEnvironment(base, projectMeta?.github, deps.githubDeps);
         if (!ghEnv.ready || !ghEnv.repo) {
-          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue");
+          const reasonMessageKey =
+            ghEnv.reasonCode === "gh_missing"
+              ? "github.reasonGhMissing"
+              : ghEnv.reasonCode === "gh_unauthenticated"
+                ? "github.reasonGhUnauthenticated"
+                : "github.reasonRepoMissing";
+          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue", {
+            messageKey: reasonMessageKey,
+          });
         }
         const issue = await createGitHubIssue(
           {

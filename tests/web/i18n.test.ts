@@ -512,5 +512,31 @@ describe("status and error messages", () => {
         }),
       ),
     ).toBe("Invalid Gitee work item ID: bad!");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("invalid_input", "请输入有效的 GitHub Issue 编号（如 #42）或完整 Issue URL", {
+          messageKey: "github.errInvalidIssueRef",
+        }),
+      ),
+    ).toBe("Please enter a valid GitHub Issue number (such as #42) or full Issue URL");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("invalid_input", "无效的 GitHub 仓库标识（应为 owner/repo）: bad/slug/extra", {
+          messageKey: "github.errInvalidRepo",
+          messageParams: { repo: "bad/slug/extra" },
+        }),
+      ),
+    ).toBe("Invalid GitHub repository slug (expected owner/repo): bad/slug/extra");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("invalid_input", "非法的 Git 分支名: bad branch", {
+          messageKey: "git.errInvalidBranch",
+          messageParams: { branch: "bad branch" },
+        }),
+      ),
+    ).toBe("Invalid Git branch name: bad branch");
   });
 });

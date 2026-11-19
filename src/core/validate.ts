@@ -109,7 +109,10 @@ const SCREENSHOT_SKIP_REASON_CODES: ScreenshotSkipReasonCode[] = [
 export function validateGitHubRepoSlug(repo: string): string {
   const trimmed = repo.trim();
   if (!GITHUB_REPO_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`);
+    throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`, {
+      messageKey: "github.errInvalidRepo",
+      messageParams: { repo },
+    });
   }
   return trimmed;
 }
@@ -150,7 +153,10 @@ export function validateGiteeIssueIdent(ident: string): string {
 export function validateGitBranchName(branch: string): string {
   const trimmed = branch.trim();
   if (!GIT_BRANCH_RE.test(trimmed) || trimmed.includes("//") || trimmed === "HEAD") {
-    throw new WorkbenchError("invalid_input", `非法的 Git 分支名: ${branch}`);
+    throw new WorkbenchError("invalid_input", `非法的 Git 分支名: ${branch}`, {
+      messageKey: "git.errInvalidBranch",
+      messageParams: { branch },
+    });
   }
   return trimmed;
 }

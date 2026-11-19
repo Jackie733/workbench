@@ -121,7 +121,9 @@ function assertGhBin(deps?: GitHubCommandDeps): { ghBin: string; runGh: NonNulla
   const { whichGh, runGh } = resolveGhRunner(deps);
   const ghBin = whichGh();
   if (!ghBin) {
-    throw new WorkbenchError("execution_failed", "未在本机检测到 GitHub CLI (gh)，请先安装并执行 gh auth login");
+    throw new WorkbenchError("execution_failed", "未在本机检测到 GitHub CLI (gh)，请先安装并执行 gh auth login", {
+      messageKey: "github.errGhMissing",
+    });
   }
   return { ghBin, runGh };
 }
@@ -162,7 +164,10 @@ export function parseGitHubIssueRef(
 ): { repo: string | null; number: number } {
   if (typeof rawRef === "number") {
     if (!Number.isSafeInteger(rawRef) || rawRef < 1) {
-      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`);
+      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`, {
+        messageKey: "github.errInvalidIssueNumber",
+        messageParams: { ref: String(rawRef) },
+      });
     }
     return { repo: fallbackRepo ? validateGitHubRepoSlug(fallbackRepo) : null, number: rawRef };
   }
@@ -172,7 +177,10 @@ export function parseGitHubIssueRef(
   if (numMatch) {
     const num = Number(numMatch[1]);
     if (!Number.isSafeInteger(num) || num < 1) {
-      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`);
+      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`, {
+        messageKey: "github.errInvalidIssueNumber",
+        messageParams: { ref: String(rawRef) },
+      });
     }
     return { repo: fallbackRepo ? validateGitHubRepoSlug(fallbackRepo) : null, number: num };
   }
@@ -202,7 +210,9 @@ export function parseGitHubIssueRef(
     // Fall through to error.
   }
 
-  throw new WorkbenchError("invalid_input", "请输入有效的 GitHub Issue 编号（如 #42）或完整 Issue URL");
+  throw new WorkbenchError("invalid_input", "请输入有效的 GitHub Issue 编号（如 #42）或完整 Issue URL", {
+    messageKey: "github.errInvalidIssueRef",
+  });
 }
 
 function parseUrlLastNumber(text: string): { url: string; number: number } | null {
@@ -453,7 +463,9 @@ export async function viewGitHubIssue(
   const base = canonicalRoot(input.root);
   const { repo: parsedRepo, number } = parseGitHubIssueRef(input.issueRef, input.repo);
   if (!parsedRepo) {
-    throw new WorkbenchError("invalid_input", "无法确定目标 GitHub 仓库，请先配置 origin 远端或提供完整 Issue URL");
+    throw new WorkbenchError("invalid_input", "无法确定目标 GitHub 仓库，请先配置 origin 远端或提供完整 Issue URL", {
+      messageKey: "github.errMissingRepo",
+    });
   }
   const { ghBin, runGh } = assertGhBin(deps);
   const res = await runGh(
@@ -463,7 +475,10 @@ export async function viewGitHubIssue(
   );
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 600).text;
-    throw new WorkbenchError("execution_failed", `读取 GitHub Issue #${number} 失败: ${msg || "未知错误"}`);
+    throw new WorkbenchError("execution_failed", `读取 GitHub Issue #${number} 失败: ${msg || "未知错误"}`, {
+      messageKey: msg ? "github.errViewIssueFailedDetail" : "github.errViewIssueFailed",
+      messageParams: msg ? { number, detail: msg } : { number },
+    });
   }
   let parsed: {
     number?: number;
@@ -476,7 +491,9 @@ export async function viewGitHubIssue(
   try {
     parsed = JSON.parse(res.stdout) as typeof parsed;
   } catch {
-    throw new WorkbenchError("execution_failed", "无法解析 gh issue view 返回的 JSON");
+    throw new WorkbenchError("execution_failed", "无法解析 gh issue view 返回的 JSON", {
+      messageKey: "github.errIssueJsonInvalid",
+    });
   }
   const num = parsed.number ?? number;
   const title = sanitizeOutput(String(parsed.title ?? `Issue #${num}`), 300).text.trim();
@@ -603,12 +620,17 @@ export async function createOrUpdateGitHubPr(
   const headBranch = validateGitBranchName(input.headBranch);
   const baseBranch = validateGitBranchName(input.baseBranch);
   if (headBranch === baseBranch) {
-    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`);
+    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`, {
+      messageKey: "gitee.errSameBranch",
+      messageParams: { baseBranch },
+    });
   }
   const cleanTitle = sanitizeOutput(input.title.trim(), 240).text.replace(/[\r\n]+/g, " ").trim();
   const cleanBody = sanitizeOutput(input.body.trim(), 40_000).text;
   if (!cleanTitle) {
-    throw new WorkbenchError("invalid_input", "PR 标题不能为空");
+    throw new WorkbenchError("invalid_input", "PR 标题不能为空", {
+      messageKey: "gitee.errPrTitleRequired",
+    });
   }
 
   const { ghBin, runGh } = assertGhBin(deps);

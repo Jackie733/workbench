@@ -2131,6 +2131,22 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       );
       expect(giteeStatusText.length).toBeGreaterThan(0);
       expect(/[\u4e00-\u9fff]/.test(giteeStatusText)).toBe(false);
+      await page.type('[data-testid="project-gitee-base-input"]', " bad");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Invalid Git branch name"),
+          ),
+        { timeout: 10_000 },
+      );
+      const branchToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Invalid Git branch name")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(branchToast)).toBe(false);
       await page.click('[data-testid="project-provider-github"]');
       await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 15_000 });
       const githubStatusText = await page.evaluate(
@@ -2138,8 +2154,57 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       );
       expect(githubStatusText.length).toBeGreaterThan(0);
       expect(/[\u4e00-\u9fff]/.test(githubStatusText)).toBe(false);
+      await page.type('[data-testid="project-github-repo-input"]', "bad repo");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Invalid GitHub repository slug"),
+          ),
+        { timeout: 10_000 },
+      );
+      const repoToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Invalid GitHub repository slug")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(repoToast)).toBe(false);
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("无效的 GitHub 仓库标识"),
+          ),
+        { timeout: 10_000 },
+      );
+      await selectLang("en");
       await clickModalAction("routing-modal", "Cancel");
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      // 8b. 英文界面导入无效 GitHub Issue 编号时返回本地化校验提示。
+      await clickReady(page, '[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.click('[data-testid="new-req-mode-import"]');
+      await page.waitForSelector('[data-testid="import-issue-ref"]', { timeout: 5000 });
+      await page.type('[data-testid="import-issue-ref"]', "bad-gh-ref!!");
+      await clickReady(page, '[data-testid="import-issue-draft-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Please enter a valid GitHub Issue number"),
+          ),
+        { timeout: 10_000 },
+      );
+      const ghImportToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Please enter a valid GitHub Issue number")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(ghImportToast)).toBe(false);
+      await clickModalAction("new-req-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="open-quick-report-btn"]');
       await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
       expect(await bodyText()).toContain("Quick report & self-evolution feedback");
