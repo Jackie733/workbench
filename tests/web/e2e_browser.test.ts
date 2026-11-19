@@ -17,6 +17,7 @@ import { runVerification } from "../../src/core/runner.ts";
 import type { RequirementState } from "../../src/core/types.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
+import { recordModelRunOutcome } from "../../src/hub/telemetry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resetAuthPassword } from "../../src/server/auth.ts";
@@ -622,6 +623,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="submit-quick-report-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
 
+      // Seed one run outcome before opening Evolution Center so Telemetry tab renders action badge localization cleanly.
+      recordModelRunOutcome({
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        action: "review",
+        status: "succeeded",
+        durationMs: 1200,
+      });
+
       // 2. Open Evolution Center from HubSidebar -> verify Inbox, Playbook, Telemetry tabs
       await clickReady(page, '[data-testid="open-evolution-btn"]');
       await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
@@ -643,9 +653,23 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // Switch to Telemetry tab
+      // Switch to Telemetry tab and verify action badge localization in both languages
       await clickReady(page, '[data-testid="evo-tab-telemetry"]');
       await page.waitForSelector('[data-testid="evo-pane-telemetry"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="telemetry-action-badge"]', { timeout: 5000 });
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent ?? ""),
+      ).toBe("审查");
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "Review",
+        { timeout: 5000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "审查",
+        { timeout: 5000 },
+      );
 
       // Switch back to Inbox tab and promote pain point to a sandboxed requirement
       await clickReady(page, '[data-testid="evo-tab-inbox"]');

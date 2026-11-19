@@ -57,6 +57,8 @@ import {
 import {
   describeClientError,
   describeClientErrorRef,
+  formatAgentActionLabel,
+  formatGitFileStatusLabel,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
   formatPrStateLabel,
@@ -2402,7 +2404,10 @@ export function Modals() {
                     >
                       <div>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>
-                          {e.harness} · {e.model} <span className="badge">{e.action}</span>{" "}
+                          {e.harness} · {e.model}{" "}
+                          <span className="badge" data-testid="telemetry-action-badge">
+                            {formatAgentActionLabel(language, e.action)}
+                          </span>{" "}
                           {cooling && <span className="badge warning">{t(language, "evo.cooling")}</span>}
                         </div>
                         <div className="xs muted">
@@ -2736,7 +2741,9 @@ export function Modals() {
                     <code style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {c.path}
                     </code>
-                    <span className="badge neutral">{c.status}</span>
+                    <span className="badge neutral" title={c.status} data-testid={`deliver-status-${c.path}`}>
+                      {formatGitFileStatusLabel(language, c.status)}
+                    </span>
                     {deliveryPreview && deliveryPreview.acceptedSnapshotFileCount > 0 && (
                       <span className={`badge ${c.inAcceptedSnapshot ? "success" : "warning"}`}>
                         {c.inAcceptedSnapshot

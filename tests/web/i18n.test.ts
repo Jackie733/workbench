@@ -13,6 +13,7 @@ import {
   formatAgentActionLabel,
   formatAgentStatusLabel,
   formatDateTime,
+  formatGitFileStatusLabel,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
   formatNumber,
@@ -743,6 +744,17 @@ describe("status and error messages", () => {
       expect(formatAgentStatusLabel("zh-CN", status)).not.toBe(status);
       expect(formatAgentStatusLabel("en", status)).not.toBe(status);
     }
+    for (const code of ["??", "M", "MM", "A", "D", "R", "C", "UU"] as const) {
+      const en = formatGitFileStatusLabel("en", code);
+      const zh = formatGitFileStatusLabel("zh-CN", code);
+      expect(/[\u4e00-\u9fff]/.test(en)).toBe(false);
+      expect(zh).not.toBe(code);
+      expect(en).not.toBe(code);
+    }
+    expect(formatGitFileStatusLabel("zh-CN", "??")).toBe("未跟踪");
+    expect(formatGitFileStatusLabel("en", "??")).toBe("Untracked");
+    expect(formatGitFileStatusLabel("zh-CN", "M")).toBe("已修改");
+    expect(formatGitFileStatusLabel("en", "M")).toBe("Modified");
 
     const ffBranchSkip = resolveWarningParam("主仓库当前位于分支 feat/x（非 main），已保留主仓库现状", {
       key: "git.ff.branchMismatch",

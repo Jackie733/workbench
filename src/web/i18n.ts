@@ -1099,6 +1099,13 @@ const zhCN = {
   "pr.state.open": "开启",
   "pr.state.merged": "已合并",
   "pr.state.closed": "已关闭",
+  "git.fileStatus.untracked": "未跟踪",
+  "git.fileStatus.modified": "已修改",
+  "git.fileStatus.added": "新增",
+  "git.fileStatus.deleted": "已删除",
+  "git.fileStatus.renamed": "已重命名",
+  "git.fileStatus.copied": "已复制",
+  "git.fileStatus.conflicted": "冲突",
   "gitee.repoLabel": "Gitee 仓库（owner/repo，留空自动识别）",
   "gitee.enterpriseLabel": "企业空间路径（用于拉取无仓库工作项）",
   "gitee.baseBranchLabel": "PR 默认 Base 分支",
@@ -2240,6 +2247,13 @@ const en: Record<MessageKey, string> = {
   "pr.state.open": "open",
   "pr.state.merged": "merged",
   "pr.state.closed": "closed",
+  "git.fileStatus.untracked": "Untracked",
+  "git.fileStatus.modified": "Modified",
+  "git.fileStatus.added": "Added",
+  "git.fileStatus.deleted": "Deleted",
+  "git.fileStatus.renamed": "Renamed",
+  "git.fileStatus.copied": "Copied",
+  "git.fileStatus.conflicted": "Conflicted",
   "gitee.repoLabel": "Gitee repository (owner/repo, blank to auto-detect)",
   "gitee.enterpriseLabel": "Enterprise slug (for repo-less work items)",
   "gitee.baseBranchLabel": "Default PR base branch",
@@ -2678,6 +2692,19 @@ export function formatAgentActionLabel(language: UiLanguage, action: string): st
 export function formatAgentStatusLabel(language: UiLanguage, status: string): string {
   const key = AGENT_STATUS_KEYS[status];
   return key ? t(language, key) : status;
+}
+
+/** Localizes Git porcelain file status codes (e.g. "??", "M", "A", "D", "R") for delivery badges. */
+export function formatGitFileStatusLabel(language: UiLanguage, status: string): string {
+  const code = status.trim();
+  if (code === "??") return t(language, "git.fileStatus.untracked");
+  if (code.includes("U") || code === "AA" || code === "DD") return t(language, "git.fileStatus.conflicted");
+  if (code.includes("R")) return t(language, "git.fileStatus.renamed");
+  if (code.includes("C")) return t(language, "git.fileStatus.copied");
+  if (code.includes("A")) return t(language, "git.fileStatus.added");
+  if (code.includes("D")) return t(language, "git.fileStatus.deleted");
+  if (code.includes("M")) return t(language, "git.fileStatus.modified");
+  return code || status;
 }
 
 export function applyDocumentLanguage(language: UiLanguage, doc: Document | null = typeof document !== "undefined" ? document : null): void {

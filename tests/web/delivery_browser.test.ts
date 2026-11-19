@@ -133,12 +133,31 @@ describe("post-acceptance delivery wrap-up UI", () => {
       const selectionState = await page.evaluate(() => ({
         appChecked: (document.querySelector('[data-testid="deliver-file-app.ts"]') as HTMLInputElement | null)?.checked,
         scratchChecked: (document.querySelector('[data-testid="deliver-file-scratch.ts"]') as HTMLInputElement | null)?.checked,
+        appStatus: document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent ?? "",
+        scratchStatus: document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent ?? "",
         modalText: document.querySelector('[data-testid="deliver-modal"]')?.textContent ?? "",
       }));
       expect(selectionState.appChecked).toBe(true);
       expect(selectionState.scratchChecked).toBe(false);
+      expect(selectionState.appStatus).toBe("已修改");
+      expect(selectionState.scratchStatus).toBe("未跟踪");
       expect(selectionState.modalText).toContain("本次验收");
       expect(selectionState.modalText).toContain("工作区其他");
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "Modified" &&
+          document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent === "Untracked",
+        { timeout: 5000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "已修改" &&
+          document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent === "未跟踪",
+        { timeout: 5000 },
+      );
 
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForSelector('[data-testid="delivery-summary-line"]', { timeout: 5000 });
