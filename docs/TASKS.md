@@ -1,6 +1,6 @@
 # 新一代工作台实施任务清单（WB-01 – WB-07）
 
-> 唯一实施进度入口。设计规范见 [DESIGN.md](DESIGN.md)，领域与存储契约见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)。旧版 Tern-Luau 单体架构及 `AF-01–AF-16` 任务记录已归档至 [archive/2026-11-16/TASKS.md](archive/2026-11-16/TASKS.md)，不继承旧版未完成的包袱。
+> 唯一实施进度入口。设计规范见 [DESIGN.md](DESIGN.md)，领域与存储契约见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)，产品入口见 [英文 README](../README.md) 与 [中文 README](../README.zh-CN.md)。旧版 Tern-Luau 单体架构及 `AF-01–AF-16` 任务记录已归档至 [archive/2026-11-16/TASKS.md](archive/2026-11-16/TASKS.md)，不继承旧版未完成的包袱。
 
 ---
 

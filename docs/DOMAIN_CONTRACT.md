@@ -109,7 +109,7 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 
 ### 3.4 人工主权边界（Human Sovereignty）
 - **不可委托的人类决策**：`approve`（批准方案）、`fast_track`（授权快速通道）与 `accept`（最终验收通过）只能由人类在 Web UI 触发；MCP Server 与 `wb` CLI 不向任何 Agent 暴露这些写入接口，Hub 执行器拉起的 Agent 子进程同样受此约束。
-- **跨模型审查定位（v5 明确约定）**：`codex` / `gemini` / `DeepSeek-V4-Pro` 产出的跨模型审查报告（`reviewReport`）作为人类验收时的强决策辅助信号（标注 `pass / concern / block`），**审查模型本身也不能替代人类点击 `accept` 完成最终验收**；同时单项目内不因执行子进程失败/限流而污染 `.workbench/` 状态机一致性。
+- **跨模型审查定位（v5 明确约定）**：`codex` / `agy`（Antigravity / Gemini CLI） / `DeepSeek-V4-Pro` 产出的跨模型审查报告（`reviewReport`）作为人类验收时的强决策辅助信号（标注 `pass / concern / block`），**审查模型本身也不能替代人类点击 `accept` 完成最终验收**；同时单项目内不因执行子进程失败/限流而污染 `.workbench/` 状态机一致性。
 - **验收门禁（Acceptance Gate）**：必须满足非阻塞/非取消/非完成、至少定义了 1 条必需验收条件（禁止 `0/0` 直接通过）、且全部必需验收条件在当前 `specHash` 与当前最新 `codeSnapshotHash` 下均为 `passed`。
 
 ### 3.5 跨 Harness 上下文交接与方案共创不变量（Context Continuity & Co-Design，v5 新增）

@@ -30,7 +30,7 @@
    - 彻底清除免责说教、内部 UUID、SHA-256 指纹与协议术语；调试信息统一收纳于「更多 → 查看调试信息」。
 5. **多项目集中统筹与分阶段异构算力路由（Multi-Project Hub & Stage-Based Model Routing）**
    - **单守护进程统筹多项目**：通过全局 `wb start` 启动常驻后台 Hub 服务（默认固定端口 `4318`，支持 `wb status` / `wb stop` / `wb restart` / `wb open`），在同一个 Web 工作台中切换、新增与初始化多个本地 Git 仓库，无需按项目逐一开终端起服务。
-   - **主动调度多种本地 CLI Harness**：工作台从被动“复制提示词/依赖单一会话”，升级为主动在目标项目根目录拉起本机已安装的 Coding Agent CLI（`codex`、`qodercn`、`opencode`、`gemini`、`omp`）并实时流式传输日志。
+   - **主动调度多种本地 CLI Harness**：工作台从被动“复制提示词/依赖单一会话”，升级为主动在目标项目根目录拉起本机已安装的 Coding Agent CLI（`codex`、`qodercn`、`opencode`、`agy`（Antigravity / Gemini CLI）、`omp`）并实时流式传输日志。
    - **按阶段分配算力与控制 SOTA 额度**：将研发拆分为 **`design`（规划设计）**、**`implement`（编码实施）**、**`fix`（失败诊断修复）** 与 **`review`（交付前跨模型审查）** 四个执行阶段；昂贵稀缺的 SOTA 模型额度优先投入低 Token、高杠杆的 `design` 与跨模型 `review`，高频高消耗的 `implement` 与 `fix` 则优先路由至额度充裕的高性价比或免费主力编码模型。
 
 ---
@@ -57,7 +57,7 @@ flowchart TD
 
     subgraph Harnesses["本地 Coding Agent Harnesses"]
         Codex["codex exec / review (ChatGPT Plus)"]
-        Gemini["gemini -p (Google AI Pro)"]
+        Agy["agy -p (Antigravity / Gemini CLI)"]
         Qoder["qodercn -p (QoderCN 订阅)"]
         OpenCode["opencode run (OpenCode Go / Free)"]
         OMP["omp -p / live /wb TUI Bridge"]
@@ -93,6 +93,7 @@ flowchart TD
 2. **核心引擎层（Workbench Core — `src/core/`）**
    - 保持按项目独立存储与验证：每个项目的规范（`spec.md`）、方案（`design.md`）、状态（`state.json`）、验证证据（`evidence/`）与人工审查/跨模型审查记录均保存在该项目根目录下 `.workbench/`，绝不混入其他项目。
 3. **通用工具与适配层（`src/mcp/`、`src/cli/`、`omp/`）**
+   - `omp/` 仅为可选集成适配器之一，不是宿主或必需依赖；`src/mcp/` 与 `src/cli/` 对任意 MCP 客户端与 CLI 等价开放。
    - MCP Server 与 `wb` CLI 保留 5 个正交交付工具（`wb_list`、`wb_get`、`wb_propose`、`wb_update_tasks`、`wb_verify`）及只写审查报告工具/命令，继续严禁暴露 `approve`、`fast_track`、`accept` 给任何 Agent。
 
 ---
@@ -143,7 +144,7 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 针对跨订阅切换模型或中途配额耗尽重跑时“重头探索浪费 Token”与“直接粘贴原始长日志污染新模型注意力”的两难问题，采用 **「同构原生续接 + 异构 5 合 1 结构化交接简报（`handoff.md`）」** 双层交接机制：
 
 1. **同 Harness 连续执行：优先复用原生 Session**
-   - 当同一需求连续调用相同 Harness（例如继续由 `codex` 或 `opencode` 补充修改）且存在有效 `nativeSessionId` 时，优先调用各 CLI 原生恢复能力（`codex exec resume`、`opencode run --session`、`omp --resume`、`gemini --resume`），保留原生对话缓存。
+   - 当同一需求连续调用相同 Harness（例如继续由 `codex` 或 `opencode` 补充修改）且存在有效 `nativeSessionId` 时，优先调用各 CLI 原生恢复能力（`codex exec resume`、`opencode run --session`、`omp --resume`、`agy --conversation`），保留原生对话缓存。
 2. **跨 Harness 切换或异常中断接力：自动合成精简交接包（`handoff.md`，上限约 1.5k–3k Tokens）**
    - 一旦切换了 Harness（如 `codex` 出方案 → `qodercn` 写代码 → 限流切 `opencode` 接力），或前一进程因限流/超时/手动 Kill 中途中断，工作台**不转储原始长聊天记录**，而是自动合成并注入高信噪比 `handoff.md`：
      - **契约事实**：当前 `spec.md`、`design.md`、已通过（`✓`）与未通过（`×`）的验收条件；
@@ -200,7 +201,7 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 1. **左栏：项目切换器与算力路由入口（Sidebar，窄屏可折叠为抽屉）**
    - **已纳管项目列表**：显示项目名称、待拍板红点/数字（`awaiting_approval` / `awaiting_acceptance` / `blocked`）、以及后台是否正在运行 Agent（呼吸指示灯）。
    - **`+ 添加项目`（目录浏览器弹窗）**：支持直接输入路径或点击浏览本机目录，识别是否为 Git 仓库；若尚未初始化 `.workbench/`，提供一键「本机排除 / 随 Git 跟踪」初始化。
-   - **算力与路由中心入口**：直接展示各 Harness（`codex` / `qodercn` / `opencode` / `gemini` / `omp`）的可用状态；点击进入配置中心切换 `balanced | sota_first | quota_saver` 预设、编辑各阶段主/备援模型、添加自定义模型并一键刷新探测。
+   - **算力与路由中心入口**：直接展示各 Harness（`codex` / `qodercn` / `opencode` / `agy` / `omp`）的可用状态；点击进入配置中心切换 `balanced | sota_first | quota_saver` 预设、编辑各阶段主/备援模型、添加自定义模型并一键刷新探测。
 
 2. **中栏：项目首页（Mission Control）与需求工作区（Workspace）**
    - **项目首页**：顶部统计摘要条（进行中 / 待拍板 / 已完成） + 动态「待你拍板」区 + 搜索/范围/布局切换（干净列表与四栏只读看板）+ `+ 新建需求`（一句话创建后可直接选模型执行）。

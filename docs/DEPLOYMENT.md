@@ -1,6 +1,6 @@
 # 用户级部署与访问检查
 
-Workbench 使用当前用户的源码、Git 仓库、Agent CLI 及认证目录。macOS 使用 LaunchAgent，Linux 和 WSL2 使用 `systemd --user`；不安装系统服务、不使用 sudo、不启用 linger、不创建 Windows 计划任务，也不提供原生 Windows Bun 服务。默认只监听 `127.0.0.1:4318`。
+Workbench 使用当前用户的源码、Git 仓库、Agent CLI 及认证目录。macOS 使用 LaunchAgent，Linux 和 WSL2 使用 `systemd --user`；不安装系统服务、不使用 sudo、不启用 linger、不创建 Windows 计划任务，也不提供原生 Windows Bun 服务。Hub 默认只监听 `127.0.0.1:4318`；显式以 `wb service install --host 0.0.0.0` 安装才启用局域网访问，并以访问密码保护（见 §3）；WSL2 等环境可用 `wb node` 接入主控 Hub（见 §4）。
 
 macOS 已用 Bun 1.4.4 完成隔离部署验收：生产依赖冻结安装、完整 deploy 脚本、真实 launchd 安装/状态/幂等安装/启停/重启/崩溃恢复/卸载；卸载保留项目及 Hub 数据。HTTP health/HTML/JS/CSS、WebSocket `bridge.status`、真实 stdio MCP initialize/tools/list/wb_list 均通过，Chromium 实际加载 Web 并添加切换项目。Linux 主机可访问用户级 systemd，但 Bun 下载超时，未完成运行验收；WSL2、Windows 客户端、重新登录及重启恢复未验证，需按文末流程验收。Hub 健康不等于外部模型执行成功。
 
@@ -49,7 +49,7 @@ bun run deploy --port 4318
 wb service status
 ```
 
-部署依次执行依赖冻结安装、`bun link`、用户服务安装及启动；任一步失败立即停止。不会拉取源码、删除 lockfile、清理数据或变更认证。只安装服务也可用 `wb service install --port 4318`。默认端口为 4318，安装只接受 `--port`，不提供远程监听选项。
+部署依次执行依赖冻结安装、`bun link`、用户服务安装及启动；任一步失败立即停止。不会拉取源码、删除 lockfile、清理数据或变更认证。只安装服务也可用 `wb service install --port 4318`。默认端口为 4318；安装接受 `--port` 与 `--host`，`--host` 可用 `127.0.0.1`、`0.0.0.0`、局域网 IP 或主机名，默认绑定 `127.0.0.1`。
 
 服务的工作目录及 Hub `--root` 固定为当前用户 HOME，不会把源码仓库自动当作业务项目，安装不透传 WORKBENCH_ROOT。先准备一个已有的、已初始化项目；新项目可以这样初始化：
 
@@ -68,7 +68,44 @@ wb open
 - `/ws?role=ui` 收到 `bridge.status` 后关闭，不注册执行桥、不触发任务。
 - 独立启动真实 stdio MCP，initialize、initialized、tools/list，再调用 `wb_list`（scope=all）；检查五个现有工具与可解析的非错误结果。未初始化项目会失败并给出指引。
 
-## 3. 生命周期、日志与命名空间
+## 3. 局域网访问与访问密码
+
+默认安装只监听 loopback，CLI、MCP、omp 桥接与部署检查等本机同用户客户端无需登录。需要从局域网其他设备访问时，重新安装并显式绑定：
+
+```sh
+wb service install --port 4318 --host 0.0.0.0
+wb service password
+wb service status
+```
+
+- 首次以非 loopback 地址安装会自动生成访问密码并在终端提示一次；之后用 `wb service password` 查看方式重置（终端或 `--json` 输出）。重置会沿用同一 session secret，已有浏览器登录不失效，但旧密码立即作废。
+- 凭据保存在 `<hubDir>/auth.json`（文件 `0600`，目录 `0700`），只存 scrypt 哈希与 session secret，绝不写入服务定义、日志或项目数据。
+- 浏览器访问 `http://<Hub 地址>:4318`，在登录页输入密码；会话 Cookie 有效期 30 天。脚本与远程节点使用 `Authorization: Bearer <密码>`。非 loopback 请求缺少凭据返回未授权，连续 5 次登录失败锁定 60 秒。
+- 同一密码复用于 `wb node install --token`。修改 host/port 会停止并重写托管配置再启动，可能中断正在执行的任务。
+- 不要以绑定 `0.0.0.0` 作为本地访问故障的回退；共享网络中应同时用系统防火墙限制来源。
+
+## 4. 远程节点（WSL2 接入主控 Hub）
+
+远程节点是独立的轻量桥接服务，让 WSL2 发行版或另一台机器中的文件系统与命令接入主控 Hub，无需在每台机器重复部署完整 Hub。在节点环境自己的固定源码根执行：
+
+```sh
+wb node install --hub http://192.168.1.10:4318 --token <访问密码>
+wb node status
+wb node stop
+wb node start
+wb node restart
+wb node uninstall
+# 不安装服务，前台运行桥接
+wb node connect --hub http://192.168.1.10:4318 --token <访问密码>
+```
+
+- `install` 写入节点配置 `node.json` 与安装记录 `node-service.json`（均为 `0600`），并按当前平台安装 LaunchAgent / systemd 用户服务；`--id` / `--name` 指定节点标识与显示名，省略时沿用已有配置或默认值。
+- `--token` 必须与主控 Hub 的访问密码一致（由 `wb service password` 生成或重置）；`--hub` 需为节点可达的主控安装地址，不能依赖节点自身的 loopback。
+- 节点数据保留在节点自己的 `<hubDir>`：`node.json`、`node-runtime.json`、`node.log`。`wb node status` 的 installed、active、connected 是不同事实。
+- 所有权独立：主控 `wb service stop/uninstall` 不停止也不卸载节点，反之 `wb node uninstall` 不影响主控 Hub；卸载保留项目与 Hub 数据。
+- 连接失败时依次检查主控服务状态、地址可达性、密码与防火墙，不要以绑定 `0.0.0.0` 作为排障手段。
+
+## 5. 生命周期、日志与命名空间
 
 ```sh
 wb service start
@@ -104,7 +141,7 @@ bun run deploy:check --root /absolute/path/to/project
 - Linux/WSL：从 `wb service status` 取得 id，再执行 `journalctl --user -u <id> -f`。
 - 未托管后台 Hub：`<hubDir>/hub.log`。
 
-## 4. 更新、改配置与卸载
+## 6. 更新、改配置与卸载
 
 更新前保存任务并停止服务，在同一个固定源码目录自行更新源码，再部署：
 
@@ -134,7 +171,7 @@ wb service install --port 14318
 wb service uninstall
 ```
 
-卸载仅停用并移除本应用拥有的定义与安装记录；保留项目、`.workbench/`、hubDir 数据、认证、日志、源码及依赖。重复卸载应安全；部分失败不代表卸载成功，检查返回错误和管理器状态。
+卸载仅停用并移除本应用拥有的定义与安装记录；保留项目、`.workbench/`、hubDir 数据、认证、日志、源码及依赖。远程节点服务不随主控 Hub 卸载，需在节点环境单独执行 `wb node uninstall`。重复卸载应安全；部分失败不代表卸载成功，检查返回错误和管理器状态。
 
 备份项目 `.workbench/` 及 hubDir 前先停服务，避免复制到不一致状态。恢复时保留业务数据，但不要复用旧 `daemon.json` 中的 PID 或另一机器的 service.json/服务定义；在目标用户和机器重新安装服务，并重新验证。不要删除外部 CLI 认证目录。
 
@@ -148,7 +185,7 @@ bun run src/cli/index.ts serve --hub --host 127.0.0.1 --port 4318 --root "$HOME"
 
 保持终端存活；不要在已托管同一 Hub 时另开此前台进程。未安装服务时，`wb start`/`wb open` 仍提供原有未托管后台模式。普通 `serve` 的随机端口不等于固定 4318。omp 的项目级服务器保持独立，不由 Hub service stop/uninstall 管理。
 
-## 5. MCP 客户端与 Windows 边界
+## 7. MCP 客户端与 Windows 边界
 
 MCP 是客户端按需启动的独立 **stdio** 子进程，不是 Hub HTTP 服务；不存在 `/mcp` 网络入口。服务和客户端应使用相同用户、认证及 hubDir，但 MCP 的 `--root` 必须指向业务项目。
 
@@ -201,7 +238,7 @@ Invoke-RestMethod http://localhost:4318/api/health
 
 再打开 `http://localhost:4318`，确认 Web 真实加载和 WebSocket 已连接。连接失败应检查发行版是否启动、用户服务是否 active/healthy、端口及 WSL 网络配置；不要以绑定 `0.0.0.0` 作为故障回退。登录、自动启动或网络测试失败不能标记为“已支持成功”。
 
-## 6. 目标机器验收清单
+## 8. 目标机器验收清单
 
 使用空闲端口（如 14318）、独立临时 hubDir 和临时 Git 项目，所有命令明确传入同一 WORKBENCH_HUB_DIR，不操作用户原有服务：
 

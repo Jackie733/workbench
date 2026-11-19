@@ -1,5 +1,12 @@
 # 变更记录
 
+## 未发布 — 产品文档体系更新（REQ-006）
+
+- **双语 README**：`README.md` 转为英文主文档，原中文内容迁移并修订为新增 `README.zh-CN.md`，两版章节对等、顶部互链；首次明确产品定位为 Agent 无关的多项目 Hub，`omp` 仅为可选集成适配器而非宿主。
+- **能力补齐**：两份 README 与 [部署指南](docs/DEPLOYMENT.md) 补齐用户级服务、局域网访问（`--host 0.0.0.0` + `wb service password`）、远程节点（`wb node`）、自进化 Playbook 与 `wb issue`、GitHub 集成（`wb github` / `config --github-repo`）与输出语言配置（`init --lang` / `config --output-language`）。
+- **一致性与命名**：DEPLOYMENT 修正「安装只接受 `--port`、不提供远程监听」的过时表述，新增局域网访问与远程节点章节；DESIGN、DOMAIN_CONTRACT 将 Harness 标识统一为 `agy`（Antigravity / Gemini CLI）；TASKS 导航补充双语 README；CHANGELOG 既有条目与归档文档保持原文不动。
+- **维护约定**：修改任一 README 必须同步另一版，保持章节结构与命令一致。
+
 ## 未发布 — 执行编排与阶段门禁修复（REQ-009 / REQ-008 复盘）
 
 - **设计阶段只产出方案**：设计提示词与交接包明确禁止修改业务代码、运行验证或标记实施完成，提交方案后立即停止；核心引擎在批准前拒绝记录验证证据与把任务标记为完成，Hub 对 `implement`/`fix` 强制校验所处阶段与有效审批，防止设计模型一步完成编码验证。

@@ -1,59 +1,89 @@
-# Workbench — 常驻多项目中心与多模型路由工作台（v5.0）
+**English** | [简体中文](README.zh-CN.md)
 
-本地优先、常驻运行、Agent 无关的 **Spec & Verification Workbench Hub**（基于 **Lightweight SDD + VDD**）。帮助开发者在同一个常驻三栏 Web 指挥舱内统筹**多个本地 Git 项目**与**多份 AI 订阅算力（ChatGPT Plus / Google AI Pro / QoderCN / OpenCode Go / omp）**——由人类守住方案审批与真实验证验收两头关口，中间调度最合适的模型接力执行、探讨与交叉审查。
+# Workbench — Resident Multi-Project Hub & Multi-Model Routing Workbench (v5.0)
 
-仓库：[Jackie733/workbench](https://github.com/Jackie733/workbench)。
+A local-first, always-on, agent-agnostic **Spec & Verification Workbench Hub** built on **Lightweight SDD + VDD**. It lets you coordinate **multiple local Git projects** and **multiple AI subscription quotas (ChatGPT Plus / Google AI Pro / QoderCN / OpenCode Go / omp)** inside one resident three-column web command center — humans keep the two decisive checkpoints (design approval and real-evidence acceptance), while the hub routes each stage to the most suitable model for execution, discussion, and cross-review.
 
----
+`omp` is only one optional integration adapter, not a host and not a required dependency: any installed coding agent CLI (`codex` / `qodercn` / `opencode` / `agy` / `omp`) can be dispatched.
 
-## 核心特性（v5.0 Hub）
-
-1. **常驻多项目控制中心（`wb start` / `wb open`）**
-   - 全局 `wb` CLI 可通过 `bun link` 安装到 `$PATH`；推荐使用用户级服务托管 Hub（默认端口 `4318`，数据存放在 `~/.workbench-hub/`）。
-   - 三栏式 Web 指挥舱左栏提供**多项目实时切换**、**本机目录浏览器与初始化引导**、以及待拍板数与后台执行状态呼吸灯。
-2. **多 Harness 自动探测与分阶段算力路由**
-   - 自动探测本机 `codex`、`qodercn`、`opencode`、`gemini`、`omp` 及模型目录，支持自定义追加付费模型（如 OpenCode Go）。
-   - 内置 `balanced`（推荐默认）、`sota_first`、`quota_saver` 三套策略预设：优先将稀缺 SOTA 额度投入低 Token、高杠杆的 `design`（规划）与 `review`（跨模型审查），将高频高消耗的 `implement` / `fix` 路由至高吞吐主力或免费模型。
-   - **主动后台执行与实时终端**：支持在主操作横幅内联切换执行模型、点击后台拉起 CLI 子进程流式推流日志、随时终止任务，或在触发限流/失败时一键切换备援模型接力重试。
-3. **跨 Harness 双层上下文交接与 PR 式共创研讨**
-   - **双层交接**：同 Harness 优先 `--resume` 原生会话；跨 Harness 切换或异常中断后，自动合成有界 `handoff.md`（汇总契约、Agent 备忘与死胡同标记、`git diff` 现场与失败日志末尾）。
-   - **非流水线共创**：支持对 `spec.md`、`design.md` 与验收条件悬停添加段落级 **`[💬 批注 / 提问]`**、右侧研讨流区分 **`仅提问探讨 (Ask)`**（纯只读不改方案）与 **`按批注修订 (Refine)`**（改完自动弹出 `vN-1 → vN` Diff）、以及人类直接在线编辑 `design.md`。
-4. **验证驱动与人工主权边界**
-   - 任何 Agent（CLI / MCP / Hub 子进程）均不可伪造 `passed` 状态，也无权替代人类点击 `approve`、`fast_track` 或 `accept`；跨模型审查结论（`pass / concern / block`）与验证证据均绑定当前 `specHash` 与工作区 Git 快照指纹，代码改动后自动标为过期（`stale`）。
+Repository: [Jackie733/workbench](https://github.com/Jackie733/workbench).
 
 ---
 
-## 快速上手
+## Core Features (v5.0 Hub)
 
-### 1. 用户级服务部署（推荐）
+1. **Resident multi-project control center (`wb start` / `wb open`)**
+   - The global `wb` CLI installs onto `$PATH` via `bun link`; a user-level service is the recommended way to host the hub (default port `4318`, data in `~/.workbench-hub/`).
+   - The three-column web command center gives you **live project switching**, a **local directory browser with guided initialization**, pending-approval counters, and background-run breathing indicators in the left rail.
+2. **Multi-harness auto-discovery and stage-based routing**
+   - Automatically discovers local `codex`, `qodercn`, `opencode`, `agy` (Antigravity / Gemini CLI), and `omp` installations plus their model catalogs, and lets you append paid models such as OpenCode Go.
+   - Ships with `balanced` (recommended default), `sota_first`, and `quota_saver` presets: scarce SOTA quota goes to the low-token, high-leverage `design` and `review` stages, while high-frequency `implement` / `fix` work routes to high-throughput or free models.
+   - **Active background execution with a live terminal**: switch the executing model inline from the action banner, stream child-process logs into the console, terminate runs at any time, or retry on a fallback model after a rate limit or failure.
+3. **Two-tier cross-harness handoff and PR-style co-design**
+   - **Two-tier handoff**: same-harness continuation reuses each CLI's native session mechanism; after a harness switch or an abnormal interruption, the hub synthesizes a bounded `handoff.md` (contract facts, agent notes and dead ends, the `git diff` scene, and the tail of the failing log).
+   - **Non-linear co-design**: hover any section of `spec.md`, `design.md`, or an acceptance criterion to add an inline **`[💬 annotate / ask]`** note; the discussion rail separates **Ask** (read-only) from **Refine** (which re-proposes the design and opens a `vN-1 → vN` diff). Humans can also edit `design.md` directly.
+4. **Verification-driven with human sovereignty**
+   - No agent (CLI, MCP, or hub child process) can forge a `passed` status or replace a human clicking `approve`, `fast_track`, or `accept`. Cross-model review verdicts (`pass / concern / block`) and verification evidence are bound to the current `specHash` and workspace Git snapshot fingerprint, and are marked `stale` as soon as code changes.
+5. **LAN access and remote nodes**
+   - The hub listens on `127.0.0.1` only by default; LAN access requires an explicit `wb service install --host 0.0.0.0`, and every non-loopback client must authenticate with the access password (browser login or `Authorization: Bearer <password>`).
+   - `wb service password` generates or resets that LAN password, which is also the `wb node install --token` secret. WSL2 and similar environments can install the lightweight bridge with the `wb node` commands to attach their files and commands to the primary hub.
+6. **Self-evolution, GitHub integration, and output language**
+   - **Playbook**: acceptance notes, rejections, and human annotations settle into a project-level `.workbench/playbook.md` and are injected into later handoffs so agents stop repeating known dead ends.
+   - **Pain-point inbox**: `wb issue "<description>"` records defects in Workbench itself into `~/.workbench-hub/evolution/inbox.jsonl` (fingerprint-deduplicated) for human triage, then evolves it in an isolated Git worktree sandbox.
+   - **GitHub integration**: `wb github status | import <issueRef> | link-issue <REQ-ID> [issueRef]` reuses your local authenticated `gh` session to import or link issues; `wb config --github-repo <owner/repo>` pins the project repository, and standard PR delivery is available after human acceptance.
+   - **Output language**: `wb init --lang zh-CN|en|auto` and `wb config --output-language ...` control the language of specs, designs, review reports, and handoff packs (project-level overrides the global default).
 
-准备 Git、当前稳定版 Bun 和固定位置的源码，在源码根执行：
+---
+
+## Quick Start
+
+### 1. User-level service deployment (recommended)
+
+Install Git, a current stable Bun, and keep the source at a fixed location. Then run from the source root:
 
 ```sh
 bun run deploy --port 4318
 wb service status
-# 新项目按需初始化；已有项目无需重建
+# Initialize new projects as needed; existing projects need no rebuild
 wb --root /absolute/path/to/project init
 bun run deploy:check --url http://127.0.0.1:4318 --root /absolute/path/to/project
 wb open
 ```
 
-macOS 使用 LaunchAgent；Linux/WSL2 使用 systemd 用户服务，WSL2 需要先启用 systemd 和可用用户会话。服务仅监听本地 loopback，复用当前用户的 Agent CLI 与认证，不自动修改登录状态。
+macOS uses a LaunchAgent; Linux/WSL2 uses a systemd user service, and WSL2 requires systemd plus a working user session. By default the service listens on loopback only and reuses the current user's agent CLIs and credentials without modifying any login state.
 
-完整的安装、启停、更新、日志、备份、卸载与 Windows MCP 配置见 [部署指南](docs/DEPLOYMENT.md)。`wb start/open/stop/restart` 在安装后由服务管理器执行；`wb status` 同时报告管理器与 Hub 健康状态。
+To reach the hub from other devices on the LAN, reinstall with an explicit `0.0.0.0` bind and generate an access password:
 
-未安装服务时仍可用 `wb start` / `wb open` 启动原有未托管后台 Hub，或主动选择前台运行（不要与同一 Hub 的托管服务同时启动）：
+```sh
+wb service install --port 4318 --host 0.0.0.0
+wb service password
+```
+
+Non-loopback clients must log in with that password. Only a scrypt hash is stored in `<hubDir>/auth.json` (mode `0600`, directory `0700`); the plaintext never enters service definitions or logs. **Do not** bind `0.0.0.0` as a fallback for local access problems.
+
+To attach WSL2 (or similar) files and commands to a primary hub, install the remote node service with the same access password:
+
+```sh
+wb node install --hub http://192.168.1.10:4318 --token <access-password>
+wb node status
+```
+
+The remote node service is independent of the primary hub service: `wb service stop/uninstall` neither stops nor uninstalls the node, and vice versa.
+
+Full installation, start/stop, update, log, backup, uninstall, and Windows MCP configuration details live in the [deployment guide](docs/DEPLOYMENT.md). Once installed, `wb start/open/stop/restart` are executed by the service manager, and `wb status` reports both manager and hub health.
+
+Without the service installed you can still start the original unmanaged background hub via `wb start` / `wb open`, or choose foreground serving explicitly (never alongside a managed hub for the same installation):
 
 ```sh
 bun run src/cli/index.ts serve --hub --host 127.0.0.1 --port 4318 --root "$HOME"
 ```
 
-首次进入 Web 工作台后，可在左侧栏点击 **`+ 添加`** 直接浏览并纳管你的本地 Git 仓库，或在 **`⚙ 路由`** 中调整各订阅模型配比。
+Inside the web workbench, use **`+ Add`** in the left rail to browse and register local Git repositories, or **`⚙ Routing`** to tune per-subscription model allocation.
 
-### 2. 在 `omp` 中联动或挂载其他 Agent MCP
+### 2. Optional integration: omp bridging or any MCP client
 
-- **`omp` 会话联动**：可将 [omp/index.ts](omp/index.ts) 配置为 omp 扩展，加载后输入 `/wb` 打开工作台并建立实时指令桥接；项目级服务器生命周期独立于全局 Hub 服务。
-- **其他 MCP 客户端（Claude Code / Codex / Cursor / OpenCode 等）**：MCP 是客户端启动的独立 stdio 子进程，不存在 `/mcp` 网络入口。使用真实绝对路径和已初始化的项目：
+- **omp session bridge (optional)**: register [omp/index.ts](omp/index.ts) as an omp extension, then type `/wb` to open the workbench and establish a live command bridge; the project-level server lifecycle is independent of the global hub service. Workbench runs fine without `omp`.
+- **Other MCP clients (Claude Code / Codex / Cursor / OpenCode, etc.)**: MCP is a stdio child process started by the client — there is no `/mcp` network endpoint. Use real absolute paths and an initialized project:
 
 ```json
 {
@@ -66,7 +96,7 @@ bun run src/cli/index.ts serve --hub --host 127.0.0.1 --port 4318 --root "$HOME"
 }
 ```
 
-### 3. 本地开发测试与类型检查
+### 3. Local development, tests, and type checking
 
 ```sh
 bun install
@@ -76,20 +106,22 @@ bun run typecheck
 
 ---
 
-## 权威文档
+## Documentation
 
-| 文档 | 用途 |
+| Document | Purpose |
 | :--- | :--- |
-| [设计规范](docs/DESIGN.md) | v5.0 Hub 产品定位、多 Harness 路由矩阵、双层交接、共创闭环与三栏指挥舱设计 |
-| [部署指南](docs/DEPLOYMENT.md) | macOS/Linux/WSL2 用户级服务、真实 HTTP/WS/MCP 检查、Windows 客户端与恢复边界 |
-| [领域契约](docs/DOMAIN_CONTRACT.md) | `.workbench/` 与 `~/.workbench-hub/` 存储分层、不变量与验证/主权门禁 |
-| [实施任务](docs/TASKS.md) | Phase 1（`WB-01`–`WB-07`）与 Phase 2（`WB-08`–`WB-12`）实施进度与实测记录 |
-| [历史归档](docs/archive/README.md) | 旧版 Tern-Luau 方案（2026-11-16 归档），仅供追溯 |
+| [Chinese README](README.zh-CN.md) | Fully equivalent Chinese version of this document |
+| [Design specification](docs/DESIGN.md) | v5.0 hub positioning, multi-harness routing matrix, two-tier handoff, co-design loop, and command-center UI |
+| [Deployment guide](docs/DEPLOYMENT.md) | macOS/Linux/WSL2 user services, LAN access and remote nodes, real HTTP/WS/MCP checks, Windows clients, and recovery boundaries |
+| [Domain contract](docs/DOMAIN_CONTRACT.md) | `.workbench/` and `~/.workbench-hub/` storage layers, invariants, and verification/sovereignty gates |
+| [Implementation tasks](docs/TASKS.md) | Phase 1 (`WB-01`–`WB-07`) and Phase 2 (`WB-08`–`WB-12`) progress and measured evidence |
+| [Historical archive](docs/archive/README.md) | Legacy Tern-Luau design (archived 2026-11-16) kept for reference only |
 
 ---
 
-## 运行与安全边界
+## Runtime & Security Boundaries
 
-- **本地数据策略**：业务数据按项目独立存放在各自仓库 `.workbench/` 下（默认写入 `.git/info/exclude`）；全局项目列表与路由策略存放在 `~/.workbench-hub/`。
-- **单向拍板控制**：MCP Server 与 `wb` CLI 不向 Agent 暴露 `approve`、`fast_track`、`accept` 或 PR 推送接口；零必需验收条件禁止验收通过。
-- **可控子进程与诚实边界**：Hub 调度器为外部 CLI 子进程绑定独立进程组（支持一键强杀无残留）；不修改各外部 CLI 全局认证状态，仅在人类验收完成并显式确认后执行受控的 `git commit`、`git push` 与 `gh` Issue/PR 同步。
+- **Local data policy**: business data lives per project under each repository's `.workbench/` (excluded through `.git/info/exclude` by default); the global project list and routing policy live in `~/.workbench-hub/`.
+- **Access boundary**: loopback only by default; explicit LAN access is password-protected (scrypt hash on disk, mode `0600`), and credentials never enter service definitions or logs.
+- **One-way approvals**: the MCP server and `wb` CLI expose no `approve`, `fast_track`, `accept`, or PR-push interface to agents, and zero required criteria can never pass acceptance.
+- **Controllable subprocesses and honest limits**: the hub binds every external CLI child process to its own process group (one-click kill without orphans), never modifies external CLI global authentication, and only performs controlled `git commit`, `git push`, and `gh` issue/PR sync after human acceptance and explicit confirmation.
