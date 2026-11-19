@@ -206,6 +206,8 @@ export interface GitObservation {
   diffTruncated: boolean;
   diffStatus: DiffEvidenceStatus;
   diffReason: string | null;
+  diffReasonKey?: string;
+  diffReasonParams?: UiMessageParams;
   binaryFiles: string[];
   omittedFiles: string[];
   baselineRequested: string | null;
@@ -647,6 +649,7 @@ export interface RequirementDiffView {
   status: DiffEvidenceStatus;
   reason: string | null;
   reasonKey?: string;
+  reasonParams?: UiMessageParams;
   acceptedAt: number | null;
   snapshotId: string | null;
   snapshotCapturedAt: number | null;

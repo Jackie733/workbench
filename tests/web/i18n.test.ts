@@ -665,5 +665,35 @@ describe("status and error messages", () => {
         }),
       ),
     ).toContain("blocking findings");
+
+    const liveUnavailableDiff = {
+      context: "live",
+      status: "unavailable",
+      reason: "验收基线 deadbeef1234 在当前仓库中不可用，无法生成基线相对 Diff",
+      reasonKey: "core.diff.baselineUnavailable",
+      reasonParams: { head: "deadbeef1234" },
+      acceptedAt: null,
+      snapshotId: null,
+      snapshotCapturedAt: null,
+      scopeNote: null,
+      observation: null,
+    } as const;
+    const liveEn = describeEvidenceContext(legacyValidity, liveUnavailableDiff, "en");
+    expect(liveEn.unavailableReason).toBe(
+      "Acceptance baseline deadbeef1234 is unavailable in this repository; cannot generate baseline-relative diff",
+    );
+    const liveZh = describeEvidenceContext(legacyValidity, liveUnavailableDiff, "zh-CN");
+    expect(liveZh.unavailableReason).toBe(
+      "验收基线 deadbeef1234 在当前仓库中不可用，无法生成基线相对 Diff",
+    );
+    for (const k of [
+      "core.diff.notGitRepo",
+      "core.diff.baselineDiffFailed",
+      "core.diff.worktreeDiffFailed",
+      "core.diff.cachedDiffFailed",
+    ] as const) {
+      expect(/[\u4e00-\u9fff]/.test(t("en", k))).toBe(false);
+      expect(t("zh-CN", k)).not.toBe(t("en", k));
+    }
   });
 });

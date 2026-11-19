@@ -30,6 +30,7 @@ interface BrowserPage {
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
   click(sel: string): Promise<void>;
+  select(sel: string, ...values: string[]): Promise<string[]>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
 }
@@ -237,6 +238,122 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 5000 });
       const unavailText = await page.evaluate(() => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "");
       expect(unavailText).toContain("历史代码差异不可用");
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes live diff and post-acceptance live comparison unavailability when baseline commit is missing", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "LiveDiffUnavailableRepo", privacyMode: "local" });
+
+    // REQ-001: active requirement with an unreachable baseline commit
+    await createRequirement(repo, {
+      goal: "Live unavailable baseline check",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const missingHash = "deadbeef1234567890abcdef1234567890abcdef";
+    const base1 = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base1 });
+    const req1Path = path.join(repo, ".workbench/items/REQ-001/state.json");
+    const req1State = JSON.parse(fs.readFileSync(req1Path, "utf8")) as RequirementState;
+    req1State.baseline = {
+      head: missingHash,
+      fingerprint: "a".repeat(64),
+      dirty: false,
+      capturedAt: Date.now(),
+    };
+    atomicWriteJson(req1Path, req1State);
+
+    // REQ-002: accepted requirement whose baseline commit later became unavailable for live comparison
+    await createRequirement(repo, {
+      goal: "Accepted live comparison baseline missing check",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-002", { designMarkdown: "# Design 2", actor: "agent" });
+    const base2 = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-002", { baseline: base2 });
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const acceptedCompare = true;\n");
+    await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap2 = await observeGitSnapshot(repo);
+    await acceptRequirement(repo, "REQ-002", { currentCodeSnapshotHash: snap2!.fingerprint });
+    const req2Path = path.join(repo, ".workbench/items/REQ-002/state.json");
+    const req2State = JSON.parse(fs.readFileSync(req2Path, "utf8")) as RequirementState;
+    req2State.baseline = {
+      head: missingHash,
+      fingerprint: "b".repeat(64),
+      dirty: false,
+      capturedAt: Date.now(),
+    };
+    atomicWriteJson(req2Path, req2State);
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 1. Live workspace diff unavailable notice shows localized English prompt & preserves short hash
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
+      const liveEnText = await page.evaluate(
+        () => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "",
+      );
+      expect(liveEnText).toContain("Acceptance baseline deadbeef1234 is unavailable");
+      expect(/[\u4e00-\u9fff]/.test(liveEnText)).toBe(false);
+
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
+            "验收基线 deadbeef1234 在当前仓库中不可用",
+          ),
+        { timeout: 10_000 },
+      );
+
+      // 2. Post-acceptance live comparison unavailable shows localized English & Chinese reasons
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="toggle-live-diff-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="toggle-live-diff-btn"]');
+      await page.waitForSelector('[data-testid="live-diff-comparison-card"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes(
+            "Acceptance baseline deadbeef1234 is unavailable",
+          ),
+        { timeout: 10_000 },
+      );
+      const compareEnText = await page.evaluate(
+        () => document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(compareEnText)).toBe(false);
+
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes(
+            "验收基线 deadbeef1234 在当前仓库中不可用",
+          ),
+        { timeout: 10_000 },
+      );
     } finally {
       await page.close();
     }

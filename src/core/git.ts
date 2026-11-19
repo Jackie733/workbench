@@ -13,6 +13,7 @@ import {
   type CommitInfo,
   type DiffEvidenceStatus,
   type GitObservation,
+  type UiMessageParams,
 } from "./types.ts";
 
 export type { BaselineSnapshot, ChangedFile, CommitInfo, GitObservation } from "./types.ts";
@@ -273,6 +274,7 @@ export async function observeGitChanges(
     return empty({
       isGitRepo: false,
       diffReason: "代码根目录不是 Git 仓库，无法采集评审 Diff",
+      diffReasonKey: "core.diff.notGitRepo",
     });
   }
 
@@ -293,6 +295,8 @@ export async function observeGitChanges(
       fingerprint: snapshot.fingerprint,
       dirty: snapshot.dirty,
       diffReason: `验收基线 ${sinceHead.slice(0, 12)} 在当前仓库中不可用，无法生成基线相对 Diff`,
+      diffReasonKey: "core.diff.baselineUnavailable",
+      diffReasonParams: { head: sinceHead.slice(0, 12) },
     });
   }
 
@@ -332,6 +336,8 @@ export async function observeGitChanges(
 
   let diffChunks: string[] = [];
   let diffReason: string | null = null;
+  let diffReasonKey: string | undefined;
+  let diffReasonParams: UiMessageParams | undefined;
   if (validBaseRef) {
     const diffRes = await execGit(base, ["diff", validBaseRef, "--", ".", ...EXCLUDE_PATHSPECS]);
     if (diffRes.code === 0) {
@@ -339,6 +345,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "基线相对 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.baselineDiffFailed";
     }
   } else if (snapshot.head) {
     const diffRes = await execGit(base, ["diff", "HEAD", "--", ".", ...EXCLUDE_PATHSPECS]);
@@ -347,6 +354,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "工作区 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.worktreeDiffFailed";
     }
   } else {
     const cachedRes = await execGit(base, ["diff", "--cached", "--", ".", ...EXCLUDE_PATHSPECS]);
@@ -355,6 +363,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "暂存区 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.cachedDiffFailed";
     }
   }
 
@@ -409,6 +418,8 @@ export async function observeGitChanges(
     diffTruncated: diffStatus === "captured" ? boundedDiff.truncated : false,
     diffStatus,
     diffReason,
+    ...(diffReasonKey ? { diffReasonKey } : {}),
+    ...(diffReasonParams ? { diffReasonParams } : {}),
     binaryFiles: diffStatus === "captured" ? omitted.binaryFiles : [],
     omittedFiles: diffStatus === "captured" ? omitted.omittedFiles : [],
     baselineRequested: sinceHead,

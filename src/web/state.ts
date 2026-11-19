@@ -25,6 +25,7 @@ import {
   formatNumber,
   pluralMessage,
   t,
+  translateRef,
   type MessageKey,
   type MessageParams,
   type UiLanguage,
@@ -185,7 +186,16 @@ export function describeEvidenceContext(
   validity: ValidityReport,
   diffView?: Pick<
     RequirementDiffView,
-    "context" | "status" | "reason" | "reasonKey" | "acceptedAt" | "snapshotId" | "scopeNote" | "scopeNoteKey" | "observation"
+    | "context"
+    | "status"
+    | "reason"
+    | "reasonKey"
+    | "reasonParams"
+    | "acceptedAt"
+    | "snapshotId"
+    | "scopeNote"
+    | "scopeNoteKey"
+    | "observation"
   > | null,
   language: UiLanguage = "zh-CN",
 ): EvidenceDisplaySummary {
@@ -230,7 +240,12 @@ export function describeEvidenceContext(
       }),
       unavailableReason:
         diffView?.status === "unavailable"
-          ? localizedReason(diffView?.reasonKey ?? p.reasonKey, diffView?.reason ?? p.reason, language)
+          ? localizedReason(
+              diffView?.reasonKey ?? p.reasonKey,
+              diffView?.reason ?? p.reason,
+              language,
+              diffView?.reasonParams,
+            )
           : null,
       truncationFlags,
       scopeNote,
@@ -241,7 +256,7 @@ export function describeEvidenceContext(
     const shortSpec = p.specHash ? p.specHash.slice(0, 8) : "-";
     const shortSnap = p.codeSnapshotHash ? p.codeSnapshotHash.slice(0, 8) : "-";
     const rawReason = diffView?.status === "unavailable" ? (diffView?.reason ?? p.reason) : p.reason;
-    const reason = localizedReason(diffView?.reasonKey ?? p.reasonKey, rawReason, language);
+    const reason = localizedReason(diffView?.reasonKey ?? p.reasonKey, rawReason, language, diffView?.reasonParams);
     const coverageSuffix = p.coverageReasonKey
       ? `${language === "en" ? "; " : "；"}${t(language, p.coverageReasonKey as MessageKey)}`
       : "";
@@ -281,16 +296,21 @@ export function describeEvidenceContext(
     }),
     unavailableReason:
       diffView?.status === "unavailable"
-        ? localizedReason(diffView?.reasonKey ?? p.reasonKey, diffView.reason ?? null, language)
+        ? localizedReason(diffView?.reasonKey ?? p.reasonKey, diffView.reason ?? null, language, diffView?.reasonParams)
         : null,
     truncationFlags,
     scopeNote,
   };
 }
 
-function localizedReason(key: string | undefined | null, raw: string | null, language: UiLanguage): string | null {
-  if (key) return t(language, key as MessageKey);
-  if (raw) return raw;
+function localizedReason(
+  key: string | undefined | null,
+  raw: string | null,
+  language: UiLanguage,
+  params?: MessageParams,
+): string | null {
+  const translated = translateRef(language, key, raw ?? "", params);
+  if (translated) return translated;
   return language === "en" ? "Reason unavailable" : "原因不可用";
 }
 

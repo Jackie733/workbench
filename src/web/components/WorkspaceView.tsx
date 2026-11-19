@@ -1364,8 +1364,12 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
         ) : diffRes.status === "unavailable" || !diffObs ? (
           <div className="callout warning" data-testid="diff-unavailable-notice" style={{ fontSize: 13, margin: 0 }}>
             <strong>{t(language, "changes.unavailable")}</strong>：
-            {translateRef(language, diffRes.reasonKey, diffRes.reason ?? evidenceSummary.unavailableReason ?? "", undefined) ||
-              t(language, "changes.cannotLoad")}
+            {translateRef(
+              language,
+              diffRes.reasonKey,
+              evidenceSummary.unavailableReason ?? diffRes.reason ?? "",
+              diffRes.reasonParams,
+            ) || t(language, "changes.cannotLoad")}
           </div>
         ) : !diffObs.isGitRepo ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
@@ -1429,7 +1433,13 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
           ) : liveDiffRes.status === "unavailable" || !liveDiffObs ? (
             <p className="muted" style={{ fontSize: 13, margin: 0 }}>
               {t(language, "changes.compareUnavailable", {
-                reason: liveDiffRes.reason ?? t(language, "changes.cannotRead"),
+                reason:
+                  translateRef(
+                    language,
+                    liveDiffRes.reasonKey,
+                    liveDiffRes.reason ?? t(language, "changes.cannotRead"),
+                    liveDiffRes.reasonParams,
+                  ) || t(language, "changes.cannotRead"),
               })}
             </p>
           ) : liveDiffObs.files.length === 0 ? (

@@ -1274,6 +1274,8 @@ export async function getRequirementDiff(
     context: "live",
     status: changes.diffStatus,
     reason: changes.diffReason,
+    ...(changes.diffReasonKey ? { reasonKey: changes.diffReasonKey } : {}),
+    ...(changes.diffReasonParams ? { reasonParams: changes.diffReasonParams } : {}),
     acceptedAt: null,
     snapshotId: null,
     snapshotCapturedAt: null,
@@ -1376,14 +1378,20 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "验收基线在当前仓库中不可用，无法捕获可信的基线相对 Diff",
-        { messageKey: "accept.errBaselineUnavailable" },
+        {
+          messageKey: gitObs.diffReasonKey ?? "accept.errBaselineUnavailable",
+          ...(gitObs.diffReasonParams ? { messageParams: gitObs.diffReasonParams } : {}),
+        },
       );
     }
     if (gitObs.diffStatus === "unavailable") {
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "无法捕获验收代码差异快照",
-        { messageKey: "accept.errDiffUnavailable" },
+        {
+          messageKey: gitObs.diffReasonKey ?? "accept.errDiffUnavailable",
+          ...(gitObs.diffReasonParams ? { messageParams: gitObs.diffReasonParams } : {}),
+        },
       );
     }
     if (gitObs.fingerprint !== snapshotHash) {
