@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { WorkbenchError } from "./errors.ts";
+import { extractMessageRef, WorkbenchError } from "./errors.ts";
 import {
   atomicWriteBuffer,
   atomicWriteFile,
@@ -35,6 +35,7 @@ import {
   type RequirementState,
   type ScreenshotBatch,
   type ScreenshotShot,
+  type UiMessageParams,
   type VerificationRecord,
 } from "./types.ts";
 import { normalizeOutputLanguage } from "./language.ts";
@@ -62,6 +63,8 @@ export interface RequirementBundle {
   acceptanceSnapshot: AcceptanceSnapshot | null;
   acceptanceSnapshotStatus: AcceptanceArtifactStatus;
   acceptanceSnapshotReason: string | null;
+  acceptanceSnapshotReasonKey?: string;
+  acceptanceSnapshotReasonParams?: UiMessageParams;
 }
 
 export function formatRequirementId(num: number): string {
@@ -198,6 +201,8 @@ interface LoadedAcceptanceSnapshot {
   snapshot: AcceptanceSnapshot | null;
   status: "none" | "available" | "missing" | "corrupt";
   reason: string | null;
+  reasonKey?: string;
+  reasonParams?: UiMessageParams;
 }
 
 function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAcceptanceSnapshot {
@@ -205,11 +210,21 @@ function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAc
   if (!ref) return { snapshot: null, status: "none", reason: null };
   if (ref.path !== snapshotRelPath(ref.id)) {
     // References must stay inside this requirement's storage; never resolve caller-controlled paths.
-    return { snapshot: null, status: "corrupt", reason: "验收快照引用路径无效" };
+    return {
+      snapshot: null,
+      status: "corrupt",
+      reason: "验收快照引用路径无效",
+      reasonKey: "core.evidence.invalidPath",
+    };
   }
   const filePath = resolveSafePath(base, acceptanceSnapshotPath(state.id, ref.id));
   if (!fs.existsSync(filePath)) {
-    return { snapshot: null, status: "missing", reason: "验收证据文件不存在，历史 Diff 不可用" };
+    return {
+      snapshot: null,
+      status: "missing",
+      reason: "验收证据文件不存在，历史 Diff 不可用",
+      reasonKey: "core.evidence.fileMissing",
+    };
   }
   try {
     const parsed = validateAcceptanceSnapshot(
@@ -217,10 +232,20 @@ function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAc
       state.id,
     );
     if (parsed.contentDigest !== computeAcceptanceSnapshotDigest(parsed)) {
-      return { snapshot: null, status: "corrupt", reason: "验收证据内容摘要校验失败" };
+      return {
+        snapshot: null,
+        status: "corrupt",
+        reason: "验收证据内容摘要校验失败",
+        reasonKey: "core.evidence.digestMismatch",
+      };
     }
     if (parsed.capturedAt !== ref.capturedAt || parsed.contentDigest !== ref.contentDigest) {
-      return { snapshot: null, status: "corrupt", reason: "验收证据与验收引用记录不一致" };
+      return {
+        snapshot: null,
+        status: "corrupt",
+        reason: "验收证据与验收引用记录不一致",
+        reasonKey: "core.evidence.refMismatch",
+      };
     }
     for (const batch of parsed.screenshots ?? []) {
       for (const shot of batch.shots) {
@@ -230,14 +255,23 @@ function loadAcceptanceSnapshot(base: string, state: RequirementState): LoadedAc
             snapshot: null,
             status: "missing",
             reason: `验收快照引用的截图文件缺失: ${shot.id}`,
+            reasonKey: "core.evidence.screenshotMissing",
+            reasonParams: { shotId: shot.id },
           };
         }
       }
     }
     return { snapshot: parsed, status: "available", reason: null };
   } catch (error) {
+    const refMsg = extractMessageRef(error);
     const message = error instanceof WorkbenchError ? error.message : "验收证据文件无法解析";
-    return { snapshot: null, status: "corrupt", reason: message };
+    return {
+      snapshot: null,
+      status: "corrupt",
+      reason: message,
+      reasonKey: refMsg?.key ?? "core.evidence.unreadable",
+      ...(refMsg?.params ? { reasonParams: refMsg.params } : {}),
+    };
   }
 }
 
@@ -276,6 +310,8 @@ export function readRequirementBundle(root: string, id: string): RequirementBund
     acceptanceSnapshot: loaded.snapshot,
     acceptanceSnapshotStatus: loaded.status,
     acceptanceSnapshotReason: loaded.reason,
+    ...(loaded.reasonKey ? { acceptanceSnapshotReasonKey: loaded.reasonKey } : {}),
+    ...(loaded.reasonParams ? { acceptanceSnapshotReasonParams: loaded.reasonParams } : {}),
   };
 }
 

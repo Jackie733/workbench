@@ -28,7 +28,7 @@ import type {
   Stage,
 } from "../../core/types.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
-import { t, translateRef, type MessageKey } from "../i18n.ts";
+import { formatPrStateLabel, prStateRef, resolveWarningParam, t, translateRef, type MessageKey } from "../i18n.ts";
 import {
   captureUiScreenshots,
   cancelRun,
@@ -1605,12 +1605,15 @@ export function WorkspaceView() {
         } else if (res.mainUpdated) {
           showToastKey("toast.prMergedMain", { num: res.pr.number });
         } else if (res.mainSyncReason) {
-          showToastKey("toast.prMergedReason", { num: res.pr.number, reason: res.mainSyncReason });
+          showToastKey("toast.prMergedReason", {
+            num: res.pr.number,
+            reason: resolveWarningParam(res.mainSyncReason, res.mainSyncReasonRef),
+          });
         } else {
           showToastKey("toast.prMergedClean", { num: res.pr.number });
         }
       } else {
-        showToastKey("toast.prStatus", { num: res.pr.number, state: res.pr.state });
+        showToastKey("toast.prStatus", { num: res.pr.number, state: prStateRef(res.pr.state) });
       }
     }
   };
@@ -1671,7 +1674,7 @@ export function WorkspaceView() {
             data-testid="ws-github-pr-link"
             title={s.github.pr.title}
           >
-            <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {s.github.pr.state}
+            <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {formatPrStateLabel(language, s.github.pr.state)}
           </a>
         )}
         <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
@@ -1932,7 +1935,7 @@ export function WorkspaceView() {
                 { count: s.delivery.files.length },
               )}{" "}
               · {formatDateTime(s.delivery.deliveredAt, language)}
-              {s.github?.pr && ` · PR #${s.github.pr.number} (${s.github.pr.state})`}
+              {s.github?.pr && ` · PR #${s.github.pr.number} (${formatPrStateLabel(language, s.github.pr.state)})`}
             </div>
           )}
           {s.stage === "done" && !s.delivery && !deliveryPreview?.sandboxActive && deliveryPreview?.canCommit && (

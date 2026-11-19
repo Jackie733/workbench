@@ -160,6 +160,8 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
       acceptanceSnapshot: bundle.acceptanceSnapshot,
       acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
       acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+      acceptanceSnapshotReasonKey: bundle.acceptanceSnapshotReasonKey,
+      acceptanceSnapshotReasonParams: bundle.acceptanceSnapshotReasonParams,
     }),
     acceptanceSnapshot: bundle.acceptanceSnapshot,
   };
@@ -213,6 +215,8 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     acceptanceSnapshot: bundle.acceptanceSnapshot,
     acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
     acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+    acceptanceSnapshotReasonKey: bundle.acceptanceSnapshotReasonKey,
+    acceptanceSnapshotReasonParams: bundle.acceptanceSnapshotReasonParams,
   });
   const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
   return {
@@ -1256,7 +1260,12 @@ export async function getRequirementDiff(
       reason:
         bundle.acceptanceSnapshotReason ??
         "历史验收记录未固化代码差异快照，无法从当前工作区回溯",
-      ...(bundle.acceptanceSnapshotReason ? {} : { reasonKey: "core.diff.noSnapshot" }),
+      ...(bundle.acceptanceSnapshotReasonKey
+        ? { reasonKey: bundle.acceptanceSnapshotReasonKey }
+        : bundle.acceptanceSnapshotReason
+          ? {}
+          : { reasonKey: "core.diff.noSnapshot" }),
+      ...(bundle.acceptanceSnapshotReasonParams ? { reasonParams: bundle.acceptanceSnapshotReasonParams } : {}),
       acceptedAt: state.acceptance?.acceptedAt ?? null,
       snapshotId: state.acceptance?.snapshot?.id ?? null,
       snapshotCapturedAt: state.acceptance?.snapshot?.capturedAt ?? null,

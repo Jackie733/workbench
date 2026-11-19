@@ -10,8 +10,10 @@ import {
   initProject,
   linkRequirementGitHubIssue,
   propose,
+  recordRequirementGitHubSync,
   updateTasks,
 } from "../../src/core/engine.ts";
+import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
@@ -586,6 +588,121 @@ describe("post-acceptance delivery wrap-up UI", () => {
             .find((txt) => txt.includes("issue sync warning: Failed to create GitHub Issue")) ?? "",
       );
       expect(/[\u4e00-\u9fff]/.test(quickWarnToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes PR state badges and merged PR main-branch skip reason in English and Chinese", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-del-ff-remote-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "SandboxSyncPrRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Test PR state label & main sync skip localization",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: base!.fingerprint });
+    await createOrReuseWorktree(repo, "REQ-001");
+    await linkRequirementGitHubIssue(repo, "REQ-001", {
+      repo: "acme/workbench",
+      issue: { number: 70, url: "https://github.com/acme/workbench/issues/70", title: "Linked", state: "open", lastSyncedAt: Date.now() },
+    });
+    await recordRequirementGitHubSync(repo, "REQ-001", {
+      prPatch: {
+        number: 77,
+        url: "https://github.com/acme/workbench/pull/77",
+        title: "REQ-001 PR",
+        headBranch: "rsi/REQ-001",
+        baseBranch: "main",
+        state: "open",
+        mergedAt: null,
+        lastSyncedAt: Date.now(),
+      },
+      eventKind: "github_pr_synced",
+      summary: "Created PR #77",
+    });
+    // Dirty main repo working tree so fast-forward merge is skipped cleanly with git.ff.dirtyWorktree
+    fs.writeFileSync(path.join(repo, "dirty.txt"), "uncommitted change\n");
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/workbench.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "view") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              number: 77,
+              url: "https://github.com/acme/workbench/pull/77",
+              title: "REQ-001 PR",
+              state: "MERGED",
+              mergedAt: new Date().toISOString(),
+              baseRefName: "main",
+              headRefName: "rsi/REQ-001",
+            }),
+            stderr: "",
+          };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10_000 });
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? ""),
+      ).toContain("PR #77 · 开启");
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? "").includes("PR #77 · open"),
+        { timeout: 10_000 },
+      );
+
+      // Sync merged PR when main repo has uncommitted changes -> localized skip reason toast
+      await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="sync-pr-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Main repository has uncommitted changes; skipped automatic fast-forward merge"),
+          ),
+        { timeout: 10_000 },
+      );
+      const mergeSkipToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("PR #77 merged")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(mergeSkipToast)).toBe(false);
     } finally {
       await page.close();
     }

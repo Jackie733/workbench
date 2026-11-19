@@ -14,10 +14,12 @@ import {
   formatGiteeStatusReason,
   formatGitHubStatusReason,
   formatNumber,
+  formatPrStateLabel,
   formatRelativeTime,
   normalizeUiLanguage,
   persistUiLanguage,
   pluralMessage,
+  prStateRef,
   readStoredUiLanguage,
   resolveWarningParam,
   t,
@@ -691,9 +693,39 @@ describe("status and error messages", () => {
       "core.diff.baselineDiffFailed",
       "core.diff.worktreeDiffFailed",
       "core.diff.cachedDiffFailed",
+      "core.evidence.invalidPath",
+      "core.evidence.fileMissing",
+      "core.evidence.digestMismatch",
+      "core.evidence.refMismatch",
+      "core.evidence.unreadable",
     ] as const) {
       expect(/[\u4e00-\u9fff]/.test(t("en", k))).toBe(false);
       expect(t("zh-CN", k)).not.toBe(t("en", k));
     }
+
+    const shotMissing = describeEvidenceContext(
+      legacyValidity,
+      {
+        ...liveUnavailableDiff,
+        context: "legacy-unavailable",
+        reasonKey: "core.evidence.screenshotMissing",
+        reasonParams: { shotId: "SHOT-1" },
+      },
+      "en",
+    );
+    expect(shotMissing.unavailableReason).toContain("SHOT-1");
+    expect(/[\u4e00-\u9fff]/.test(shotMissing.unavailableReason ?? "")).toBe(false);
+
+    const ffBranchSkip = resolveWarningParam("主仓库当前位于分支 feat/x（非 main），已保留主仓库现状", {
+      key: "git.ff.branchMismatch",
+      params: { current: "feat/x", target: "main" },
+    });
+    expect(t("en", "toast.prMergedReason", { num: 42, reason: ffBranchSkip })).toBe(
+      "PR #42 merged, sandbox cleaned (Main repository is currently on branch feat/x (not main); kept main repository as is)",
+    );
+    expect(formatPrStateLabel("zh-CN", "open")).toBe("开启");
+    expect(formatPrStateLabel("en", "open")).toBe("open");
+    expect(t("zh-CN", "toast.prStatus", { num: 42, state: prStateRef("merged") })).toBe("PR #42 当前状态：已合并");
+    expect(t("en", "toast.prStatus", { num: 42, state: prStateRef("merged") })).toBe("PR #42 status: merged");
   });
 });

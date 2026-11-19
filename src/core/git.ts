@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
-import { WorkbenchError } from "./errors.ts";
+import { WorkbenchError, type StructuredMessageRef } from "./errors.ts";
 import { listProjectSandboxes } from "./sandbox.ts";
 import { sanitizeOutput, validateGitBranchName } from "./validate.ts";
 import {
@@ -691,28 +691,51 @@ export async function fetchAndFastForwardBranch(
   root: string,
   targetBranch: string,
   remote = "origin",
-): Promise<{ updated: boolean; reason: string | null }> {
+): Promise<{ updated: boolean; reason: string | null; reasonRef?: StructuredMessageRef }> {
   const base = canonicalRoot(root);
   const safeBranch = validateGitBranchName(targetBranch);
   const tree = await inspectWorkingTreeForDelivery(base);
   if (!tree.isGitRepo) {
-    return { updated: false, reason: "主目录不是 Git 仓库" };
+    return {
+      updated: false,
+      reason: "主目录不是 Git 仓库",
+      reasonRef: { key: "git.ff.notGitRepo" },
+    };
   }
   if (tree.branch !== safeBranch) {
-    return { updated: false, reason: `主仓库当前位于分支 ${tree.branch ?? "HEAD"}（非 ${safeBranch}），已保留主仓库现状` };
+    const current = tree.branch ?? "HEAD";
+    return {
+      updated: false,
+      reason: `主仓库当前位于分支 ${current}（非 ${safeBranch}），已保留主仓库现状`,
+      reasonRef: { key: "git.ff.branchMismatch", params: { current, target: safeBranch } },
+    };
   }
   if (tree.dirty) {
-    return { updated: false, reason: "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull" };
+    return {
+      updated: false,
+      reason: "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull",
+      reasonRef: { key: "git.ff.dirtyWorktree" },
+    };
   }
   const fetchRes = await execGit(base, ["fetch", remote, safeBranch], 30_000);
   if (fetchRes.code !== 0) {
     const msg = sanitizeOutput(fetchRes.stderr.toString("utf8").trim(), 400).text;
-    return { updated: false, reason: `git fetch 失败: ${msg || "未知错误"}` };
+    return {
+      updated: false,
+      reason: `git fetch 失败: ${msg || "未知错误"}`,
+      reasonRef: msg ? { key: "git.ff.fetchFailedDetail", params: { detail: msg } } : { key: "git.ff.fetchFailed" },
+    };
   }
   const ffRes = await execGit(base, ["merge", "--ff-only", `${remote}/${safeBranch}`], 20_000);
   if (ffRes.code !== 0) {
     const msg = sanitizeOutput(ffRes.stderr.toString("utf8").trim(), 400).text;
-    return { updated: false, reason: `无法快进合并 ${remote}/${safeBranch}: ${msg || "存在分叉提交"}` };
+    return {
+      updated: false,
+      reason: `无法快进合并 ${remote}/${safeBranch}: ${msg || "存在分叉提交"}`,
+      reasonRef: msg
+        ? { key: "git.ff.mergeFailedDetail", params: { remote, branch: safeBranch, detail: msg } }
+        : { key: "git.ff.mergeFailed", params: { remote, branch: safeBranch } },
+    };
   }
   return { updated: true, reason: null };
 }

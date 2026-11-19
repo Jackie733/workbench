@@ -59,6 +59,8 @@ import {
   describeClientErrorRef,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
+  formatPrStateLabel,
+  prStateRef,
   resolveWarningParam,
   t,
   translateRef,
@@ -2041,12 +2043,20 @@ export function Modals() {
       if (out) {
         await invalidateAllWorkbenchQueries();
         if (out.pr.state === "merged") {
-          showToastKey(
-            out.cleanedSandbox ? "toast.prMergedClean" : "toast.prMerged",
-            { num: out.pr.number },
-          );
+          if (!out.cleanedSandbox) {
+            showToastKey("toast.prMerged", { num: out.pr.number });
+          } else if (out.mainUpdated) {
+            showToastKey("toast.prMergedMain", { num: out.pr.number });
+          } else if (out.mainSyncReason) {
+            showToastKey("toast.prMergedReason", {
+              num: out.pr.number,
+              reason: resolveWarningParam(out.mainSyncReason, out.mainSyncReasonRef),
+            });
+          } else {
+            showToastKey("toast.prMergedClean", { num: out.pr.number });
+          }
         } else {
-          showToastKey("toast.prStatus", { num: out.pr.number, state: out.pr.state });
+          showToastKey("toast.prStatus", { num: out.pr.number, state: prStateRef(out.pr.state) });
         }
       }
     };
@@ -2191,7 +2201,7 @@ export function Modals() {
                             )}
                             {sandboxItem?.github?.pr && (
                               <span className={`badge ${sandboxItem.github.pr.state === "merged" ? "success" : "info"}`}>
-                                PR #{sandboxItem.github.pr.number} · {sandboxItem.github.pr.state}
+                                PR #{sandboxItem.github.pr.number} · {formatPrStateLabel(language, sandboxItem.github.pr.state)}
                               </span>
                             )}
                             <span className="xs muted">{formatDateTime(p.updatedAt, language)}</span>

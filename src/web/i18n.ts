@@ -1078,6 +1078,22 @@ const zhCN = {
   "core.diff.baselineDiffFailed": "基线相对 Diff 生成失败，评审证据不完整",
   "core.diff.worktreeDiffFailed": "工作区 Diff 生成失败，评审证据不完整",
   "core.diff.cachedDiffFailed": "暂存区 Diff 生成失败，评审证据不完整",
+  "core.evidence.invalidPath": "验收快照引用路径无效",
+  "core.evidence.fileMissing": "验收证据文件不存在，历史 Diff 不可用",
+  "core.evidence.digestMismatch": "验收证据内容摘要校验失败",
+  "core.evidence.refMismatch": "验收证据与验收引用记录不一致",
+  "core.evidence.screenshotMissing": "验收快照引用的截图文件缺失：{shotId}",
+  "core.evidence.unreadable": "验收证据文件无法解析",
+  "git.ff.notGitRepo": "主目录不是 Git 仓库",
+  "git.ff.branchMismatch": "主仓库当前位于分支 {current}（非 {target}），已保留主仓库现状",
+  "git.ff.dirtyWorktree": "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull",
+  "git.ff.fetchFailed": "git fetch 失败",
+  "git.ff.fetchFailedDetail": "git fetch 失败：{detail}",
+  "git.ff.mergeFailed": "无法快进合并 {remote}/{branch}",
+  "git.ff.mergeFailedDetail": "无法快进合并 {remote}/{branch}：{detail}",
+  "pr.state.open": "开启",
+  "pr.state.merged": "已合并",
+  "pr.state.closed": "已关闭",
   "gitee.repoLabel": "Gitee 仓库（owner/repo，留空自动识别）",
   "gitee.enterpriseLabel": "企业空间路径（用于拉取无仓库工作项）",
   "gitee.baseBranchLabel": "PR 默认 Base 分支",
@@ -2198,6 +2214,22 @@ const en: Record<MessageKey, string> = {
   "core.diff.baselineDiffFailed": "Failed to generate baseline-relative diff; review evidence is incomplete",
   "core.diff.worktreeDiffFailed": "Failed to generate workspace diff; review evidence is incomplete",
   "core.diff.cachedDiffFailed": "Failed to generate staged diff; review evidence is incomplete",
+  "core.evidence.invalidPath": "Invalid acceptance snapshot reference path",
+  "core.evidence.fileMissing": "Acceptance evidence file does not exist; historical diff unavailable",
+  "core.evidence.digestMismatch": "Acceptance evidence content digest verification failed",
+  "core.evidence.refMismatch": "Acceptance evidence does not match acceptance record",
+  "core.evidence.screenshotMissing": "Screenshot file referenced by acceptance snapshot is missing: {shotId}",
+  "core.evidence.unreadable": "Acceptance evidence file could not be parsed",
+  "git.ff.notGitRepo": "Main directory is not a Git repository",
+  "git.ff.branchMismatch": "Main repository is currently on branch {current} (not {target}); kept main repository as is",
+  "git.ff.dirtyWorktree": "Main repository has uncommitted changes; skipped automatic fast-forward merge — run git pull manually",
+  "git.ff.fetchFailed": "git fetch failed",
+  "git.ff.fetchFailedDetail": "git fetch failed: {detail}",
+  "git.ff.mergeFailed": "Unable to fast-forward merge {remote}/{branch}",
+  "git.ff.mergeFailedDetail": "Unable to fast-forward merge {remote}/{branch}: {detail}",
+  "pr.state.open": "open",
+  "pr.state.merged": "merged",
+  "pr.state.closed": "closed",
   "gitee.repoLabel": "Gitee repository (owner/repo, blank to auto-detect)",
   "gitee.enterpriseLabel": "Enterprise slug (for repo-less work items)",
   "gitee.baseBranchLabel": "Default PR base branch",
@@ -2592,6 +2624,23 @@ export function resolveWarningParam(
     return { key: ref.key, ...(ref.params ? { params: ref.params } : {}) };
   }
   return warning;
+}
+
+const PR_STATE_KEYS: Record<string, MessageKey> = {
+  open: "pr.state.open",
+  merged: "pr.state.merged",
+  closed: "pr.state.closed",
+};
+
+/** Returns a reactive UiMessageRef for known PR states (open/merged/closed) so toasts and badges localize cleanly. */
+export function prStateRef(state: string): UiMessageRef | string {
+  const key = PR_STATE_KEYS[state.toLowerCase()];
+  return key ? { key } : state;
+}
+
+export function formatPrStateLabel(language: UiLanguage, state: string): string {
+  const key = PR_STATE_KEYS[state.toLowerCase()];
+  return key ? t(language, key) : state;
 }
 
 export function applyDocumentLanguage(language: UiLanguage, doc: Document | null = typeof document !== "undefined" ? document : null): void {

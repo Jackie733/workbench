@@ -1041,6 +1041,7 @@ export async function syncRsiSandboxPrAndCleanup(
   cleanedSandbox: boolean;
   mainUpdated: boolean;
   mainSyncReason: string | null;
+  mainSyncReasonRef?: StructuredMessageRef | null;
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
@@ -1059,12 +1060,14 @@ export async function syncRsiSandboxPrAndCleanup(
 
   let mainUpdated = false;
   let mainSyncReason: string | null = null;
+  let mainSyncReasonRef: StructuredMessageRef | null = null;
   let cleanedSandbox = false;
 
   if (isMerged) {
     const ff = await fetchAndFastForwardBranch(base, latestPr.baseBranch || "main", "origin");
     mainUpdated = ff.updated;
     mainSyncReason = ff.reason;
+    mainSyncReasonRef = ff.reasonRef ?? null;
   }
 
   const sandbox = getSandboxForRequirement(base, reqId);
@@ -1105,6 +1108,7 @@ export async function syncRsiSandboxPrAndCleanup(
     cleanedSandbox,
     mainUpdated,
     mainSyncReason,
+    ...(mainSyncReasonRef ? { mainSyncReasonRef } : {}),
     touchesWeb,
     touchesBackend,
   };

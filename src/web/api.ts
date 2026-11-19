@@ -304,6 +304,7 @@ export const api = {
       cleanedSandbox: boolean;
       mainUpdated: boolean;
       mainSyncReason: string | null;
+      mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded: boolean;
       restartRecommended: boolean;
     }>(`/api/hub/evolution/sync-pr/${encodeURIComponent(reqId)}`, {
@@ -577,6 +578,7 @@ export const api = {
       cleanedSandbox: boolean;
       mainUpdated: boolean;
       mainSyncReason: string | null;
+      mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded?: boolean;
       restartRecommended?: boolean;
     }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/pr-sync`), {

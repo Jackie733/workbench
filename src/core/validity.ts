@@ -25,6 +25,8 @@ export interface EvaluateRequirementOptions {
   acceptanceSnapshot?: AcceptanceSnapshot | null;
   acceptanceSnapshotStatus?: AcceptanceArtifactStatus;
   acceptanceSnapshotReason?: string | null;
+  acceptanceSnapshotReasonKey?: string;
+  acceptanceSnapshotReasonParams?: UiMessageParams;
 }
 
 /** Computes deterministic SHA-256 of spec.md content and normalized acceptance criteria. */
@@ -891,13 +893,16 @@ export function evaluateRequirement(
       acceptanceGate,
       reviewValidity,
     );
-    const diffReasonKey = options.acceptanceSnapshotReason
-      ? undefined
-      : snapStatus === "available"
-        ? "core.diff.mismatch"
-        : acc.snapshot
-          ? "core.diff.missing"
-          : "core.diff.noSnapshot";
+    const diffReasonKey =
+      options.acceptanceSnapshotReasonKey ??
+      (options.acceptanceSnapshotReason
+        ? undefined
+        : snapStatus === "available"
+          ? "core.diff.mismatch"
+          : acc.snapshot
+            ? "core.diff.missing"
+            : "core.diff.noSnapshot");
+    const diffReasonParams = options.acceptanceSnapshotReasonKey ? options.acceptanceSnapshotReasonParams : undefined;
     const diffReason =
       options.acceptanceSnapshotReason ??
       (snapStatus === "available"
@@ -911,6 +916,7 @@ export function evaluateRequirement(
       artifactStatus: snapStatus === "available" ? "corrupt" : snapStatus,
       reason: coverageReason ? `${diffReason}；${coverageReason}` : diffReason,
       ...(diffReasonKey ? { reasonKey: diffReasonKey } : {}),
+      ...(diffReasonParams ? { reasonParams: diffReasonParams } : {}),
       ...(coverageReasonKey ? { coverageReasonKey } : {}),
       acceptedAt: acc.acceptedAt,
       snapshotId: acc.snapshot?.id ?? null,

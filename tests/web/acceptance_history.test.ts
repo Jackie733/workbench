@@ -354,6 +354,92 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
           ),
         { timeout: 10_000 },
       );
+
+      // 3. Missing and corrupt acceptance snapshot diagnostics localize cleanly in both languages
+      const reqMissing = await createRequirement(repo, {
+        goal: "Missing evidence file check",
+        criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+      });
+      await propose(repo, reqMissing.state.id, { designMarkdown: "# D3", actor: "agent" });
+      await approveDesign(repo, reqMissing.state.id, { baseline: base2 });
+      await runVerification(repo, reqMissing.state.id, { command: "echo ok", criterionIds: ["AC-1"] });
+      const missSnap = await observeGitSnapshot(repo);
+      await acceptRequirement(repo, reqMissing.state.id, { currentCodeSnapshotHash: missSnap!.fingerprint });
+      const missingStatePath = path.join(repo, `.workbench/items/${reqMissing.state.id}/state.json`);
+      const missingState = JSON.parse(fs.readFileSync(missingStatePath, "utf8")) as RequirementState;
+      const snapRelPath = missingState.acceptance!.snapshot!.path;
+      fs.rmSync(path.join(repo, `.workbench/items/${reqMissing.state.id}/${snapRelPath}`), { force: true });
+
+      const reqCorrupt = await createRequirement(repo, {
+        goal: "Corrupt evidence file check",
+        criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+      });
+      await propose(repo, reqCorrupt.state.id, { designMarkdown: "# D4", actor: "agent" });
+      await approveDesign(repo, reqCorrupt.state.id, { baseline: base2 });
+      await runVerification(repo, reqCorrupt.state.id, { command: "echo ok", criterionIds: ["AC-1"] });
+      const corruptSnap = await observeGitSnapshot(repo);
+      await acceptRequirement(repo, reqCorrupt.state.id, { currentCodeSnapshotHash: corruptSnap!.fingerprint });
+      const corruptStatePath = path.join(repo, `.workbench/items/${reqCorrupt.state.id}/state.json`);
+      const corruptState = JSON.parse(fs.readFileSync(corruptStatePath, "utf8")) as RequirementState;
+      fs.writeFileSync(
+        path.join(repo, `.workbench/items/${reqCorrupt.state.id}/${corruptState.acceptance!.snapshot!.path}`),
+        "{broken json",
+      );
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
+      await page.click('[data-action="set-scope"][data-value="done"]');
+
+      // Missing snapshot artifact in EN then ZH
+      await page.waitForSelector(`[data-testid="req-row-${reqMissing.state.id}"]`, { timeout: 10_000 });
+      await page.click(`[data-testid="req-row-${reqMissing.state.id}"]`);
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
+            "Acceptance evidence file does not exist",
+          ),
+        { timeout: 10_000 },
+      );
+      const missEn = await page.evaluate(
+        () => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(missEn)).toBe(false);
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
+            "验收证据文件不存在",
+          ),
+        { timeout: 10_000 },
+      );
+
+      // Corrupt snapshot artifact in EN then ZH
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector(`[data-testid="req-row-${reqCorrupt.state.id}"]`, { timeout: 10_000 });
+      await page.click(`[data-testid="req-row-${reqCorrupt.state.id}"]`);
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
+            "Acceptance evidence file could not be parsed",
+          ),
+        { timeout: 10_000 },
+      );
+      const corruptEn = await page.evaluate(
+        () => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(corruptEn)).toBe(false);
     } finally {
       await page.close();
     }
