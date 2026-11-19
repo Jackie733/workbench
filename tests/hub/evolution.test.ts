@@ -845,4 +845,33 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(issueJson.attachments).toHaveLength(1);
     expect(issueJson.attachments[0]!.name).toBe("cli-attach.log");
   }, 20_000);
+
+  test("applySandboxToMain applies committed changes when sandbox branch is ahead of main", async () => {
+    makeTempHub();
+    const wbRepo = makeGitRepo("workbench");
+    await initProject(wbRepo, { name: "workbench", privacyMode: "local" });
+    const req = await createRequirement(wbRepo, {
+      goal: "Apply committed sandbox diff against main HEAD",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    const reqId = req.state.id;
+    const wt = await createOrReuseWorktree(wbRepo, reqId);
+    fs.writeFileSync(path.join(wt.worktreePath, "src/web/committed_feature.ts"), "export const committedFeature = 1;\n");
+    execFileSync("git", ["-C", wt.worktreePath, "add", "src/web/committed_feature.ts"], { stdio: "ignore" });
+    execFileSync("git", ["-C", wt.worktreePath, "commit", "-m", "feat: add committed feature in sandbox"], {
+      stdio: "ignore",
+    });
+
+    await propose(wbRepo, reqId, { designMarkdown: "# Committed sandbox feature", actor: "agent" });
+    await approveDesign(wbRepo, reqId);
+    await runVerification(wbRepo, reqId, { command: "echo ok", criterionIds: ["AC-1"] });
+    await acceptRequirement(wbRepo, reqId, {
+      currentCodeSnapshotHash: getRequirement(wbRepo, reqId).state.verifications[0]!.codeSnapshotHash,
+    });
+
+    const applied = await applySandboxToMain(wbRepo, reqId);
+    expect(applied.appliedFiles).toContain("src/web/committed_feature.ts");
+    expect(applied.touchesWeb).toBe(true);
+    expect(fs.existsSync(path.join(wbRepo, "src/web/committed_feature.ts"))).toBe(true);
+  });
 });

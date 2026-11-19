@@ -586,16 +586,29 @@ function hasInProgressMergeOrRebase(wt: string): boolean {
 
 function resolveEffectiveSandboxBaseRef(base: string, wt: string, sandbox: SandboxRecord, mainHead?: string | null): string {
   let baseRef = sandbox.baseHead ?? "";
+  let resolvedMainHead = mainHead ?? "";
+  if (!resolvedMainHead) {
+    try {
+      resolvedMainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      resolvedMainHead = "";
+    }
+  }
   try {
-    const mergeBase = execFileSync("git", ["-C", wt, "merge-base", mainHead || "HEAD", sandbox.branch], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (mergeBase && /^[0-9a-f]{7,64}$/i.test(mergeBase)) {
-      if (!baseRef) {
-        baseRef = mergeBase;
-      } else if (mergeBase !== baseRef && isGitAncestor(base, baseRef, mergeBase)) {
-        baseRef = mergeBase;
+    if (resolvedMainHead) {
+      const mergeBase = execFileSync("git", ["-C", wt, "merge-base", resolvedMainHead, sandbox.branch], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (mergeBase && /^[0-9a-f]{7,64}$/i.test(mergeBase)) {
+        if (!baseRef) {
+          baseRef = mergeBase;
+        } else if (mergeBase !== baseRef && isGitAncestor(base, baseRef, mergeBase)) {
+          baseRef = mergeBase;
+        }
       }
     }
   } catch {
@@ -898,10 +911,10 @@ export async function applySandboxToMain(
     );
   }
 
-  // Determine the fork commit (never diff blindly against moved main HEAD)
-  let baseRef = resolveEffectiveSandboxBaseRef(base, wt, sandbox);
+  // Determine the fork commit against main HEAD (never diff against sandbox's own branch HEAD)
+  const mainSnap = await observeGitSnapshot(base);
+  let baseRef = resolveEffectiveSandboxBaseRef(base, wt, sandbox, mainSnap?.head ?? null);
   if (!baseRef) {
-    const mainSnap = await observeGitSnapshot(base);
     if (!mainSnap?.head) {
       throw new WorkbenchError("execution_failed", "无法确定主仓库与沙箱的分叉基准提交");
     }
