@@ -65,6 +65,7 @@ import {
   type ScreenshotBatch,
   type ScreenshotBatchStatus,
   type ScreenshotShot,
+  type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
   type Stage,
   type TaskInput,
@@ -96,11 +97,22 @@ const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "sta
 const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
 const SCREENSHOT_TRIGGERS: ScreenshotTrigger[] = ["auto_submit", "manual"];
 const SCREENSHOT_STATUSES: ScreenshotBatchStatus[] = ["captured", "partial", "skipped"];
+const SCREENSHOT_SKIP_REASON_CODES: ScreenshotSkipReasonCode[] = [
+  "browser_missing",
+  "chrome_path_missing",
+  "puppeteer_path_missing",
+  "server_unavailable",
+  "browser_launch_failed",
+  "no_shots",
+];
 
 export function validateGitHubRepoSlug(repo: string): string {
   const trimmed = repo.trim();
   if (!GITHUB_REPO_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`);
+    throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`, {
+      messageKey: "github.errInvalidRepo",
+      messageParams: { repo },
+    });
   }
   return trimmed;
 }
@@ -108,7 +120,10 @@ export function validateGitHubRepoSlug(repo: string): string {
 export function validateGiteeRepoSlug(repo: string): string {
   const trimmed = repo.trim();
   if (!GITHUB_REPO_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 仓库标识（应为 owner/repo）: ${repo}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 仓库标识（应为 owner/repo）: ${repo}`, {
+      messageKey: "gitee.errInvalidRepo",
+      messageParams: { repo },
+    });
   }
   return trimmed;
 }
@@ -116,7 +131,10 @@ export function validateGiteeRepoSlug(repo: string): string {
 export function validateGiteeEnterpriseSlug(enterprise: string): string {
   const trimmed = enterprise.trim();
   if (!GITEE_ENTERPRISE_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 企业空间标识: ${enterprise}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 企业空间标识: ${enterprise}`, {
+      messageKey: "gitee.errInvalidEnterprise",
+      messageParams: { enterprise },
+    });
   }
   return trimmed;
 }
@@ -124,7 +142,10 @@ export function validateGiteeEnterpriseSlug(enterprise: string): string {
 export function validateGiteeIssueIdent(ident: string): string {
   const trimmed = ident.trim().replace(/^#/, "");
   if (!GITEE_ISSUE_IDENT_RE.test(trimmed)) {
-    throw new WorkbenchError("invalid_input", `无效的 Gitee 工作项编号: ${ident}`);
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 工作项编号: ${ident}`, {
+      messageKey: "gitee.errInvalidIssueIdent",
+      messageParams: { ident },
+    });
   }
   return trimmed.toUpperCase();
 }
@@ -132,7 +153,10 @@ export function validateGiteeIssueIdent(ident: string): string {
 export function validateGitBranchName(branch: string): string {
   const trimmed = branch.trim();
   if (!GIT_BRANCH_RE.test(trimmed) || trimmed.includes("//") || trimmed === "HEAD") {
-    throw new WorkbenchError("invalid_input", `非法的 Git 分支名: ${branch}`);
+    throw new WorkbenchError("invalid_input", `非法的 Git 分支名: ${branch}`, {
+      messageKey: "git.errInvalidBranch",
+      messageParams: { branch },
+    });
   }
   return trimmed;
 }
@@ -717,9 +741,28 @@ export function validateScreenshotBatch(raw: unknown): ScreenshotBatch {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图批次必须是对象");
   assertAllowedKeys(
     raw,
-    ["id", "createdAt", "trigger", "actor", "specHash", "codeSnapshotHash", "status", "skipReason", "shots", "durationMs"],
+    [
+      "id",
+      "createdAt",
+      "trigger",
+      "actor",
+      "specHash",
+      "codeSnapshotHash",
+      "status",
+      "skipReason",
+      "reasonCode",
+      "shots",
+      "durationMs",
+    ],
     "screenshotBatch",
   );
+  if (
+    raw.reasonCode !== undefined &&
+    raw.reasonCode !== null &&
+    !SCREENSHOT_SKIP_REASON_CODES.includes(raw.reasonCode as ScreenshotSkipReasonCode)
+  ) {
+    throw new WorkbenchError("corrupt_record", "截图跳过原因码无效");
+  }
   if (
     typeof raw.id !== "string" ||
     !SCREENSHOT_BATCH_ID_RE.test(raw.id) ||

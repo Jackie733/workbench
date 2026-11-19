@@ -7,6 +7,8 @@ import {
   type AttachmentMeta,
 } from "../../core/types.ts";
 import { api } from "../api.ts";
+import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 const CLIENT_ALLOWED_EXTS = new Set([
@@ -45,10 +47,11 @@ export interface AttachmentPickerProps {
 
 /** 文件选择 / 拖拽 / 剪贴板截图三合一附件选择器。 */
 export function AttachmentPicker({ value, onChange, disabled, scope = "project" }: AttachmentPickerProps) {
+  const language = useUiStore((s) => s.language);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LocalizedError | null>(null);
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const previewsRef = useRef<Record<string, string>>({});
 
@@ -77,18 +80,18 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
     setError(null);
     const remaining = MAX_ATTACHMENTS_PER_ITEM - value.length;
     if (remaining <= 0) {
-      setError(`单条记录最多 ${MAX_ATTACHMENTS_PER_ITEM} 个附件`);
+      setError({ key: "attachment.maxOther", params: { count: MAX_ATTACHMENTS_PER_ITEM }, text: "" });
       return;
     }
     const accepted: File[] = [];
     for (const file of incoming) {
       const ext = extensionOf(file.name);
       if (!CLIENT_ALLOWED_EXTS.has(ext)) {
-        setError(`不支持的附件类型: ${file.name}（禁止 svg/html 及可执行文件）`);
+        setError({ key: "attachment.unsupported", params: { name: file.name }, text: "" });
         continue;
       }
       if (file.size > MAX_ATTACHMENT_BYTES) {
-        setError(`文件 ${file.name} 超过单文件 10 MB 上限`);
+        setError({ key: "attachment.tooLarge", params: { name: file.name }, text: "" });
         continue;
       }
       accepted.push(file);
@@ -96,7 +99,11 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
     if (accepted.length === 0) return;
     const picked = accepted.slice(0, remaining);
     if (accepted.length > remaining) {
-      setError(`单条记录最多 ${MAX_ATTACHMENTS_PER_ITEM} 个附件，已自动截取前 ${remaining} 个`);
+      setError({
+        key: "attachment.truncated",
+        params: { max: MAX_ATTACHMENTS_PER_ITEM, count: remaining },
+        text: "",
+      });
     }
     setUploading(true);
     try {
@@ -104,7 +111,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       const next = [...value, ...res.attachments];
       const nextTotal = next.reduce((sum, meta) => sum + meta.size, 0);
       if (nextTotal > MAX_ATTACHMENT_TOTAL_BYTES) {
-        setError("附件合计大小超过 20 MB 上限");
+        setError({ key: "attachment.totalExceeded", text: "" });
         return;
       }
       for (let i = 0; i < res.attachments.length; i += 1) {
@@ -117,7 +124,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       setPreviews({ ...previewsRef.current });
       onChange(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "附件上传失败");
+      setError(describeClientErrorRef(err));
     } finally {
       setUploading(false);
       if (inputRef.current) inputRef.current.value = "";
@@ -135,7 +142,11 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       if (!file) continue;
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const ext = item.type === "image/jpeg" ? "jpg" : item.type.split("/")[1] || "png";
-      files.push(new File([file], `截图-${stamp}.${ext}`, { type: item.type }));
+      files.push(
+        new File([file], `${t(useUiStore.getState().language, "attachment.screenshotNamePrefix")}-${stamp}.${ext}`, {
+          type: item.type,
+        }),
+      );
     }
     if (files.length > 0) {
       event.preventDefault();
@@ -149,7 +160,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
         className={`attachment-dropzone${dragOver ? " drag-over" : ""}${disabled ? " disabled" : ""}`}
         role="button"
         tabIndex={disabled ? -1 : 0}
-        aria-label="添加图片或文件附件"
+        aria-label={t(language, "attachment.addAria")}
         onPaste={handlePaste}
         onClick={() => {
           if (!disabled && !uploading) inputRef.current?.click();
@@ -184,22 +195,20 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
         />
         {uploading ? (
           <span className="xs muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon icon={Loader2} size={14} className="spin" /> 正在上传附件…
+            <Icon icon={Loader2} size={14} className="spin" /> {t(language, "attachment.uploading")}
           </span>
         ) : (
           <span className="attachment-dropzone-hint">
             <Icon icon={Paperclip} size={14} />
-            <span>点击选择、拖拽文件，或粘贴剪贴板截图</span>
-            <span className="xs muted">
-              （图片 png/jpeg/gif/webp；文件 pdf/txt/md/json/csv/log/zip；单文件 ≤10MB，最多 8 个）
-            </span>
+            <span>{t(language, "attachment.hint")}</span>
+            <span className="xs muted">{t(language, "attachment.hintDetail")}</span>
           </span>
         )}
       </div>
 
       {error && (
         <div className="callout danger xs" role="alert" data-testid="attachment-error" style={{ marginTop: 6 }}>
-          {error}
+          {error.key ? t(language, error.key, error.params) : error.text}
         </div>
       )}
 
@@ -226,7 +235,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
               <button
                 className="btn ghost xs"
                 type="button"
-                aria-label={`移除附件 ${meta.name}`}
+                aria-label={t(language, "attachment.removeAria", { name: meta.name })}
                 data-testid="attachment-remove"
                 onClick={() => removeLocal(meta.id)}
               >
@@ -235,7 +244,7 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
             </div>
           ))}
           <div className="xs muted">
-            已选 {value.length} 个附件，合计 {formatSize(totalSize)}
+            {t(language, "attachment.selected", { count: value.length, size: formatSize(totalSize) })}
           </div>
         </div>
       )}

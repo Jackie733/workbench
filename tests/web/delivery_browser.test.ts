@@ -8,9 +8,14 @@ import {
   approveDesign,
   createRequirement,
   initProject,
+  linkRequirementGitHubIssue,
   propose,
+  recordRequirementGitHubSync,
+  updateTasks,
 } from "../../src/core/engine.ts";
+import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
+import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
@@ -24,6 +29,8 @@ interface BrowserPage {
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
   click(sel: string): Promise<void>;
+  select(sel: string, ...values: string[]): Promise<string[]>;
+  type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
 }
@@ -126,12 +133,31 @@ describe("post-acceptance delivery wrap-up UI", () => {
       const selectionState = await page.evaluate(() => ({
         appChecked: (document.querySelector('[data-testid="deliver-file-app.ts"]') as HTMLInputElement | null)?.checked,
         scratchChecked: (document.querySelector('[data-testid="deliver-file-scratch.ts"]') as HTMLInputElement | null)?.checked,
+        appStatus: document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent ?? "",
+        scratchStatus: document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent ?? "",
         modalText: document.querySelector('[data-testid="deliver-modal"]')?.textContent ?? "",
       }));
       expect(selectionState.appChecked).toBe(true);
       expect(selectionState.scratchChecked).toBe(false);
+      expect(selectionState.appStatus).toBe("已修改");
+      expect(selectionState.scratchStatus).toBe("未跟踪");
       expect(selectionState.modalText).toContain("本次验收");
       expect(selectionState.modalText).toContain("工作区其他");
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "Modified" &&
+          document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent === "Untracked",
+        { timeout: 5000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "已修改" &&
+          document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent === "未跟踪",
+        { timeout: 5000 },
+      );
 
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForSelector('[data-testid="delivery-summary-line"]', { timeout: 5000 });
@@ -150,6 +176,552 @@ describe("post-acceptance delivery wrap-up UI", () => {
       expect(committed).toBe("app.ts");
       const status = execFileSync("git", ["status", "--short"], { cwd: repo, encoding: "utf8" }).trim();
       expect(status).toBe("?? scratch.ts");
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes GitHub Issue creation, PR delivery, and PR status sync errors in English UI", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-del-remote-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "DeliverGitHubErrRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Ship GitHub error i18n",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const accSnap = await observeGitSnapshot(repo);
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: accSnap!.fingerprint });
+
+    let prCreateAttempts = 0;
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/demo.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          return { code: 1, stdout: "", stderr: "API rate limit exceeded" };
+        }
+        if (args[0] === "pr" && args[1] === "list") {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "create") {
+          prCreateAttempts += 1;
+          if (prCreateAttempts === 1) {
+            return { code: 1, stdout: "", stderr: "Permission denied to repo" };
+          }
+          return { code: 0, stdout: "https://github.com/acme/demo/pull/42\n", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "view") {
+          return { code: 1, stdout: "", stderr: "Could not resolve to a PullRequest" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+
+      // 1. Create & link GitHub Issue failure renders localized English message with upstream detail.
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="menu-link-issue-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="menu-link-issue-btn"]');
+      await page.waitForSelector('[data-testid="submit-link-issue-btn"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="submit-link-issue-btn"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="submit-link-issue-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Failed to create GitHub Issue: API rate limit exceeded"),
+          ),
+        { timeout: 10_000 },
+      );
+      const issueErrToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Failed to create GitHub Issue")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(issueErrToast)).toBe(false);
+      await page.evaluate(() => {
+        const modal = document.querySelector('[data-testid="link-issue-modal"]');
+        const closeBtn = Array.from(modal?.querySelectorAll("button") ?? []).find(
+          (b) => b.textContent?.trim() === "Cancel",
+        );
+        closeBtn?.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="link-issue-modal"]'), { timeout: 10_000 });
+
+      // 2. Deliver PR creation failure renders localized English message with upstream detail.
+      await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-deliver-btn"]');
+      await page.waitForSelector('[data-testid="deliver-mode-pr"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="deliver-mode-pr"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="deliver-mode-pr"]');
+      await page.click('[data-testid="submit-deliver-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Failed to create GitHub PR: Permission denied to repo"),
+          ),
+        { timeout: 10_000 },
+      );
+      const prErrToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Failed to create GitHub PR")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(prErrToast)).toBe(false);
+
+      // 3. Wait for preview refresh after commit+push, retry PR creation (succeeds as #42), then test PR status sync failure.
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('[data-testid="deliver-file-app.ts"]') &&
+          !(document.querySelector('[data-testid="submit-deliver-btn"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="submit-deliver-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="deliver-modal"]'), { timeout: 10_000 });
+      await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="sync-pr-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Failed to query PR #42 status: Could not resolve to a PullRequest"),
+          ),
+        { timeout: 10_000 },
+      );
+      const syncErrToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Failed to query PR #42 status")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(syncErrToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes GitHub Issue warnings on create, manual issue sync, and PR delivery in English UI", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-del-warn-remote-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "GitHubWarnRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Ship PR with linked issue sync warning",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await linkRequirementGitHubIssue(repo, "REQ-001", {
+      repo: "acme/demo",
+      issue: { number: 12, url: "https://github.com/acme/demo/issues/12", title: "Linked", state: "open", lastSyncedAt: Date.now() },
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const accSnap = await observeGitSnapshot(repo);
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: accSnap!.fingerprint });
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/demo.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          return { code: 1, stdout: "", stderr: "API quota exceeded" };
+        }
+        if (args[0] === "issue" && args[1] === "comment") {
+          return { code: 1, stdout: "", stderr: "Upstream sync blocked" };
+        }
+        if (args[0] === "pr" && args[1] === "list") {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "create") {
+          return { code: 0, stdout: "https://github.com/acme/demo/pull/42\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 1. New requirement with "Also create a GitHub issue" when gh issue create fails -> localized warning toast.
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 10_000 });
+      await page.type('[data-testid="new-req-goal"]', "Create issue warning test");
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="new-req-create-issue"]') as HTMLInputElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="new-req-create-issue"]');
+      await page.click('[data-testid="save-draft-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "GitHub issue sync warning: Failed to create GitHub Issue: API quota exceeded",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const createWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("GitHub issue sync warning")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(createWarnToast)).toBe(false);
+
+      // 2. Manual "Sync current status to issue #12" failure on REQ-001 -> localized comment error toast.
+      await page.waitForSelector('[data-testid="back-home-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="menu-sync-issue-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="menu-sync-issue-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Failed to comment on Issue #12: Upstream sync blocked"),
+          ),
+        { timeout: 10_000 },
+      );
+      const manualSyncToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Failed to comment on Issue #12")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(manualSyncToast)).toBe(false);
+
+      // 3. Deliver PR #42 when linked issue comment sync fails -> localized PR sync warning toast.
+      await page.waitForSelector('[data-testid="open-deliver-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-deliver-btn"]');
+      await page.waitForSelector('[data-testid="deliver-mode-pr"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="deliver-mode-pr"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="deliver-mode-pr"]');
+      await page.click('[data-testid="submit-deliver-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "Created PR #42 (issue sync warning: Failed to comment on Issue #12: Upstream sync blocked)",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const deliverWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Created PR #42")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(deliverWarnToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes quick report issue sync warnings and acceptance gate blocker errors in English UI", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "workbench", version: "5.0.0" }, null, 2));
+    execFileSync("git", ["add", "package.json"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add package.json"], { cwd: repo, stdio: "ignore" });
+    await initProject(repo, { name: "workbench", privacyMode: "local" });
+
+    // Prepare REQ-001 ready for acceptance so we can trigger a server-side gate blocker via snapshot drift.
+    await createRequirement(repo, {
+      goal: "Verify acceptance error localization",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    await updateTasks(repo, "REQ-001", {
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: (await observeGitSnapshot(repo))?.fingerprint ?? null,
+    });
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/workbench.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "issue" && args[1] === "create") {
+          return { code: 1, stdout: "", stderr: "API quota exceeded" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 1. Acceptance gate blocker error from UI Accept click localizes blockers in English & re-renders in Chinese.
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
+      // Dirty tracked file right before Accept so server observes stale verification against current snapshot.
+      fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 99;\n");
+      await page.click('[data-testid="action-accept"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+            (el) =>
+              (el.textContent ?? "").includes("Acceptance gate failed:") &&
+              (el.textContent ?? "").includes("AC-1"),
+          ),
+        { timeout: 10_000 },
+      );
+      const enAcceptErr = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Acceptance gate failed:")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(enAcceptErr)).toBe(false);
+
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+            (el) =>
+              (el.textContent ?? "").includes("验收门禁未通过：") &&
+              (el.textContent ?? "").includes("AC-1"),
+          ),
+        { timeout: 10_000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
+
+      // 2. Quick report auto-promote with GitHub issue creation failing -> localized English warning toast.
+      await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-title"]', { timeout: 10_000 });
+      await page.type('[data-testid="quick-report-title"]', "Broken alignment");
+      const autoPromoteChecked = await page.evaluate(
+        () => Boolean((document.querySelector('[data-testid="quick-report-autopromote"]') as HTMLInputElement | null)?.checked),
+      );
+      if (!autoPromoteChecked) await page.click('[data-testid="quick-report-autopromote"]');
+      await page.waitForSelector('[data-testid="quick-report-create-issue"]', { timeout: 10_000 });
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.disabled,
+        { timeout: 10_000 },
+      );
+      const createIssueChecked = await page.evaluate(
+        () => Boolean((document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.checked),
+      );
+      if (!createIssueChecked) await page.click('[data-testid="quick-report-create-issue"]');
+      await page.click('[data-testid="submit-quick-report-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes(
+              "Created requirement REQ-002 with a sandbox (issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
+            ),
+          ),
+        { timeout: 10_000 },
+      );
+      const quickWarnToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("issue sync warning: Failed to create GitHub Issue")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(quickWarnToast)).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("localizes PR state badges and merged PR main-branch skip reason in English and Chinese", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-del-ff-remote-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "SandboxSyncPrRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Test PR state label & main sync skip localization",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design", actor: "agent" });
+    const base = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: base });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: base!.fingerprint });
+    await createOrReuseWorktree(repo, "REQ-001");
+    await linkRequirementGitHubIssue(repo, "REQ-001", {
+      repo: "acme/workbench",
+      issue: { number: 70, url: "https://github.com/acme/workbench/issues/70", title: "Linked", state: "open", lastSyncedAt: Date.now() },
+    });
+    await recordRequirementGitHubSync(repo, "REQ-001", {
+      prPatch: {
+        number: 77,
+        url: "https://github.com/acme/workbench/pull/77",
+        title: "REQ-001 PR",
+        headBranch: "rsi/REQ-001",
+        baseBranch: "main",
+        state: "open",
+        mergedAt: null,
+        lastSyncedAt: Date.now(),
+      },
+      eventKind: "github_pr_synced",
+      summary: "Created PR #77",
+    });
+    // Dirty main repo working tree so fast-forward merge is skipped cleanly with git.ff.dirtyWorktree
+    fs.writeFileSync(path.join(repo, "dirty.txt"), "uncommitted change\n");
+
+    const githubDeps: GitHubCommandDeps = {
+      getRemoteUrl: async () => "https://github.com/acme/workbench.git",
+      resolveDefaultBaseBranch: async () => "main",
+      whichGh: () => "/usr/bin/gh",
+      runGh: async (_bin, args) => {
+        if (args[0] === "auth" && args[1] === "status") {
+          return { code: 0, stdout: "Logged in to github.com account alice", stderr: "" };
+        }
+        if (args[0] === "pr" && args[1] === "view") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              number: 77,
+              url: "https://github.com/acme/workbench/pull/77",
+              title: "REQ-001 PR",
+              state: "MERGED",
+              mergedAt: new Date().toISOString(),
+              baseRefName: "main",
+              headRefName: "rsi/REQ-001",
+            }),
+            stderr: "",
+          };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, githubDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10_000 });
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? ""),
+      ).toContain("PR #77 · 开启");
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? "").includes("PR #77 · open"),
+        { timeout: 10_000 },
+      );
+
+      // Sync merged PR when main repo has uncommitted changes -> localized skip reason toast
+      await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="sync-pr-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Main repository has uncommitted changes; skipped automatic fast-forward merge"),
+          ),
+        { timeout: 10_000 },
+      );
+      const mergeSkipToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("PR #77 merged")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(mergeSkipToast)).toBe(false);
     } finally {
       await page.close();
     }

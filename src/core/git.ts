@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
-import { WorkbenchError } from "./errors.ts";
+import { WorkbenchError, type StructuredMessageRef } from "./errors.ts";
 import { listProjectSandboxes } from "./sandbox.ts";
 import { sanitizeOutput, validateGitBranchName } from "./validate.ts";
 import {
@@ -13,6 +13,7 @@ import {
   type CommitInfo,
   type DiffEvidenceStatus,
   type GitObservation,
+  type UiMessageParams,
 } from "./types.ts";
 
 export type { BaselineSnapshot, ChangedFile, CommitInfo, GitObservation } from "./types.ts";
@@ -273,6 +274,7 @@ export async function observeGitChanges(
     return empty({
       isGitRepo: false,
       diffReason: "代码根目录不是 Git 仓库，无法采集评审 Diff",
+      diffReasonKey: "core.diff.notGitRepo",
     });
   }
 
@@ -293,6 +295,8 @@ export async function observeGitChanges(
       fingerprint: snapshot.fingerprint,
       dirty: snapshot.dirty,
       diffReason: `验收基线 ${sinceHead.slice(0, 12)} 在当前仓库中不可用，无法生成基线相对 Diff`,
+      diffReasonKey: "core.diff.baselineUnavailable",
+      diffReasonParams: { head: sinceHead.slice(0, 12) },
     });
   }
 
@@ -332,6 +336,8 @@ export async function observeGitChanges(
 
   let diffChunks: string[] = [];
   let diffReason: string | null = null;
+  let diffReasonKey: string | undefined;
+  let diffReasonParams: UiMessageParams | undefined;
   if (validBaseRef) {
     const diffRes = await execGit(base, ["diff", validBaseRef, "--", ".", ...EXCLUDE_PATHSPECS]);
     if (diffRes.code === 0) {
@@ -339,6 +345,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "基线相对 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.baselineDiffFailed";
     }
   } else if (snapshot.head) {
     const diffRes = await execGit(base, ["diff", "HEAD", "--", ".", ...EXCLUDE_PATHSPECS]);
@@ -347,6 +354,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "工作区 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.worktreeDiffFailed";
     }
   } else {
     const cachedRes = await execGit(base, ["diff", "--cached", "--", ".", ...EXCLUDE_PATHSPECS]);
@@ -355,6 +363,7 @@ export async function observeGitChanges(
       if (text) diffChunks.push(text);
     } else {
       diffReason = "暂存区 diff 生成失败，评审证据不完整";
+      diffReasonKey = "core.diff.cachedDiffFailed";
     }
   }
 
@@ -409,6 +418,8 @@ export async function observeGitChanges(
     diffTruncated: diffStatus === "captured" ? boundedDiff.truncated : false,
     diffStatus,
     diffReason,
+    ...(diffReasonKey ? { diffReasonKey } : {}),
+    ...(diffReasonParams ? { diffReasonParams } : {}),
     binaryFiles: diffStatus === "captured" ? omitted.binaryFiles : [],
     omittedFiles: diffStatus === "captured" ? omitted.omittedFiles : [],
     baselineRequested: sinceHead,
@@ -489,18 +500,26 @@ export async function commitFilesInGit(
 ): Promise<{ commitHash: string; shortHash: string; branch: string | null }> {
   const base = canonicalRoot(root);
   if (files.length === 0) {
-    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件");
+    throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件", {
+      messageKey: "git.errCommitNoFiles",
+    });
   }
   const addRes = await execGit(base, ["add", "--", ...files], 30_000);
   if (addRes.code !== 0) {
     const msg = addRes.stderr.toString("utf8").trim() || addRes.stdout.toString("utf8").trim();
-    throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`, {
+      messageKey: msg ? "git.errStageFailedDetail" : "git.errStageFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const commitRes = await execGit(base, ["commit", "--only", "-F", "-", "--", ...files], 30_000, commitMessage);
   if (commitRes.code !== 0) {
     const msg = commitRes.stderr.toString("utf8").trim() || commitRes.stdout.toString("utf8").trim();
-    throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`, {
+      messageKey: msg ? "git.errCommitFailedDetail" : "git.errCommitFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const headRes = await execGit(base, ["rev-parse", "HEAD"]);
@@ -511,7 +530,9 @@ export async function commitFilesInGit(
   const rawBranch = branchRes.code === 0 ? branchRes.stdout.toString("utf8").trim() : "";
   const branch = rawBranch && rawBranch !== "HEAD" ? rawBranch : null;
   if (!commitHash) {
-    throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希");
+    throw new WorkbenchError("execution_failed", "提交已创建但无法读取提交哈希", {
+      messageKey: "git.errCommitNoHash",
+    });
   }
   return { commitHash, shortHash, branch };
 }
@@ -586,10 +607,12 @@ export async function resolveDefaultBaseBranch(root: string, remote = "origin"):
   return null;
 }
 
+const GIT_REF_RE = /^[0-9a-zA-Z._/-]{2,128}$/;
+
 /** Counts commits reachable from headRef that are not in baseRef. */
 export async function countCommitsBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<number> {
   const base = canonicalRoot(root);
-  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return 0;
+  if (!baseRef || baseRef.includes("..") || !GIT_REF_RE.test(baseRef)) return 0;
   try {
     const res = await execGit(base, ["rev-list", "--count", `${baseRef}..${headRef}`]);
     if (res.code !== 0) return 0;
@@ -603,7 +626,7 @@ export async function countCommitsBetween(root: string, baseRef: string, headRef
 /** Lists non-workbench files changed between baseRef and headRef. */
 export async function listCommittedFilesBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<string[]> {
   const base = canonicalRoot(root);
-  if (!baseRef || !/^[0-9a-fA-Z._/-]{2,128}$/.test(baseRef)) return [];
+  if (!baseRef || baseRef.includes("..") || !GIT_REF_RE.test(baseRef)) return [];
   try {
     const res = await execGit(base, [
       "diff",
@@ -632,12 +655,18 @@ export async function createFeatureBranchAtHead(root: string, branchName: string
 
   const exists = await execGit(base, ["rev-parse", "--verify", `refs/heads/${safeBranch}`]);
   if (exists.code === 0) {
-    throw new WorkbenchError("revision_conflict", `本地分支 ${safeBranch} 已存在，请换用其他分支名或先切换过去`);
+    throw new WorkbenchError("revision_conflict", `本地分支 ${safeBranch} 已存在，请换用其他分支名或先切换过去`, {
+      messageKey: "git.errBranchExists",
+      messageParams: { branch: safeBranch },
+    });
   }
   const createRes = await execGit(base, ["checkout", "-b", safeBranch], 15_000);
   if (createRes.code !== 0) {
     const msg = sanitizeOutput(createRes.stderr.toString("utf8").trim() || createRes.stdout.toString("utf8").trim(), 512).text;
-    throw new WorkbenchError("execution_failed", `创建分支 ${safeBranch} 失败: ${msg || "git checkout -b 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建分支 ${safeBranch} 失败: ${msg || "git checkout -b 返回非零"}`, {
+      messageKey: msg ? "git.errCreateBranchFailedDetail" : "git.errCreateBranchFailed",
+      messageParams: msg ? { branch: safeBranch, detail: msg } : { branch: safeBranch },
+    });
   }
   return safeBranch;
 }
@@ -650,7 +679,10 @@ export async function pushBranchToRemote(root: string, branchName: string, remot
   if (res.code !== 0) {
     const raw = res.stderr.toString("utf8").trim() || res.stdout.toString("utf8").trim();
     const msg = sanitizeOutput(raw, 800).text;
-    throw new WorkbenchError("execution_failed", `推送分支 ${safeBranch} 至 ${remote} 失败: ${msg || "git push 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `推送分支 ${safeBranch} 至 ${remote} 失败: ${msg || "git push 返回非零"}`, {
+      messageKey: msg ? "git.errPushFailedDetail" : "git.errPushFailed",
+      messageParams: msg ? { branch: safeBranch, remote, detail: msg } : { branch: safeBranch, remote },
+    });
   }
 }
 
@@ -659,28 +691,51 @@ export async function fetchAndFastForwardBranch(
   root: string,
   targetBranch: string,
   remote = "origin",
-): Promise<{ updated: boolean; reason: string | null }> {
+): Promise<{ updated: boolean; reason: string | null; reasonRef?: StructuredMessageRef }> {
   const base = canonicalRoot(root);
   const safeBranch = validateGitBranchName(targetBranch);
   const tree = await inspectWorkingTreeForDelivery(base);
   if (!tree.isGitRepo) {
-    return { updated: false, reason: "主目录不是 Git 仓库" };
+    return {
+      updated: false,
+      reason: "主目录不是 Git 仓库",
+      reasonRef: { key: "git.ff.notGitRepo" },
+    };
   }
   if (tree.branch !== safeBranch) {
-    return { updated: false, reason: `主仓库当前位于分支 ${tree.branch ?? "HEAD"}（非 ${safeBranch}），已保留主仓库现状` };
+    const current = tree.branch ?? "HEAD";
+    return {
+      updated: false,
+      reason: `主仓库当前位于分支 ${current}（非 ${safeBranch}），已保留主仓库现状`,
+      reasonRef: { key: "git.ff.branchMismatch", params: { current, target: safeBranch } },
+    };
   }
   if (tree.dirty) {
-    return { updated: false, reason: "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull" };
+    return {
+      updated: false,
+      reason: "主仓库存在未提交改动，已跳过自动快进合并，请手工执行 git pull",
+      reasonRef: { key: "git.ff.dirtyWorktree" },
+    };
   }
   const fetchRes = await execGit(base, ["fetch", remote, safeBranch], 30_000);
   if (fetchRes.code !== 0) {
     const msg = sanitizeOutput(fetchRes.stderr.toString("utf8").trim(), 400).text;
-    return { updated: false, reason: `git fetch 失败: ${msg || "未知错误"}` };
+    return {
+      updated: false,
+      reason: `git fetch 失败: ${msg || "未知错误"}`,
+      reasonRef: msg ? { key: "git.ff.fetchFailedDetail", params: { detail: msg } } : { key: "git.ff.fetchFailed" },
+    };
   }
   const ffRes = await execGit(base, ["merge", "--ff-only", `${remote}/${safeBranch}`], 20_000);
   if (ffRes.code !== 0) {
     const msg = sanitizeOutput(ffRes.stderr.toString("utf8").trim(), 400).text;
-    return { updated: false, reason: `无法快进合并 ${remote}/${safeBranch}: ${msg || "存在分叉提交"}` };
+    return {
+      updated: false,
+      reason: `无法快进合并 ${remote}/${safeBranch}: ${msg || "存在分叉提交"}`,
+      reasonRef: msg
+        ? { key: "git.ff.mergeFailedDetail", params: { remote, branch: safeBranch, detail: msg } }
+        : { key: "git.ff.mergeFailed", params: { remote, branch: safeBranch } },
+    };
   }
   return { updated: true, reason: null };
 }

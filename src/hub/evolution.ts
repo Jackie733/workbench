@@ -18,10 +18,11 @@ import {
   recordRequirementGitHubSync,
   syncRequirementBaseline,
 } from "../core/engine.ts";
-import { WorkbenchError } from "../core/errors.ts";
+import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "../core/errors.ts";
 import { atomicWriteBuffer, atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withFileLockSync } from "../core/fs.ts";
 import { fetchAndFastForwardBranch, observeGitSnapshot } from "../core/git.ts";
 import {
+  buildGitHubReasonMessageDetails,
   buildRequirementIssueBody,
   createGitHubIssue,
   inspectGitHubEnvironment,
@@ -1040,6 +1041,7 @@ export async function syncRsiSandboxPrAndCleanup(
   cleanedSandbox: boolean;
   mainUpdated: boolean;
   mainSyncReason: string | null;
+  mainSyncReasonRef?: StructuredMessageRef | null;
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
@@ -1058,12 +1060,14 @@ export async function syncRsiSandboxPrAndCleanup(
 
   let mainUpdated = false;
   let mainSyncReason: string | null = null;
+  let mainSyncReasonRef: StructuredMessageRef | null = null;
   let cleanedSandbox = false;
 
   if (isMerged) {
     const ff = await fetchAndFastForwardBranch(base, latestPr.baseBranch || "main", "origin");
     mainUpdated = ff.updated;
     mainSyncReason = ff.reason;
+    mainSyncReasonRef = ff.reasonRef ?? null;
   }
 
   const sandbox = getSandboxForRequirement(base, reqId);
@@ -1104,6 +1108,7 @@ export async function syncRsiSandboxPrAndCleanup(
     cleanedSandbox,
     mainUpdated,
     mainSyncReason,
+    ...(mainSyncReasonRef ? { mainSyncReasonRef } : {}),
     touchesWeb,
     touchesBackend,
   };
@@ -1124,6 +1129,7 @@ export async function promotePainPoint(
   workbenchProjectId: string;
   sandbox: SandboxRecord | null;
   githubIssueWarning?: string;
+  githubIssueWarningRef?: StructuredMessageRef;
 }> {
   const initialList = readPainPoints();
   const initialIdx = initialList.findIndex((p) => p.id === painId);
@@ -1211,6 +1217,7 @@ export async function promotePainPoint(
   });
 
   let githubIssueWarning: string | undefined;
+  let githubIssueWarningRef: StructuredMessageRef | undefined;
   const projectMeta = getProjectStatus(wbRoot).project;
   const shouldCreateIssue =
     options.createGitHubIssue === true ||
@@ -1220,6 +1227,7 @@ export async function promotePainPoint(
       const ghEnv = await inspectGitHubEnvironment(wbRoot, projectMeta?.github, deps);
       if (!ghEnv.ready || !ghEnv.repo) {
         githubIssueWarning = ghEnv.reason ?? "GitHub CLI 环境未就绪，已跳过同步创建 Issue";
+        githubIssueWarningRef = { key: buildGitHubReasonMessageDetails(ghEnv).messageKey };
       } else {
         const issue = await createGitHubIssue(
           {
@@ -1240,6 +1248,7 @@ export async function promotePainPoint(
       }
     } catch (err) {
       githubIssueWarning = err instanceof Error ? err.message : String(err);
+      githubIssueWarningRef = extractMessageRef(err) ?? undefined;
     }
   }
 
@@ -1272,5 +1281,6 @@ export async function promotePainPoint(
     workbenchProjectId: registered.id,
     sandbox,
     ...(githubIssueWarning ? { githubIssueWarning } : {}),
+    ...(githubIssueWarningRef ? { githubIssueWarningRef } : {}),
   };
 }

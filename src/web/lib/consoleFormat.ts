@@ -1,3 +1,5 @@
+import { t, type UiLanguage } from "../i18n.ts";
+
 export type ConsoleBlockKind =
   | "command_env"
   | "prompt_context"
@@ -169,7 +171,7 @@ function formatErrorContent(raw: string): string {
   return trimmed;
 }
 
-function summarizeCommandEnv(content: string): string {
+function summarizeCommandEnv(content: string, language: UiLanguage): string {
   const lines = content.split("\n").map((l) => l.trim()).filter(Boolean);
   const cmdLine = lines.find((l) => l.startsWith("$ ")) ?? "";
   const modelLine = lines.find((l) => /^model\s*:/i.test(l));
@@ -185,31 +187,28 @@ function summarizeCommandEnv(content: string): string {
   if (modelLine) {
     parts.push(modelLine.replace(/^model\s*:\s*/i, "model="));
   }
-  return parts.join(" · ") || `共 ${lines.length} 行环境信息`;
+  return parts.join(" · ") || t(language, "console.block.envLines", { count: lines.length });
 }
 
-function summarizeNoise(lines: string[]): { summary: string; itemCount: number } {
+function summarizeNoise(lines: string[], language: UiLanguage): { summary: string; itemCount: number } {
   const nonEmpty = lines.map((l) => l.trim()).filter(Boolean);
   const hookNames: string[] = [];
-  let otherCount = 0;
   for (const l of nonEmpty) {
     const m = HOOK_LINE_RE.exec(l);
     if (m) {
       const name = m[1]!.trim().split(/\s+/)[0] ?? m[1]!.trim();
       if (!hookNames.includes(name)) hookNames.push(name);
-    } else {
-      otherCount++;
     }
   }
   if (hookNames.length > 0) {
     const preview = hookNames.slice(0, 3).join(", ") + (hookNames.length > 3 ? "…" : "");
     return {
-      summary: `${preview}（共 ${nonEmpty.length} 条过程事件）`,
+      summary: t(language, "console.block.noiseHookSummary", { preview, count: nonEmpty.length }),
       itemCount: nonEmpty.length,
     };
   }
   return {
-    summary: `共 ${nonEmpty.length} 条过程/传输事件${otherCount > 0 ? "" : ""}`,
+    summary: t(language, "console.block.noiseSummary", { count: nonEmpty.length }),
     itemCount: nonEmpty.length,
   };
 }
@@ -223,7 +222,7 @@ function previewFirstLine(content: string, maxLen = 72): string {
  * Parses raw streaming or persisted agent execution logs into structured semantic blocks.
  * Preserves all content and guarantees stable block IDs during incremental append.
  */
-export function parseConsoleLog(rawText: string): ConsoleBlock[] {
+export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN"): ConsoleBlock[] {
   const normalized = stripAnsi(rawText);
   if (!normalized.trim()) return [];
 
@@ -308,8 +307,8 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
       const content = trimBlankEdges(buf).join("\n");
       pushBlock({
         kind: "command_env",
-        title: "启动命令与环境",
-        summary: summarizeCommandEnv(content),
+        title: t(language, "console.block.commandEnv"),
+        summary: summarizeCommandEnv(content, language),
         content,
         defaultCollapsed: true,
         collapsible: true,
@@ -347,8 +346,8 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
         const lineTotal = countLines(content);
         pushBlock({
           kind: "prompt_context",
-          title: "注入提示词与交接上下文",
-          summary: `已注入提示词与上下文（共 ${lineTotal} 行）`,
+          title: t(language, "console.block.promptContext"),
+          summary: t(language, "console.block.promptLines", { count: lineTotal }),
           content,
           defaultCollapsed: true,
           collapsible: true,
@@ -379,10 +378,10 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
         break;
       }
       const content = trimBlankEdges(buf).join("\n");
-      const info = summarizeNoise(buf);
+      const info = summarizeNoise(buf, language);
       pushBlock({
         kind: "lifecycle_noise",
-        title: "过程钩子与引擎事件",
+        title: t(language, "console.block.lifecycleNoise"),
         summary: info.summary,
         content,
         defaultCollapsed: true,
@@ -399,7 +398,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
       const isWarn = trimmed.includes(QODER_WARN_CHAR) || trimmed.includes("回退");
       pushBlock({
         kind: "status",
-        title: isWarn ? "模型回退提示" : "引擎已就绪",
+        title: t(language, isWarn ? "console.block.modelFallback" : "console.block.engineReady"),
         summary: clean,
         content: clean,
         defaultCollapsed: false,
@@ -414,7 +413,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
       const clean = trimmed.slice(QODER_DONE_PREFIX.length).trim();
       pushBlock({
         kind: "status",
-        title: "执行完成",
+        title: t(language, "console.block.runDone"),
         summary: clean,
         content: clean,
         defaultCollapsed: false,
@@ -431,7 +430,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
         const text = `tokens used: ${nextVal}`;
         pushBlock({
           kind: "status",
-          title: "Token 消耗",
+          title: t(language, "console.block.tokenUsed"),
           summary: text,
           content: text,
           defaultCollapsed: false,
@@ -477,8 +476,8 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
         const preview = previewFirstLine(content, 64);
         pushBlock({
           kind: "thinking",
-          title: "思考过程",
-          summary: lineTotal > 1 ? `${preview}（共 ${lineTotal} 行）` : preview,
+          title: t(language, "console.block.thinking"),
+          summary: lineTotal > 1 ? t(language, "console.block.thinkingLines", { preview, count: lineTotal }) : preview,
           content,
           defaultCollapsed: true,
           collapsible: true,
@@ -493,7 +492,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
       const toolText = trimmed.slice(QODER_TOOL_PREFIX.length).replace(/^调用工具:\s*/, "").trim();
       pushBlock({
         kind: "tool_call",
-        title: "调用工具",
+        title: t(language, "console.block.toolCall"),
         summary: toolText,
         content: toolText,
         defaultCollapsed: false,
@@ -529,13 +528,17 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
         const bodyLinesCount = bodyLines.length;
         const isLongOutput = bodyLinesCount > 6 || bodyText.length > 400;
         const compactCmd = cmdText.length > 68 ? `${cmdText.slice(0, 65)}...` : cmdText;
-        const statusTag = failed ? `退出码 ${exitCode}` : duration ? `成功 (${duration})` : "执行中";
-        const countTag = bodyLinesCount > 0 ? ` · ${bodyLinesCount} 行输出` : "";
+        const statusTag = failed
+          ? t(language, "console.block.execExitCode", { code: exitCode })
+          : duration
+            ? t(language, "console.block.execSuccess", { duration })
+            : t(language, "console.block.execRunning");
+        const countTag = bodyLinesCount > 0 ? t(language, "console.block.execOutputLines", { count: bodyLinesCount }) : "";
         const fullContent = cleaned.join("\n");
 
         pushBlock({
           kind: "tool_call",
-          title: failed ? "命令执行失败" : "命令执行",
+          title: t(language, failed ? "console.block.execFailed" : "console.block.execOk"),
           summary: `${compactCmd} · ${statusTag}${countTag}`,
           content: fullContent,
           defaultCollapsed: !failed && isLongOutput,
@@ -578,7 +581,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
       const formatted = formatErrorContent(trimBlankEdges(buf).join("\n"));
       pushBlock({
         kind: "error",
-        title: "错误与异常告警",
+        title: t(language, "console.block.error"),
         summary: previewFirstLine(formatted, 80),
         content: formatted,
         defaultCollapsed: false,
@@ -624,7 +627,7 @@ export function parseConsoleLog(rawText: string): ConsoleBlock[] {
     if (content) {
       pushBlock({
         kind: "message",
-        title: isAgentMarker ? "Agent 回复" : "终端输出",
+        title: t(language, isAgentMarker ? "console.block.agentReply" : "console.block.stdout"),
         summary: previewFirstLine(content, 72),
         content,
         defaultCollapsed: false,

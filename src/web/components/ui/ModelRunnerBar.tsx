@@ -9,15 +9,17 @@ import { Command } from "cmdk";
 import { Check, ChevronsUpDown, Cpu, Gauge, Search } from "lucide-react";
 import type { AgentAction } from "../../../core/types.ts";
 import type { ReasoningEffort } from "../../../hub/types.ts";
+import { t } from "../../i18n.ts";
 import { cn } from "../../lib/utils.ts";
 import { useHubStateQuery } from "../../queries.ts";
 import {
   activeRunnerChoice,
   collectModelOptions,
-  EFFORT_LABELS,
+  effortLabel,
   getModelEffortCapability,
 } from "../../state.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
+import { useUiStore } from "../../stores/uiStore.ts";
 import { Icon } from "../Icon.tsx";
 
 export function ModelRunnerBar({
@@ -29,6 +31,7 @@ export function ModelRunnerBar({
   testId: string;
   includeManualCopy?: boolean;
 }) {
+  const language = useUiStore((s) => s.language);
   const { data: hub } = useHubStateQuery();
   const harnesses = hub?.harnesses ?? [];
   const routing = hub?.routing ?? null;
@@ -66,20 +69,19 @@ export function ModelRunnerBar({
     [harnesses, choice.harness, choice.model],
   );
   const efforts = effortCap.efforts;
+  const lockedEffort = effortCap.defaultEffort ?? efforts[0];
   const effectiveDefaultEffort = choice.effort ?? effortCap.defaultEffort;
   const effortValue =
     selectedEffort && efforts.includes(selectedEffort) ? selectedEffort : "";
 
   const currentDisplay =
     selectedRunnerKey === "manual_copy"
-      ? "仅生成提示词 (手动复制)"
+      ? t(language, "runner.manual")
       : selectedRunnerKey
         ? `${choice.harness}/${choice.model}`
         : choice.harness
-          ? `${includeManualCopy ? "自动" : "默认"} (${choice.harness}/${choice.model ?? ""})`
-          : includeManualCopy
-            ? "自动路由"
-            : "默认路由";
+          ? `${t(language, includeManualCopy ? "runner.auto" : "runner.default")} (${choice.harness}/${choice.model ?? ""})`
+          : t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute");
 
   const tierTone = (tier: string) => {
     if (tier === "sota") return "bg-blue-500/10 text-blue-600 dark:text-blue-400";
@@ -103,7 +105,7 @@ export function ModelRunnerBar({
         }}
       >
         <option value="">
-          {includeManualCopy ? "自动路由" : "默认路由"}
+          {t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}
           {choice.harness ? ` (${choice.harness}/${choice.model ?? ""})` : ""}
         </option>
         {modelOptions.map((o) => (
@@ -111,7 +113,7 @@ export function ModelRunnerBar({
             {o.label}
           </option>
         ))}
-        {includeManualCopy && <option value="manual_copy">仅生成提示词 (手动复制)</option>}
+        {includeManualCopy && <option value="manual_copy">{t(language, "runner.manual")}</option>}
       </select>
 
       <PopoverRoot open={open} onOpenChange={setOpen}>
@@ -120,7 +122,7 @@ export function ModelRunnerBar({
             type="button"
             className="btn xs inline-flex items-center gap-1.5 max-w-[235px]"
             data-testid={`${testId}-trigger`}
-            title={`当前模型：${currentDisplay}`}
+            title={t(language, "runner.current", { model: currentDisplay })}
           >
             <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
             <span className="truncate font-mono text-[11.5px]">{currentDisplay}</span>
@@ -137,17 +139,17 @@ export function ModelRunnerBar({
               <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
                 <Icon icon={Search} size={14} className="text-[var(--muted)] shrink-0" />
                 <Command.Input
-                  placeholder="搜索模型 / Harness / Provider..."
+                  placeholder={t(language, "runner.searchPlaceholder")}
                   className="w-full bg-transparent text-[12.5px] outline-none placeholder:text-[var(--muted)]"
                 />
               </div>
               <Command.List className="overflow-y-auto p-1.5 flex-1">
                 <Command.Empty className="py-6 text-center text-xs text-[var(--muted)]">
-                  未找到匹配的模型
+                  {t(language, "runner.noMatch")}
                 </Command.Empty>
-                <Command.Group heading="快捷策略" className="cmdk-group">
+                <Command.Group heading={t(language, "runner.quickPresets")} className="cmdk-group">
                   <Command.Item
-                    value="__auto__ 默认路由 自动路由"
+                    value="__auto__ 默认路由 自动路由 auto routing default"
                     onSelect={() => {
                       setSelectedRunnerKey("", stageAction);
                       setOpen(false);
@@ -158,14 +160,14 @@ export function ModelRunnerBar({
                     )}
                   >
                     <span>
-                      {includeManualCopy ? "自动路由" : "默认路由"}
+                      {t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}
                       {choice.harness ? ` (${choice.harness}/${choice.model})` : ""}
                     </span>
                     {selectedRunnerKey === "" && <Icon icon={Check} size={14} />}
                   </Command.Item>
                   {includeManualCopy && (
                     <Command.Item
-                      value="manual_copy 仅生成提示词 手动复制"
+                      value="manual_copy 仅生成提示词 手动复制 manual copy prompt"
                       onSelect={() => {
                         setSelectedRunnerKey("manual_copy", stageAction);
                         setOpen(false);
@@ -175,7 +177,7 @@ export function ModelRunnerBar({
                         selectedRunnerKey === "manual_copy" && "font-semibold text-[var(--accent)]",
                       )}
                     >
-                      <span>仅生成提示词 (手动复制)</span>
+                      <span>{t(language, "runner.manual")}</span>
                       {selectedRunnerKey === "manual_copy" && <Icon icon={Check} size={14} />}
                     </Command.Item>
                   )}
@@ -218,7 +220,7 @@ export function ModelRunnerBar({
 
       {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
       {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (
-        <div className="inline-flex items-center gap-1" title="模型推理强度 (Reasoning Effort)">
+        <div className="inline-flex items-center gap-1" title={t(language, "runner.effortTitle")}>
           <span className="hidden sm:inline-flex items-center text-[var(--muted)]">
             <Icon icon={Gauge} size={14} />
           </span>
@@ -230,11 +232,12 @@ export function ModelRunnerBar({
             onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "", stageAction)}
           >
             <option value="">
-              默认强度{effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}
+              {t(language, "runner.effortDefault")}
+              {effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}
             </option>
             {efforts.map((eff) => (
               <option key={eff} value={eff}>
-                {EFFORT_LABELS[eff] ?? eff}
+                {effortLabel(language, eff)}
               </option>
             ))}
           </select>
@@ -244,10 +247,16 @@ export function ModelRunnerBar({
         <div
           className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--surface-2,transparent)] text-[11px] font-mono text-[var(--muted)]"
           data-testid={`${testId}-effort-locked`}
-          title="该模型变体已内置固定推理强度，不可单独覆盖"
+          title={t(language, "runner.effortLockedTitle")}
         >
           <Icon icon={Gauge} size={14} />
-          <span>固定: {effortCap.defaultEffort ?? efforts[0] ?? "内置"}</span>
+          <span>
+            {t(language, "runner.effortLockedLabel", {
+              effort: lockedEffort
+                ? effortLabel(language, lockedEffort)
+                : t(language, "runner.effortBuiltin"),
+            })}
+          </span>
         </div>
       )}
     </div>

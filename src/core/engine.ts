@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { WorkbenchError } from "./errors.ts";
+import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "./errors.ts";
 import { atomicWriteJson, canonicalRoot, resolveSafePath, withProjectWriteLock } from "./fs.ts";
 import {
   commitFilesInGit,
@@ -16,12 +16,14 @@ import {
   pushBranchToRemote,
 } from "./git.ts";
 import {
+  buildGiteeReasonMessageDetails,
   createOrUpdateGiteePr,
   detectGitRemoteProvider,
   inspectGiteeEnvironment,
   type GiteeApiDeps,
 } from "./gitee.ts";
 import {
+  buildGitHubReasonMessageDetails,
   buildRequirementPrBody,
   commentOnGitHubIssue,
   createOrUpdateGitHubPr,
@@ -158,35 +160,52 @@ function toDetail(bundle: RequirementBundle, currentCodeSnapshotHash: string | n
       acceptanceSnapshot: bundle.acceptanceSnapshot,
       acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
       acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+      acceptanceSnapshotReasonKey: bundle.acceptanceSnapshotReasonKey,
+      acceptanceSnapshotReasonParams: bundle.acceptanceSnapshotReasonParams,
     }),
     acceptanceSnapshot: bundle.acceptanceSnapshot,
   };
 }
 
-function buildProgressText(state: RequirementState, requiredTotal: number, requiredPassed: number): string {
+function buildProgressText(
+  state: RequirementState,
+  requiredTotal: number,
+  requiredPassed: number,
+): { text: string; key: string; params?: Record<string, string | number> } {
   const tasksTotal = state.tasks.length;
   const tasksDone = state.tasks.filter((t) => t.status === "done").length;
   switch (state.stage) {
     case "draft":
-      return "草稿";
+      return { text: "草稿", key: "progress.draft" };
     case "designing":
-      return "方案起草中";
+      return { text: "方案起草中", key: "progress.designing" };
     case "awaiting_approval":
-      return state.designVersion > 0 ? `方案 v${state.designVersion} 待批准` : "规范变更待确认";
+      return state.designVersion > 0
+        ? {
+            text: `方案 v${state.designVersion} 待批准`,
+            key: "progress.awaitingApprovalDesign",
+            params: { version: state.designVersion },
+          }
+        : { text: "规范变更待确认", key: "progress.specChanged" };
     case "implementing": {
       const parts: string[] = [];
       parts.push(tasksTotal > 0 ? `任务 ${tasksDone}/${tasksTotal}` : "实施中");
       if (requiredTotal > 0) parts.push(`验证 ${requiredPassed}/${requiredTotal}`);
-      return parts.join(" · ");
+      const key = tasksTotal > 0 ? "progress.implementingTasks" : "progress.implementing";
+      return { text: parts.join(" · "), key, params: { done: tasksDone, total: tasksTotal, passed: requiredPassed, required: requiredTotal } };
     }
     case "awaiting_acceptance":
-      return `待验收 · 验证 ${requiredPassed}/${requiredTotal}`;
+      return {
+        text: `待验收 · 验证 ${requiredPassed}/${requiredTotal}`,
+        key: "progress.awaitingAcceptance",
+        params: { passed: requiredPassed, total: requiredTotal },
+      };
     case "done":
-      return "已完成";
+      return { text: "已完成", key: "progress.done" };
     case "blocked":
-      return `已阻塞 · ${state.blockedReason ?? "未记录原因"}`;
+      return { text: `已阻塞 · ${state.blockedReason ?? "未记录原因"}`, key: "progress.blocked" };
     case "cancelled":
-      return "已取消";
+      return { text: "已取消", key: "progress.cancelled" };
   }
 }
 
@@ -196,7 +215,10 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     acceptanceSnapshot: bundle.acceptanceSnapshot,
     acceptanceSnapshotStatus: bundle.acceptanceSnapshotStatus,
     acceptanceSnapshotReason: bundle.acceptanceSnapshotReason,
+    acceptanceSnapshotReasonKey: bundle.acceptanceSnapshotReasonKey,
+    acceptanceSnapshotReasonParams: bundle.acceptanceSnapshotReasonParams,
   });
+  const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
   return {
     id: state.id,
     title: state.title,
@@ -211,8 +233,12 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     tasksDone: state.tasks.filter((t) => t.status === "done").length,
     needsDecision: validity.needsDecision,
     decisionReason: validity.decisionReason,
+    ...(validity.decisionReasonKey ? { decisionReasonKey: validity.decisionReasonKey } : {}),
+    ...(validity.decisionReasonParams ? { decisionReasonParams: validity.decisionReasonParams } : {}),
     blockedReason: state.blockedReason,
-    progressText: buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed),
+    progressText: progress.text,
+    progressKey: progress.key,
+    ...(progress.params ? { progressParams: progress.params } : {}),
     ...(state.github ? { github: state.github } : {}),
     createdAt: state.createdAt,
     updatedAt: state.updatedAt,
@@ -1010,7 +1036,10 @@ export async function updateTasks(
         throw new WorkbenchError(
           "acceptance_gate_failed",
           `尚不满足提交验收条件：${validity.acceptanceGate.blockers.join("；")}`,
-          { blockers: validity.acceptanceGate.blockers },
+          {
+            blockers: validity.acceptanceGate.blockers,
+            ...(validity.acceptanceGate.blockerRefs ? { blockerRefs: validity.acceptanceGate.blockerRefs } : {}),
+          },
         );
       }
       nextStage = "awaiting_acceptance";
@@ -1220,6 +1249,8 @@ export async function getRequirementDiff(
         snapshotId: snap.id,
         snapshotCapturedAt: snap.capturedAt,
         scopeNote: snap.git.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : WORKTREE_SCOPE_NOTE,
+        scopeNoteKey:
+          snap.git.filesScope === "baseline-relative" ? "evidence.scope.baseline" : "evidence.scope.worktree",
         observation: obs,
       };
     }
@@ -1229,6 +1260,12 @@ export async function getRequirementDiff(
       reason:
         bundle.acceptanceSnapshotReason ??
         "历史验收记录未固化代码差异快照，无法从当前工作区回溯",
+      ...(bundle.acceptanceSnapshotReasonKey
+        ? { reasonKey: bundle.acceptanceSnapshotReasonKey }
+        : bundle.acceptanceSnapshotReason
+          ? {}
+          : { reasonKey: "core.diff.noSnapshot" }),
+      ...(bundle.acceptanceSnapshotReasonParams ? { reasonParams: bundle.acceptanceSnapshotReasonParams } : {}),
       acceptedAt: state.acceptance?.acceptedAt ?? null,
       snapshotId: state.acceptance?.snapshot?.id ?? null,
       snapshotCapturedAt: state.acceptance?.snapshot?.capturedAt ?? null,
@@ -1246,10 +1283,17 @@ export async function getRequirementDiff(
     context: "live",
     status: changes.diffStatus,
     reason: changes.diffReason,
+    ...(changes.diffReasonKey ? { reasonKey: changes.diffReasonKey } : {}),
+    ...(changes.diffReasonParams ? { reasonParams: changes.diffReasonParams } : {}),
     acceptedAt: null,
     snapshotId: null,
     snapshotCapturedAt: null,
     scopeNote: changes.filesScope === "baseline-relative" ? BASELINE_SCOPE_NOTE : changes.filesScope === "worktree" ? WORKTREE_SCOPE_NOTE : null,
+    ...(changes.filesScope === "baseline-relative"
+      ? { scopeNoteKey: "evidence.scope.baseline" }
+      : changes.filesScope === "worktree"
+        ? { scopeNoteKey: "evidence.scope.worktree" }
+        : {}),
     observation: changes,
   };
 }
@@ -1266,14 +1310,18 @@ export async function acceptRequirement(
   },
 ): Promise<RequirementDetail> {
   if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
-    throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收");
+    throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法完成验收", {
+      messageKey: "accept.errMissingSnapshotHash",
+    });
   }
   const base = canonicalRoot(root);
   const snapshotHash = input.currentCodeSnapshotHash;
   const codeRoot = resolveCodeRoot(base, id);
   const codeRootKind = codeRoot !== base ? "sandbox" : "project";
   if (!fs.existsSync(codeRoot)) {
-    throw new WorkbenchError("acceptance_gate_failed", "代码根目录不存在，无法捕获验收快照");
+    throw new WorkbenchError("acceptance_gate_failed", "代码根目录不存在，无法捕获验收快照", {
+      messageKey: "accept.errMissingCodeRoot",
+    });
   }
 
   // Pre-flight gate & baseline-relative change capture outside the lock to keep lock hold minimal.
@@ -1282,18 +1330,32 @@ export async function acceptRequirement(
     throw new WorkbenchError(
       "revision_conflict",
       `版本冲突：期望 revision=${input.expectedRevision}，实际 revision=${preBundle.state.revision}`,
-      { expectedRevision: input.expectedRevision, actualRevision: preBundle.state.revision },
+      {
+        expectedRevision: input.expectedRevision,
+        actualRevision: preBundle.state.revision,
+        messageKey: "accept.errRevisionConflict",
+        messageParams: {
+          expected: input.expectedRevision,
+          actual: preBundle.state.revision,
+        },
+      },
     );
   }
   if (preBundle.state.stage !== "implementing" && preBundle.state.stage !== "awaiting_acceptance") {
-    throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`);
+    throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`, {
+      messageKey: "accept.errInvalidStage",
+      messageParams: { stage: preBundle.state.stage },
+    });
   }
   const preValidity = evaluateRequirement(preBundle.state, snapshotHash);
   if (!preValidity.acceptanceGate.ok) {
     throw new WorkbenchError(
       "acceptance_gate_failed",
       `验收门禁未通过：${preValidity.acceptanceGate.blockers.join("；")}`,
-      { blockers: preValidity.acceptanceGate.blockers },
+      {
+        blockers: preValidity.acceptanceGate.blockers,
+        ...(preValidity.acceptanceGate.blockerRefs ? { blockerRefs: preValidity.acceptanceGate.blockerRefs } : {}),
+      },
     );
   }
   const overrideReason = input.overrideReason?.trim()
@@ -1307,7 +1369,10 @@ export async function acceptRequirement(
     throw new WorkbenchError(
       "acceptance_gate_failed",
       "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
-      { reviewVerdict: "block" },
+      {
+        reviewVerdict: "block",
+        messageKey: "accept.errReviewBlockRequiresOverride",
+      },
     );
   }
 
@@ -1322,22 +1387,33 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "验收基线在当前仓库中不可用，无法捕获可信的基线相对 Diff",
+        {
+          messageKey: gitObs.diffReasonKey ?? "accept.errBaselineUnavailable",
+          ...(gitObs.diffReasonParams ? { messageParams: gitObs.diffReasonParams } : {}),
+        },
       );
     }
     if (gitObs.diffStatus === "unavailable") {
       throw new WorkbenchError(
         "acceptance_gate_failed",
         gitObs.diffReason ?? "无法捕获验收代码差异快照",
+        {
+          messageKey: gitObs.diffReasonKey ?? "accept.errDiffUnavailable",
+          ...(gitObs.diffReasonParams ? { messageParams: gitObs.diffReasonParams } : {}),
+        },
       );
     }
     if (gitObs.fingerprint !== snapshotHash) {
       throw new WorkbenchError(
         "revision_conflict",
         "代码工作区在验收采集期间发生变化，请刷新状态与 Diff 后重试",
+        { messageKey: "accept.errWorkspaceChanged" },
       );
     }
   } else if (baselineHead) {
-    throw new WorkbenchError("acceptance_gate_failed", "目标目录已不再是 Git 仓库，无法捕获验收快照");
+    throw new WorkbenchError("acceptance_gate_failed", "目标目录已不再是 Git 仓库，无法捕获验收快照", {
+      messageKey: "accept.errNotGitRepo",
+    });
   }
 
   const sanitized = sanitizeOutput(gitObs.diff, MAX_ACCEPTANCE_DIFF_BYTES);
@@ -1349,10 +1425,15 @@ export async function acceptRequirement(
   const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
     const { state } = current;
     if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
-      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`);
+      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`, {
+        messageKey: "accept.errInvalidStage",
+        messageParams: { stage: state.stage },
+      });
     }
     if ((state.baseline?.head ?? null) !== baselineHead) {
-      throw new WorkbenchError("revision_conflict", "需求基线在验收期间发生变化，请刷新后重试");
+      throw new WorkbenchError("revision_conflict", "需求基线在验收期间发生变化，请刷新后重试", {
+        messageKey: "accept.errBaselineChanged",
+      });
     }
 
     const validity = evaluateRequirement(state, snapshotHash);
@@ -1360,7 +1441,10 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         `验收门禁未通过：${validity.acceptanceGate.blockers.join("；")}`,
-        { blockers: validity.acceptanceGate.blockers },
+        {
+          blockers: validity.acceptanceGate.blockers,
+          ...(validity.acceptanceGate.blockerRefs ? { blockerRefs: validity.acceptanceGate.blockerRefs } : {}),
+        },
       );
     }
     if (
@@ -1371,7 +1455,10 @@ export async function acceptRequirement(
       throw new WorkbenchError(
         "acceptance_gate_failed",
         "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
-        { reviewVerdict: "block" },
+        {
+          reviewVerdict: "block",
+          messageKey: "accept.errReviewBlockRequiresOverride",
+        },
       );
     }
 
@@ -1381,6 +1468,7 @@ export async function acceptRequirement(
         throw new WorkbenchError(
           "revision_conflict",
           "代码工作区在验收提交期间发生变化，已拒绝落盘，请刷新后重试",
+          { messageKey: "accept.errWorkspaceChangedOnSave" },
         );
       }
     }
@@ -1708,6 +1796,7 @@ export async function deliverRequirement(
   delivery: DeliveryRecord;
   pr?: RequirementGitHubPrLink;
   githubSyncWarning?: string;
+  githubSyncWarningRef?: StructuredMessageRef;
   touchesWeb: boolean;
   touchesBackend: boolean;
 }> {
@@ -1829,7 +1918,11 @@ export async function deliverRequirement(
     giteeToken = (deps?.giteeToken ?? deps?.giteeDeps?.token ?? process.env.GITEE_ACCESS_TOKEN ?? "").trim();
     const giteeEnv = await inspectGiteeEnvironment(base, projectMeta.gitee, giteeToken, deps?.giteeDeps);
     if (!giteeEnv.ready || !giteeEnv.repo) {
-      throw new WorkbenchError("execution_failed", giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR");
+      throw new WorkbenchError(
+        "execution_failed",
+        giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR",
+        buildGiteeReasonMessageDetails(giteeEnv),
+      );
     }
     repo = giteeEnv.repo;
     giteeEnterprise = giteeEnv.enterprise;
@@ -1839,7 +1932,11 @@ export async function deliverRequirement(
   } else {
     const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
     if (!ghEnv.ready || !ghEnv.repo) {
-      throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR");
+      throw new WorkbenchError(
+        "execution_failed",
+        ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR",
+        buildGitHubReasonMessageDetails(ghEnv),
+      );
     }
     repo = ghEnv.repo;
     baseBranch = validateGitBranchName(
@@ -1883,11 +1980,15 @@ export async function deliverRequirement(
     const aheadRef = sandbox?.baseHead || baseBranch;
     const aheadCount = await countCommitsBetween(codeRoot, aheadRef, "HEAD");
     if (aheadCount <= 0) {
-      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交");
+      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交", {
+        messageKey: "deliver.errNoFilesOrCommits",
+      });
     }
     const headInfo = await getHeadCommitInfo(codeRoot);
     if (!headInfo) {
-      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息");
+      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息", {
+        messageKey: "deliver.errNoHeadInfo",
+      });
     }
     commitHash = headInfo.commitHash;
     shortHash = headInfo.shortHash;
@@ -1990,6 +2091,7 @@ export async function deliverRequirement(
   });
 
   let githubSyncWarning: string | undefined;
+  let githubSyncWarningRef: StructuredMessageRef | undefined;
   const linkedIssue = bundle.state.github?.issue;
   if (
     remoteProvider !== "gitee" &&
@@ -2009,6 +2111,7 @@ export async function deliverRequirement(
       );
     } catch (err) {
       githubSyncWarning = err instanceof Error ? err.message : String(err);
+      githubSyncWarningRef = extractMessageRef(err) ?? undefined;
     }
   }
 
@@ -2027,6 +2130,7 @@ export async function deliverRequirement(
     delivery: recordedDelivery!,
     pr: prLink,
     ...(githubSyncWarning ? { githubSyncWarning } : {}),
+    ...(githubSyncWarningRef ? { githubSyncWarningRef } : {}),
     touchesWeb,
     touchesBackend,
   };

@@ -37,7 +37,7 @@ import {
   readAttachmentForServe,
   requirementAttachmentsDir,
 } from "../core/attachments.ts";
-import { WorkbenchError, type WorkbenchErrorCode } from "../core/errors.ts";
+import { extractMessageRef, WorkbenchError, type StructuredMessageRef, type WorkbenchErrorCode } from "../core/errors.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import {
   detectGitRemoteProvider,
@@ -51,6 +51,7 @@ import {
   type GiteeIssueItem,
 } from "../core/gitee.ts";
 import {
+  buildGitHubReasonMessageDetails,
   buildRequirementIssueBody,
   commentOnGitHubIssue,
   createGitHubIssue,
@@ -249,12 +250,17 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     detail: RequirementDetail,
     snapHash: string | null,
     labels?: string[],
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+  ): Promise<{ detail: RequirementDetail; warning?: string; warningRef?: StructuredMessageRef }> => {
     try {
       const projectMeta = getProjectStatus(projectRoot).project;
       const ghEnv = await inspectGitHubEnvironment(projectRoot, projectMeta?.github, deps.githubDeps);
       if (!ghEnv.ready || !ghEnv.repo) {
-        return { detail, warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue" };
+        const msgDetails = buildGitHubReasonMessageDetails(ghEnv);
+        return {
+          detail,
+          warning: ghEnv.reason ?? "GitHub 环境未就绪，已跳过同步创建 Issue",
+          warningRef: { key: msgDetails.messageKey },
+        };
       }
       const issue = await createGitHubIssue(
         {
@@ -273,7 +279,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
       return { detail: updated };
     } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
+      const warningRef = extractMessageRef(err) ?? undefined;
+      return {
+        detail,
+        warning: err instanceof Error ? err.message : String(err),
+        ...(warningRef ? { warningRef } : {}),
+      };
     }
   };
 
@@ -294,7 +305,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     detail: RequirementDetail,
     comment: string,
     opts?: { state?: "open" | "closed"; snapHash?: string | null },
-  ): Promise<{ detail: RequirementDetail; warning?: string }> => {
+  ): Promise<{ detail: RequirementDetail; warning?: string; warningRef?: StructuredMessageRef }> => {
     if (detail.state.github?.provider === "gitee") return { detail };
     const linked = detail.state.github?.issue;
     const repo = detail.state.github?.repo;
@@ -322,7 +333,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
       return { detail: updated };
     } catch (err) {
-      return { detail, warning: err instanceof Error ? err.message : String(err) };
+      const warningRef = extractMessageRef(err) ?? undefined;
+      return {
+        detail,
+        warning: err instanceof Error ? err.message : String(err),
+        ...(warningRef ? { warningRef } : {}),
+      };
     }
   };
 
@@ -428,7 +444,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     if (method === "GET" && pathname === "/api/gitee/issues") {
       const token = resolveGiteeToken();
       if (!token) {
-        throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写");
+        throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写", {
+          messageKey: "gitee.reasonTokenMissing",
+        });
       }
       const status = getProjectStatus(base);
       const remoteRepo = status.project?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(await resolveRemoteUrl(base));
@@ -620,12 +638,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           };
         } else {
           if (!rawIssueRef) {
-            throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL");
+            throw new WorkbenchError("invalid_input", "请提供 Gitee 工作项编号或 URL", {
+              messageKey: "gitee.errIssueRefRequired",
+            });
           }
           if (!token) {
             throw new WorkbenchError(
               "invalid_input",
               "尚未配置 Gitee 私人令牌 (Access Token)，请先在「工作台设置 -> 全局设置」中填写",
+              { messageKey: "gitee.reasonTokenMissing" },
             );
           }
           giteeIssue = await viewGiteeIssue(
@@ -713,7 +734,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const issueRef =
         typeof body.issueRef === "string" || typeof body.issueRef === "number" ? body.issueRef : "";
       if (!String(issueRef).trim()) {
-        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL");
+        throw new WorkbenchError("invalid_input", "请提供 GitHub Issue 编号或 URL", {
+          messageKey: "github.errIssueRefRequired",
+        });
       }
       const remoteRepo = projectMeta?.github?.repo ?? parseGitHubRepoFromRemoteUrl(remoteUrl);
       const issue = await viewGitHubIssue({ root: base, repo: remoteRepo, issueRef }, deps.githubDeps);
@@ -799,10 +822,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         body.createGitHubIssue === true ||
         (body.createGitHubIssue !== false && projectMeta?.github?.autoCreateIssue === true);
       let githubWarning: string | undefined;
+      let githubWarningRef: StructuredMessageRef | undefined;
       if (shouldCreateIssue) {
         const linked = await tryCreateAndLinkIssue(base, detail, snapshot?.fingerprint ?? null);
         detail = linked.detail;
         githubWarning = linked.warning;
+        githubWarningRef = linked.warningRef;
       }
 
       let dispatch: DispatchOutcome | null = null;
@@ -815,7 +840,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, ...(githubWarning ? { githubWarning } : {}) }, 201);
+      return jsonResponse(
+        {
+          detail,
+          dispatch,
+          ...(githubWarning ? { githubWarning } : {}),
+          ...(githubWarningRef ? { githubWarningRef } : {}),
+        },
+        201,
+      );
     }
 
     // Routes matching /api/requirements/:id[/...]
@@ -1126,6 +1159,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         await distillRequirementToPlaybook(base, detail).catch(() => {});
         const projectMeta = getProjectStatus(base).project;
         let githubSyncWarning: string | undefined;
+        let githubSyncWarningRef: StructuredMessageRef | undefined;
         if (
           detail.state.github?.provider !== "gitee" &&
           detail.state.github?.issue &&
@@ -1139,9 +1173,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           );
           detail = synced.detail;
           githubSyncWarning = synced.warning;
+          githubSyncWarningRef = synced.warningRef;
         }
         deps.broadcastUi({ type: "workbench.updated", reason: "accepted", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, ...(githubSyncWarning ? { githubSyncWarning } : {}) });
+        return jsonResponse({
+          detail,
+          ...(githubSyncWarning ? { githubSyncWarning } : {}),
+          ...(githubSyncWarningRef ? { githubSyncWarningRef } : {}),
+        });
       }
 
       if (method === "GET" && sub === "delivery") {
@@ -1187,6 +1226,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           delivery: res.delivery,
           ...(res.pr ? { pr: res.pr } : {}),
           ...(res.githubSyncWarning ? { githubSyncWarning: res.githubSyncWarning } : {}),
+          ...(res.githubSyncWarningRef ? { githubSyncWarningRef: res.githubSyncWarningRef } : {}),
           webReloaded: reloadRes.reloaded,
           restartRecommended: !body.createPr && res.touchesBackend,
         });
@@ -1207,7 +1247,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           if (isGitee && body.provider !== "github") {
             const token = resolveGiteeToken();
             if (!token) {
-              throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+              throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+                messageKey: "gitee.errTokenMissing",
+              });
             }
             const remoteRepo = projectMeta?.gitee?.repo ?? parseGiteeRepoFromRemoteUrl(remoteUrl);
             const enterprise = projectMeta?.gitee?.enterprise ?? extractGiteeOwner(remoteRepo);
@@ -1255,7 +1297,15 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         }
         const ghEnv = await inspectGitHubEnvironment(base, projectMeta?.github, deps.githubDeps);
         if (!ghEnv.ready || !ghEnv.repo) {
-          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue");
+          const reasonMessageKey =
+            ghEnv.reasonCode === "gh_missing"
+              ? "github.reasonGhMissing"
+              : ghEnv.reasonCode === "gh_unauthenticated"
+                ? "github.reasonGhUnauthenticated"
+                : "github.reasonRepoMissing";
+          throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub 环境未就绪，无法创建 Issue", {
+            messageKey: reasonMessageKey,
+          });
         }
         const issue = await createGitHubIssue(
           {
@@ -1280,7 +1330,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         if (!detail.state.github?.issue || !detail.state.github?.repo) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`);
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 GitHub Issue`, {
+            messageKey: "github.errIssueNotLinked",
+            messageParams: { id },
+          });
         }
         const targetState =
           body.state === "closed" || body.state === "open"
@@ -1297,7 +1350,16 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           snapHash: snapshot?.fingerprint ?? null,
         });
         if (synced.warning) {
-          throw new WorkbenchError("execution_failed", synced.warning);
+          throw new WorkbenchError(
+            "execution_failed",
+            synced.warning,
+            synced.warningRef
+              ? {
+                  messageKey: synced.warningRef.key,
+                  ...(synced.warningRef.params ? { messageParams: synced.warningRef.params } : {}),
+                }
+              : undefined,
+          );
         }
         deps.broadcastUi({ type: "workbench.updated", reason: "github.issue_synced", root: base, id, at: Date.now() });
         return jsonResponse({ detail: synced.detail });
@@ -1325,14 +1387,19 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(base);
         const current = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         if (!current.state.github?.repo || !current.state.github?.pr) {
-          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 PR`);
+          throw new WorkbenchError("not_found", `需求 ${id} 尚未绑定 PR`, {
+            messageKey: "github.errPrNotLinked",
+            messageParams: { id },
+          });
         }
         const isGiteePr =
           current.state.github.provider === "gitee" || /gitee\.com/i.test(current.state.github.pr.url);
         if (isGiteePr) {
           const token = resolveGiteeToken();
           if (!token) {
-            throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)");
+            throw new WorkbenchError("invalid_input", "尚未配置 Gitee 私人令牌 (Access Token)", {
+              messageKey: "gitee.errTokenMissing",
+            });
           }
           const latestPr = await viewGiteePr(
             { repo: current.state.github.repo, prNumber: current.state.github.pr.number, token },

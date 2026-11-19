@@ -21,6 +21,7 @@ import type {
   Stage,
   VerificationRecord,
 } from "../core/types.ts";
+import type { StructuredMessageRef } from "../core/errors.ts";
 import type { GitObservation } from "../core/git.ts";
 import type { GiteeEnvironmentStatus, GiteeIssueItem } from "../core/gitee.ts";
 import type { GitHubEnvironmentStatus, ImportedGitHubIssue } from "../core/github.ts";
@@ -266,6 +267,7 @@ export const api = {
       workbenchProjectId: string;
       sandbox: SandboxRecord | null;
       githubIssueWarning?: string;
+      githubIssueWarningRef?: StructuredMessageRef;
     }>(`/api/hub/evolution/${encodeURIComponent(id)}/promote`, {
       method: "POST",
       body: JSON.stringify(input ?? {}),
@@ -302,6 +304,7 @@ export const api = {
       cleanedSandbox: boolean;
       mainUpdated: boolean;
       mainSyncReason: string | null;
+      mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded: boolean;
       restartRecommended: boolean;
     }>(`/api/hub/evolution/sync-pr/${encodeURIComponent(reqId)}`, {
@@ -371,7 +374,12 @@ export const api = {
     createGitHubIssue?: boolean;
     attachmentIds?: string[];
   }) =>
-    requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null; githubWarning?: string }>(
+    requestJson<{
+      detail: RequirementDetail;
+      dispatch: DispatchOutcome | null;
+      githubWarning?: string;
+      githubWarningRef?: StructuredMessageRef;
+    }>(
       withProjectParam("/api/requirements"),
       {
         method: "POST",
@@ -515,10 +523,13 @@ export const api = {
       { method: "POST", body: JSON.stringify(input) },
     ),
   accept: (id: string, input: { expectedRevision?: number; note?: string; overrideReason?: string; acceptedRisks?: string[] }) =>
-    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`), {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
+    requestJson<{ detail: RequirementDetail; githubSyncWarning?: string; githubSyncWarningRef?: StructuredMessageRef }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`),
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    ),
   getDelivery: (id: string) =>
     requestJson<DeliveryPreview>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/delivery`)),
   deliver: (
@@ -540,6 +551,7 @@ export const api = {
       delivery: DeliveryRecord;
       pr?: RequirementGitHubPrLink;
       githubSyncWarning?: string;
+      githubSyncWarningRef?: StructuredMessageRef;
       webReloaded: boolean;
       restartRecommended: boolean;
     }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/deliver`), {
@@ -566,6 +578,7 @@ export const api = {
       cleanedSandbox: boolean;
       mainUpdated: boolean;
       mainSyncReason: string | null;
+      mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded?: boolean;
       restartRecommended?: boolean;
     }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/pr-sync`), {

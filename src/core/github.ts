@@ -28,6 +28,8 @@ export interface GitHubCommandDeps {
   resolveDefaultBaseBranch?: (root: string) => Promise<string | null>;
 }
 
+export type GitHubStatusReasonCode = "gh_missing" | "gh_unauthenticated" | "repo_missing";
+
 export interface GitHubEnvironmentStatus {
   ghInstalled: boolean;
   authenticated: boolean;
@@ -37,6 +39,8 @@ export interface GitHubEnvironmentStatus {
   defaultBaseBranch: string | null;
   ready: boolean;
   reason: string | null;
+  reasonCode?: GitHubStatusReasonCode | null;
+  reasonDetail?: string | null;
 }
 
 export interface ImportedGitHubIssue {
@@ -117,7 +121,9 @@ function assertGhBin(deps?: GitHubCommandDeps): { ghBin: string; runGh: NonNulla
   const { whichGh, runGh } = resolveGhRunner(deps);
   const ghBin = whichGh();
   if (!ghBin) {
-    throw new WorkbenchError("execution_failed", "未在本机检测到 GitHub CLI (gh)，请先安装并执行 gh auth login");
+    throw new WorkbenchError("execution_failed", "未在本机检测到 GitHub CLI (gh)，请先安装并执行 gh auth login", {
+      messageKey: "github.errGhMissing",
+    });
   }
   return { ghBin, runGh };
 }
@@ -158,7 +164,10 @@ export function parseGitHubIssueRef(
 ): { repo: string | null; number: number } {
   if (typeof rawRef === "number") {
     if (!Number.isSafeInteger(rawRef) || rawRef < 1) {
-      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`);
+      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`, {
+        messageKey: "github.errInvalidIssueNumber",
+        messageParams: { ref: String(rawRef) },
+      });
     }
     return { repo: fallbackRepo ? validateGitHubRepoSlug(fallbackRepo) : null, number: rawRef };
   }
@@ -168,7 +177,10 @@ export function parseGitHubIssueRef(
   if (numMatch) {
     const num = Number(numMatch[1]);
     if (!Number.isSafeInteger(num) || num < 1) {
-      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`);
+      throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${rawRef}`, {
+        messageKey: "github.errInvalidIssueNumber",
+        messageParams: { ref: String(rawRef) },
+      });
     }
     return { repo: fallbackRepo ? validateGitHubRepoSlug(fallbackRepo) : null, number: num };
   }
@@ -198,7 +210,9 @@ export function parseGitHubIssueRef(
     // Fall through to error.
   }
 
-  throw new WorkbenchError("invalid_input", "请输入有效的 GitHub Issue 编号（如 #42）或完整 Issue URL");
+  throw new WorkbenchError("invalid_input", "请输入有效的 GitHub Issue 编号（如 #42）或完整 Issue URL", {
+    messageKey: "github.errInvalidIssueRef",
+  });
 }
 
 function parseUrlLastNumber(text: string): { url: string; number: number } | null {
@@ -237,6 +251,8 @@ export async function inspectGitHubEnvironment(
       defaultBaseBranch,
       ready: false,
       reason: "本机未安装 gh CLI，无法执行 GitHub Issue / PR 同步",
+      reasonCode: "gh_missing",
+      reasonDetail: null,
     };
   }
 
@@ -270,10 +286,13 @@ export async function inspectGitHubEnvironment(
   }
 
   let reason: string | null = null;
+  let reasonCode: GitHubStatusReasonCode | null = null;
   if (!authenticated) {
     reason = "gh CLI 尚未登录，请先在终端运行 gh auth login";
+    reasonCode = "gh_unauthenticated";
   } else if (!repo) {
     reason = "当前项目尚未配置 GitHub 仓库（未检测到 github.com origin 远端，也可在项目设置中手动指定 owner/repo）";
+    reasonCode = "repo_missing";
   }
 
   return {
@@ -285,7 +304,22 @@ export async function inspectGitHubEnvironment(
     defaultBaseBranch: defaultBaseBranch ?? "main",
     ready: authenticated && Boolean(repo),
     reason,
+    reasonCode,
+    reasonDetail: null,
   };
+}
+
+/** Maps GitHub CLI readiness diagnostics into structured error message details. */
+export function buildGitHubReasonMessageDetails(
+  status: Pick<GitHubEnvironmentStatus, "ghInstalled" | "authenticated" | "repo" | "reasonCode">,
+): { messageKey: string } {
+  if (!status.ghInstalled || status.reasonCode === "gh_missing") {
+    return { messageKey: "github.reasonGhMissing" };
+  }
+  if (!status.authenticated || status.reasonCode === "gh_unauthenticated") {
+    return { messageKey: "github.reasonGhUnauthenticated" };
+  }
+  return { messageKey: "github.reasonRepoMissing" };
 }
 
 export function buildRequirementIssueBody(detail: RequirementDetail): string {
@@ -398,7 +432,9 @@ export async function createGitHubIssue(
   const cleanTitle = sanitizeOutput(input.title.trim(), 240).text.replace(/[\r\n]+/g, " ").trim();
   const cleanBody = sanitizeOutput(input.body.trim(), 32_000).text;
   if (!cleanTitle) {
-    throw new WorkbenchError("invalid_input", "GitHub Issue 标题不能为空");
+    throw new WorkbenchError("invalid_input", "GitHub Issue 标题不能为空", {
+      messageKey: "github.errIssueTitleRequired",
+    });
   }
 
   const buildArgs = (labels?: string[]) => {
@@ -419,12 +455,19 @@ export async function createGitHubIssue(
   }
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 800).text;
-    throw new WorkbenchError("execution_failed", `创建 GitHub Issue 失败: ${msg || "gh issue create 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建 GitHub Issue 失败: ${msg || "gh issue create 返回非零"}`, {
+      messageKey: msg ? "github.errCreateIssueFailedDetail" : "github.errCreateIssueFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const parsed = parseUrlLastNumber(`${res.stdout}\n${res.stderr}`);
   if (!parsed) {
-    throw new WorkbenchError("execution_failed", `GitHub Issue 已创建但无法解析返回 URL: ${sanitizeOutput(res.stdout, 300).text}`);
+    const raw = sanitizeOutput(res.stdout, 300).text;
+    throw new WorkbenchError("execution_failed", `GitHub Issue 已创建但无法解析返回 URL: ${raw}`, {
+      messageKey: "github.errCreateIssueBadUrl",
+      messageParams: { raw },
+    });
   }
   return {
     number: parsed.number,
@@ -442,7 +485,9 @@ export async function viewGitHubIssue(
   const base = canonicalRoot(input.root);
   const { repo: parsedRepo, number } = parseGitHubIssueRef(input.issueRef, input.repo);
   if (!parsedRepo) {
-    throw new WorkbenchError("invalid_input", "无法确定目标 GitHub 仓库，请先配置 origin 远端或提供完整 Issue URL");
+    throw new WorkbenchError("invalid_input", "无法确定目标 GitHub 仓库，请先配置 origin 远端或提供完整 Issue URL", {
+      messageKey: "github.errMissingRepo",
+    });
   }
   const { ghBin, runGh } = assertGhBin(deps);
   const res = await runGh(
@@ -452,7 +497,10 @@ export async function viewGitHubIssue(
   );
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 600).text;
-    throw new WorkbenchError("execution_failed", `读取 GitHub Issue #${number} 失败: ${msg || "未知错误"}`);
+    throw new WorkbenchError("execution_failed", `读取 GitHub Issue #${number} 失败: ${msg || "未知错误"}`, {
+      messageKey: msg ? "github.errViewIssueFailedDetail" : "github.errViewIssueFailed",
+      messageParams: msg ? { number, detail: msg } : { number },
+    });
   }
   let parsed: {
     number?: number;
@@ -465,7 +513,9 @@ export async function viewGitHubIssue(
   try {
     parsed = JSON.parse(res.stdout) as typeof parsed;
   } catch {
-    throw new WorkbenchError("execution_failed", "无法解析 gh issue view 返回的 JSON");
+    throw new WorkbenchError("execution_failed", "无法解析 gh issue view 返回的 JSON", {
+      messageKey: "github.errIssueJsonInvalid",
+    });
   }
   const num = parsed.number ?? number;
   const title = sanitizeOutput(String(parsed.title ?? `Issue #${num}`), 300).text.trim();
@@ -487,7 +537,10 @@ export async function commentOnGitHubIssue(
   const base = canonicalRoot(input.root);
   const repo = validateGitHubRepoSlug(input.repo);
   if (!Number.isSafeInteger(input.issueNumber) || input.issueNumber < 1) {
-    throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${input.issueNumber}`);
+    throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${input.issueNumber}`, {
+      messageKey: "github.errInvalidIssueNumber",
+      messageParams: { ref: String(input.issueNumber) },
+    });
   }
   const cleanBody = sanitizeOutput(input.body.trim(), 24_000).text;
   if (!cleanBody) return;
@@ -499,7 +552,10 @@ export async function commentOnGitHubIssue(
   );
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 600).text;
-    throw new WorkbenchError("execution_failed", `向 Issue #${input.issueNumber} 发送评论失败: ${msg || "未知错误"}`);
+    throw new WorkbenchError("execution_failed", `向 Issue #${input.issueNumber} 发送评论失败: ${msg || "未知错误"}`, {
+      messageKey: msg ? "github.errCommentIssueFailedDetail" : "github.errCommentIssueFailed",
+      messageParams: msg ? { number: input.issueNumber, detail: msg } : { number: input.issueNumber },
+    });
   }
 }
 
@@ -510,7 +566,10 @@ export async function setGitHubIssueState(
   const base = canonicalRoot(input.root);
   const repo = validateGitHubRepoSlug(input.repo);
   if (!Number.isSafeInteger(input.issueNumber) || input.issueNumber < 1) {
-    throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${input.issueNumber}`);
+    throw new WorkbenchError("invalid_input", `无效的 Issue 编号: ${input.issueNumber}`, {
+      messageKey: "github.errInvalidIssueNumber",
+      messageParams: { ref: String(input.issueNumber) },
+    });
   }
   const { ghBin, runGh } = assertGhBin(deps);
   const cmd = input.state === "closed" ? "close" : "reopen";
@@ -521,7 +580,10 @@ export async function setGitHubIssueState(
   const res = await runGh(ghBin, args, { cwd: base });
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 600).text;
-    throw new WorkbenchError("execution_failed", `更新 Issue #${input.issueNumber} 状态失败: ${msg || "未知错误"}`);
+    throw new WorkbenchError("execution_failed", `更新 Issue #${input.issueNumber} 状态失败: ${msg || "未知错误"}`, {
+      messageKey: msg ? "github.errUpdateIssueFailedDetail" : "github.errUpdateIssueFailed",
+      messageParams: msg ? { number: input.issueNumber, detail: msg } : { number: input.issueNumber },
+    });
   }
 }
 
@@ -592,12 +654,17 @@ export async function createOrUpdateGitHubPr(
   const headBranch = validateGitBranchName(input.headBranch);
   const baseBranch = validateGitBranchName(input.baseBranch);
   if (headBranch === baseBranch) {
-    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`);
+    throw new WorkbenchError("invalid_input", `源分支与目标分支不能同为 ${baseBranch}，请先创建特性分支`, {
+      messageKey: "gitee.errSameBranch",
+      messageParams: { baseBranch },
+    });
   }
   const cleanTitle = sanitizeOutput(input.title.trim(), 240).text.replace(/[\r\n]+/g, " ").trim();
   const cleanBody = sanitizeOutput(input.body.trim(), 40_000).text;
   if (!cleanTitle) {
-    throw new WorkbenchError("invalid_input", "PR 标题不能为空");
+    throw new WorkbenchError("invalid_input", "PR 标题不能为空", {
+      messageKey: "gitee.errPrTitleRequired",
+    });
   }
 
   const { ghBin, runGh } = assertGhBin(deps);
@@ -610,7 +677,10 @@ export async function createOrUpdateGitHubPr(
     );
     if (editRes.code !== 0) {
       const msg = sanitizeOutput(editRes.stderr.trim() || editRes.stdout.trim(), 600).text;
-      throw new WorkbenchError("execution_failed", `更新已有 PR #${existing.number} 失败: ${msg || "未知错误"}`);
+      throw new WorkbenchError("execution_failed", `更新已有 PR #${existing.number} 失败: ${msg || "未知错误"}`, {
+        messageKey: msg ? "github.errEditPrFailedDetail" : "github.errEditPrFailed",
+        messageParams: msg ? { number: existing.number, detail: msg } : { number: existing.number },
+      });
     }
     return {
       ...existing,
@@ -641,7 +711,10 @@ export async function createOrUpdateGitHubPr(
   );
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 800).text;
-    throw new WorkbenchError("execution_failed", `创建 GitHub PR 失败: ${msg || "gh pr create 返回非零"}`);
+    throw new WorkbenchError("execution_failed", `创建 GitHub PR 失败: ${msg || "gh pr create 返回非零"}`, {
+      messageKey: msg ? "github.errCreatePrFailedDetail" : "github.errCreatePrFailed",
+      ...(msg ? { messageParams: { detail: msg } } : {}),
+    });
   }
 
   const parsed = parseUrlLastNumber(`${res.stdout}\n${res.stderr}`);
@@ -661,7 +734,9 @@ export async function createOrUpdateGitHubPr(
 
   const viewed = await findOpenPrForBranch({ root: base, repo, headBranch }, deps);
   if (!viewed) {
-    throw new WorkbenchError("execution_failed", "PR 已提交但无法获取 PR 编号与 URL");
+    throw new WorkbenchError("execution_failed", "PR 已提交但无法获取 PR 编号与 URL", {
+      messageKey: "github.errCreatePrMissingUrl",
+    });
   }
   return { ...viewed, created: true };
 }
@@ -673,7 +748,10 @@ export async function viewGitHubPr(
   const base = canonicalRoot(input.root);
   const repo = validateGitHubRepoSlug(input.repo);
   if (!Number.isSafeInteger(input.prNumber) || input.prNumber < 1) {
-    throw new WorkbenchError("invalid_input", `无效的 PR 编号: ${input.prNumber}`);
+    throw new WorkbenchError("invalid_input", `无效的 PR 编号: ${input.prNumber}`, {
+      messageKey: "gitee.errInvalidPrNumber",
+      messageParams: { prNumber: String(input.prNumber) },
+    });
   }
   const { ghBin, runGh } = assertGhBin(deps);
   const res = await runGh(
@@ -691,7 +769,10 @@ export async function viewGitHubPr(
   );
   if (res.code !== 0) {
     const msg = sanitizeOutput(res.stderr.trim() || res.stdout.trim(), 600).text;
-    throw new WorkbenchError("execution_failed", `查询 PR #${input.prNumber} 状态失败: ${msg || "未知错误"}`);
+    throw new WorkbenchError("execution_failed", `查询 PR #${input.prNumber} 状态失败: ${msg || "未知错误"}`, {
+      messageKey: msg ? "github.errViewPrFailedDetail" : "github.errViewPrFailed",
+      messageParams: msg ? { number: input.prNumber, detail: msg } : { number: input.prNumber },
+    });
   }
   let parsed: {
     number?: number;
@@ -705,7 +786,9 @@ export async function viewGitHubPr(
   try {
     parsed = JSON.parse(res.stdout) as typeof parsed;
   } catch {
-    throw new WorkbenchError("execution_failed", "无法解析 gh pr view 返回的 JSON");
+    throw new WorkbenchError("execution_failed", "无法解析 gh pr view 返回的 JSON", {
+      messageKey: "github.errPrJsonInvalid",
+    });
   }
 
   const rawState = String(parsed.state ?? "").toUpperCase();

@@ -206,6 +206,8 @@ export interface GitObservation {
   diffTruncated: boolean;
   diffStatus: DiffEvidenceStatus;
   diffReason: string | null;
+  diffReasonKey?: string;
+  diffReasonParams?: UiMessageParams;
   binaryFiles: string[];
   omittedFiles: string[];
   baselineRequested: string | null;
@@ -468,6 +470,15 @@ export interface ReviewReport {
 export type ScreenshotTrigger = "auto_submit" | "manual";
 export type ScreenshotBatchStatus = "captured" | "partial" | "skipped";
 
+/** Stable reason codes for workbench-generated screenshot skips; UI localizes them. */
+export type ScreenshotSkipReasonCode =
+  | "browser_missing"
+  | "chrome_path_missing"
+  | "puppeteer_path_missing"
+  | "server_unavailable"
+  | "browser_launch_failed"
+  | "no_shots";
+
 export interface ScreenshotShot {
   /** Stable shot ID such as S-<ts>-<uuid8>. */
   id: string;
@@ -490,6 +501,8 @@ export interface ScreenshotBatch {
   codeSnapshotHash: string;
   status: ScreenshotBatchStatus;
   skipReason: string | null;
+  /** Present for skips produced by the workbench itself; historical raw reason stays readable. */
+  reasonCode?: ScreenshotSkipReasonCode | null;
   shots: ScreenshotShot[];
   durationMs: number;
 }
@@ -498,6 +511,8 @@ export interface ScreenshotCaptureResult {
   status: ScreenshotBatchStatus;
   batchId: string | null;
   reason: string | null;
+  reasonCode?: ScreenshotSkipReasonCode | null;
+  reasonParams?: Record<string, string> | null;
   batch: ScreenshotBatch | null;
 }
 
@@ -552,6 +567,8 @@ export interface EvaluatedVerification {
   record: VerificationRecord;
   effectiveState: EffectiveVerificationState;
   staleReason: string | null;
+  staleReasonKey?: string;
+  staleReasonParams?: UiMessageParams;
 }
 
 export type CriterionCoverageState = "passed" | "failed" | "stale" | "unverified" | "unavailable";
@@ -561,6 +578,8 @@ export interface CriterionCoverageItem {
   state: CriterionCoverageState;
   verificationIds: string[];
   reason: string | null;
+  reasonKey?: string;
+  reasonParams?: UiMessageParams;
 }
 
 export interface CriteriaCoverage {
@@ -574,11 +593,13 @@ export interface CriteriaCoverage {
 export interface ApprovalStatus {
   valid: boolean;
   reason: string | null;
+  reasonKey?: string;
 }
 
 export interface AcceptanceGate {
   ok: boolean;
   blockers: string[];
+  blockerRefs?: UiMessageRef[];
 }
 
 export type EvidenceContext = "live" | "accepted" | "legacy-unavailable";
@@ -588,11 +609,24 @@ export type AcceptanceArtifactStatus = "none" | "available" | "missing" | "corru
 export type CoverageSource = "live" | "snapshot" | "acceptance-hashes" | "unavailable";
 
 /** Where the displayed verification/diff evidence came from, and how it was recovered. */
+/** Optional UI message reference so clients can localize stable states while old fields stay readable. */
+export interface UiMessageRef {
+  key: string;
+  params?: UiMessageParams;
+}
+export type UiMessageParamValue = string | number | UiMessageRef;
+export type UiMessageParams = Record<string, UiMessageParamValue>;
+
 export interface EvidenceProvenance {
   context: EvidenceContext;
   coverageSource: CoverageSource;
   artifactStatus: AcceptanceArtifactStatus;
   reason: string | null;
+  reasonKey?: string;
+  reasonParams?: UiMessageParams;
+  coverageReasonKey?: string;
+  coverageReasonParams?: UiMessageParams;
+  scopeNoteKey?: string;
   acceptedAt: number | null;
   snapshotId: string | null;
   snapshotPath: string | null;
@@ -614,10 +648,13 @@ export interface RequirementDiffView {
   context: EvidenceContext;
   status: DiffEvidenceStatus;
   reason: string | null;
+  reasonKey?: string;
+  reasonParams?: UiMessageParams;
   acceptedAt: number | null;
   snapshotId: string | null;
   snapshotCapturedAt: number | null;
   scopeNote: string | null;
+  scopeNoteKey?: string;
   observation: GitObservation | null;
 }
 
@@ -640,11 +677,15 @@ export type ActionId =
 export interface BannerAction {
   id: ActionId;
   label: string;
+  labelKey?: string;
+  labelParams?: UiMessageParams;
   disabledReason?: string;
 }
 
 export interface ActionBanner {
   headline: string;
+  headlineKey?: string;
+  headlineParams?: UiMessageParams;
   tone: "neutral" | "info" | "success" | "warning" | "danger";
   primaryAction: BannerAction | null;
   secondaryActions: BannerAction[];
@@ -653,6 +694,7 @@ export interface ActionBanner {
 export interface ReviewValidity {
   effectiveState: "current" | "stale" | "missing";
   reason: string | null;
+  reasonKey?: string;
 }
 
 export interface ValidityReport {
@@ -664,6 +706,8 @@ export interface ValidityReport {
   banner: ActionBanner;
   needsDecision: boolean;
   decisionReason: string | null;
+  decisionReasonKey?: string;
+  decisionReasonParams?: UiMessageParams;
   evidenceContext: EvidenceContext;
   provenance: EvidenceProvenance;
 }
@@ -682,8 +726,12 @@ export interface RequirementSummary {
   tasksDone: number;
   needsDecision: boolean;
   decisionReason: string | null;
+  decisionReasonKey?: string;
+  decisionReasonParams?: UiMessageParams;
   blockedReason: string | null;
   progressText: string;
+  progressKey?: string;
+  progressParams?: UiMessageParams;
   github?: RequirementGitHubLink | null;
   createdAt: number;
   updatedAt: number;

@@ -31,3 +31,26 @@ export class WorkbenchError extends Error {
     return this.details ? { code: this.code, message: this.message, details: this.details } : { code: this.code, message: this.message };
   }
 }
+
+export interface StructuredMessageRef {
+  key: string;
+  params?: Record<string, string | number>;
+}
+
+/** Extracts a serializable message ref from WorkbenchError details for warning/toast localization. */
+export function extractMessageRef(err: unknown): StructuredMessageRef | null {
+  if (!(err instanceof WorkbenchError) || typeof err.details?.messageKey !== "string") return null;
+  const rawParams = err.details.messageParams;
+  const params =
+    rawParams && typeof rawParams === "object"
+      ? (Object.fromEntries(
+          Object.entries(rawParams as Record<string, unknown>).filter(
+            ([, v]) => typeof v === "string" || typeof v === "number",
+          ),
+        ) as Record<string, string | number>)
+      : undefined;
+  return {
+    key: err.details.messageKey,
+    ...(params && Object.keys(params).length > 0 ? { params } : {}),
+  };
+}

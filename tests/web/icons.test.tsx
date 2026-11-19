@@ -199,7 +199,9 @@ describe("application icon inventory", () => {
     }
     const primitives = read("src/web/components/Primitives.tsx");
     const modelBar = read("src/web/components/ui/ModelRunnerBar.tsx");
-    expect(modelBar).toContain("仅生成提示词 (手动复制)");
+    const i18n = read("src/web/i18n.ts");
+    expect(modelBar).toContain('"runner.manual"');
+    expect(i18n).toContain("仅生成提示词 (手动复制)");
     expect(primitives).not.toContain("📋");
     expect(modelBar).not.toContain("📋");
   });
@@ -207,7 +209,8 @@ describe("application icon inventory", () => {
   test("preserves documented text/prose exceptions", () => {
     const workspace = read("src/web/components/WorkspaceView.tsx");
     expect(workspace).toContain("+{f.additions}/-{f.deletions}");
-    expect(workspace).toContain("对比 v${activeVer - 1} → v${activeVer}");
+    expect(workspace).toContain('"spec.compare"');
+    expect(read("src/web/i18n.ts")).toContain("对比 v{prev} → v{curr}");
     const sidebar = read("src/web/components/HubSidebar.tsx");
     expect(sidebar).toContain("<BrandMark />");
     const renderSource = read("src/web/render.ts");
@@ -238,7 +241,8 @@ describe("shared brand mark and browser icons", () => {
     }
     expect(read("src/web/components/Topbar.tsx")).toContain('<span className="app-brand-name">Workbench</span>');
     expect(read("src/web/components/HubSidebar.tsx")).toContain("<span>Workbench</span>");
-    expect(read("src/web/components/LoginView.tsx")).toContain("Workbench 局域网登录");
+    expect(read("src/web/components/LoginView.tsx")).toContain('t(language, "login.title")');
+    expect(read("src/web/i18n.ts")).toContain('"login.title": "Workbench 局域网登录"');
   });
 
   test("brand styles keep the mark at a fixed ratio and remove the placeholder tile", () => {

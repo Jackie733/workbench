@@ -1,5 +1,7 @@
 import { Download, FileText, Trash2 } from "lucide-react";
 import type { AttachmentMeta } from "../../core/types.ts";
+import { t } from "../i18n.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 function formatSize(bytes: number): string {
@@ -17,6 +19,7 @@ export interface AttachmentGalleryProps {
 
 /** 需求详情与收集箱详情共用的附件展示：图片缩略图 + 文件下载列表。 */
 export function AttachmentGallery({ attachments, urlFor, onDelete, emptyText }: AttachmentGalleryProps) {
+  const language = useUiStore((s) => s.language);
   if (attachments.length === 0) {
     if (!emptyText) return null;
     return <div className="xs muted">{emptyText}</div>;
@@ -41,7 +44,7 @@ export function AttachmentGallery({ attachments, urlFor, onDelete, emptyText }: 
                 <button
                   className="btn ghost xs attachment-delete"
                   type="button"
-                  aria-label={`删除附件 ${meta.name}`}
+                  aria-label={t(language, "attachment.deleteAria", { name: meta.name })}
                   onClick={() => onDelete(meta.id)}
                 >
                   <Icon icon={Trash2} size={14} />
@@ -63,14 +66,19 @@ export function AttachmentGallery({ attachments, urlFor, onDelete, emptyText }: 
                 {meta.name}
               </span>
               <span className="xs muted">{formatSize(meta.size)}</span>
-              <a className="btn ghost xs" href={urlFor(meta.id)} download={meta.name} aria-label={`下载附件 ${meta.name}`}>
+              <a
+                className="btn ghost xs"
+                href={urlFor(meta.id)}
+                download={meta.name}
+                aria-label={t(language, "attachment.downloadAria", { name: meta.name })}
+              >
                 <Icon icon={Download} size={14} />
               </a>
               {onDelete && (
                 <button
                   className="btn ghost xs"
                   type="button"
-                  aria-label={`删除附件 ${meta.name}`}
+                  aria-label={t(language, "attachment.deleteAria", { name: meta.name })}
                   onClick={() => onDelete(meta.id)}
                 >
                   <Icon icon={Trash2} size={14} />

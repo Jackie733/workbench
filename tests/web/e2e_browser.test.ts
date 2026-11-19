@@ -3,11 +3,24 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
+import {
+  acceptRequirement,
+  approveDesign,
+  createRequirement,
+  getRequirement,
+  initProject,
+  propose,
+} from "../../src/core/engine.ts";
+import { observeGitSnapshot } from "../../src/core/git.ts";
+import { atomicWriteJson } from "../../src/core/fs.ts";
+import { runVerification } from "../../src/core/runner.ts";
+import type { RequirementState } from "../../src/core/types.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
+import { recordModelRunOutcome } from "../../src/hub/telemetry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
+import { resetAuthPassword } from "../../src/server/auth.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
 
 const browserEnv = resolveTestBrowser();
@@ -22,6 +35,7 @@ interface BrowserPage {
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
+  evaluateOnNewDocument(fn: () => void): Promise<unknown>;
   mouse: {
     move(x: number, y: number, opts?: { steps?: number }): Promise<void>;
     down(): Promise<void>;
@@ -610,6 +624,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="submit-quick-report-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
 
+      // Seed one run outcome before opening Evolution Center so Telemetry tab renders action badge localization cleanly.
+      recordModelRunOutcome({
+        harness: "codex",
+        model: "gpt-6.2-sol",
+        action: "review",
+        status: "succeeded",
+        durationMs: 1200,
+      });
+
       // 2. Open Evolution Center from HubSidebar -> verify Inbox, Playbook, Telemetry tabs
       await clickReady(page, '[data-testid="open-evolution-btn"]');
       await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
@@ -631,9 +654,23 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // Switch to Telemetry tab
+      // Switch to Telemetry tab and verify action badge localization in both languages
       await clickReady(page, '[data-testid="evo-tab-telemetry"]');
       await page.waitForSelector('[data-testid="evo-pane-telemetry"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="telemetry-action-badge"]', { timeout: 5000 });
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent ?? ""),
+      ).toBe("审查");
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "Review",
+        { timeout: 5000 },
+      );
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "审查",
+        { timeout: 5000 },
+      );
 
       // Switch back to Inbox tab and promote pain point to a sandboxed requirement
       await clickReady(page, '[data-testid="evo-tab-inbox"]');
@@ -1374,6 +1411,35 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         "codex/gpt-6.1-sol",
         `${presetDesign.harness}/${presetDesign.model}`,
       ]);
+
+      // 4. Console run selector and Timeline runs badge localize action & status cleanly across language switches.
+      await page.waitForSelector('[data-testid="console-pane"] select option', { timeout: 5000 });
+      const zhOptionText = await page.evaluate(
+        () => document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "",
+      );
+      expect(zhOptionText).toContain("设计 ·");
+      expect(zhOptionText).toContain("(已完成)");
+
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="workspace-tab-scroll"]')?.textContent ?? "").includes("设计 · 已完成"),
+        { timeout: 5000 },
+      );
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+            "Design ·",
+          ) &&
+          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+            "(Completed)",
+          ) &&
+          (document.querySelector('[data-testid="workspace-tab-scroll"]')?.textContent ?? "").includes(
+            "Design · Completed",
+          ),
+        { timeout: 5000 },
+      );
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
@@ -1812,4 +1878,515 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 30_000);
+
+  test("REQ-003: bilingual interface keeps session, project, requirement, draft, and document language", async () => {
+    const root = initGitRepo();
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-i18n-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+    await initProject(root, { name: "BilingualRepo", privacyMode: "local", outputLanguage: "en" });
+    await createRequirement(root, {
+      goal: "中文需求正文保留测试",
+      criteria: [{ id: "AC-1", description: "中文验收条件原文", required: true, command: "echo ok" }],
+    });
+    await propose(root, "REQ-001", { designMarkdown: "# 中文方案标题\n\n方案正文原文保留。", actor: "agent" });
+    // 已验收需求：用于在英文界面打开已固化验收证据，并确认中文历史原文保持可读。
+    await createRequirement(root, {
+      goal: "已验收证据中文原文",
+      criteria: [
+        { id: "AC-1", description: "验收通过并保留中文输出", required: true, command: "echo 中文历史证据原文" },
+      ],
+    });
+    await propose(root, "REQ-002", { designMarkdown: "# 已验收方案", actor: "agent" });
+    const acceptBaseline = await observeGitSnapshot(root);
+    await approveDesign(root, "REQ-002", { baseline: acceptBaseline });
+    await runVerification(root, "REQ-002", {
+      command: "echo 中文历史证据原文",
+      criterionIds: ["AC-1"],
+    });
+    const acceptedSnapshot = await observeGitSnapshot(root);
+    await acceptRequirement(root, "REQ-002", { currentCodeSnapshotHash: acceptedSnapshot!.fingerprint });
+
+    // 旧版已验收需求：验收记录缺少快照，用于英文界面下断言历史原文保留。
+    await createRequirement(root, {
+      goal: "旧版验收中文原文",
+      criteria: [{ id: "AC-1", description: "旧版验收条件原文", required: true, command: "echo 旧版历史证据原文" }],
+    });
+    await propose(root, "REQ-003", { designMarkdown: "# 旧版中文方案", actor: "agent" });
+    await approveDesign(root, "REQ-003", { baseline: acceptedSnapshot });
+    await runVerification(root, "REQ-003", { command: "echo 旧版历史证据原文", criterionIds: ["AC-1"] });
+    const legacyDone = await acceptRequirement(root, "REQ-003", {
+      currentCodeSnapshotHash: acceptedSnapshot!.fingerprint,
+    });
+    const legacyState: RequirementState = {
+      ...legacyDone.state,
+      acceptance: {
+        acceptedAt: legacyDone.state.acceptance!.acceptedAt,
+        specHash: legacyDone.state.acceptance!.specHash,
+        codeSnapshotHash: legacyDone.state.acceptance!.codeSnapshotHash,
+        verificationIds: legacyDone.state.acceptance!.verificationIds,
+      },
+    };
+    atomicWriteJson(path.join(root, ".workbench/items/REQ-003/state.json"), legacyState);
+
+    // 实施中需求：用于验证英文界面下截图跳过原因的本地化即时提示。
+    await createRequirement(root, {
+      goal: "截图跳过英文提示",
+      criteria: [{ id: "AC-1", description: "截图提示用例", required: true, command: "echo shot" }],
+    });
+    await propose(root, "REQ-004", { designMarkdown: "# 截图用例方案", actor: "agent" });
+    await approveDesign(root, "REQ-004", { baseline: acceptedSnapshot });
+
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, hostname: "0.0.0.0" });
+    servers.push(server);
+    const { password } = resetAuthPassword(hubDir);
+    const lanUrl = `http://${os.hostname()}:${server.port}`;
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    const readLang = () => page.evaluate(() => document.documentElement.lang);
+    const readTitle = () => page.evaluate(() => document.title);
+    const bodyText = () => page.evaluate(() => document.body.innerText);
+    const selectLang = async (lang: string) => {
+      await page.select('[data-testid="ui-language-select"]', lang);
+      await page.waitForFunction(
+        (expected) => document.documentElement.lang === (expected as string),
+        { timeout: 5000 },
+        lang,
+      );
+    };
+    const clickModalAction = (testId: string, label: string) =>
+      page.evaluate(
+        (tid: string, text: string) => {
+          const buttons = Array.from(
+            document.querySelectorAll(`[data-testid="${tid}"] .modal-actions button`),
+          ) as HTMLButtonElement[];
+          const target = buttons.find((b) => (b.textContent ?? "").includes(text));
+          if (!target) throw new Error(`modal action not found: ${text}`);
+          target.click();
+        },
+        testId,
+        label,
+      );
+    const readDocumentLanguages = () =>
+      page.evaluate(async () => {
+        const hub = (await (await fetch("/api/hub/state")).json()) as { outputLanguage?: string };
+        const project = (await (await fetch("/api/project")).json()) as {
+          project?: { outputLanguage?: string } | null;
+        };
+        return { hub: hub.outputLanguage ?? null, project: project.project?.outputLanguage ?? null };
+      });
+
+    try {
+      await page.setViewport({ width: 1280, height: 860 });
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+
+      // 1. 默认简体中文（登录门禁前）。
+      expect(await readLang()).toBe("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+      await page.waitForSelector('[data-testid="login-view"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("登录工作台");
+      expect(
+        await page.evaluate(() =>
+          document.querySelector('[data-testid="ui-language-select"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("切换界面语言");
+
+      // 2. 登录前切换英文并即时生效。
+      await selectLang("en");
+      expect(await readTitle()).toContain("Spec & Verification");
+      expect(await bodyText()).toContain("Sign in");
+      expect(
+        await page.evaluate(() =>
+          document.querySelector('[data-testid="ui-language-select"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("Switch interface language");
+
+      // 2b. 已显示的登录错误随界面语言切换即时更新，而不是停留在请求失败时的语言。
+      const wrongPin = password === "000000" ? "111111" : "000000";
+      await page.type('[data-testid="login-password-input"]', wrongPin);
+      await clickReady(page, '[data-testid="login-submit-btn"]');
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="login-error"]')?.textContent ?? "").includes(
+            "Incorrect access PIN",
+          ),
+        { timeout: 5000 },
+      );
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector('[data-testid="login-error"]')?.textContent ?? "").includes(
+            "访问密码错误，请重试",
+          ),
+        { timeout: 5000 },
+      );
+
+      // 3. 重新加载清空错误与输入，切到英文后登录，并记录模型文档语言设置。
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="login-view"]', { timeout: 5000 });
+      await selectLang("en");
+      await page.type('[data-testid="login-password-input"]', password);
+      await clickReady(page, '[data-testid="login-submit-btn"]');
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("New requirement");
+      const docLanguagesBefore = await readDocumentLanguages();
+      expect(docLanguagesBefore.project).toBe("en");
+
+      // 4. 英文界面下保留中文需求正文，并渲染英文状态横幅/验证反馈/批注控件。
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-banner"]', { timeout: 5000 });
+      const workspaceText = await bodyText();
+      expect(workspaceText).toContain("中文需求正文保留测试");
+      expect(workspaceText).toContain("中文验收条件原文");
+      expect(workspaceText).toContain("中文方案标题");
+      expect(workspaceText).toContain("submitted design v1");
+      expect(workspaceText).toContain("Verification has not run yet");
+      expect(workspaceText).toContain("Annotate");
+      expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
+        "Awaiting approval",
+      );
+
+      // 4b. 英文界面下的批注弹窗与控件。
+      await page.click('[data-action="annotate-anchor"]');
+      await page.waitForSelector('[data-testid="annotate-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Section annotation & question");
+      expect(await bodyText()).toContain("Add & ask now");
+      expect(
+        await page.evaluate(
+          () => (document.querySelector('[data-testid="annotate-msg"]') as HTMLTextAreaElement | null)?.placeholder,
+        ),
+      ).toContain("Enter a question about this section");
+      await clickModalAction("annotate-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="annotate-modal"]'), {
+        timeout: 5000,
+      });
+
+      // 5. 编辑草稿在切换语言后保留，当前需求与视图不丢失。
+      await clickReady(page, '[data-testid="start-edit-design-btn"]');
+      await page.type('[data-testid="design-body-input"]', "\n未提交的设计草稿保留");
+      await selectLang("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+      expect(await bodyText()).toContain("Agent 已提交技术方案 v1");
+      expect(await bodyText()).toContain("尚未运行验证");
+      expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
+        "待批准",
+      );
+      // 5b. 中文界面下的批注、设置与报修文案同样完整。
+      await page.click('[data-action="annotate-anchor"]');
+      await page.waitForSelector('[data-testid="annotate-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("段落批注与提问");
+      expect(await bodyText()).toContain("加入并立即提问");
+      await clickModalAction("annotate-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="annotate-modal"]'), {
+        timeout: 5000,
+      });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("工作台设置");
+      await clickModalAction("routing-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), {
+        timeout: 5000,
+      });
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("随手报修与自进化反馈");
+      expect(await bodyText()).toContain("UI 异常 / 布局交互问题");
+      await clickModalAction("quick-report-modal", "取消");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), {
+        timeout: 5000,
+      });
+      const draftValue = await page.evaluate(
+        () => (document.querySelector('[data-testid="design-body-input"]') as HTMLTextAreaElement | null)?.value ?? "",
+      );
+      expect(draftValue).toContain("未提交的设计草稿保留");
+      expect(await page.evaluate(() => document.querySelector(".app-req-id")?.textContent)).toBe("REQ-001");
+
+      // 6. 切回英文后刷新：偏好持久化，界面与标题恢复英文。
+      await selectLang("en");
+      expect(await page.evaluate(() => localStorage.getItem("wb-ui-language"))).toBe("en");
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await readLang()).toBe("en");
+      expect(await readTitle()).toContain("Spec & Verification");
+
+      // 7. 非法偏好回退简体中文。
+      await page.evaluate(() => localStorage.setItem("wb-ui-language", "fr"));
+      await page.goto(lanUrl, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-list"]', { timeout: 5000 });
+      expect(await readLang()).toBe("zh-CN");
+      expect(await readTitle()).toContain("规范与验证");
+
+      // 7b. 英文界面打开已固化的验收证据：界面标题本地化，中文历史命令与输出原文保留。
+      await selectLang("en");
+      await page.click('[data-action="set-scope"][data-value="done"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid^="ev-"]', { timeout: 5000 });
+      const acceptedEvidenceText = await bodyText();
+      expect(acceptedEvidenceText).toContain("Frozen acceptance snapshot");
+      expect(acceptedEvidenceText).toContain("echo 中文历史证据原文");
+      expect(acceptedEvidenceText).toContain("中文历史证据原文");
+      await page.click('[data-action="toggle-log"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(
+            document
+              .querySelector(".evidence-log")
+              ?.textContent?.includes("中文历史证据原文"),
+          ),
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      // 7c. 英文界面打开旧版验收记录：界面标题本地化，中文历史命令与输出原文保留。
+      await page.waitForSelector('[data-testid="req-row-REQ-003"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-003"]');
+      await page.waitForSelector('[data-testid="evidence-provenance-banner"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Legacy acceptance record (no diff snapshot)");
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 5000 });
+      const legacyEvidenceText = await bodyText();
+      expect(legacyEvidenceText).toContain("Historical code diff unavailable");
+      expect(legacyEvidenceText).toContain("echo 旧版历史证据原文");
+      expect(legacyEvidenceText).toContain("旧版历史证据原文");
+      await page.click('[data-action="toggle-log"]');
+      await page.waitForFunction(
+        () =>
+          Boolean(
+            document
+              .querySelector(".evidence-log")
+              ?.textContent?.includes("旧版历史证据原文"),
+          ),
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      await page.click('[data-action="set-scope"][data-value="active"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+
+      // 8. 设置与报修弹窗随界面语言呈现，模型文档语言保持不变。
+      await selectLang("en");
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Workspace settings");
+      await page.click('[data-testid="settings-tab-project"]');
+      expect(
+        await page.evaluate(
+          () => (document.querySelector('[data-testid="project-output-language-select"]') as HTMLSelectElement | null)?.value,
+        ),
+      ).toBe("en");
+      await page.click('[data-testid="project-provider-gitee"]');
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 15_000 });
+      const giteeStatusText = await page.evaluate(
+        () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
+      );
+      expect(giteeStatusText.length).toBeGreaterThan(0);
+      expect(/[\u4e00-\u9fff]/.test(giteeStatusText)).toBe(false);
+      await page.type('[data-testid="project-gitee-base-input"]', " bad");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Invalid Git branch name"),
+          ),
+        { timeout: 10_000 },
+      );
+      const branchToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Invalid Git branch name")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(branchToast)).toBe(false);
+      await page.click('[data-testid="project-provider-github"]');
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 15_000 });
+      const githubStatusText = await page.evaluate(
+        () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
+      );
+      expect(githubStatusText.length).toBeGreaterThan(0);
+      expect(/[\u4e00-\u9fff]/.test(githubStatusText)).toBe(false);
+      await page.type('[data-testid="project-github-repo-input"]', "bad repo");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Invalid GitHub repository slug"),
+          ),
+        { timeout: 10_000 },
+      );
+      const repoToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Invalid GitHub repository slug")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(repoToast)).toBe(false);
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("无效的 GitHub 仓库标识"),
+          ),
+        { timeout: 10_000 },
+      );
+      await selectLang("en");
+      await clickModalAction("routing-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      // 8b. 英文界面导入无效 GitHub Issue 编号时返回本地化校验提示。
+      await clickReady(page, '[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.click('[data-testid="new-req-mode-import"]');
+      await page.waitForSelector('[data-testid="import-issue-ref"]', { timeout: 5000 });
+      await page.type('[data-testid="import-issue-ref"]', "bad-gh-ref!!");
+      await clickReady(page, '[data-testid="import-issue-draft-btn"]');
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+            (el.textContent ?? "").includes("Please enter a valid GitHub Issue number"),
+          ),
+        { timeout: 10_000 },
+      );
+      const ghImportToast = await page.evaluate(
+        () =>
+          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+            .map((el) => el.textContent ?? "")
+            .find((txt) => txt.includes("Please enter a valid GitHub Issue number")) ?? "",
+      );
+      expect(/[\u4e00-\u9fff]/.test(ghImportToast)).toBe(false);
+      await clickModalAction("new-req-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), { timeout: 5000 });
+      await clickReady(page, '[data-testid="open-quick-report-btn"]');
+      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Quick report & self-evolution feedback");
+      expect(await bodyText()).toContain("UI anomaly / layout interaction");
+      await clickModalAction("quick-report-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
+      expect(await readDocumentLanguages()).toEqual(docLanguagesBefore);
+
+      // 9. 客户端错误反馈在英文界面下本地化。
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      await clickReady(page, '[data-testid="manual-verify-btn"]');
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "Enter a verification command first",
+          ),
+        { timeout: 5000 },
+      );
+      // 9b. 已显示的即时错误提示随语言切换重新渲染为当前语言。
+      await selectLang("zh-CN");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "请先输入验证命令",
+          ),
+        { timeout: 5000 },
+      );
+      await selectLang("en");
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            "Enter a verification command first",
+          ),
+        { timeout: 5000 },
+      );
+
+      // 9c. 英文界面下截图跳过原因显示本地化即时提示，且随语言切换更新；历史批次原文不受影响。
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      await page.click('[data-action="set-scope"][data-value="active"]');
+      await page.waitForSelector('[data-testid="req-row-REQ-004"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-004"]');
+      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      const originalChromePath = process.env.WORKBENCH_CHROME_PATH;
+      process.env.WORKBENCH_CHROME_PATH = "/definitely/missing/chrome";
+      try {
+        await clickReady(page, '[data-testid="screenshot-recapture"]');
+        await page.waitForFunction(
+          () =>
+            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+              "does not exist",
+            ),
+          { timeout: 5000 },
+        );
+        await selectLang("zh-CN");
+        await page.waitForFunction(
+          () =>
+            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+              "指向的浏览器不存在",
+            ),
+          { timeout: 5000 },
+        );
+      } finally {
+        if (originalChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+        else process.env.WORKBENCH_CHROME_PATH = originalChromePath;
+      }
+      await selectLang("en");
+
+      // 10. 窄屏仍可使用语言入口；存储不可用时本会话仍可切换。
+      await page.setViewport({ width: 375, height: 720 });
+      const languageBox = await page.evaluate(() => {
+        const sel = document.querySelector('[data-testid="ui-language-select"]');
+        const rect = sel?.getBoundingClientRect();
+        return { width: rect?.width ?? 0, overflow: document.documentElement.scrollWidth > window.innerWidth };
+      });
+      expect(languageBox.width).toBeGreaterThan(0);
+      expect(languageBox.overflow).toBe(false);
+      await page.evaluate(() => {
+        const proto = Storage.prototype;
+        (proto as unknown as Record<string, unknown>).__origGet = proto.getItem;
+        (proto as unknown as Record<string, unknown>).__origSet = proto.setItem;
+        proto.getItem = () => {
+          throw new Error("storage blocked");
+        };
+        proto.setItem = () => {
+          throw new Error("storage blocked");
+        };
+      });
+      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 5000 });
+      expect(await bodyText()).toContain("变更与验证");
+      await page.evaluate(() => {
+        const proto = Storage.prototype as unknown as Record<string, unknown>;
+        proto.getItem = proto.__origGet as typeof Storage.prototype.getItem;
+        proto.setItem = proto.__origSet as typeof Storage.prototype.setItem;
+      });
+
+      // 11. 启动前即禁用/拒绝读取 browser localStorage 时仍能以简体中文正常启动并在当前会话切换到英文。
+      const blockedPage = await browser!.newPage();
+      const blockedErrors: string[] = [];
+      blockedPage.on("pageerror", (err: Error) => blockedErrors.push(err.message));
+      try {
+        await blockedPage.evaluateOnNewDocument(() => {
+          Object.defineProperty(window, "localStorage", {
+            configurable: true,
+            get() {
+              throw new DOMException("Storage access denied", "SecurityError");
+            },
+          });
+        });
+        await blockedPage.setViewport({ width: 1360, height: 860 });
+        await blockedPage.goto(`http://127.0.0.1:${server.port}`, { waitUntil: "networkidle0" });
+        expect(blockedErrors).toEqual([]);
+        await blockedPage.waitForSelector('[data-testid="ui-language-select"]', { timeout: 10_000 });
+        expect(await blockedPage.evaluate(() => document.documentElement.lang)).toBe("zh-CN");
+        await blockedPage.select('[data-testid="ui-language-select"]', "en");
+        await blockedPage.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
+        expect(await blockedPage.evaluate(() => document.body.innerText)).toContain("Workbench");
+        expect(blockedErrors).toEqual([]);
+      } finally {
+        await blockedPage.close();
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
 });
