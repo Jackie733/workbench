@@ -262,7 +262,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       // Verify design version diff toggle works
       // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
-      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 6000 });
+      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 15000 });
       await page.click('[data-action="toggle-design-diff"]');
       await page.waitForSelector(".diff-code", { timeout: 5000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");

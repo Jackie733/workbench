@@ -3,6 +3,7 @@ import { KeyRound, Lock } from "lucide-react";
 import { api, ApiClientError } from "../api.ts";
 import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 import { UiLanguageSelect } from "./Primitives.tsx";
 
@@ -60,7 +61,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
           <UiLanguageSelect />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-          <span className="sb-logo">W</span>
+          <BrandMark />
           <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{t(language, "login.title")}</h2>
         </div>
         <p className="muted xs" style={{ margin: "0 0 16px" }}>

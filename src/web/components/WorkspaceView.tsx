@@ -227,6 +227,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
   const revValid = validity.reviewValidity;
+  const isReviewCurrent = revValid.effectiveState === "current";
   const findings = review?.findings ?? [];
 
   const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>(() =>
@@ -356,7 +357,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
               {s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && review.verdict !== "pass" && (
                 <>
                   <button
-                    className="btn primary xs"
+                    className={isReviewCurrent ? "btn primary xs" : "btn xs"}
                     type="button"
                     data-testid="review-fix-btn"
                     disabled={busy}
@@ -367,9 +368,11 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     }
                   >
                     <Icon icon={Wrench} size={14} />{" "}
-                    {findings.length > 0 && selectedFindingIds.length > 0
-                      ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
-                      : t(language, "core.action.fixPerReview")}
+                    {isReviewCurrent
+                      ? findings.length > 0 && selectedFindingIds.length > 0
+                        ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
+                        : t(language, "core.action.fixPerReview")
+                      : t(language, "review.fixStale")}
                   </button>
                   <button
                     className="btn xs"
@@ -380,7 +383,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   >
                     {t(language, "core.action.sendBack")}
                   </button>
-                  {validity.acceptanceGate.ok && (
+                  {isReviewCurrent && validity.acceptanceGate.ok && (
                     <button
                       className="btn xs"
                       type="button"
@@ -397,7 +400,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 </>
               )}
               <button
-                className="btn xs"
+                className={!isReviewCurrent ? "btn primary xs" : "btn xs"}
                 type="button"
                 data-testid="review-rerun-btn"
                 disabled={busy}
@@ -1558,11 +1561,18 @@ export function WorkspaceView() {
   const { banner } = validity;
   const bridgeConnected = Boolean(project?.bridge.connected);
 
+  const isGiteeProject =
+    project?.remoteProvider === "gitee" ||
+    Boolean(project?.project?.gitee) ||
+    s.github?.provider === "gitee";
+  const prPlatformLabel = isGiteeProject ? "Gitee" : "GitHub";
+
   const openDeliverModal = (preferPr?: boolean) => {
     const candidates = deliveryPreview?.candidates ?? [];
     const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
     const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
-    const usePr = preferPr ?? Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr);
+    const usePr =
+      preferPr ?? Boolean((reqData?.sandbox || !deliveryPreview?.canCommit) && deliveryPreview?.canCreatePr);
     setModal({
       kind: "deliver",
       commitMessage: deliveryPreview?.suggestedMessage ?? `feat(${s.id.toLowerCase()}): ${s.title}`,
@@ -1570,7 +1580,7 @@ export function WorkspaceView() {
       note: "",
       createPr: usePr,
       branchName: deliveryPreview?.suggestedBranch ?? `feat/${s.id.toLowerCase()}`,
-      baseBranch: deliveryPreview?.baseBranch ?? "main",
+      baseBranch: deliveryPreview?.baseBranch ?? (isGiteeProject ? "master" : "main"),
       prTitle: `${s.id}: ${s.title}`,
     });
   };
@@ -1701,13 +1711,19 @@ export function WorkspaceView() {
                       type="button"
                       data-testid="menu-link-issue-btn"
                       onClick={() => {
-                        setModal({ kind: "link_issue", requirementId: s.id, mode: "create", issueRef: "" });
+                        setModal({
+                          kind: "link_issue",
+                          requirementId: s.id,
+                          provider: isGiteeProject ? "gitee" : "github",
+                          mode: isGiteeProject ? "link" : "create",
+                          issueRef: "",
+                        });
                       }}
                     >
-                      {t(language, "ws.menu.linkIssue")}
+                      {t(language, isGiteeProject ? "ws.menu.linkGitee" : "ws.menu.linkIssue")}
                     </button>
                   </DropdownItem>
-                ) : (
+                ) : s.github.provider !== "gitee" ? (
                   <DropdownItem asChild>
                     <button
                       type="button"
@@ -1723,7 +1739,7 @@ export function WorkspaceView() {
                       {t(language, "ws.menu.syncIssue", { number: s.github.issue.number })}
                     </button>
                   </DropdownItem>
-                )}
+                ) : null}
                 {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
                   <DropdownItem asChild>
                     <button
@@ -1917,10 +1933,11 @@ export function WorkspaceView() {
           {s.stage === "done" && deliveryPreview?.sandboxActive && !s.github?.pr && (
             <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-sandbox-hint">
               {deliveryPreview.canCreatePr
-                ? t(language, "ws.deliverySandboxPr", {
+                ? t(language, "ws.deliverySandboxPrPlatform", {
                     branch: deliveryPreview.branch ?? reqData?.sandbox?.branch ?? "",
+                    platform: prPlatformLabel,
                   })
-                : t(language, "ws.deliverySandboxNoPr")}
+                : t(language, "ws.deliverySandboxNoPrPlatform", { platform: prPlatformLabel })}
             </div>
           )}
           {canRunModel && (
@@ -1996,7 +2013,7 @@ export function WorkspaceView() {
               {reqData?.sandbox && deliveryPreview?.canCreatePr
                 ? s.github?.pr
                   ? t(language, "ws.deliverPrAppend")
-                  : t(language, "ws.deliverPrCreate")
+                  : t(language, "ws.deliverPrCreatePlatform", { platform: prPlatformLabel })
                 : s.delivery
                   ? t(language, "ws.deliverMore")
                   : t(language, "ws.deliverStart")}

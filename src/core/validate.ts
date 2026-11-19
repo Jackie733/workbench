@@ -3,6 +3,7 @@ import { WorkbenchError } from "./errors.ts";
 import {
   ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
   AGENT_ACTIONS,
+  GIT_REMOTE_PROVIDERS,
   MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_ACCEPTANCE_SNAPSHOT_BYTES,
   MAX_AGENT_RUNS,
@@ -46,8 +47,10 @@ import {
   type DiffFilesScope,
   type DiscussionEntry,
   type EffectiveVerificationState,
+  type GitRemoteProvider,
   type HandoffNote,
   type OutputLanguage,
+  type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
   type RequirementGitHubIssueLink,
@@ -85,6 +88,8 @@ const SCREENSHOT_PATH_RE = /^screenshots\/shot-S-[A-Za-z0-9-]{1,64}\.png$/;
 const SCREENSHOT_VIEWPORT_RE = /^\d{2,5}x\d{2,5}$/;
 const GIT_REF_RE = /^[0-9a-f]{7,64}$/i;
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const GITEE_ENTERPRISE_RE = /^[A-Za-z0-9_.-]{1,100}$/;
+const GITEE_ISSUE_IDENT_RE = /^[A-Za-z0-9]{4,16}$/;
 const GIT_BRANCH_RE = /^(?![-.])(?!.*\.\.)(?!.*@\{)[A-Za-z0-9._/-]{1,128}(?<!\.lock)(?<![./])$/;
 const DIFF_STATUSES: DiffEvidenceStatus[] = ["captured", "empty", "unavailable"];
 const FILES_SCOPES: DiffFilesScope[] = ["baseline-relative", "worktree", "none"];
@@ -107,6 +112,30 @@ export function validateGitHubRepoSlug(repo: string): string {
     throw new WorkbenchError("invalid_input", `无效的 GitHub 仓库标识（应为 owner/repo）: ${repo}`);
   }
   return trimmed;
+}
+
+export function validateGiteeRepoSlug(repo: string): string {
+  const trimmed = repo.trim();
+  if (!GITHUB_REPO_RE.test(trimmed)) {
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 仓库标识（应为 owner/repo）: ${repo}`);
+  }
+  return trimmed;
+}
+
+export function validateGiteeEnterpriseSlug(enterprise: string): string {
+  const trimmed = enterprise.trim();
+  if (!GITEE_ENTERPRISE_RE.test(trimmed)) {
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 企业空间标识: ${enterprise}`);
+  }
+  return trimmed;
+}
+
+export function validateGiteeIssueIdent(ident: string): string {
+  const trimmed = ident.trim().replace(/^#/, "");
+  if (!GITEE_ISSUE_IDENT_RE.test(trimmed)) {
+    throw new WorkbenchError("invalid_input", `无效的 Gitee 工作项编号: ${ident}`);
+  }
+  return trimmed.toUpperCase();
 }
 
 export function validateGitBranchName(branch: string): string {
@@ -315,6 +344,25 @@ function validateProjectGitHubConfig(raw: unknown): ProjectGitHubConfig | undefi
   return raw as unknown as ProjectGitHubConfig;
 }
 
+function validateProjectGiteeConfig(raw: unknown): ProjectGiteeConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json gitee 配置必须是对象");
+  assertAllowedKeys(raw, ["repo", "enterprise", "defaultBaseBranch"], "project.gitee");
+  if (raw.repo !== undefined && (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo.trim()))) {
+    throw new WorkbenchError("corrupt_record", "project.gitee.repo 格式不合法");
+  }
+  if (raw.enterprise !== undefined && (typeof raw.enterprise !== "string" || !GITEE_ENTERPRISE_RE.test(raw.enterprise.trim()))) {
+    throw new WorkbenchError("corrupt_record", "project.gitee.enterprise 格式不合法");
+  }
+  if (
+    raw.defaultBaseBranch !== undefined &&
+    (typeof raw.defaultBaseBranch !== "string" || !GIT_BRANCH_RE.test(raw.defaultBaseBranch.trim()) || raw.defaultBaseBranch.includes("//"))
+  ) {
+    throw new WorkbenchError("corrupt_record", "project.gitee.defaultBaseBranch 格式不合法");
+  }
+  return raw as unknown as ProjectGiteeConfig;
+}
+
 export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -334,6 +382,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
     throw new WorkbenchError("corrupt_record", "project.json 字段不合法");
   }
   validateProjectGitHubConfig(raw.github);
+  validateProjectGiteeConfig(raw.gitee);
   return raw as unknown as ProjectMetadata;
 }
 
@@ -943,12 +992,20 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
 function validateRequirementGitHubIssue(raw: unknown): RequirementGitHubIssueLink | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "github.issue 字段无效");
-  assertAllowedKeys(raw, ["number", "url", "title", "state", "lastSyncedStage", "lastSyncedAt"], "github.issue");
+  assertAllowedKeys(
+    raw,
+    ["number", "url", "title", "state", "issueType", "programName", "lastSyncedStage", "lastSyncedAt"],
+    "github.issue",
+  );
+  const validNumber =
+    isSafeInt(raw.number, 1) || (typeof raw.number === "string" && GITEE_ISSUE_IDENT_RE.test(raw.number));
   if (
-    !isSafeInt(raw.number, 1) ||
+    !validNumber ||
     !isSafeHttpsUrl(raw.url) ||
     !isSafeText(raw.title, 400) ||
-    (raw.state !== "open" && raw.state !== "closed") ||
+    (raw.state !== "open" && raw.state !== "progressing" && raw.state !== "closed" && raw.state !== "rejected") ||
+    (raw.issueType !== undefined && !isSafeText(raw.issueType, 100, true)) ||
+    (raw.programName !== undefined && !isSafeText(raw.programName, 200, true)) ||
     (raw.lastSyncedStage !== undefined && !STAGES.includes(raw.lastSyncedStage as Stage)) ||
     !isSafeInt(raw.lastSyncedAt, 0)
   ) {
@@ -983,8 +1040,15 @@ function validateRequirementGitHubPr(raw: unknown): RequirementGitHubPrLink | nu
 function validateRequirementGitHubLink(raw: unknown): RequirementGitHubLink | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "state.github 字段无效");
-  assertAllowedKeys(raw, ["repo", "issue", "pr"], "state.github");
-  if (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo)) {
+  assertAllowedKeys(raw, ["provider", "repo", "enterprise", "issue", "pr"], "state.github");
+  if (raw.provider !== undefined && !GIT_REMOTE_PROVIDERS.includes(raw.provider as GitRemoteProvider)) {
+    throw new WorkbenchError("corrupt_record", "state.github.provider 格式损坏");
+  }
+  if (raw.enterprise !== undefined && (typeof raw.enterprise !== "string" || !GITEE_ENTERPRISE_RE.test(raw.enterprise))) {
+    throw new WorkbenchError("corrupt_record", "state.github.enterprise 格式损坏");
+  }
+  const allowEmptyRepo = raw.provider === "gitee" && typeof raw.enterprise === "string" && raw.enterprise.length > 0;
+  if (typeof raw.repo !== "string" || (raw.repo === "" ? !allowEmptyRepo : !GITHUB_REPO_RE.test(raw.repo))) {
     throw new WorkbenchError("corrupt_record", "state.github.repo 格式损坏");
   }
   validateRequirementGitHubIssue(raw.issue);
@@ -1100,7 +1164,7 @@ export function sanitizeOutput(raw: string, maxBytes: number): { text: string; t
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ")
     .replace(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, "[PRIVATE KEY REDACTED]")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, "$1[REDACTED]")
-    .replace(/\b((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*)[^\s,;'"`]+/gi, "$1[REDACTED]")
+    .replace(/\b((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*)[^\s,;'"`&]+/gi, "$1[REDACTED]")
     .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})/g, "[CREDENTIAL REDACTED]");
 
   const bytes = Buffer.from(cleaned, "utf8");

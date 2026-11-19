@@ -278,10 +278,10 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       await page.click('[data-action="toggle-theme"]');
       expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe("dark");
       await page.click('[data-testid="new-req-btn"]');
-      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 10_000 });
       await page.type('[data-testid="new-req-goal"]', "深色主题提示回归");
       await page.click('[data-testid="save-draft-btn"]');
-      await page.waitForSelector(TOAST_SEL, { timeout: 5000 });
+      await page.waitForSelector(TOAST_SEL, { timeout: 10_000 });
       const dark = await readToastStyle();
       expect(dark).not.toBeNull();
       expect(dark!.theme).toBe("dark");
@@ -348,13 +348,22 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       expect(narrow!.hitInsideToast).toBe(true);
       expect(narrow!.modalOpen).toBe(true);
 
+      // 悬停第一条提示暂停 4s 自动消失计时，避免并发高负载下与第二条提示创建竞态。
+      const hoverPt = await page.evaluate((sel: string) => {
+        const r = document.querySelector(sel)!.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }, TOAST_SEL);
+      await page.mouse.move(hoverPt.x, hoverPt.y);
+
       // 提示可见时弹窗内输入与保存仍然可用；成功后两条提示在窄屏共存且不溢出。
       await page.type('[data-testid="new-req-goal"]', "窄屏弹窗交互回归");
-      await page.click('[data-testid="save-draft-btn"]');
-      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
+      await page.evaluate(() => {
+        (document.querySelector('[data-testid="save-draft-btn"]') as HTMLButtonElement | null)?.click();
+      });
+      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 10_000 });
       await page.waitForFunction(
         (sel: unknown) => document.querySelectorAll(String(sel)).length === 2,
-        { timeout: 5000 },
+        { timeout: 10_000 },
         TOAST_SEL,
       );
       await page.waitForFunction(

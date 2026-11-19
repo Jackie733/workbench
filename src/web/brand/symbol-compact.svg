@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Workbench compact symbol">
+<title>Workbench compact symbol</title>
+
+<defs>
+  <linearGradient id="s-slate" x1="0.18" y1="0.14" x2="0.84" y2="0.88">
+    <stop offset="0" stop-color="#394260"/>
+    <stop offset="0.62" stop-color="#232A44"/>
+    <stop offset="1" stop-color="#171D31"/>
+  </linearGradient>
+  <linearGradient id="s-accent" x1="0.16" y1="0.18" x2="0.88" y2="0.82">
+    <stop offset="0" stop-color="#8364FF"/>
+    <stop offset="0.54" stop-color="#756CF9"/>
+    <stop offset="1" stop-color="#4A90FF"/>
+  </linearGradient>
+  <linearGradient id="s-under" x1="0.2" y1="0.12" x2="0.9" y2="0.92">
+    <stop offset="0" stop-color="#7077A4"/>
+    <stop offset="1" stop-color="#A4AACB"/>
+  </linearGradient>
+  <filter id="s-shadowBlur" x="-20%" y="-20%" width="140%" height="140%">
+    <feGaussianBlur stdDeviation="8"/>
+  </filter>
+  <filter id="s-softShadow" x="-20%" y="-20%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0F1730" flood-opacity="0.12"/>
+  </filter>
+</defs>
+<g filter="url(#s-softShadow)">
+  <path d="M 230.70 272.00 L 281.30 272.00 Q 256.00 260.00 445.70 350.00 L 445.70 374.00 Q 471.00 362.00 281.30 452.00 L 230.70 452.00 Q 256.00 464.00 66.30 374.00 L 66.30 350.00 Q 41.00 362.00 230.70 272.00 Z" fill="url(#s-under)" opacity="0.58" filter="url(#s-shadowBlur)"/>
+  <path d="M 230.85 171.31 L 281.15 171.31 Q 256.00 159.00 465.85 261.69 L 465.85 286.31 Q 491.00 274.00 281.15 376.69 L 230.85 376.69 Q 256.00 389.00 46.15 286.31 L 46.15 261.69 Q 21.00 274.00 230.85 171.31 Z" fill="url(#s-accent)"/>
+  <path d="M 230.80 73.20 L 281.20 73.20 Q 256.00 61.00 451.80 155.80 L 451.80 180.20 Q 477.00 168.00 281.20 262.80 L 230.80 262.80 Q 256.00 275.00 60.20 180.20 L 60.20 155.80 Q 35.00 168.00 230.80 73.20 Z" fill="url(#s-slate)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 256 132 L 256 219"/>
+    <path d="M 231.2 263.3 L 169 292"/>
+    <path d="M 280.8 263.3 L 343 292"/>
+    <circle cx="256" cy="247" r="31"/>
+  </g>
+  <g fill="#FFFFFF">
+    <circle cx="256" cy="125" r="20"/>
+    <circle cx="152" cy="298" r="20"/>
+    <circle cx="360" cy="298" r="20"/>
+  </g>
+</g>
+</svg>

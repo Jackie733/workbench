@@ -216,4 +216,34 @@ describe("WB-02 git observer and verification runner", () => {
       else process.env.WORKBENCH_REQ_ID = prevReq;
     }
   });
+
+  test("subsumes file-only bun test subsets into exact bun test while keeping filtered runs separate", async () => {
+    const repo = initGitRepo(true);
+    await initProject(repo);
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.writeFileSync(
+      path.join(repo, "tests/sample.test.ts"),
+      `import { expect, test } from "bun:test";\ntest("ok", () => { expect(1).toBe(1); });\n`,
+    );
+    git(repo, "add", "tests/sample.test.ts");
+    git(repo, "commit", "-m", "add sample test");
+
+    await createRequirement(repo, {
+      goal: "验证 bun test 子集自动去重归并",
+      criteria: [
+        { id: "AC-1", description: "全量测试", required: true, command: "bun test" },
+        { id: "AC-2", description: "子集文件测试", required: true, command: "bun test tests/sample.test.ts" },
+        { id: "AC-3", description: "带过滤参数保持独立", required: true, command: "bun test tests/sample.test.ts -t ok" },
+      ],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const res = await runAllVerifications(repo, "REQ-001");
+    expect(res.runs).toHaveLength(2);
+    expect(res.runs[0]!.record.command).toBe("bun test");
+    expect(res.runs[0]!.record.criterionIds).toEqual(["AC-1", "AC-2"]);
+    expect(res.runs[1]!.record.command).toBe("bun test tests/sample.test.ts -t ok");
+    expect(res.runs[1]!.record.criterionIds).toEqual(["AC-3"]);
+    expect(res.detail.validity.acceptanceGate.ok).toBe(true);
+  });
 });

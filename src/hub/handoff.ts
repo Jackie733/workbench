@@ -166,55 +166,73 @@ export async function synthesizeHandoffPacket(
 
   if (hasSteering) {
     const steerLines: string[] = ["## 1. 跨模型审查待修复项与人类最新反馈（最高优先级）"];
-    if (review && includeReviewDetail) {
+    const hasFreshHumanGuidance = Boolean(state.lastFeedback) || Boolean(options.humanInstruction?.trim());
+    const prioritizeHumanOverStaleReview =
+      Boolean(review && includeReviewDetail) &&
+      validity.reviewValidity.effectiveState === "stale" &&
+      hasFreshHumanGuidance;
+
+    const buildReviewLines = (markdownBudget: number): string[] => {
+      if (!review || !includeReviewDetail) return [];
+      const out: string[] = [];
       const revStatusLabel =
         validity.reviewValidity.effectiveState === "current"
           ? "当前代码快照有效"
-          : `已过期：${validity.reviewValidity.reason ?? "代码或规范已变动"}`;
+          : `历史参考·已过期：${validity.reviewValidity.reason ?? "代码或规范已变动"}`;
       const verdictText =
         review.verdict === "block"
           ? "阻塞修复 (block)"
           : review.verdict === "concern"
             ? "存在关注点 (concern)"
             : "建议通过 (pass)";
-      steerLines.push(
-        `### 最新跨模型 Code Review（${review.reviewerHarness}/${review.reviewerModel} · ${verdictText} · ${revStatusLabel}）`,
-      );
-      steerLines.push(`- **核心结论**：${sanitizeOutput(review.summary, 1200).text}`);
+      const headingPrefix = prioritizeHumanOverStaleReview ? "历史跨模型 Code Review" : "最新跨模型 Code Review";
+      out.push(`### ${headingPrefix}（${review.reviewerHarness}/${review.reviewerModel} · ${verdictText} · ${revStatusLabel}）`);
+      out.push(`- **核心结论**：${sanitizeOutput(review.summary, 1200).text}`);
       if (review.findings && review.findings.length > 0) {
-        steerLines.push("- **结构化审查问题清单**：");
+        out.push("- **结构化审查问题清单**：");
         for (const f of review.findings.slice(0, 20)) {
           const critTag = f.criterionIds?.length ? ` [${f.criterionIds.join(", ")}]` : "";
           const fileTag = f.files?.length ? ` (${f.files.slice(0, 4).join(", ")})` : "";
-          steerLines.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${critTag}${fileTag}`);
-          if (f.suggestion) steerLines.push(`    - 建议：${sanitizeOutput(f.suggestion, 400).text}`);
+          out.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${critTag}${fileTag}`);
+          if (f.suggestion) out.push(`    - 建议：${sanitizeOutput(f.suggestion, 400).text}`);
         }
       }
       if (review.markdown.trim() && review.verdict !== "pass") {
-        steerLines.push(
+        out.push(
           clipTextByBytes(
             review.markdown.trim(),
-            3600,
+            markdownBudget,
             `\n…（完整审查原文见 \`${itemDirHint}/state.json\` reviewReport）`,
           ),
         );
       }
-      steerLines.push("");
-    }
+      out.push("");
+      return out;
+    };
 
-    if (state.lastFeedback || options.humanInstruction?.trim() || pendingNotes.length > 0) {
-      steerLines.push("### 人类最新指令与未解决批注");
+    const buildHumanLines = (): string[] => {
+      if (!state.lastFeedback && !options.humanInstruction?.trim() && pendingNotes.length === 0) return [];
+      const out: string[] = [
+        prioritizeHumanOverStaleReview ? "### 人类最新指令与未解决批注（当前最高优先级）" : "### 人类最新指令与未解决批注",
+      ];
       if (state.lastFeedback) {
-        steerLines.push(`- **最新打回/修改意见**：${sanitizeOutput(state.lastFeedback, 1600).text}`);
+        out.push(`- **最新打回/修改意见**：${sanitizeOutput(state.lastFeedback, 1600).text}`);
       }
       if (options.humanInstruction?.trim()) {
-        steerLines.push(`- **本次执行特别嘱咐**：${sanitizeOutput(options.humanInstruction.trim(), 2000).text}`);
+        out.push(`- **本次执行特别嘱咐**：${sanitizeOutput(options.humanInstruction.trim(), 2000).text}`);
       }
       for (const d of pendingNotes.slice(-10)) {
         const anchor = d.anchor ? `[${d.anchor}] ` : "";
-        steerLines.push(`- (${d.actor}/${d.mode}) ${anchor}${sanitizeOutput(d.message, 600).text}`);
+        out.push(`- (${d.actor}/${d.mode}) ${anchor}${sanitizeOutput(d.message, 600).text}`);
       }
-      steerLines.push("");
+      out.push("");
+      return out;
+    };
+
+    if (prioritizeHumanOverStaleReview) {
+      steerLines.push(...buildHumanLines(), ...buildReviewLines(1600));
+    } else {
+      steerLines.push(...buildReviewLines(3600), ...buildHumanLines());
     }
     sections.push({
       key: "steering",

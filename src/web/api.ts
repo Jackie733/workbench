@@ -6,8 +6,10 @@ import type {
   DeliveryPreview,
   DeliveryRecord,
   DiscussionEntry,
+  GitRemoteProvider,
   OutputLanguage,
   PrivacyMode,
+  ProjectGiteeConfig,
   ProjectGitHubConfig,
   ProjectMetadata,
   RequirementDetail,
@@ -20,6 +22,7 @@ import type {
   VerificationRecord,
 } from "../core/types.ts";
 import type { GitObservation } from "../core/git.ts";
+import type { GiteeEnvironmentStatus, GiteeIssueItem } from "../core/gitee.ts";
 import type { GitHubEnvironmentStatus, ImportedGitHubIssue } from "../core/github.ts";
 import type { SandboxRecord } from "../core/sandbox.ts";
 import type {
@@ -42,12 +45,17 @@ import type {
 import type { BridgeStatus, DispatchOutcome } from "../server/index.ts";
 import type { DispatchAction } from "../server/prompts.ts";
 
+export interface GiteeIssueListItem extends GiteeIssueItem {
+  importedRequirementId: string | null;
+}
+
 export interface ProjectInfoResponse {
   initialized: boolean;
   project: ProjectMetadata | null;
   root: string;
   bridge: BridgeStatus;
   effectiveOutputLanguage?: "zh-CN" | "en";
+  remoteProvider?: GitRemoteProvider | null;
   remoteRepo?: string | null;
   git: { isGitRepo: boolean; head?: string; dirty?: boolean; fingerprint?: string | null };
 }
@@ -70,6 +78,8 @@ export interface HubStateResponse {
   harnesses: HarnessInfo[];
   routing: RoutingConfig;
   outputLanguage?: OutputLanguage;
+  giteeTokenConfigured?: boolean;
+  giteeTokenMasked?: string | null;
   activeRuns: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>;
   evolutionOpenCount?: number;
   cooldownCount?: number;
@@ -220,8 +230,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ preset }),
     }),
-  updateHubPreferences: (input: { outputLanguage?: OutputLanguage }) =>
-    requestJson<{ outputLanguage: OutputLanguage }>("/api/hub/preferences", {
+  updateHubPreferences: (input: { outputLanguage?: OutputLanguage; giteeAccessToken?: string | null }) =>
+    requestJson<{
+      outputLanguage: OutputLanguage;
+      giteeTokenConfigured?: boolean;
+      giteeTokenMasked?: string | null;
+    }>("/api/hub/preferences", {
       method: "PUT",
       body: JSON.stringify(input),
     }),
@@ -322,12 +336,30 @@ export const api = {
     name?: string;
     outputLanguage?: OutputLanguage | "inherit" | null;
     github?: ProjectGitHubConfig | null;
+    gitee?: ProjectGiteeConfig | null;
   }) =>
     requestJson<{ project: ProjectMetadata }>(withProjectParam("/api/project/settings"), {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
   getGitHubStatus: () => requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status")),
+  getGiteeStatus: () => requestJson<GiteeEnvironmentStatus>(withProjectParam("/api/gitee/status")),
+  listGiteeIssues: (params?: {
+    filter?: "assigned" | "created" | "all";
+    state?: "active" | "open" | "progressing" | "closed" | "all";
+    q?: string;
+    enterprise?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.filter) qs.set("filter", params.filter);
+    if (params?.state) qs.set("state", params.state);
+    if (params?.q?.trim()) qs.set("q", params.q.trim());
+    if (params?.enterprise?.trim()) qs.set("enterprise", params.enterprise.trim());
+    const suffix = qs.toString();
+    return requestJson<{ account: string; enterprise: string | null; items: GiteeIssueListItem[] }>(
+      withProjectParam(suffix ? `/api/gitee/issues?${suffix}` : "/api/gitee/issues"),
+    );
+  },
   listRequirements: (scope: "active" | "done" | "cancelled" | "all") =>
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null; bridge: BridgeStatus }>(
       withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
@@ -346,12 +378,19 @@ export const api = {
         body: JSON.stringify(input),
       },
     ),
-  importGitHubIssue: (input: { issueRef: string; dispatchAgent?: boolean }) =>
+  importGitHubIssue: (input: {
+    issueRef?: string;
+    provider?: GitRemoteProvider;
+    giteeIssue?: GiteeIssueItem;
+    enterprise?: string;
+    dispatchAgent?: boolean;
+  }) =>
     requestJson<{
       detail: RequirementDetail;
       dispatch?: DispatchOutcome | null;
       alreadyExisted: boolean;
-      issue: ImportedGitHubIssue;
+      issue: ImportedGitHubIssue | GiteeIssueItem;
+      provider?: GitRemoteProvider;
     }>(withProjectParam("/api/requirements/import-issue"), {
       method: "POST",
       body: JSON.stringify(input),
@@ -507,7 +546,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  linkRequirementIssue: (id: string, input?: { issueRef?: string; title?: string; body?: string }) =>
+  linkRequirementIssue: (
+    id: string,
+    input?: { issueRef?: string; provider?: GitRemoteProvider; title?: string; body?: string },
+  ) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/issue`), {
       method: "POST",
       body: JSON.stringify(input ?? {}),

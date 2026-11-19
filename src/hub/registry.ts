@@ -112,6 +112,8 @@ export function readHubConfig(): HubConfig {
         : (projects[0]?.id ?? null);
 
     const outputLanguage = normalizeOutputLanguage(raw.outputLanguage) ?? DEFAULT_OUTPUT_LANGUAGE;
+    const giteeAccessToken =
+      typeof raw.giteeAccessToken === "string" && raw.giteeAccessToken.trim() ? raw.giteeAccessToken.trim() : undefined;
 
     return {
       schemaVersion: 1,
@@ -119,6 +121,7 @@ export function readHubConfig(): HubConfig {
       projects,
       routing: normalizeRoutingConfig(raw.routing),
       outputLanguage,
+      ...(giteeAccessToken ? { giteeAccessToken } : {}),
     };
   } catch {
     return defaultHubConfig();
@@ -219,7 +222,10 @@ export function applyHubRoutingPreset(preset: RoutingPreset, harnesses?: Harness
   return writeHubConfig(config);
 }
 
-export function updateHubPreferences(patch: { outputLanguage?: OutputLanguage }): HubConfig {
+export function updateHubPreferences(patch: {
+  outputLanguage?: OutputLanguage;
+  giteeAccessToken?: string | null;
+}): HubConfig {
   const config = readHubConfig();
   if (patch.outputLanguage !== undefined) {
     const valid = normalizeOutputLanguage(patch.outputLanguage);
@@ -228,7 +234,32 @@ export function updateHubPreferences(patch: { outputLanguage?: OutputLanguage })
     }
     config.outputLanguage = valid;
   }
+  if (patch.giteeAccessToken !== undefined) {
+    if (patch.giteeAccessToken === null || patch.giteeAccessToken.trim() === "") {
+      delete config.giteeAccessToken;
+    } else {
+      const clean = patch.giteeAccessToken.trim();
+      if (clean.length > 512 || /[\0\r\n\s]/.test(clean)) {
+        throw new WorkbenchError("invalid_input", "Gitee 私人令牌格式不合法（不能包含空白或控制字符）");
+      }
+      config.giteeAccessToken = clean;
+    }
+  }
   return writeHubConfig(config);
+}
+
+export function resolveEffectiveGiteeToken(cfg?: HubConfig | null): string | null {
+  const configured = cfg?.giteeAccessToken?.trim();
+  if (configured) return configured;
+  const envToken = process.env.GITEE_ACCESS_TOKEN?.trim();
+  return envToken || null;
+}
+
+export function maskAccessToken(token?: string | null): string | null {
+  const clean = token?.trim();
+  if (!clean) return null;
+  if (clean.length <= 4) return "••••";
+  return `••••${clean.slice(-4)}`;
 }
 
 export function writeDaemonInfo(info: DaemonInfo): string {

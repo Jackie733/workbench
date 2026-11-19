@@ -7,6 +7,7 @@ import {
   countCommitsBetween,
   createFeatureBranchAtHead,
   detectOmittedDiffContent,
+  getGitRemoteUrl,
   getHeadCommitInfo,
   inspectWorkingTreeForDelivery,
   listCommittedFilesBetween,
@@ -14,6 +15,12 @@ import {
   observeGitSnapshot,
   pushBranchToRemote,
 } from "./git.ts";
+import {
+  createOrUpdateGiteePr,
+  detectGitRemoteProvider,
+  inspectGiteeEnvironment,
+  type GiteeApiDeps,
+} from "./gitee.ts";
 import {
   buildRequirementPrBody,
   commentOnGitHubIssue,
@@ -64,9 +71,11 @@ import {
   type DeliveryRecord,
   type DiscussionEntry,
   type GitObservation,
+  type GitRemoteProvider,
   type HandoffNote,
   type OutputLanguage,
   type PrivacyMode,
+  type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
   type RequirementDetail,
@@ -99,6 +108,8 @@ import {
   sanitizeOutput,
   validateAgentRunRecord,
   validateGitBranchName,
+  validateGiteeEnterpriseSlug,
+  validateGiteeRepoSlug,
   validateGitHubRepoSlug,
   validateMarkdownContent,
   validateProjectMetadata,
@@ -248,6 +259,7 @@ export async function updateProjectConfig(
     name?: string;
     outputLanguage?: OutputLanguage | null;
     github?: ProjectGitHubConfig | null;
+    gitee?: ProjectGiteeConfig | null;
   },
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
@@ -301,6 +313,32 @@ export async function updateProjectConfig(
         next.github = mergedGh;
       } else {
         delete next.github;
+      }
+    }
+
+    if (patch.gitee === null) {
+      delete next.gitee;
+    } else if (patch.gitee !== undefined) {
+      const mergedGitee: ProjectGiteeConfig = { ...(current.gitee ?? {}) };
+      if (patch.gitee.repo !== undefined) {
+        const cleanRepo = patch.gitee.repo.trim();
+        if (cleanRepo) mergedGitee.repo = validateGiteeRepoSlug(cleanRepo);
+        else delete mergedGitee.repo;
+      }
+      if (patch.gitee.enterprise !== undefined) {
+        const cleanEnt = patch.gitee.enterprise.trim();
+        if (cleanEnt) mergedGitee.enterprise = validateGiteeEnterpriseSlug(cleanEnt);
+        else delete mergedGitee.enterprise;
+      }
+      if (patch.gitee.defaultBaseBranch !== undefined) {
+        const cleanBranch = patch.gitee.defaultBaseBranch.trim();
+        if (cleanBranch) mergedGitee.defaultBaseBranch = validateGitBranchName(cleanBranch);
+        else delete mergedGitee.defaultBaseBranch;
+      }
+      if (Object.keys(mergedGitee).length > 0) {
+        next.gitee = mergedGitee;
+      } else {
+        delete next.gitee;
       }
     }
 
@@ -1009,6 +1047,7 @@ export async function updateTasks(
         ...state,
         tasks: nextTasks,
         stage: nextStage,
+        ...(input.readyForAcceptance === true ? { lastFeedback: null } : {}),
         ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
         timeline: nextTimeline,
       },
@@ -1531,11 +1570,34 @@ function normalizeDeliveryFiles(files: string[]): string[] {
   return unique;
 }
 
-/** Previews workspace or RSI sandbox changes for post-acceptance Git commit & GitHub PR delivery. */
+export type DeliveryCommandDeps = GitHubCommandDeps & {
+  giteeDeps?: GiteeApiDeps;
+  giteeToken?: string | null;
+};
+
+async function resolveProjectRemoteProvider(
+  base: string,
+  projectMeta: ProjectMetadata,
+  deps?: DeliveryCommandDeps,
+): Promise<GitRemoteProvider | null> {
+  if (projectMeta.gitee?.repo || projectMeta.gitee?.enterprise) return "gitee";
+  if (projectMeta.github?.repo) return "github";
+  const remoteUrl = deps?.giteeDeps?.getRemoteUrl
+    ? await deps.giteeDeps.getRemoteUrl(base)
+    : deps?.getRemoteUrl
+      ? await deps.getRemoteUrl(base)
+      : await getGitRemoteUrl(base);
+  const detected = detectGitRemoteProvider(remoteUrl);
+  if (detected) return detected;
+  if (projectMeta.gitee) return "gitee";
+  return null;
+}
+
+/** Previews workspace or RSI sandbox changes for post-acceptance Git commit & GitHub/Gitee PR delivery. */
 export async function getRequirementDeliveryPreview(
   root: string,
   id: string,
-  deps?: GitHubCommandDeps,
+  deps?: DeliveryCommandDeps,
 ): Promise<DeliveryPreview> {
   const base = canonicalRoot(root);
   const bundle = readRequirementBundle(base, id);
@@ -1556,8 +1618,31 @@ export async function getRequirementDeliveryPreview(
     inAcceptedSnapshot: acceptedSet.has(f.path),
   }));
 
-  const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
-  const baseBranch = projectMeta.github?.defaultBaseBranch ?? ghEnv.defaultBaseBranch ?? "main";
+  const remoteProvider = await resolveProjectRemoteProvider(base, projectMeta, deps);
+  let baseBranch: string;
+  let remoteRepo: string | null;
+  let remoteReady: boolean;
+  let remoteReason: string | null;
+
+  if (remoteProvider === "gitee") {
+    const giteeEnv = await inspectGiteeEnvironment(
+      base,
+      projectMeta.gitee,
+      deps?.giteeToken ?? deps?.giteeDeps?.token,
+      deps?.giteeDeps,
+    );
+    baseBranch = projectMeta.gitee?.defaultBaseBranch ?? giteeEnv.defaultBaseBranch ?? "master";
+    remoteRepo = giteeEnv.repo;
+    remoteReady = giteeEnv.ready;
+    remoteReason = giteeEnv.reason;
+  } else {
+    const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
+    baseBranch = projectMeta.github?.defaultBaseBranch ?? ghEnv.defaultBaseBranch ?? "main";
+    remoteRepo = ghEnv.repo;
+    remoteReady = ghEnv.ready;
+    remoteReason = ghEnv.reason;
+  }
+
   const aheadRef = sandbox
     ? (sandbox.baseHead ?? baseBranch)
     : tree.branch && tree.branch !== baseBranch
@@ -1576,8 +1661,12 @@ export async function getRequirementDeliveryPreview(
   } else if (sandboxActive) {
     if (candidates.length === 0 && aheadCommitsCount === 0) {
       reason = "隔离沙箱中暂无可提交或待推送的变更";
-    } else if (!ghEnv.ready) {
-      reason = ghEnv.reason ?? "GitHub 环境未就绪，可使用「应用沙箱改动」本地合并";
+    } else if (!remoteReady) {
+      reason =
+        remoteReason ??
+        (remoteProvider === "gitee"
+          ? "Gitee 环境未就绪，可使用「应用沙箱改动」本地合并"
+          : "GitHub 环境未就绪，可使用「应用沙箱改动」本地合并");
     } else {
       canCreatePr = true;
     }
@@ -1586,7 +1675,7 @@ export async function getRequirementDeliveryPreview(
       reason = "当前工作区干净，暂无未提交改动";
     } else {
       canCommit = candidates.length > 0;
-      canCreatePr = ghEnv.ready && (candidates.length > 0 || aheadCommitsCount > 0);
+      canCreatePr = remoteReady && (candidates.length > 0 || aheadCommitsCount > 0);
     }
   }
 
@@ -1608,10 +1697,11 @@ export async function getRequirementDeliveryPreview(
     aheadCommitsCount,
     canCommit,
     canCreatePr,
+    remoteProvider,
     baseBranch,
-    githubRepo: ghEnv.repo,
-    githubReady: ghEnv.ready,
-    githubReason: ghEnv.reason,
+    githubRepo: remoteRepo,
+    githubReady: remoteReady,
+    githubReason: remoteReason,
     reason,
     suggestedMessage: buildSuggestedCommitMessage(state.id, state.title),
     suggestedBranch,
@@ -1640,7 +1730,7 @@ export async function deliverRequirement(
     prTitle?: string;
     prBody?: string;
   },
-  deps?: GitHubCommandDeps,
+  deps?: DeliveryCommandDeps,
 ): Promise<{
   detail: RequirementDetail;
   delivery: DeliveryRecord;
@@ -1757,14 +1847,33 @@ export async function deliverRequirement(
     throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法推送分支或创建 PR");
   }
 
-  const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
-  if (!ghEnv.ready || !ghEnv.repo) {
-    throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR");
+  const remoteProvider = await resolveProjectRemoteProvider(base, projectMeta, deps);
+  let repo: string;
+  let baseBranch: string;
+  let giteeToken = "";
+  let giteeEnterprise: string | null = null;
+
+  if (remoteProvider === "gitee") {
+    giteeToken = (deps?.giteeToken ?? deps?.giteeDeps?.token ?? process.env.GITEE_ACCESS_TOKEN ?? "").trim();
+    const giteeEnv = await inspectGiteeEnvironment(base, projectMeta.gitee, giteeToken, deps?.giteeDeps);
+    if (!giteeEnv.ready || !giteeEnv.repo) {
+      throw new WorkbenchError("execution_failed", giteeEnv.reason ?? "Gitee 环境未就绪，无法创建 PR");
+    }
+    repo = giteeEnv.repo;
+    giteeEnterprise = giteeEnv.enterprise;
+    baseBranch = validateGitBranchName(
+      input.baseBranch?.trim() || projectMeta.gitee?.defaultBaseBranch || giteeEnv.defaultBaseBranch || "master",
+    );
+  } else {
+    const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
+    if (!ghEnv.ready || !ghEnv.repo) {
+      throw new WorkbenchError("execution_failed", ghEnv.reason ?? "GitHub CLI 环境未就绪，无法创建 PR");
+    }
+    repo = ghEnv.repo;
+    baseBranch = validateGitBranchName(
+      input.baseBranch?.trim() || projectMeta.github?.defaultBaseBranch || ghEnv.defaultBaseBranch || "main",
+    );
   }
-  const repo = ghEnv.repo;
-  const baseBranch = validateGitBranchName(
-    input.baseBranch?.trim() || projectMeta.github?.defaultBaseBranch || ghEnv.defaultBaseBranch || "main",
-  );
 
   let targetBranch = sandbox ? sandbox.branch : (tree.branch ?? "");
   if (!sandbox && (!targetBranch || targetBranch === baseBranch || targetBranch === "master" || targetBranch === "HEAD")) {
@@ -1825,18 +1934,32 @@ export async function deliverRequirement(
   const detailForBody = toDetail(preBundle, currentSnap?.fingerprint ?? null);
   const prBody = input.prBody?.trim() || buildRequirementPrBody(detailForBody, note);
 
-  const prResult = await createOrUpdateGitHubPr(
-    {
-      root: codeRoot,
-      repo,
-      headBranch: targetBranch,
-      baseBranch,
-      title: prTitle,
-      body: prBody,
-    },
-    deps,
-  );
+  const prResult =
+    remoteProvider === "gitee"
+      ? await createOrUpdateGiteePr(
+          {
+            repo,
+            headBranch: targetBranch,
+            baseBranch,
+            title: prTitle,
+            body: prBody,
+            token: giteeToken,
+          },
+          deps?.giteeDeps,
+        )
+      : await createOrUpdateGitHubPr(
+          {
+            root: codeRoot,
+            repo,
+            headBranch: targetBranch,
+            baseBranch,
+            title: prTitle,
+            body: prBody,
+          },
+          deps,
+        );
   const { created: prCreated, ...prLink } = prResult;
+  const platformLabel = remoteProvider === "gitee" ? "Gitee" : "GitHub";
 
   let recordedDelivery: DeliveryRecord | null = null;
   const bundle = await mutateRequirement(base, id, input.expectedRevision, (current, now) => {
@@ -1857,6 +1980,8 @@ export async function deliverRequirement(
     const prevGithub: RequirementGitHubLink = state.github ?? { repo };
     const nextGithub: RequirementGitHubLink = {
       ...prevGithub,
+      ...(remoteProvider ? { provider: remoteProvider } : {}),
+      ...(giteeEnterprise && !prevGithub.enterprise ? { enterprise: giteeEnterprise } : {}),
       repo,
       pr: prLink,
     };
@@ -1877,7 +2002,7 @@ export async function deliverRequirement(
         now,
         "github_pr_created",
         "human",
-        `${prCreated ? "已创建" : "已更新"} GitHub PR #${prLink.number} (${targetBranch} -> ${baseBranch})`,
+        `${prCreated ? "已创建" : "已更新"} ${platformLabel} PR #${prLink.number} (${targetBranch} -> ${baseBranch})`,
         prLink.url,
       ),
     );
@@ -1894,7 +2019,12 @@ export async function deliverRequirement(
 
   let githubSyncWarning: string | undefined;
   const linkedIssue = bundle.state.github?.issue;
-  if (linkedIssue && projectMeta.github?.autoSyncIssue !== false) {
+  if (
+    remoteProvider !== "gitee" &&
+    linkedIssue &&
+    typeof linkedIssue.number === "number" &&
+    projectMeta.github?.autoSyncIssue !== false
+  ) {
     try {
       await commentOnGitHubIssue(
         {
@@ -1934,19 +2064,32 @@ export async function linkRequirementGitHubIssue(
   root: string,
   id: string,
   input: {
+    provider?: GitRemoteProvider;
     repo: string;
+    enterprise?: string | null;
     issue: RequirementGitHubIssueLink;
     summary?: string;
     currentCodeSnapshotHash?: string | null;
   },
 ): Promise<RequirementDetail> {
   const base = canonicalRoot(root);
-  const repo = validateGitHubRepoSlug(input.repo);
+  const provider = input.provider ?? "github";
+  const enterprise = input.enterprise?.trim() ? validateGiteeEnterpriseSlug(input.enterprise) : undefined;
+  const repo = input.repo.trim()
+    ? provider === "gitee"
+      ? validateGiteeRepoSlug(input.repo)
+      : validateGitHubRepoSlug(input.repo)
+    : "";
+  if (!repo && !(provider === "gitee" && enterprise)) {
+    throw new WorkbenchError("invalid_input", "请提供有效的仓库标识或企业空间标识");
+  }
   const bundle = await mutateRequirement(base, id, undefined, (current, now) => {
     const { state } = current;
     const nextGithub: RequirementGitHubLink = {
       ...(state.github ?? { repo }),
+      provider,
       repo,
+      ...(enterprise ? { enterprise } : {}),
       issue: input.issue,
     };
     return {
@@ -1959,7 +2102,10 @@ export async function linkRequirementGitHubIssue(
             now,
             "github_issue_linked",
             "human",
-            input.summary?.trim() || `已关联 GitHub Issue #${input.issue.number}`,
+            input.summary?.trim() ||
+              (provider === "gitee"
+                ? `已关联 Gitee 工作项 #${input.issue.number}`
+                : `已关联 GitHub Issue #${input.issue.number}`),
             input.issue.url,
           ),
         ),

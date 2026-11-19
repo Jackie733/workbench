@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Check } from "lucide-react";
+import { BrandMark } from "../../src/web/components/BrandMark.tsx";
 import { COVERAGE_ICONS, Icon, TASK_ICONS } from "../../src/web/components/Icon.tsx";
 import { renderMarkdown } from "../../src/web/render.ts";
 
@@ -211,9 +212,74 @@ describe("application icon inventory", () => {
     expect(workspace).toContain('"spec.compare"');
     expect(read("src/web/i18n.ts")).toContain("对比 v{prev} → v{curr}");
     const sidebar = read("src/web/components/HubSidebar.tsx");
-    expect(sidebar).toContain('<span className="sb-logo">W</span>');
+    expect(sidebar).toContain("<BrandMark />");
     const renderSource = read("src/web/render.ts");
     expect(renderSource).toContain('checked ? "☑" : "☐"');
+  });
+});
+
+describe("shared brand mark and browser icons", () => {
+  test("renders a decorative fixed-size compact symbol from the public brand path", () => {
+    const html = renderToStaticMarkup(<BrandMark />);
+
+    expect(html).toContain('class="brand-mark"');
+    expect(html).toContain('src="/brand/symbol-compact.svg"');
+    expect(html).toContain('alt=""');
+    expect(html).toContain('width="22"');
+    expect(html).toContain('height="22"');
+  });
+
+  test("all three brand entry points share the component and keep their visible product text", () => {
+    for (const file of ["Topbar.tsx", "HubSidebar.tsx", "LoginView.tsx"]) {
+      const source = read(`src/web/components/${file}`);
+      expect(source, `${file} must import the shared brand mark`).toContain(
+        'import { BrandMark } from "./BrandMark.tsx";',
+      );
+      expect(source, `${file} must render the shared brand mark`).toContain("<BrandMark />");
+      expect(source, `${file} must not keep the letter placeholder`).not.toContain("sb-logo");
+      expect(source, `${file} must not keep a letter-only brand glyph`).not.toMatch(/>\s*W\s*</);
+    }
+    expect(read("src/web/components/Topbar.tsx")).toContain('<span className="app-brand-name">Workbench</span>');
+    expect(read("src/web/components/HubSidebar.tsx")).toContain("<span>Workbench</span>");
+    expect(read("src/web/components/LoginView.tsx")).toContain('t(language, "login.title")');
+    expect(read("src/web/i18n.ts")).toContain('"login.title": "Workbench 局域网登录"');
+  });
+
+  test("brand styles keep the mark at a fixed ratio and remove the placeholder tile", () => {
+    const css = read("src/web/styles.css");
+    expect(css).toMatch(/\.brand-mark\s*\{[^}]*width:\s*22px/);
+    expect(css).toMatch(/\.brand-mark\s*\{[^}]*height:\s*22px/);
+    expect(css).toMatch(/\.brand-mark\s*\{[^}]*flex-shrink:\s*0/);
+    expect(css).toMatch(/\.brand-mark\s*\{[^}]*object-fit:\s*contain/);
+    expect(css).not.toContain(".sb-logo");
+  });
+
+  test("page declares the vector, compatibility, and apple touch icons", () => {
+    const html = read("src/web/index.html");
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+    expect(html).toContain('<link rel="alternate icon" href="/favicon.ico" />');
+    expect(html).toContain('<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />');
+    expect(html).not.toContain("site.webmanifest");
+    expect(html).not.toContain("og:image");
+  });
+
+  test("brand folder contains only the four used originals plus provenance notes", () => {
+    const dir = path.join(ROOT, "src/web/brand");
+    expect(fs.readdirSync(dir).sort()).toEqual([
+      "README.md",
+      "apple-touch-icon.png",
+      "favicon.ico",
+      "favicon.svg",
+      "symbol-compact.svg",
+    ]);
+    for (const svg of ["symbol-compact.svg", "favicon.svg"]) {
+      const content = fs.readFileSync(path.join(dir, svg), "utf8");
+      expect(content, `${svg} must stay an SVG source`).toContain("<svg");
+      expect(content).toContain("Workbench");
+    }
+    expect(fs.readFileSync(path.join(dir, "favicon.ico")).subarray(0, 4)).toEqual(Buffer.from([0, 0, 1, 0]));
+    expect(fs.readFileSync(path.join(dir, "apple-touch-icon.png")).subarray(1, 4)).toEqual(Buffer.from("PNG"));
+    expect(fs.readFileSync(path.join(dir, "README.md"), "utf8")).toContain("Workbench_Logo_Assets_v1");
   });
 });
 

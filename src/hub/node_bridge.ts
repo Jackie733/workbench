@@ -8,6 +8,7 @@ import { stageUpload } from "../core/attachments.ts";
 import { getProjectStatus, initProject } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
+import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE } from "../core/language.ts";
 import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type PrivacyMode } from "../core/types.ts";
@@ -42,6 +43,7 @@ export interface NodeRpcRequest {
   projectRoot?: string;
   routing?: RoutingConfig;
   outputLanguage?: OutputLanguage;
+  giteeAccessToken?: string | null;
 }
 
 export interface NodeRpcResponse {
@@ -104,6 +106,7 @@ export class RemoteNodeRegistry {
       workbenchVersion?: string;
       routing: RoutingConfig;
       outputLanguage: OutputLanguage;
+      giteeAccessToken?: string | null;
     },
   ): void {
     const prev = this.nodes.get(meta.nodeId);
@@ -140,6 +143,7 @@ export class RemoteNodeRegistry {
           nodeId: meta.nodeId,
           routing: meta.routing,
           outputLanguage: meta.outputLanguage,
+          giteeAccessToken: meta.giteeAccessToken ?? null,
         }),
       );
     } catch {
@@ -227,11 +231,16 @@ export class RemoteNodeRegistry {
     cb.onStatusChanged();
   }
 
-  broadcastConfigSync(routing: RoutingConfig, outputLanguage: OutputLanguage): void {
+  broadcastConfigSync(
+    routing: RoutingConfig,
+    outputLanguage: OutputLanguage,
+    giteeAccessToken?: string | null,
+  ): void {
     const payload = JSON.stringify({
       type: "node.config.sync",
       routing,
       outputLanguage,
+      ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
     });
     for (const entry of this.nodes.values()) {
       try {
@@ -307,6 +316,7 @@ export class RemoteNodeRegistry {
     url: URL,
     routing: RoutingConfig,
     outputLanguage: OutputLanguage,
+    giteeAccessToken?: string | null,
   ): Promise<Response> {
     const method = req.method.toUpperCase();
     const pathname = url.pathname;
@@ -314,7 +324,7 @@ export class RemoteNodeRegistry {
     const timeoutMs =
       pathname.endsWith("/verify") || pathname.endsWith("/screenshots/capture")
         ? 320_000
-        : pathname.endsWith("/deliver") || pathname.includes("/github/")
+        : pathname.endsWith("/deliver") || pathname.includes("/github/") || pathname.includes("/gitee/")
           ? 90_000
           : 35_000;
 
@@ -329,6 +339,7 @@ export class RemoteNodeRegistry {
         projectRoot,
         routing,
         outputLanguage,
+        ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
       },
       timeoutMs,
     );
@@ -403,6 +414,7 @@ export interface NodeClientOptions {
   initialHarnesses?: HarnessInfo[];
   commandBuilder?: CustomCommandBuilder;
   githubDeps?: GitHubCommandDeps;
+  giteeDeps?: GiteeApiDeps;
   reconnectBaseMs?: number;
   onConnected?: () => void;
   onDisconnected?: (reason?: string) => void;
@@ -451,9 +463,10 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
   const version = packageInfo.version;
   const wsUrl = buildNodeWebSocketUrl(options.hubUrl, { nodeId, nodeName, hostname, platform, version });
 
-  let syncedPrefs: { routing: RoutingConfig; outputLanguage: OutputLanguage } = {
+  let syncedPrefs: { routing: RoutingConfig; outputLanguage: OutputLanguage; giteeAccessToken: string | null } = {
     routing: buildPresetRouting("balanced"),
     outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
+    giteeAccessToken: null,
   };
 
   let ws: WebSocket | null = null;
@@ -545,7 +558,9 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
     ensureWatcherFor,
     reloadWebBundle: async () => ({ reloaded: false }),
     getHubOutputLanguage: () => syncedPrefs.outputLanguage,
+    getGiteeAccessToken: () => syncedPrefs.giteeAccessToken ?? process.env.GITEE_ACCESS_TOKEN ?? null,
     githubDeps: options.githubDeps,
+    giteeDeps: options.giteeDeps,
   });
 
   const handleRpc = async (req: NodeRpcRequest): Promise<NodeRpcResponse> => {
@@ -623,10 +638,12 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       }
 
       if (req.kind === "project_http") {
-        if (req.routing || req.outputLanguage) {
+        if (req.routing || req.outputLanguage || req.giteeAccessToken !== undefined) {
           syncedPrefs = {
             routing: req.routing ?? syncedPrefs.routing,
             outputLanguage: req.outputLanguage ?? syncedPrefs.outputLanguage,
+            giteeAccessToken:
+              req.giteeAccessToken !== undefined ? req.giteeAccessToken : syncedPrefs.giteeAccessToken,
           };
         }
         const base = canonicalRoot(req.projectRoot ?? "");
@@ -759,12 +776,21 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       }
 
       if (parsed.type === "node.welcome" || parsed.type === "node.config.sync") {
-        if (parsed.routing && isRecord(parsed.routing)) {
+        if ((parsed.routing && isRecord(parsed.routing)) || parsed.giteeAccessToken !== undefined) {
           syncedPrefs = {
-            routing: parsed.routing as unknown as RoutingConfig,
+            routing:
+              parsed.routing && isRecord(parsed.routing)
+                ? (parsed.routing as unknown as RoutingConfig)
+                : syncedPrefs.routing,
             outputLanguage: (typeof parsed.outputLanguage === "string"
               ? parsed.outputLanguage
               : syncedPrefs.outputLanguage) as OutputLanguage,
+            giteeAccessToken:
+              parsed.giteeAccessToken !== undefined
+                ? typeof parsed.giteeAccessToken === "string" && parsed.giteeAccessToken.trim()
+                  ? parsed.giteeAccessToken.trim()
+                  : null
+                : syncedPrefs.giteeAccessToken,
           };
         }
         return;

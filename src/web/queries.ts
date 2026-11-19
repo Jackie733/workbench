@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
+import type { GiteeIssueItem } from "../core/gitee.ts";
 import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
 import type { SandboxDriftInfo } from "../hub/evolution.ts";
@@ -27,6 +28,9 @@ export const queryKeys = {
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
   githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
+  giteeStatus: (projectId: string | null) => ["gitee", "status", projectId] as const,
+  giteeIssues: (projectId: string | null, filter: string, state: string, q: string) =>
+    ["gitee", "issues", projectId, filter, state, q] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
@@ -45,6 +49,30 @@ export function useGitHubStatusQuery(activeProjectId: string | null, enabled: bo
   return useQuery({
     queryKey: queryKeys.githubStatus(activeProjectId),
     queryFn: () => api.getGitHubStatus(),
+    enabled,
+  });
+}
+
+export function useGiteeStatusQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.giteeStatus(activeProjectId),
+    queryFn: () => api.getGiteeStatus(),
+    enabled,
+  });
+}
+
+export function useGiteeIssuesQuery(
+  activeProjectId: string | null,
+  params: {
+    filter: "assigned" | "created" | "all";
+    state: "active" | "open" | "progressing" | "closed" | "all";
+    q: string;
+  },
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: queryKeys.giteeIssues(activeProjectId, params.filter, params.state, params.q),
+    queryFn: () => api.listGiteeIssues(params),
     enabled,
   });
 }
@@ -506,8 +534,8 @@ export async function dispatchSyncBaseWithAgent(
   const msg =
     `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标提交 ${drift.mainHead.slice(0, 7)} 共 ${drift.behindCount} 个提交` +
     (conflicts ? `，重叠冲突文件：${conflicts}` : "") +
-    `。同步主干步骤：\n` +
-    `1. 检查 git status：若存在未提交改动，先 git add -A && git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；\n` +
+    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已过期的旧审查意见。同步主干步骤：\n` +
+    `1. 检查 git status：若存在未提交业务/测试改动，使用 git add -u 与显式业务文件路径暂存后 git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；严禁提交 node_modules 或临时目录；\n` +
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
     `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
   const useCli = shouldUseCliRunner("fix");
@@ -829,6 +857,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
   const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.importGitHubIssue({
+      provider: "github",
       issueRef,
       dispatchAgent: dispatchAgent && !useCli,
     }),
@@ -838,9 +867,11 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
+    const issueNumber =
+      "number" in res.issue ? res.issue.number : (res.detail.state.github?.issue?.number ?? "");
     if (res.alreadyExisted) {
       ui.showToastKey("toast.issueLinkedExisting", {
-        number: res.issue.number,
+        number: issueNumber,
         id: res.detail.state.id,
       });
       return;
@@ -853,9 +884,50 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
       }
     } else {
       ui.showToastKey("toast.createdFromIssue", {
-        number: res.issue.number,
+        number: issueNumber,
         id: res.detail.state.id,
       });
+    }
+  }
+}
+
+export async function submitImportGiteeIssue(opts: {
+  issue?: GiteeIssueItem | null;
+  issueRef?: string;
+  dispatchAgent: boolean;
+}): Promise<void> {
+  const ui = useUiStore.getState();
+  const issueRef = opts.issueRef?.trim() ?? "";
+  if (!opts.issue && !issueRef) {
+    ui.showToastKey("gitee.toastNeedRef", undefined, true);
+    return;
+  }
+  const useCli = opts.dispatchAgent && shouldUseCliRunner("design");
+  const res = await runBusy(() =>
+    api.importGitHubIssue({
+      provider: "gitee",
+      ...(opts.issue ? { giteeIssue: opts.issue } : { issueRef }),
+      dispatchAgent: opts.dispatchAgent && !useCli,
+    }),
+  );
+  if (res) {
+    ui.setModal(null);
+    ui.setSelectedId(res.detail.state.id);
+    ui.setWorkspaceTab("spec");
+    await invalidateAllWorkbenchQueries();
+    const ident = String(res.detail.state.github?.issue?.number ?? opts.issue?.ident ?? issueRef);
+    if (res.alreadyExisted) {
+      ui.showToastKey("gitee.toastLinkedExisting", { ident, id: res.detail.state.id });
+      return;
+    }
+    if (opts.dispatchAgent) {
+      if (useCli) {
+        await triggerActiveRun(res.detail.state.id, "design");
+      } else {
+        handleDispatchOutcome(res.dispatch ?? null, "gitee.toastDispatchAction");
+      }
+    } else {
+      ui.showToastKey("gitee.toastCreated", { ident, id: res.detail.state.id });
     }
   }
 }

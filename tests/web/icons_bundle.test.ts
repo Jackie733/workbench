@@ -1,11 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 
 const ROOT = path.resolve(import.meta.dir, "../..");
 const WEB_DIR = path.join(ROOT, "src/web");
-const FIXTURE_DIR = fs.mkdtempSync(path.join(import.meta.dir, ".icons-bundle-"));
+const FIXTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "wb-icons-bundle-"));
+fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(FIXTURE_DIR, "node_modules"), "dir");
 
 // Same browser build configuration as src/server/index.ts (Bun 1.3.14, esm/browser/minify:false).
 const BUILD_CONFIG = { target: "browser", format: "esm", minify: false } as const;

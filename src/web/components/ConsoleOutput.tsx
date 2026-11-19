@@ -14,7 +14,9 @@ import {
   Wrench,
   Zap,
 } from "lucide-react";
+import { t, type UiLanguage } from "../i18n.ts";
 import { parseConsoleLog, type ConsoleBlock, type ConsoleBlockKind } from "../lib/consoleFormat.ts";
+import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 
 export interface ConsoleOutputProps {
@@ -22,6 +24,7 @@ export interface ConsoleOutputProps {
   rawLog: string;
   isRunning?: boolean;
   emptyText?: string;
+  language?: UiLanguage;
 }
 
 function blockIcon(kind: ConsoleBlockKind, tone: ConsoleBlock["tone"]) {
@@ -130,8 +133,11 @@ export function ConsoleOutput({
   runId,
   rawLog,
   isRunning = false,
-  emptyText = "等待终端输出…",
+  emptyText,
+  language: languageProp,
 }: ConsoleOutputProps) {
+  const storeLanguage = useUiStore((s) => s.language);
+  const language = languageProp ?? storeLanguage;
   const [viewMode, setViewMode] = useState<"structured" | "raw">("structured");
   const [collapseOverrides, setCollapseOverrides] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState(false);
@@ -141,7 +147,7 @@ export function ConsoleOutput({
   const isAtBottomRef = useRef(true);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const blocks = useMemo(() => parseConsoleLog(rawLog), [rawLog]);
+  const blocks = useMemo(() => parseConsoleLog(rawLog, language), [rawLog, language]);
 
   useEffect(() => {
     setCollapseOverrides({});
@@ -225,14 +231,14 @@ export function ConsoleOutput({
   return (
     <>
       <div className="console-controls-bar" data-testid="console-controls-bar">
-        <div className="segmented" role="group" aria-label="终端视图模式">
+        <div className="segmented" role="group" aria-label={t(language, "console.modeAria")}>
           <button
             type="button"
             className={viewMode === "structured" ? "active" : ""}
             data-testid="console-mode-structured"
             onClick={() => setViewMode("structured")}
           >
-            结构视图
+            {t(language, "console.modeStructured")}
           </button>
           <button
             type="button"
@@ -240,7 +246,7 @@ export function ConsoleOutput({
             data-testid="console-mode-raw"
             onClick={() => setViewMode("raw")}
           >
-            原始输出
+            {t(language, "console.modeRaw")}
           </button>
         </div>
 
@@ -252,7 +258,7 @@ export function ConsoleOutput({
               data-testid="console-toggle-secondary-btn"
               onClick={toggleAllSecondary}
             >
-              {hasCollapsedSecondary ? "展开全部" : "收起次要"}
+              {t(language, hasCollapsedSecondary ? "console.expandAll" : "console.collapseSecondary")}
             </button>
           )}
           <button
@@ -263,7 +269,7 @@ export function ConsoleOutput({
             onClick={() => void handleCopy()}
           >
             <Icon icon={copied ? Check : Copy} size={14} />
-            {copied ? "已复制" : "复制"}
+            {t(language, copied ? "console.copied" : "console.copy")}
           </button>
         </div>
       </div>
@@ -277,7 +283,7 @@ export function ConsoleOutput({
         >
           {!rawLog ? (
             <div className="console-empty">
-              {isRunning ? emptyText : "暂无终端输出"}
+              {isRunning ? (emptyText ?? t(language, "console.waiting")) : t(language, "console.empty")}
             </div>
           ) : viewMode === "raw" ? (
             <pre className="console-raw-pre" data-testid="console-raw-pre">
@@ -367,7 +373,7 @@ export function ConsoleOutput({
                         <span className="console-fold-title">{block.title}</span>
                         <span className="console-fold-summary">{block.summary}</span>
                       </span>
-                      <span className="console-fold-meta">{block.linesCount} 行</span>
+                      <span className="console-fold-meta">{t(language, "console.lines", { count: block.linesCount })}</span>
                     </button>
                     {expanded && (
                       <div className="console-block-body" data-testid="console-block-body">
@@ -389,7 +395,7 @@ export function ConsoleOutput({
             onClick={jumpToBottom}
           >
             <Icon icon={ArrowDown} size={14} />
-            跳至最新
+            {t(language, "console.jumpBottom")}
           </button>
         )}
       </div>

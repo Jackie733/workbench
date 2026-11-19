@@ -18,6 +18,7 @@ import { backHome, logoutSession, useAuthStatusQuery, useHubStateQuery, useProje
 import { bridgeStatusLabel } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 import { UiLanguageSelect } from "./Primitives.tsx";
 
@@ -76,7 +77,7 @@ export function Topbar() {
             if (selectedId) backHome();
           }}
         >
-          <span className="sb-logo">W</span>
+          <BrandMark />
           <span className="app-brand-name">Workbench</span>
         </button>
 

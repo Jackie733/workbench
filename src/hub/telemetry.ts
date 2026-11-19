@@ -101,6 +101,7 @@ export function recordModelRunOutcome(input: {
   rateLimited?: boolean;
   timedOut?: boolean;
   modelFallback?: boolean;
+  modelUnavailable?: boolean;
   cooldownMs?: number;
   now?: number;
 }): ModelTelemetrySnapshot {
@@ -148,7 +149,7 @@ export function recordModelRunOutcome(input: {
       ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
     };
 
-    if (input.rateLimited || input.modelFallback) {
+    if (input.rateLimited || input.modelFallback || input.modelUnavailable) {
       snap.cooldowns[modelKey] = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
     } else if (input.status === "succeeded") {
       delete snap.cooldowns[modelKey];

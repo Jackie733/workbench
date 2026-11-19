@@ -181,4 +181,34 @@ describe("ConsoleOutput SSR rendering", () => {
     expect(html).toContain('<code class="console-inline-code">inlineCode</code>');
     expect(html).toContain("[spawn error] ENOENT");
   });
+
+  test("renders English console chrome and structured block titles when UI language is en while keeping log content verbatim", () => {
+    const log = [
+      "$ qodercn -p -o stream-json -m DeepSeek-Flash",
+      "⚡ Qoder 引擎已就绪 (model: DeepSeek-Flash)",
+      "💭 检查 i18n 键覆盖",
+      "🔧 调用工具: Read (src/web/i18n.ts)",
+      "已完成中文与英文对齐。",
+    ].join("\n");
+
+    const enBlocks = parseConsoleLog(log, "en");
+    expect(enBlocks.map((b) => b.title)).toEqual([
+      "Command & Environment",
+      "Engine Ready",
+      "Thinking",
+      "Tool Call",
+      "Terminal Output",
+    ]);
+    expect(enBlocks[4]!.content).toBe("已完成中文与英文对齐。");
+
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, { runId: "RUN-EN", rawLog: log, isRunning: false, language: "en" }),
+    );
+    expect(html).toContain("Structured");
+    expect(html).toContain("Raw output");
+    expect(html).toContain("Expand all");
+    expect(html).toContain("Copy");
+    expect(html).toContain("Command &amp; Environment");
+    expect(html).toContain("已完成中文与英文对齐。");
+  });
 });

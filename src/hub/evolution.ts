@@ -38,6 +38,7 @@ import {
 } from "../core/sandbox.ts";
 import { isProjectInitialized, readRequirementBundle } from "../core/store.ts";
 import {
+  MAX_EVIDENCE_BYTES,
   WORKBENCH_DIR,
   type AgentRunRecord,
   type AttachmentMeta,
@@ -442,6 +443,27 @@ export function syncRequirementMirrorToSandbox(
   if (fs.existsSync(srcPlaybook)) {
     atomicWriteFile(resolveSafePath(wt, `${WORKBENCH_DIR}/playbook.md`), readBoundedText(srcPlaybook, 16 * 1024));
   }
+
+  // 验证证据按最新 20 个规则文件镜像，保证沙箱内只读审查可直接核验既有运行日志。
+  const srcEvidence = path.join(srcItemDir, "evidence");
+  if (fs.existsSync(srcEvidence) && fs.lstatSync(srcEvidence).isDirectory()) {
+    const dstEvidence = resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}/evidence`);
+    fs.mkdirSync(dstEvidence, { recursive: true });
+    const recentEvidence: Array<{ name: string; srcFile: string; mtimeMs: number; mode: number }> = [];
+    for (const entry of fs.readdirSync(srcEvidence, { withFileTypes: true })) {
+      if (!entry.isFile() || (!entry.name.endsWith(".json") && !entry.name.endsWith(".log"))) continue;
+      const srcFile = path.join(srcEvidence, entry.name);
+      const stat = fs.lstatSync(srcFile);
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      recentEvidence.push({ name: entry.name, srcFile, mtimeMs: stat.mtimeMs, mode: stat.mode & 0o777 });
+    }
+    recentEvidence.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const ev of recentEvidence.slice(0, 20)) {
+      const buf = fs.readFileSync(ev.srcFile);
+      const bounded = buf.length > MAX_EVIDENCE_BYTES ? buf.subarray(0, MAX_EVIDENCE_BYTES) : buf;
+      atomicWriteBuffer(resolveSafePath(wt, `${WORKBENCH_DIR}/items/${reqId}/evidence/${ev.name}`), bounded, ev.mode);
+    }
+  }
 }
 
 export async function createOrReuseWorktree(
@@ -502,6 +524,35 @@ export async function createOrReuseWorktree(
 
 function splitNullStrings(buf: Buffer): string[] {
   return buf.toString("utf8").split("\0").filter(Boolean);
+}
+
+function hasDirtyWorktreeExcludingNodeModules(wt: string): boolean {
+  const raw = execFileSync("git", [
+    "-C",
+    wt,
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "-uall",
+    "--",
+    ".",
+    ":(exclude).workbench",
+    ":(exclude).omp/workbench",
+  ]);
+  const tokens = splitNullStrings(raw);
+  for (let i = 0; i < tokens.length; i++) {
+    const entry = tokens[i]!;
+    const xy = entry.slice(0, 2);
+    const filePath = entry.slice(3);
+    if (xy[0] === "R" || xy[0] === "C") {
+      i += 1;
+    }
+    if (!filePath || filePath === "node_modules" || filePath.startsWith("node_modules/")) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function isGitAncestor(repoDir: string, ancestor: string, descendant: string): boolean {
@@ -773,10 +824,7 @@ export async function syncRsiSandboxBase(
     execFileSync("git", ["-C", wt, "read-tree", "-m", "-u", wtHead, drift.mainHead], { stdio: "pipe" });
     execFileSync("git", ["-C", wt, "reset", "--soft", drift.mainHead], { stdio: "pipe" });
   } else {
-    const wtDirty =
-      execFileSync("git", ["-C", wt, "status", "--porcelain", "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench"], {
-        encoding: "utf8",
-      }).trim().length > 0;
+    const wtDirty = hasDirtyWorktreeExcludingNodeModules(wt);
     if (wtDirty) {
       throw new WorkbenchError(
         "revision_conflict",

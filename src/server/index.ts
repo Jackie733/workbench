@@ -14,6 +14,7 @@ import {
 import { getProjectStatus, getRequirement, initProject } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
+import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
@@ -52,10 +53,12 @@ import {
   isAutoRegistrableProjectRoot,
   isLocalNodeId,
   LOCAL_NODE_ID,
+  maskAccessToken,
   readHubConfig,
   registerHubProject,
   removeDaemonInfo,
   removeHubProject,
+  resolveEffectiveGiteeToken,
   resolveHubDir,
   setActiveHubProject,
   updateHubPreferences,
@@ -120,6 +123,14 @@ export interface WorkbenchServerHandle {
   getBridgeStatus(): BridgeStatus;
 }
 
+// 只公开界面与浏览器图标实际使用的四个文件；精确路径映射到 brand 下的固定文件名。
+const BRAND_ASSETS: Record<string, { file: string; contentType: string }> = {
+  "/favicon.svg": { file: "favicon.svg", contentType: "image/svg+xml" },
+  "/favicon.ico": { file: "favicon.ico", contentType: "image/x-icon" },
+  "/apple-touch-icon.png": { file: "apple-touch-icon.png", contentType: "image/png" },
+  "/brand/symbol-compact.svg": { file: "symbol-compact.svg", contentType: "image/svg+xml" },
+};
+
 // Bun 1.3.14 在同进程重复 Bun.build 且相关模块已被运行时加载时会抛出 EBADF/EISDIR，
 // 因此非开发模式下同一 webDir 的初始构建结果在进程内共享；开发模式与显式 reload 仍每次重新构建。
 const initialWebBundles = new Map<string, Promise<{ html: string; css: string; js: string } | null>>();
@@ -164,6 +175,7 @@ export async function startWorkbenchServer(options: {
   webDir?: string;
   executor?: HubExecutor;
   githubDeps?: GitHubCommandDeps;
+  giteeDeps?: GiteeApiDeps;
 }): Promise<WorkbenchServerHandle> {
   const defaultRoot = canonicalRoot(options.root);
   const hubMode = options.hubMode === true;
@@ -476,7 +488,9 @@ export async function startWorkbenchServer(options: {
     ensureWatcherFor,
     reloadWebBundle,
     getHubOutputLanguage: () => readHubConfig().outputLanguage,
+    getGiteeAccessToken: () => resolveEffectiveGiteeToken(readHubConfig()),
     githubDeps: options.githubDeps,
+    giteeDeps: options.giteeDeps,
   });
 
   const handleApi = async (req: Request, url: URL): Promise<Response> => {
@@ -554,6 +568,7 @@ export async function startWorkbenchServer(options: {
           : localHarnesses;
       const activeRuns = nodes.flatMap((n) => n.activeRuns);
 
+      const effectiveGiteeToken = resolveEffectiveGiteeToken(cfg);
       return jsonResponse({
         hubMode,
         activeProjectId: activeId,
@@ -563,6 +578,8 @@ export async function startWorkbenchServer(options: {
         harnesses: effectiveHarnesses,
         routing: cfg.routing,
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        giteeTokenConfigured: Boolean(effectiveGiteeToken),
+        giteeTokenMasked: maskAccessToken(effectiveGiteeToken),
         activeRuns,
         evolutionOpenCount,
         cooldownCount: telemetry.activeCooldowns.length,
@@ -575,10 +592,21 @@ export async function startWorkbenchServer(options: {
       if (body.outputLanguage !== undefined && !outputLanguage) {
         throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
       }
-      const cfg = updateHubPreferences({ outputLanguage });
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
+      const giteeAccessToken =
+        body.giteeAccessToken === null
+          ? null
+          : typeof body.giteeAccessToken === "string"
+            ? body.giteeAccessToken
+            : undefined;
+      const cfg = updateHubPreferences({ outputLanguage, giteeAccessToken });
+      const effectiveToken = resolveEffectiveGiteeToken(cfg);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken);
       broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
-      return jsonResponse({ outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE });
+      return jsonResponse({
+        outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        giteeTokenConfigured: Boolean(effectiveToken),
+        giteeTokenMasked: maskAccessToken(effectiveToken),
+      });
     }
 
     if (method === "POST" && pathname === "/api/hub/projects") {
@@ -882,6 +910,7 @@ export async function startWorkbenchServer(options: {
         url,
         cfg.routing,
         cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        resolveEffectiveGiteeToken(cfg),
       );
     }
 
@@ -1003,6 +1032,32 @@ export async function startWorkbenchServer(options: {
         }
       }
 
+      const brandAsset = BRAND_ASSETS[url.pathname];
+      if (brandAsset) {
+        const method = req.method.toUpperCase();
+        if (method !== "GET" && method !== "HEAD") {
+          return new Response("Method Not Allowed", {
+            status: 405,
+            headers: { Allow: "GET, HEAD", "Cache-Control": "no-store" },
+          });
+        }
+        let body: ArrayBuffer;
+        try {
+          const file = fs.readFileSync(path.join(webDir, "brand", brandAsset.file));
+          body = new ArrayBuffer(file.byteLength);
+          new Uint8Array(body).set(file);
+        } catch {
+          return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+        }
+        return new Response(method === "HEAD" ? null : body, {
+          headers: {
+            "Content-Type": brandAsset.contentType,
+            "Content-Length": String(body.byteLength),
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
       if (isDevWeb) {
         cachedWeb = await buildWebBundle(webDir);
       }
@@ -1043,6 +1098,7 @@ export async function startWorkbenchServer(options: {
             workbenchVersion: ws.data.nodeMeta?.workbenchVersion,
             routing: cfg.routing,
             outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+            giteeAccessToken: resolveEffectiveGiteeToken(cfg),
           });
           broadcastUi({ type: "hub.updated", reason: "node.connected", nodeId: ws.data.nodeId, at: Date.now() });
         } else {

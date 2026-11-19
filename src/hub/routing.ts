@@ -620,8 +620,19 @@ export function resolveRouteCandidates(
 const RATE_LIMIT_RE =
   /(rate[_\s-]?limit|too many requests|\b429\b|quota[_\s-]?(exceeded|exhausted|limit)|insufficient[_\s_]?quota|usage limit|credit balance|额度不足|配额已用完|触发限流|已限流)/i;
 
-export function detectRateLimitOrQuotaError(output: string, exitCode: number | null): boolean {
+const MODEL_UNAVAILABLE_RE =
+  /(model unavailable|model[_\s-]?not[_\s-]?found|unknown model|invalid model|unsupported model|no such model|provider[^\n]*unavailable|模型不可用|未找到模型)/i;
+
+function matchesNonZeroOutput(output: string, exitCode: number | null, pattern: RegExp): boolean {
   if (exitCode === 0) return false;
   const tail = output.length > 4096 ? output.slice(-4096) : output;
-  return RATE_LIMIT_RE.test(tail);
+  return pattern.test(tail);
+}
+
+export function detectRateLimitOrQuotaError(output: string, exitCode: number | null): boolean {
+  return matchesNonZeroOutput(output, exitCode, RATE_LIMIT_RE);
+}
+
+export function detectModelUnavailableError(output: string, exitCode: number | null): boolean {
+  return matchesNonZeroOutput(output, exitCode, MODEL_UNAVAILABLE_RE);
 }

@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { getRequirement, recordVerification } from "./engine.ts";
 import { WorkbenchError } from "./errors.ts";
 import { canonicalRoot } from "./fs.ts";
@@ -193,6 +195,18 @@ export async function runVerification(
   return { detail, record, log: fullSanitized.text };
 }
 
+function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
+  const parts = cmd.trim().split(/\s+/);
+  if (parts.length < 3 || parts[0] !== "bun" || parts[1] !== "test") return false;
+  for (const token of parts.slice(2)) {
+    if (token.startsWith("-") || /[|&;<>()$`\\*?{}[\]]/.test(token)) return false;
+    if (path.isAbsolute(token) || token.startsWith("..")) return false;
+    if (!/^[A-Za-z0-9_./-]+\.test\.(?:ts|tsx|js|jsx|mts|cts)$/.test(token)) return false;
+    if (!fs.existsSync(path.join(codeRoot, token))) return false;
+  }
+  return true;
+}
+
 /** Runs all distinct verification commands configured on a requirement's acceptance criteria. */
 export async function runAllVerifications(
   root: string,
@@ -201,6 +215,7 @@ export async function runAllVerifications(
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
+  const codeRoot = resolveCodeRoot(base, id);
   const groups = new Map<string, string[]>();
 
   for (const criterion of current.state.criteria) {
@@ -213,6 +228,20 @@ export async function runAllVerifications(
 
   if (groups.size === 0) {
     throw new WorkbenchError("invalid_input", "当前需求尚未给验收条件配置自动验证命令");
+  }
+
+  // When exact `bun test` is already scheduled, merge pure file-subset `bun test <files>` ACs into it.
+  const fullBunIds = groups.get("bun test");
+  if (fullBunIds) {
+    for (const [cmd, cids] of Array.from(groups.entries())) {
+      if (cmd === "bun test") continue;
+      if (isSubsumedBunTestCommand(cmd, codeRoot)) {
+        for (const cid of cids) {
+          if (!fullBunIds.includes(cid)) fullBunIds.push(cid);
+        }
+        groups.delete(cmd);
+      }
+    }
   }
 
   const runs: RunVerificationResult[] = [];
