@@ -23,7 +23,12 @@ export interface GiteeApiDeps {
   token?: string | null;
 }
 
-export type GiteeStatusReasonCode = "token_missing" | "auth_invalid_response" | "auth_failed" | "repo_missing";
+export type GiteeStatusReasonCode =
+  | "token_missing"
+  | "auth_invalid_response"
+  | "auth_failed"
+  | "network_failed"
+  | "repo_missing";
 
 export interface GiteeEnvironmentStatus {
   tokenConfigured: boolean;
@@ -38,6 +43,7 @@ export interface GiteeEnvironmentStatus {
   reason: string | null;
   reasonCode?: GiteeStatusReasonCode | null;
   reasonDetail?: string | null;
+  httpStatus?: number | null;
 }
 
 export interface GiteeIssueItem {
@@ -278,14 +284,20 @@ async function giteeRequest<T>(
       const cleanMsg = sanitizeOutput(apiMsg || `HTTP ${resp.status}`, 400).text;
       const err = new WorkbenchError("execution_failed", `Gitee API 请求失败 (${resp.status}): ${cleanMsg}`, {
         httpStatus: resp.status,
+        upstreamErrorCode: "gitee_api_http_error",
+        upstreamStatus: resp.status,
+        upstreamDetail: cleanMsg,
       });
       throw err;
     }
     return { status: resp.status, data: parsed as T };
   } catch (err) {
     if (err instanceof WorkbenchError) throw err;
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new WorkbenchError("execution_failed", `连接 Gitee API 失败: ${sanitizeOutput(msg, 300).text}`);
+    const cleanMsg = sanitizeOutput(err instanceof Error ? err.message : String(err), 300).text;
+    throw new WorkbenchError("execution_failed", `连接 Gitee API 失败: ${cleanMsg}`, {
+      upstreamErrorCode: "gitee_network_error",
+      upstreamDetail: cleanMsg,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -401,6 +413,7 @@ export async function inspectGiteeEnvironment(
       reason: "尚未配置 Gitee 私人令牌 (Access Token)，请在「工作台设置 -> 全局设置」中填写",
       reasonCode: "token_missing",
       reasonDetail: null,
+      httpStatus: null,
     };
   }
 
@@ -410,6 +423,7 @@ export async function inspectGiteeEnvironment(
   let authReason: string | null = null;
   let authReasonCode: GiteeStatusReasonCode | null = null;
   let authReasonDetail: string | null = null;
+  let authHttpStatus: number | null = null;
   try {
     const { data } = await giteeRequest<RawGiteeUser>("/user", token, { timeoutMs: 8_000 }, deps);
     if (data && typeof data.login === "string" && data.login.trim()) {
@@ -422,18 +436,32 @@ export async function inspectGiteeEnvironment(
     }
   } catch (err) {
     authenticated = false;
-    authReasonCode = "auth_failed";
-    authReasonDetail = err instanceof Error ? err.message : null;
-    authReason = authReasonDetail ?? "Gitee 私人令牌无效或已过期";
+    if (err instanceof WorkbenchError && err.details?.upstreamErrorCode === "gitee_api_http_error") {
+      authReasonCode = "auth_failed";
+      const status = err.details.upstreamStatus ?? err.details.httpStatus;
+      authHttpStatus = typeof status === "number" ? status : null;
+      authReasonDetail = typeof err.details.upstreamDetail === "string" ? err.details.upstreamDetail : null;
+      authReason = err.message;
+    } else if (err instanceof WorkbenchError && err.details?.upstreamErrorCode === "gitee_network_error") {
+      authReasonCode = "network_failed";
+      authReasonDetail = typeof err.details.upstreamDetail === "string" ? err.details.upstreamDetail : null;
+      authReason = err.message;
+    } else {
+      authReasonCode = "auth_failed";
+      authReasonDetail = err instanceof Error ? err.message : null;
+      authReason = authReasonDetail ?? "Gitee 私人令牌无效或已过期";
+    }
   }
 
   let reason: string | null = null;
   let reasonCode: GiteeStatusReasonCode | null = null;
   let reasonDetail: string | null = null;
+  let httpStatus: number | null = null;
   if (!authenticated) {
     reason = authReason ?? "Gitee 私人令牌无效或连接失败";
     reasonCode = authReasonCode ?? "auth_failed";
     reasonDetail = authReasonDetail;
+    httpStatus = authHttpStatus;
   } else if (!repo) {
     reason = "当前项目尚未配置 Gitee 仓库（未检测到 gitee.com origin 远端，可在项目设置中手动指定 owner/repo）";
     reasonCode = "repo_missing";
@@ -452,6 +480,7 @@ export async function inspectGiteeEnvironment(
     reason,
     reasonCode,
     reasonDetail,
+    httpStatus,
   };
 }
 

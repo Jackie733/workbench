@@ -25,6 +25,7 @@ interface BrowserPage {
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
   click(sel: string): Promise<void>;
+  select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
@@ -293,6 +294,69 @@ describe("Gitee Web UI workflow", () => {
         () => document.querySelector('[data-testid="new-req-mode-import"]')?.textContent ?? "",
       );
       expect(tabLabel).toContain("Gitee");
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 30_000 });
+
+  test("renders localized Gitee auth failure without Chinese prefix in English UI across Settings and Import", async () => {
+    makeTempHub();
+    const { repo } = makeGiteeGitRepo();
+    await initProject(repo, { name: "deepmdt-frontend-pc", privacyMode: "local" });
+    await updateProjectConfig(repo, {
+      gitee: { repo: "openstring/deepmdt-frontend-pc", enterprise: "openstring", defaultBaseBranch: "master" },
+    });
+
+    const { giteeDeps } = createMockGiteeDeps();
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, giteeDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+
+      // 1. Save an invalid token that triggers mock HTTP 401 Unauthorized, then switch UI to English.
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 5000 });
+      await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 5000 });
+      await page.type('[data-testid="hub-gitee-token-input"]', "bad-gitee-token");
+      await page.click('[data-testid="save-routing-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      await page.select('[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
+
+      // 2. Settings -> Project tab displays English Gitee auth failure with HTTP status & upstream detail.
+      await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 5000 });
+      await page.click('[data-testid="settings-tab-project"]');
+      await page.waitForSelector('[data-testid="project-provider-status"]', { timeout: 5000 });
+      const badgeText = await page.evaluate(
+        () => document.querySelector('[data-testid="project-provider-status"]')?.textContent ?? "",
+      );
+      expect(badgeText).toBe("Gitee Access Token verification failed (HTTP 401): Unauthorized");
+      expect(/[\u4e00-\u9fff]/.test(badgeText)).toBe(false);
+      await page.evaluate(() => {
+        const modal = document.querySelector('[data-testid="routing-modal"]');
+        const closeBtn = Array.from(modal?.querySelectorAll("button") ?? []).find(
+          (b) => b.textContent?.trim() === "Cancel",
+        );
+        closeBtn?.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      // 3. New requirement -> Gitee import pane displays English auth failure without Chinese prefix.
+      await page.click('[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 5000 });
+      await page.click('[data-testid="new-req-mode-import"]');
+      await page.waitForSelector('[data-testid="gitee-import-pane"]', { timeout: 5000 });
+      const importText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-import-pane"]')?.textContent ?? "",
+      );
+      expect(importText).toContain("Gitee Access Token verification failed (HTTP 401): Unauthorized");
+      expect(/[\u4e00-\u9fff]/.test(importText)).toBe(false);
     } finally {
       await page.close();
     }

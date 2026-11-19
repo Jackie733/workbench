@@ -406,11 +406,51 @@ describe("status and error messages", () => {
         tokenConfigured: true,
         authenticated: false,
         repo: null,
-        reason: "HTTP 401: invalid token",
+        reason: "Gitee API 请求失败 (401): Unauthorized",
         reasonCode: "auth_failed",
-        reasonDetail: "HTTP 401: invalid token",
+        httpStatus: 401,
+        reasonDetail: "Unauthorized",
       }),
-    ).toBe("Gitee Access Token verification failed: HTTP 401: invalid token");
+    ).toBe("Gitee Access Token verification failed (HTTP 401): Unauthorized");
+    expect(
+      formatGiteeStatusReason("zh-CN", {
+        tokenConfigured: true,
+        authenticated: false,
+        repo: null,
+        reason: "Gitee API 请求失败 (401): Unauthorized",
+        reasonCode: "auth_failed",
+        httpStatus: 401,
+        reasonDetail: "Unauthorized",
+      }),
+    ).toBe("Gitee 私人令牌验证失败 (HTTP 401)：Unauthorized");
+    expect(
+      formatGiteeStatusReason("en", {
+        tokenConfigured: true,
+        authenticated: false,
+        repo: null,
+        reason: "连接 Gitee API 失败: ECONNREFUSED",
+        reasonCode: "network_failed",
+        reasonDetail: "ECONNREFUSED",
+      }),
+    ).toBe("Failed to connect to Gitee API: ECONNREFUSED");
+    expect(
+      formatGiteeStatusReason("en", {
+        tokenConfigured: true,
+        authenticated: false,
+        repo: null,
+        reason: "Upstream auth rejected",
+      }),
+    ).toBe("Gitee Access Token verification failed: Upstream auth rejected");
+    expect(
+      describeClientError(
+        "en",
+        new ApiClientError("execution_failed", "Gitee API 请求失败 (401): Unauthorized", {
+          upstreamErrorCode: "gitee_api_http_error",
+          upstreamStatus: 401,
+          upstreamDetail: "Unauthorized",
+        }),
+      ),
+    ).toBe("Gitee API request failed (HTTP 401): Unauthorized");
     expect(
       formatGiteeStatusReason("en", {
         tokenConfigured: true,

@@ -54,6 +54,7 @@ import {
   useRequirementQuery,
 } from "../queries.ts";
 import {
+  describeClientError,
   describeClientErrorRef,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
@@ -390,9 +391,7 @@ export function Modals() {
                   ) : giteeIssuesQuery.isError ? (
                     <div className="callout danger xs">
                       {t(language, "gitee.loadFailed")}
-                      {giteeIssuesQuery.error instanceof Error
-                        ? giteeIssuesQuery.error.message
-                        : t(language, "toast.operationFailed")}
+                      {describeClientError(language, giteeIssuesQuery.error)}
                     </div>
                   ) : (giteeIssuesQuery.data?.items.length ?? 0) === 0 ? (
                     <div className="muted xs" style={{ padding: 12, textAlign: "center" }}>

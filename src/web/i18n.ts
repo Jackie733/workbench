@@ -997,6 +997,11 @@ const zhCN = {
   "gitee.reasonAuthInvalid": "Gitee 私人令牌验证未返回有效账号信息",
   "gitee.reasonAuthFailed": "Gitee 私人令牌无效或连接失败",
   "gitee.reasonAuthFailedWithDetail": "Gitee 私人令牌验证失败：{detail}",
+  "gitee.reasonAuthHttpFailedWithDetail": "Gitee 私人令牌验证失败 (HTTP {status})：{detail}",
+  "gitee.reasonNetworkFailed": "连接 Gitee API 失败",
+  "gitee.reasonNetworkFailedWithDetail": "连接 Gitee API 失败：{detail}",
+  "gitee.apiHttpError": "Gitee API 请求失败 (HTTP {status})：{detail}",
+  "gitee.networkError": "连接 Gitee API 失败：{detail}",
   "gitee.reasonRepoMissing": "当前项目尚未配置 Gitee 仓库（未检测到 gitee.com origin 远端，可在项目设置中手动指定 owner/repo）",
   "github.reasonGhMissing": "本机未安装 gh CLI，无法执行 GitHub Issue / PR 同步",
   "github.reasonGhUnauthenticated": "gh CLI 尚未登录，请先在终端运行 gh auth login",
@@ -2041,6 +2046,11 @@ const en: Record<MessageKey, string> = {
   "gitee.reasonAuthInvalid": "Gitee Access Token verification did not return a valid account",
   "gitee.reasonAuthFailed": "Gitee Access Token is invalid or connection failed",
   "gitee.reasonAuthFailedWithDetail": "Gitee Access Token verification failed: {detail}",
+  "gitee.reasonAuthHttpFailedWithDetail": "Gitee Access Token verification failed (HTTP {status}): {detail}",
+  "gitee.reasonNetworkFailed": "Failed to connect to Gitee API",
+  "gitee.reasonNetworkFailedWithDetail": "Failed to connect to Gitee API: {detail}",
+  "gitee.apiHttpError": "Gitee API request failed (HTTP {status}): {detail}",
+  "gitee.networkError": "Failed to connect to Gitee API: {detail}",
   "gitee.reasonRepoMissing": "No Gitee repository configured for this project (no gitee.com origin remote detected; specify owner/repo in Project Settings)",
   "github.reasonGhMissing": "gh CLI is not installed on this machine, so GitHub Issue / PR sync is unavailable",
   "github.reasonGhUnauthenticated": "gh CLI is not authenticated. Run gh auth login in a terminal first",
@@ -2280,6 +2290,29 @@ export interface LocalizedError {
 
 export function describeClientErrorRef(err: unknown): LocalizedError {
   if (err instanceof ApiClientError) {
+    const upstreamCode = err.details?.upstreamErrorCode;
+    if (upstreamCode === "gitee_api_http_error") {
+      const status = Number(err.details?.upstreamStatus ?? err.details?.httpStatus ?? 0);
+      const rawDetail = typeof err.details?.upstreamDetail === "string" ? err.details.upstreamDetail.trim() : "";
+      const detail = rawDetail || `HTTP ${status || 500}`;
+      if (status > 0) {
+        return {
+          key: "gitee.apiHttpError",
+          params: { status, detail },
+          text: detail,
+        };
+      }
+    }
+    if (upstreamCode === "gitee_network_error") {
+      const detail = typeof err.details?.upstreamDetail === "string" ? err.details.upstreamDetail.trim() : "";
+      if (detail) {
+        return {
+          key: "gitee.networkError",
+          params: { detail },
+          text: detail,
+        };
+      }
+    }
     const baseKey = ERROR_CODE_KEYS[err.code] ?? "error.request_failed";
     const detail = err.message?.trim();
     if (!detail || ERROR_CODE_KEYS_REQUIRING_DETAIL.has(err.code)) {
@@ -2308,34 +2341,46 @@ export function describeClientError(language: UiLanguage, err: unknown): string 
 
 const ERROR_CODE_KEYS_REQUIRING_DETAIL = new Set(["revision_conflict", "unauthorized"]);
 
-const KNOWN_GITEE_FALLBACK_REASONS = new Set([
-  "Gitee 私人令牌验证未返回有效账号信息",
-  "Gitee 私人令牌无效或已过期",
-  "Gitee 私人令牌无效或连接失败",
-]);
-
 /** Localizes Gitee readiness diagnostics from structured fields while preserving raw upstream errors. */
 export function formatGiteeStatusReason(
   language: UiLanguage,
-  status: Pick<GiteeEnvironmentStatus, "tokenConfigured" | "authenticated" | "repo" | "reason" | "reasonCode" | "reasonDetail">,
+  status: Pick<
+    GiteeEnvironmentStatus,
+    "tokenConfigured" | "authenticated" | "repo" | "reason" | "reasonCode" | "reasonDetail" | "httpStatus"
+  >,
 ): string {
-  if (!status.tokenConfigured || status.reasonCode === "token_missing") {
+  if (status.reasonCode === "token_missing" || !status.tokenConfigured) {
     return t(language, "gitee.reasonTokenMissing");
   }
-  if (!status.authenticated || status.reasonCode === "auth_failed" || status.reasonCode === "auth_invalid_response") {
-    const rawDetail =
-      status.reasonDetail?.trim() ||
-      (status.reasonCode ? "" : status.reason && !KNOWN_GITEE_FALLBACK_REASONS.has(status.reason) ? status.reason.trim() : "");
-    if (rawDetail) return t(language, "gitee.reasonAuthFailedWithDetail", { detail: rawDetail });
-    if (status.reasonCode === "auth_invalid_response" || status.reason === "Gitee 私人令牌验证未返回有效账号信息") {
-      return t(language, "gitee.reasonAuthInvalid");
+  if (status.reasonCode === "auth_invalid_response") {
+    return t(language, "gitee.reasonAuthInvalid");
+  }
+  if (status.reasonCode === "network_failed") {
+    const detail = status.reasonDetail?.trim();
+    return detail
+      ? t(language, "gitee.reasonNetworkFailedWithDetail", { detail })
+      : t(language, "gitee.reasonNetworkFailed");
+  }
+  if (status.reasonCode === "auth_failed") {
+    const detail = status.reasonDetail?.trim();
+    if (typeof status.httpStatus === "number" && detail) {
+      return t(language, "gitee.reasonAuthHttpFailedWithDetail", { status: status.httpStatus, detail });
+    }
+    if (detail) {
+      return t(language, "gitee.reasonAuthFailedWithDetail", { detail });
     }
     return t(language, "gitee.reasonAuthFailed");
   }
-  if (!status.repo || status.reasonCode === "repo_missing") {
+  if (status.reasonCode === "repo_missing" || (status.authenticated && !status.repo)) {
     return t(language, "gitee.reasonRepoMissing");
   }
-  return status.reason ?? t(language, "gitee.statusNotReady");
+  if (!status.authenticated) {
+    const legacyDetail = status.reasonDetail?.trim() || status.reason?.trim();
+    return legacyDetail
+      ? t(language, "gitee.reasonAuthFailedWithDetail", { detail: legacyDetail })
+      : t(language, "gitee.reasonAuthFailed");
+  }
+  return status.reason?.trim() || t(language, "gitee.statusNotReady");
 }
 
 /** Localizes GitHub CLI readiness diagnostics from structured status fields. */
