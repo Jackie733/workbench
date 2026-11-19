@@ -409,6 +409,9 @@ describe("post-acceptance delivery wrap-up UI", () => {
       expect(/[\u4e00-\u9fff]/.test(createWarnToast)).toBe(false);
 
       // 2. Manual "Sync current status to issue #12" failure on REQ-001 -> localized comment error toast.
+      await page.waitForSelector('[data-testid="back-home-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
