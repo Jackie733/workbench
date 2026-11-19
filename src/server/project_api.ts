@@ -182,6 +182,7 @@ export async function buildLocalProjectSnapshot(
 ): Promise<LocalProjectSnapshot> {
   const status = getProjectStatus(projectRoot);
   const isGitRepo = fs.existsSync(path.join(projectRoot, ".git"));
+  const activeRuns = executor.getActiveRuns(projectRoot);
   let activeCount = 0;
   let decisionCount = 0;
   if (status.initialized) {
@@ -196,14 +197,19 @@ export async function buildLocalProjectSnapshot(
         },
       });
       activeCount = items.length;
-      decisionCount = items.filter((i) => i.needsDecision).length;
+      const processingIds = new Set(
+        activeRuns
+          .filter((run) => run.status === "running" && run.action !== "ask")
+          .map((run) => run.requirementId),
+      );
+      decisionCount = items.filter((i) => i.needsDecision && !processingIds.has(i.id)).length;
     } catch (error) {
       console.warn(
         `[workbench] 读取项目快照失败 ${projectRoot}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
-  const runningCount = executor.getActiveRuns(projectRoot).length;
+  const runningCount = activeRuns.length;
   return {
     initialized: status.initialized,
     isGitRepo,

@@ -11,7 +11,7 @@ import {
   useProjectQuery,
   useRequirementsQuery,
 } from "../queries.ts";
-import { filteredItems, progressDetail, relativeTime, STAGE_META } from "../state.ts";
+import { filteredItems, findActiveRequirementRun, partitionPendingDecisions, progressDetail, relativeTime, STAGE_META } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
@@ -286,17 +286,21 @@ export function HomeView() {
     }
   }, [homeScrollY]);
 
+  const activeRunList = Object.values(activeRuns);
+  const pendingDecisions = partitionPendingDecisions(rawItems, activeRunList, activeProjectId).humanPending.sort(
+    (a, b) => {
+      const aBlock = isBlockingDecision(a) ? 0 : 1;
+      const bBlock = isBlockingDecision(b) ? 0 : 1;
+      if (aBlock !== bBlock) return aBlock - bBlock;
+      return a.updatedAt - b.updatedAt;
+    },
+  );
+
   const activeCnt = rawItems.filter((i) => i.stage !== "done" && i.stage !== "cancelled").length;
-  const decisionCnt = rawItems.filter((i) => i.needsDecision).length;
+  const decisionCnt = pendingDecisions.length;
   const doneCnt = rawItems.filter((i) => i.stage === "done").length;
 
   const visible = filteredItems(rawItems, query, language);
-  const pendingDecisions = [...rawItems.filter((i) => i.needsDecision)].sort((a, b) => {
-    const aBlock = isBlockingDecision(a) ? 0 : 1;
-    const bBlock = isBlockingDecision(b) ? 0 : 1;
-    if (aBlock !== bBlock) return aBlock - bBlock;
-    return a.updatedAt - b.updatedAt;
-  });
 
   return (
     <div data-testid="home-view">
@@ -448,12 +452,7 @@ export function HomeView() {
               {visible.map((item) => {
                 const meta = STAGE_META[item.stage];
                 const detail = progressDetail(item, language);
-                const activeReqRun = Object.values(activeRuns).find(
-                  (r) =>
-                    r.requirementId === item.id &&
-                    r.status === "running" &&
-                    (!r.projectId || r.projectId === activeProjectId),
-                );
+                const activeReqRun = findActiveRequirementRun(activeRunList, item.id, activeProjectId);
                 return (
                   <div
                     key={item.id}
