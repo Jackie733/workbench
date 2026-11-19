@@ -23,6 +23,7 @@ import {
   persistUiLanguage,
   pluralMessage,
   prStateRef,
+  readStorageItem,
   readStoredUiLanguage,
   resolveWarningParam,
   t,
@@ -30,6 +31,7 @@ import {
   UI_LANGUAGE_STORAGE_KEY,
   uiMessage,
   uiLanguageName,
+  writeStorageItem,
   type MessageKey,
 } from "../../src/web/i18n.ts";
 import { describeEvidenceContext } from "../../src/web/state.ts";
@@ -135,6 +137,8 @@ describe("preference storage", () => {
       }),
     ).toBe(true);
     expect(stored[UI_LANGUAGE_STORAGE_KEY]).toBe("en");
+    expect(readStorageItem("wb-theme", makeThrowingStorage())).toBeNull();
+    expect(writeStorageItem("wb-theme", "dark", makeThrowingStorage())).toBe(false);
   });
 
   test("store switches language in memory even when persistence is unavailable", () => {
@@ -744,7 +748,7 @@ describe("status and error messages", () => {
       expect(formatAgentStatusLabel("zh-CN", status)).not.toBe(status);
       expect(formatAgentStatusLabel("en", status)).not.toBe(status);
     }
-    for (const code of ["??", "M", "MM", "A", "D", "R", "C", "UU"] as const) {
+    for (const code of ["??", "M", "MM", "A", "AM", "D", "AD", "R", "RM", "C", "CM", "T", "MT", "TM", "AT", "U", "UU"] as const) {
       const en = formatGitFileStatusLabel("en", code);
       const zh = formatGitFileStatusLabel("zh-CN", code);
       expect(/[\u4e00-\u9fff]/.test(en)).toBe(false);
@@ -755,6 +759,10 @@ describe("status and error messages", () => {
     expect(formatGitFileStatusLabel("en", "??")).toBe("Untracked");
     expect(formatGitFileStatusLabel("zh-CN", "M")).toBe("已修改");
     expect(formatGitFileStatusLabel("en", "M")).toBe("Modified");
+    expect(formatGitFileStatusLabel("zh-CN", "T")).toBe("类型变更");
+    expect(formatGitFileStatusLabel("en", "T")).toBe("Type changed");
+    expect(formatGitFileStatusLabel("zh-CN", "MT")).toBe("类型变更");
+    expect(formatGitFileStatusLabel("en", "MT")).toBe("Type changed");
 
     const ffBranchSkip = resolveWarningParam("主仓库当前位于分支 feat/x（非 main），已保留主仓库现状", {
       key: "git.ff.branchMismatch",

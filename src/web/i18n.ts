@@ -1105,6 +1105,7 @@ const zhCN = {
   "git.fileStatus.deleted": "已删除",
   "git.fileStatus.renamed": "已重命名",
   "git.fileStatus.copied": "已复制",
+  "git.fileStatus.typeChanged": "类型变更",
   "git.fileStatus.conflicted": "冲突",
   "gitee.repoLabel": "Gitee 仓库（owner/repo，留空自动识别）",
   "gitee.enterpriseLabel": "企业空间路径（用于拉取无仓库工作项）",
@@ -2253,6 +2254,7 @@ const en: Record<MessageKey, string> = {
   "git.fileStatus.deleted": "Deleted",
   "git.fileStatus.renamed": "Renamed",
   "git.fileStatus.copied": "Copied",
+  "git.fileStatus.typeChanged": "Type changed",
   "git.fileStatus.conflicted": "Conflicted",
   "gitee.repoLabel": "Gitee repository (owner/repo, blank to auto-detect)",
   "gitee.enterpriseLabel": "Enterprise slug (for repo-less work items)",
@@ -2337,26 +2339,38 @@ function safeStorage(): UiLanguageStorage | null {
   }
 }
 
-export function readStoredUiLanguage(storage: UiLanguageStorage | null = safeStorage()): UiLanguage {
-  if (!storage) return DEFAULT_UI_LANGUAGE;
+export function readStorageItem(key: string, storage: UiLanguageStorage | null = safeStorage()): string | null {
+  if (!storage) return null;
   try {
-    return normalizeUiLanguage(storage.getItem(UI_LANGUAGE_STORAGE_KEY)) ?? DEFAULT_UI_LANGUAGE;
+    return storage.getItem(key);
   } catch {
-    return DEFAULT_UI_LANGUAGE;
+    return null;
   }
+}
+
+export function writeStorageItem(
+  key: string,
+  value: string,
+  storage: UiLanguageStorage | null = safeStorage(),
+): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readStoredUiLanguage(storage: UiLanguageStorage | null = safeStorage()): UiLanguage {
+  return normalizeUiLanguage(readStorageItem(UI_LANGUAGE_STORAGE_KEY, storage)) ?? DEFAULT_UI_LANGUAGE;
 }
 
 export function persistUiLanguage(
   language: UiLanguage,
   storage: UiLanguageStorage | null = safeStorage(),
 ): boolean {
-  if (!storage) return false;
-  try {
-    storage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
-    return true;
-  } catch {
-    return false;
-  }
+  return writeStorageItem(UI_LANGUAGE_STORAGE_KEY, language, storage);
 }
 
 export function uiLanguageName(language: UiLanguage): string {
@@ -2701,6 +2715,7 @@ export function formatGitFileStatusLabel(language: UiLanguage, status: string): 
   if (code.includes("U") || code === "AA" || code === "DD") return t(language, "git.fileStatus.conflicted");
   if (code.includes("R")) return t(language, "git.fileStatus.renamed");
   if (code.includes("C")) return t(language, "git.fileStatus.copied");
+  if (code.includes("T")) return t(language, "git.fileStatus.typeChanged");
   if (code.includes("A")) return t(language, "git.fileStatus.added");
   if (code.includes("D")) return t(language, "git.fileStatus.deleted");
   if (code.includes("M")) return t(language, "git.fileStatus.modified");

@@ -6,8 +6,10 @@ import {
   applyDocumentLanguage,
   describeClientErrorRef,
   persistUiLanguage,
+  readStorageItem,
   readStoredUiLanguage,
   t,
+  writeStorageItem,
   type MessageKey,
   type MessageParams,
   type UiLanguage,
@@ -18,14 +20,12 @@ export const DEFAULT_DRAWER_WIDTH = 720;
 export const MIN_DRAWER_WIDTH = 320;
 
 function initialDesktopSidebarOpen(): boolean {
-  if (typeof localStorage === "undefined") return true;
-  const saved = localStorage.getItem("wb-sidebar-open");
+  const saved = readStorageItem("wb-sidebar-open");
   return saved === "false" ? false : true;
 }
 
 function initialDrawerWidth(): number {
-  if (typeof localStorage === "undefined") return DEFAULT_DRAWER_WIDTH;
-  const raw = Number(localStorage.getItem("wb-drawer-width"));
+  const raw = Number(readStorageItem("wb-drawer-width"));
   if (Number.isFinite(raw) && raw >= MIN_DRAWER_WIDTH) {
     return Math.round(raw);
   }
@@ -129,9 +129,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
       if (typeof document !== "undefined") {
         document.documentElement.setAttribute("data-theme", next);
       }
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem("wb-theme", next);
-      }
+      writeStorageItem("wb-theme", next);
       return { theme: next };
     }),
   setLanguage: (language) => {
@@ -142,9 +140,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setBusy: (busy) => set({ busy }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setDesktopSidebarOpen: (desktopSidebarOpen) => {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("wb-sidebar-open", String(desktopSidebarOpen));
-    }
+    writeStorageItem("wb-sidebar-open", String(desktopSidebarOpen));
     set({ desktopSidebarOpen });
   },
   setActiveProjectId: (activeProjectId) => set({ activeProjectId }),
@@ -172,9 +168,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   setDrawerWidth: (width) => {
     const rounded = Math.max(MIN_DRAWER_WIDTH, Math.round(width));
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("wb-drawer-width", String(rounded));
-    }
+    writeStorageItem("wb-drawer-width", String(rounded));
     set({ drawerWidth: rounded });
   },
   setDrawerTab: (drawerTab) => set({ drawerTab }),

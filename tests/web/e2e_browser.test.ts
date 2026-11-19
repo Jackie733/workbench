@@ -35,6 +35,7 @@ interface BrowserPage {
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
+  evaluateOnNewDocument(fn: () => void): Promise<unknown>;
   mouse: {
     move(x: number, y: number, opts?: { steps?: number }): Promise<void>;
     down(): Promise<void>;
@@ -2356,6 +2357,32 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         proto.getItem = proto.__origGet as typeof Storage.prototype.getItem;
         proto.setItem = proto.__origSet as typeof Storage.prototype.setItem;
       });
+
+      // 11. 启动前即禁用/拒绝读取 browser localStorage 时仍能以简体中文正常启动并在当前会话切换到英文。
+      const blockedPage = await browser!.newPage();
+      const blockedErrors: string[] = [];
+      blockedPage.on("pageerror", (err: Error) => blockedErrors.push(err.message));
+      try {
+        await blockedPage.evaluateOnNewDocument(() => {
+          Object.defineProperty(window, "localStorage", {
+            configurable: true,
+            get() {
+              throw new DOMException("Storage access denied", "SecurityError");
+            },
+          });
+        });
+        await blockedPage.setViewport({ width: 1360, height: 860 });
+        await blockedPage.goto(`http://127.0.0.1:${server.port}`, { waitUntil: "networkidle0" });
+        expect(blockedErrors).toEqual([]);
+        await blockedPage.waitForSelector('[data-testid="ui-language-select"]', { timeout: 10_000 });
+        expect(await blockedPage.evaluate(() => document.documentElement.lang)).toBe("zh-CN");
+        await blockedPage.select('[data-testid="ui-language-select"]', "en");
+        await blockedPage.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
+        expect(await blockedPage.evaluate(() => document.body.innerText)).toContain("Workbench");
+        expect(blockedErrors).toEqual([]);
+      } finally {
+        await blockedPage.close();
+      }
 
       expect(pageErrors).toEqual([]);
     } finally {

@@ -24,6 +24,7 @@ import {
   formatRelativeTime,
   formatNumber,
   pluralMessage,
+  readStorageItem,
   t,
   translateRef,
   type MessageKey,
@@ -341,10 +342,13 @@ export function effortLabel(language: UiLanguage, effort: ReasoningEffort): stri
 }
 
 export function initialTheme(): "light" | "dark" {
-  if (typeof localStorage === "undefined") return "light";
-  const saved = localStorage.getItem("wb-theme");
+  const saved = readStorageItem("wb-theme");
   if (saved === "light" || saved === "dark") return saved;
-  return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  try {
+    return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  } catch {
+    return "light";
+  }
 }
 
 export function relativeTime(ms: number, language: UiLanguage = "zh-CN"): string {

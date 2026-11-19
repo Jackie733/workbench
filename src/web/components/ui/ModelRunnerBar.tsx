@@ -149,7 +149,7 @@ export function ModelRunnerBar({
                 </Command.Empty>
                 <Command.Group heading={t(language, "runner.quickPresets")} className="cmdk-group">
                   <Command.Item
-                    value="__auto__ 默认路由 自动路由"
+                    value="__auto__ 默认路由 自动路由 auto routing default"
                     onSelect={() => {
                       setSelectedRunnerKey("", stageAction);
                       setOpen(false);
@@ -167,7 +167,7 @@ export function ModelRunnerBar({
                   </Command.Item>
                   {includeManualCopy && (
                     <Command.Item
-                      value="manual_copy 仅生成提示词 手动复制"
+                      value="manual_copy 仅生成提示词 手动复制 manual copy prompt"
                       onSelect={() => {
                         setSelectedRunnerKey("manual_copy", stageAction);
                         setOpen(false);
