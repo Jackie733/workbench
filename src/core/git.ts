@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { canonicalRoot } from "./fs.ts";
 import { WorkbenchError, type StructuredMessageRef } from "./errors.ts";
@@ -30,7 +31,13 @@ interface ExecResult {
   stderr: Buffer;
 }
 
-function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS, stdinText?: string): Promise<ExecResult> {
+function execGit(
+  cwd: string,
+  args: string[],
+  timeoutMs = GIT_TIMEOUT_MS,
+  stdinText?: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(cwd)) {
       reject(Object.assign(new Error(`cwd no longer exists: ${cwd}`), { code: "ENOENT" }));
@@ -45,6 +52,7 @@ function execGit(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS, stdinT
           timeout: timeoutMs,
           maxBuffer: 16 * 1024 * 1024,
           encoding: "buffer",
+          ...(env ? { env } : {}),
         },
         (error, stdout, stderr) => {
           if (error && typeof (error as NodeJS.ErrnoException).code === "string") {
@@ -672,10 +680,18 @@ export async function createFeatureBranchAtHead(root: string, branchName: string
 }
 
 /** Pushes branchName to remote (defaults to origin) with upstream tracking. */
-export async function pushBranchToRemote(root: string, branchName: string, remote = "origin"): Promise<void> {
+export async function pushBranchToRemote(
+  root: string,
+  branchName: string,
+  remote = "origin",
+  options: { forceWithLease?: boolean } = {},
+): Promise<void> {
   const base = canonicalRoot(root);
   const safeBranch = validateGitBranchName(branchName);
-  const res = await execGit(base, ["push", "-u", remote, safeBranch], 60_000);
+  const args = options.forceWithLease
+    ? ["push", "--force-with-lease", "-u", remote, safeBranch]
+    : ["push", "-u", remote, safeBranch];
+  const res = await execGit(base, args, 60_000);
   if (res.code !== 0) {
     const raw = res.stderr.toString("utf8").trim() || res.stdout.toString("utf8").trim();
     const msg = sanitizeOutput(raw, 800).text;
@@ -683,6 +699,270 @@ export async function pushBranchToRemote(root: string, branchName: string, remot
       messageKey: msg ? "git.errPushFailedDetail" : "git.errPushFailed",
       messageParams: msg ? { branch: safeBranch, remote, detail: msg } : { branch: safeBranch, remote },
     });
+  }
+}
+
+/** Fetches remote tracking ref `<remote>/<branchName>` without modifying any working tree. */
+export async function fetchRemoteBranch(
+  root: string,
+  branchName: string,
+  remote = "origin",
+  timeoutMs = 15_000,
+): Promise<{ ok: boolean; error?: string }> {
+  const base = canonicalRoot(root);
+  const safeBranch = validateGitBranchName(branchName);
+  try {
+    const remoteUrl = await getGitRemoteUrl(base, remote);
+    if (!remoteUrl) return { ok: false, error: "no remote" };
+    const res = await execGit(base, ["fetch", remote, safeBranch], timeoutMs);
+    if (res.code !== 0) {
+      return { ok: false, error: sanitizeOutput(res.stderr.toString("utf8").trim(), 400).text || "git fetch failed" };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function revParseCommit(repoDir: string, ref: string): Promise<string | null> {
+  try {
+    const res = await execGit(repoDir, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    if (res.code !== 0) return null;
+    const oid = res.stdout.toString("utf8").trim();
+    return /^[0-9a-f]{7,64}$/i.test(oid) ? oid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function isAncestorCommit(repoDir: string, ancestor: string, descendant: string): Promise<boolean> {
+  if (!ancestor || !descendant) return false;
+  try {
+    const res = await execGit(repoDir, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return res.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+export interface TargetMainRefInfo {
+  baseBranch: string;
+  refName: string;
+  oid: string;
+  localOid: string | null;
+  remoteOid: string | null;
+  remoteAheadCount: number;
+}
+
+/**
+ * Resolves the freshest main integration target across local baseBranch (or HEAD) and origin/<baseBranch>,
+ * allowing isolated worktrees to track origin/<baseBranch> even when the main checkout is dirty or on another branch.
+ */
+export async function resolveTargetMainRef(
+  root: string,
+  preferredBaseBranch?: string | null,
+  remote = "origin",
+): Promise<TargetMainRefInfo | null> {
+  const base = canonicalRoot(root);
+  const baseBranch = preferredBaseBranch?.trim() || (await resolveDefaultBaseBranch(base, remote)) || "main";
+  const headOid = await revParseCommit(base, "HEAD");
+  const localBranchOid = await revParseCommit(base, `refs/heads/${baseBranch}`);
+  const remoteBranchOid = await revParseCommit(base, `refs/remotes/${remote}/${baseBranch}`);
+
+  const localOid = localBranchOid ?? headOid;
+  if (!localOid && !remoteBranchOid) return null;
+
+  let refName = localBranchOid ? `refs/heads/${baseBranch}` : "HEAD";
+  let oid = localOid ?? remoteBranchOid!;
+  let remoteAheadCount = 0;
+
+  if (remoteBranchOid && localOid && remoteBranchOid !== localOid) {
+    remoteAheadCount = await countCommitsBetween(base, localOid, remoteBranchOid);
+    if (remoteAheadCount > 0 && (await isAncestorCommit(base, localOid, remoteBranchOid))) {
+      refName = `${remote}/${baseBranch}`;
+      oid = remoteBranchOid;
+    }
+  } else if (remoteBranchOid && !localOid) {
+    refName = `${remote}/${baseBranch}`;
+    oid = remoteBranchOid;
+  }
+
+  return {
+    baseBranch,
+    refName,
+    oid,
+    localOid: localOid ?? null,
+    remoteOid: remoteBranchOid ?? null,
+    remoteAheadCount,
+  };
+}
+
+/** Checks local remote-tracking ref for divergence (e.g. stale remote branch from an earlier PR attempt). */
+export async function inspectRemoteBranchDivergence(
+  root: string,
+  branchName: string,
+  remote = "origin",
+): Promise<{ remoteBranchExists: boolean; behindRemoteCount: number; diverged: boolean }> {
+  const base = canonicalRoot(root);
+  try {
+    const safeBranch = validateGitBranchName(branchName);
+    const remoteOid = await revParseCommit(base, `refs/remotes/${remote}/${safeBranch}`);
+    if (!remoteOid) {
+      return { remoteBranchExists: false, behindRemoteCount: 0, diverged: false };
+    }
+    const localOid = (await revParseCommit(base, `refs/heads/${safeBranch}`)) ?? (await revParseCommit(base, "HEAD"));
+    if (!localOid) {
+      return { remoteBranchExists: true, behindRemoteCount: 0, diverged: false };
+    }
+    if (remoteOid === localOid) {
+      return { remoteBranchExists: true, behindRemoteCount: 0, diverged: false };
+    }
+    const behindRemoteCount = await countCommitsBetween(base, localOid, remoteOid);
+    const isFf = await isAncestorCommit(base, remoteOid, localOid);
+    return {
+      remoteBranchExists: true,
+      behindRemoteCount,
+      diverged: behindRemoteCount > 0 && !isFf,
+    };
+  } catch {
+    return { remoteBranchExists: false, behindRemoteCount: 0, diverged: false };
+  }
+}
+
+/**
+ * Captures an in-memory Git tree OID for a worktree including uncommitted & untracked edits
+ * (excluding .workbench, .omp/workbench, and node_modules) without mutating the real index or files.
+ */
+export async function captureWorkingTreeTreeOid(wtDir: string, headRef = "HEAD"): Promise<string> {
+  const wt = canonicalRoot(wtDir);
+  const statusRes = await execGit(wt, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
+  const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
+  const dirtyPaths: string[] = [];
+  for (const entry of entries) {
+    if (!entry.path || entry.path === "node_modules" || entry.path.startsWith("node_modules/")) continue;
+    dirtyPaths.push(entry.path);
+    if (entry.origPath && entry.origPath !== "node_modules" && !entry.origPath.startsWith("node_modules/")) {
+      dirtyPaths.push(entry.origPath);
+    }
+  }
+  const uniquePaths = Array.from(new Set(dirtyPaths));
+  if (uniquePaths.length === 0) {
+    const headOid = await revParseCommit(wt, headRef);
+    return headOid ?? headRef;
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-git-idx-"));
+  const tmpIndex = path.join(tmpDir, "index");
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  try {
+    const readRes = await execGit(wt, ["read-tree", headRef], GIT_TIMEOUT_MS, undefined, env);
+    if (readRes.code !== 0) {
+      return (await revParseCommit(wt, headRef)) ?? headRef;
+    }
+    for (let i = 0; i < uniquePaths.length; i += 100) {
+      const chunk = uniquePaths.slice(i, i + 100);
+      await execGit(wt, ["add", "-A", "--", ...chunk], 30_000, undefined, env);
+    }
+    const treeRes = await execGit(wt, ["write-tree"], GIT_TIMEOUT_MS, undefined, env);
+    if (treeRes.code === 0) {
+      const treeOid = treeRes.stdout.toString("utf8").trim();
+      if (/^[0-9a-f]{7,64}$/i.test(treeOid)) {
+        const headOid = await revParseCommit(wt, headRef);
+        const commitEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || "Workbench",
+          GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || "workbench@local",
+          GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || "Workbench",
+          GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || "workbench@local",
+        };
+        const commitArgs = headOid
+          ? ["commit-tree", treeOid, "-p", headOid, "-m", "wb-wip-snapshot"]
+          : ["commit-tree", treeOid, "-m", "wb-wip-snapshot"];
+        const commitRes = await execGit(wt, commitArgs, GIT_TIMEOUT_MS, undefined, commitEnv);
+        if (commitRes.code === 0) {
+          const commitOid = commitRes.stdout.toString("utf8").trim();
+          if (/^[0-9a-f]{7,64}$/i.test(commitOid)) return commitOid;
+        }
+      }
+    }
+    return (await revParseCommit(wt, headRef)) ?? headRef;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+export interface MergeTreeConflictResult {
+  clean: boolean;
+  conflictFiles: string[];
+  unavailable: boolean;
+}
+
+/**
+ * Runs in-memory 3-way merge conflict detection via `git merge-tree --write-tree` (Git 2.38+)
+ * without touching any working tree or index.
+ */
+export async function inspectMergeTreeConflict(
+  repoDir: string,
+  options: { baseRef?: string; leftRef: string; rightRef: string },
+): Promise<MergeTreeConflictResult> {
+  const base = canonicalRoot(repoDir);
+  const args = [
+    "merge-tree",
+    "--write-tree",
+    "--name-only",
+    "-z",
+    "--no-messages",
+    ...(options.baseRef ? [`--merge-base=${options.baseRef}`] : []),
+    options.leftRef,
+    options.rightRef,
+  ];
+  try {
+    const res = await execGit(base, args, 15_000);
+    if (res.code === 0) {
+      return { clean: true, conflictFiles: [], unavailable: false };
+    }
+    if (res.code === 1) {
+      const tokens = res.stdout.toString("utf8").split("\0");
+      // First NUL token is the resulting tree OID; subsequent non-empty tokens are conflicted filenames.
+      const files = Array.from(
+        new Set(
+          tokens
+            .slice(1)
+            .map((s) => s.trim())
+            .filter(
+              (s) =>
+                s.length > 0 &&
+                s !== ".workbench" &&
+                !s.startsWith(".workbench/") &&
+                s !== ".omp/workbench" &&
+                !s.startsWith(".omp/workbench/") &&
+                s !== "node_modules" &&
+                !s.startsWith("node_modules/"),
+            ),
+        ),
+      ).sort();
+      if (files.length === 0) {
+        return { clean: true, conflictFiles: [], unavailable: false };
+      }
+      return { clean: false, conflictFiles: files, unavailable: false };
+    }
+    return { clean: false, conflictFiles: [], unavailable: true };
+  } catch {
+    return { clean: false, conflictFiles: [], unavailable: true };
+  }
+}
+
+/** Extracts unmerged diff / conflict marker excerpts from a worktree when a merge is already in progress. */
+export async function extractMergeConflictContext(wtDir: string, maxBytes = 6144): Promise<string> {
+  const wt = canonicalRoot(wtDir);
+  try {
+    const res = await execGit(wt, ["diff", "--diff-filter=U", "--", ".", ...EXCLUDE_PATHSPECS]);
+    if (res.code !== 0) return "";
+    const text = res.stdout.toString("utf8").trim();
+    if (!text) return "";
+    return truncateUtf8(text, maxBytes).text;
+  } catch {
+    return "";
   }
 }
 

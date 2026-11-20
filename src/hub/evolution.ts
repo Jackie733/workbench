@@ -15,12 +15,21 @@ import {
   getRequirement,
   initProject,
   linkRequirementGitHubIssue,
+  prepareRequirementForConflictSync,
   recordRequirementGitHubSync,
   syncRequirementBaseline,
 } from "../core/engine.ts";
 import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "../core/errors.ts";
 import { atomicWriteBuffer, atomicWriteFile, canonicalRoot, readBoundedText, resolveSafePath, withFileLockSync } from "../core/fs.ts";
-import { fetchAndFastForwardBranch, observeGitSnapshot } from "../core/git.ts";
+import {
+  captureWorkingTreeTreeOid,
+  fetchAndFastForwardBranch,
+  fetchRemoteBranch,
+  getGitRemoteUrl,
+  inspectMergeTreeConflict,
+  observeGitSnapshot,
+  resolveTargetMainRef,
+} from "../core/git.ts";
 import {
   buildGitHubReasonMessageDetails,
   buildRequirementIssueBody,
@@ -31,6 +40,7 @@ import {
 } from "../core/github.ts";
 import {
   getSandboxForRequirement,
+  listProjectSandboxes,
   readSandboxes,
   sandboxKey,
   withSandboxLockSync,
@@ -43,8 +53,14 @@ import {
   WORKBENCH_DIR,
   type AgentRunRecord,
   type AttachmentMeta,
+  type CascadeSyncItemResult,
   type CriterionInput,
+  type MergeOrderEntry,
+  type MergeOrderRecommendation,
   type RequirementDetail,
+  type SandboxDriftInfo,
+  type SandboxDriftStatus,
+  type SiblingConflictInfo,
 } from "../core/types.ts";
 import { assertRequirementId, sanitizeOutput } from "../core/validate.ts";
 import { isLocalNodeId, readHubConfig, registerHubProject, resolveHubDir } from "./registry.ts";
@@ -467,9 +483,19 @@ export function syncRequirementMirrorToSandbox(
   }
 }
 
+export type { SandboxDriftInfo } from "../core/types.ts";
+
+export interface CreateWorktreeOptions {
+  branchPrefix?: "rsi" | "feat";
+  branchName?: string;
+  stackedOnReqId?: string;
+  baseRef?: string;
+}
+
 export async function createOrReuseWorktree(
   wbRoot: string,
   reqId: string,
+  options: CreateWorktreeOptions = {},
 ): Promise<SandboxRecord> {
   assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
@@ -484,8 +510,35 @@ export async function createOrReuseWorktree(
     throw new WorkbenchError("execution_failed", "目标仓库尚未初始化 Git 提交，无法创建 Worktree 沙箱");
   }
 
-  const worktreePath = path.join(worktreesBaseDir(), reqId);
-  const branch = `rsi/${reqId}`;
+  let startPoint = options.baseRef?.trim() || "";
+  if (!startPoint && options.stackedOnReqId?.trim()) {
+    const parentSb = getSandboxForRequirement(base, options.stackedOnReqId.trim());
+    if (!parentSb) {
+      throw new WorkbenchError("not_found", `堆叠基准需求 ${options.stackedOnReqId} 尚未开启 Worktree 沙箱`);
+    }
+    startPoint = parentSb.branch;
+  }
+  if (!startPoint) {
+    const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
+    const configuredBase = projectMeta?.github?.defaultBaseBranch ?? projectMeta?.gitee?.defaultBaseBranch;
+    const targetMain = await resolveTargetMainRef(base, configuredBase);
+    startPoint = targetMain?.oid ?? "HEAD";
+  }
+
+  let baseHeadOid = snap.head;
+  try {
+    baseHeadOid = execFileSync("git", ["-C", base, "rev-parse", "--verify", `${startPoint}^{commit}`], {
+      encoding: "utf8",
+    }).trim();
+  } catch {
+    startPoint = "HEAD";
+  }
+
+  const projHash = createHash("sha256").update(base, "utf8").digest("hex").slice(0, 8);
+  const worktreePath = path.join(worktreesBaseDir(), projHash, reqId);
+  const branch =
+    options.branchName?.trim() ||
+    (options.branchPrefix === "feat" ? `feat/${reqId.toLowerCase()}` : `rsi/${reqId}`);
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true, mode: 0o700 });
   if (fs.existsSync(worktreePath)) {
     try {
@@ -495,7 +548,7 @@ export async function createOrReuseWorktree(
     }
   }
 
-  execFileSync("git", ["-C", base, "worktree", "add", "-B", branch, worktreePath, "HEAD"], {
+  execFileSync("git", ["-C", base, "worktree", "add", "-B", branch, worktreePath, startPoint], {
     stdio: "pipe",
   });
 
@@ -512,7 +565,7 @@ export async function createOrReuseWorktree(
     requirementId: reqId,
     worktreePath,
     branch,
-    baseHead: snap.head,
+    baseHead: baseHeadOid,
     createdAt: Date.now(),
   };
   withSandboxLockSync(() => {
@@ -527,7 +580,7 @@ function splitNullStrings(buf: Buffer): string[] {
   return buf.toString("utf8").split("\0").filter(Boolean);
 }
 
-function hasDirtyWorktreeExcludingNodeModules(wt: string): boolean {
+function listDirtyPathsExcludingNodeModules(wt: string): string[] {
   const raw = execFileSync("git", [
     "-C",
     wt,
@@ -541,19 +594,28 @@ function hasDirtyWorktreeExcludingNodeModules(wt: string): boolean {
     ":(exclude).omp/workbench",
   ]);
   const tokens = splitNullStrings(raw);
+  const paths: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const entry = tokens[i]!;
     const xy = entry.slice(0, 2);
     const filePath = entry.slice(3);
+    let origPath = "";
     if (xy[0] === "R" || xy[0] === "C") {
+      origPath = tokens[i + 1] ?? "";
       i += 1;
     }
-    if (!filePath || filePath === "node_modules" || filePath.startsWith("node_modules/")) {
-      continue;
+    if (filePath && filePath !== "node_modules" && !filePath.startsWith("node_modules/")) {
+      paths.push(filePath);
     }
-    return true;
+    if (origPath && origPath !== "node_modules" && !origPath.startsWith("node_modules/")) {
+      paths.push(origPath);
+    }
   }
-  return false;
+  return Array.from(new Set(paths));
+}
+
+function hasDirtyWorktreeExcludingNodeModules(wt: string): boolean {
+  return listDirtyPathsExcludingNodeModules(wt).length > 0;
 }
 
 function isGitAncestor(repoDir: string, ancestor: string, descendant: string): boolean {
@@ -641,10 +703,16 @@ export async function reconcileRsiSandboxBaseline(
   const wt = canonicalRoot(sandbox.worktreePath);
   if (hasInProgressMergeOrRebase(wt)) return null;
 
-  let mainHead = "";
+  const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
+  const configuredBase = projectMeta?.github?.defaultBaseBranch ?? projectMeta?.gitee?.defaultBaseBranch;
+  const targetMain = await resolveTargetMainRef(base, configuredBase);
+
+  let mainHead = targetMain?.oid ?? "";
   let wtHead = "";
   try {
-    mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    if (!mainHead) {
+      mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    }
     wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   } catch {
     return null;
@@ -696,30 +764,66 @@ export async function reconcileRsiSandboxBaseline(
   return detail;
 }
 
-export interface SandboxDriftInfo {
-  requirementId: string;
-  branch: string;
-  baseHead: string;
-  mainHead: string;
-  behindCount: number;
-  aheadCount: number;
-  mainDirty: boolean;
-  conflictFiles: string[];
-  canAutoSync: boolean;
+function listWorktreeTouchedFiles(wt: string, sinceRef: string): Set<string> {
+  return new Set<string>([
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", wt, "diff", "--name-only", "-z", "--no-renames", sinceRef,
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ),
+    ...splitNullStrings(
+      execFileSync("git", [
+        "-C", wt, "ls-files", "--others", "-z", "--exclude-standard",
+        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
+      ]),
+    ).filter((s) => s !== "node_modules" && !s.startsWith("node_modules/")),
+  ]);
 }
 
-/** Inspects whether an isolated RSI worktree has fallen behind main or has overlapping modified files. */
-export async function inspectRsiSandboxDrift(wbRoot: string, reqId: string): Promise<SandboxDriftInfo | null> {
+function readStashTip(wt: string): string {
+  try {
+    return execFileSync("git", ["-C", wt, "rev-parse", "--verify", "refs/stash"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Inspects whether an isolated worktree has fallen behind main, has hunk-level conflicts, or overlaps with sibling worktrees. */
+export async function inspectRsiSandboxDrift(
+  wbRoot: string,
+  reqId: string,
+  options: { includeSiblings?: boolean; fetchRemote?: boolean } = {},
+): Promise<SandboxDriftInfo | null> {
   assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
   const sandbox = getSandboxForRequirement(base, reqId);
   if (!sandbox || !fs.existsSync(sandbox.worktreePath)) return null;
   const wt = canonicalRoot(sandbox.worktreePath);
 
-  let mainHead = "";
+  const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
+  const configuredBase = projectMeta?.github?.defaultBaseBranch ?? projectMeta?.gitee?.defaultBaseBranch;
+
+  if (options.fetchRemote) {
+    const remoteUrl = await getGitRemoteUrl(base);
+    if (remoteUrl) {
+      const preTarget = await resolveTargetMainRef(base, configuredBase);
+      if (preTarget?.baseBranch) {
+        await fetchRemoteBranch(base, preTarget.baseBranch);
+      }
+    }
+  }
+
+  const targetMain = await resolveTargetMainRef(base, configuredBase);
+  let mainHead = targetMain?.oid ?? "";
   let wtHead = "";
   try {
-    mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    if (!mainHead) {
+      mainHead = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    }
     wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   } catch {
     return null;
@@ -747,62 +851,148 @@ export async function inspectRsiSandboxDrift(wbRoot: string, reqId: string): Pro
     aheadCount = 0;
   }
 
-  const wtFiles = new Set<string>([
-    ...splitNullStrings(
+  const wtFiles = listWorktreeTouchedFiles(wt, effectiveBase);
+  const mainFiles = new Set<string>(
+    splitNullStrings(
       execFileSync("git", [
-        "-C", wt, "diff", "--name-only", "-z", "--no-renames", effectiveBase,
+        "-C", base, "diff", "--name-only", "-z", "--no-renames", effectiveBase, mainHead,
         "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
       ]),
     ),
-    ...splitNullStrings(
-      execFileSync("git", [
-        "-C", wt, "ls-files", "--others", "-z", "--exclude-standard",
-        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
-      ]),
-    ).filter((s) => s !== "node_modules" && !s.startsWith("node_modules/")),
-  ]);
-
-  const mainFiles = new Set<string>([
-    ...splitNullStrings(
-      execFileSync("git", [
-        "-C", base, "diff", "--name-only", "-z", "--no-renames", effectiveBase,
-        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
-      ]),
-    ),
-    ...splitNullStrings(
-      execFileSync("git", [
-        "-C", base, "ls-files", "--others", "-z", "--exclude-standard",
-        "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench",
-      ]),
-    ),
-  ]);
+  );
 
   const mainDirty =
     execFileSync("git", ["-C", base, "status", "--porcelain", "--", ".", ":(exclude).workbench", ":(exclude).omp/workbench"], {
       encoding: "utf8",
     }).trim().length > 0;
 
-  const conflictFiles = Array.from(wtFiles).filter((f) => mainFiles.has(f)).sort();
+  const overlapFiles = Array.from(wtFiles).filter((f) => mainFiles.has(f)).sort();
+  let driftStatus: SandboxDriftStatus = "up_to_date";
+  let conflictFiles: string[] = [];
+  let cachedWtTree: string | null = null;
+
+  const getWtTree = async () => {
+    if (!cachedWtTree) {
+      cachedWtTree = await captureWorkingTreeTreeOid(wt, wtHead);
+    }
+    return cachedWtTree;
+  };
+
+  if (behindCount === 0) {
+    driftStatus = "up_to_date";
+    conflictFiles = [];
+  } else if (overlapFiles.length === 0) {
+    driftStatus = "clean_behind";
+    conflictFiles = [];
+  } else {
+    const wtTree = await getWtTree();
+    const mt = await inspectMergeTreeConflict(base, {
+      baseRef: effectiveBase,
+      leftRef: mainHead,
+      rightRef: wtTree,
+    });
+    if (!mt.unavailable) {
+      if (mt.clean) {
+        driftStatus = "auto_mergeable";
+        conflictFiles = [];
+      } else {
+        driftStatus = "true_conflict";
+        conflictFiles = mt.conflictFiles.length > 0 ? mt.conflictFiles : overlapFiles;
+      }
+    } else {
+      driftStatus = "true_conflict";
+      conflictFiles = overlapFiles;
+    }
+  }
+
+  let siblingConflicts: SiblingConflictInfo[] | undefined;
+  if (options.includeSiblings !== false) {
+    const siblings = listProjectSandboxes(base).filter((sb) => sb.requirementId !== reqId);
+    if (siblings.length > 0) {
+      const detected: SiblingConflictInfo[] = [];
+      for (const sib of siblings) {
+        try {
+          const sibDetail = getRequirement(base, sib.requirementId);
+          if (sibDetail.state.stage === "cancelled") continue;
+          if (sibDetail.state.stage === "done" && sibDetail.state.github?.pr?.state === "merged") continue;
+          const sibWt = canonicalRoot(sib.worktreePath);
+          const sibHead = execFileSync("git", ["-C", sibWt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+          const sibBase = resolveEffectiveSandboxBaseRef(base, sibWt, sib, mainHead) || sibHead;
+          const sibFiles = listWorktreeTouchedFiles(sibWt, sibBase);
+          const sibOverlap = Array.from(wtFiles).filter((f) => sibFiles.has(f)).sort();
+          if (sibOverlap.length === 0) continue;
+
+          let commonBase = effectiveBase;
+          try {
+            const mb = execFileSync("git", ["-C", base, "merge-base", wtHead, sibHead], {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+            }).trim();
+            if (/^[0-9a-f]{7,64}$/i.test(mb)) commonBase = mb;
+          } catch {
+            // Fallback to effectiveBase.
+          }
+          const wtTree = await getWtTree();
+          const sibTree = await captureWorkingTreeTreeOid(sibWt, sibHead);
+          const sibMt = await inspectMergeTreeConflict(base, {
+            baseRef: commonBase,
+            leftRef: wtTree,
+            rightRef: sibTree,
+          });
+          const sibConflicts = sibMt.unavailable
+            ? sibOverlap
+            : sibMt.clean
+              ? []
+              : sibMt.conflictFiles.length > 0
+                ? sibMt.conflictFiles
+                : sibOverlap;
+          detected.push({
+            requirementId: sib.requirementId,
+            title: sibDetail.state.title,
+            branch: sib.branch,
+            stage: sibDetail.state.stage,
+            conflictFiles: sibConflicts,
+            overlapFiles: sibOverlap,
+            autoMergeable: !sibMt.unavailable && sibMt.clean,
+          });
+        } catch {
+          // Skip inaccessible sibling sandbox.
+        }
+      }
+      if (detected.length > 0) {
+        siblingConflicts = detected;
+      }
+    }
+  }
+
   return {
     requirementId: reqId,
     branch: sandbox.branch,
+    baseBranch: targetMain?.baseBranch ?? configuredBase ?? "main",
     baseHead: effectiveBase,
     mainHead,
+    targetRef: targetMain?.refName,
+    remoteAheadCount: targetMain?.remoteAheadCount ?? 0,
     behindCount,
     aheadCount,
     mainDirty,
+    driftStatus,
+    overlapFiles,
     conflictFiles,
     canAutoSync: behindCount > 0 && conflictFiles.length === 0,
+    ...(siblingConflicts ? { siblingConflicts } : {}),
   };
 }
 
 /**
- * Safely fast-forwards/merges an isolated RSI sandbox worktree to current main HEAD
- * when there are no overlapping file conflicts, preserving all uncommitted WIP edits.
+ * Safely fast-forwards/merges an isolated worktree to the latest main target
+ * when there are no hunk-level conflicts (clean_behind or auto_mergeable),
+ * preserving uncommitted WIP edits via 2-way read-tree or temporary stash/pop.
  */
 export async function syncRsiSandboxBase(
   wbRoot: string,
   reqId: string,
+  options: { fetchRemote?: boolean } = {},
 ): Promise<{
   synced: boolean;
   upToDate: boolean;
@@ -817,7 +1007,10 @@ export async function syncRsiSandboxBase(
     throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
   }
   const wt = canonicalRoot(sandbox.worktreePath);
-  const drift = await inspectRsiSandboxDrift(base, reqId);
+  const drift = await inspectRsiSandboxDrift(base, reqId, {
+    includeSiblings: false,
+    fetchRemote: options.fetchRemote !== false,
+  });
   if (!drift) {
     throw new WorkbenchError("execution_failed", "无法检查沙箱基线状态");
   }
@@ -826,57 +1019,320 @@ export async function syncRsiSandboxBase(
     const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
     return { synced: true, upToDate: true, conflictFiles: [], drift, detail };
   }
-  if (drift.conflictFiles.length > 0) {
+  if (drift.conflictFiles.length > 0 || !drift.canAutoSync) {
     const wtSnap = await observeGitSnapshot(wt);
     const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
     return { synced: false, upToDate: false, conflictFiles: drift.conflictFiles, drift, detail };
   }
 
   const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  if (drift.aheadCount === 0) {
-    // Two-way read-tree merge preserves all uncommitted WIP edits & untracked files while updating base files.
+  const dirtyPaths = listDirtyPathsExcludingNodeModules(wt);
+  const wtDirty = dirtyPaths.length > 0;
+
+  if (drift.aheadCount === 0 && drift.overlapFiles.length === 0) {
+    // Two-way read-tree merge preserves all uncommitted WIP edits & untracked files while updating untouched base files.
     execFileSync("git", ["-C", wt, "read-tree", "-m", "-u", wtHead, drift.mainHead], { stdio: "pipe" });
     execFileSync("git", ["-C", wt, "reset", "--soft", drift.mainHead], { stdio: "pipe" });
   } else {
-    const wtDirty = hasDirtyWorktreeExcludingNodeModules(wt);
+    let createdStash = false;
     if (wtDirty) {
-      throw new WorkbenchError(
-        "revision_conflict",
-        "沙箱分支已有独立提交且存在未提交改动，请先提交或使用 Agent 协助合并主干",
+      const beforeStash = readStashTip(wt);
+      execFileSync(
+        "git",
+        ["-C", wt, "stash", "push", "-u", "-m", `wb-sync-wip-${reqId}`, "--", ...dirtyPaths],
+        { stdio: "pipe" },
       );
+      const afterStash = readStashTip(wt);
+      createdStash = Boolean(afterStash && afterStash !== beforeStash);
     }
+
     try {
-      execFileSync("git", ["-C", wt, "merge", "--no-edit", drift.mainHead], { stdio: "pipe" });
+      if (drift.aheadCount === 0) {
+        execFileSync("git", ["-C", wt, "merge", "--ff-only", drift.mainHead], { stdio: "pipe" });
+      } else {
+        execFileSync("git", ["-C", wt, "merge", "--no-edit", drift.mainHead], { stdio: "pipe" });
+      }
     } catch {
       try {
         execFileSync("git", ["-C", wt, "merge", "--abort"], { stdio: "ignore" });
       } catch {
         // Ignore abort cleanup error.
       }
+      if (createdStash) {
+        try {
+          execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "ignore" });
+        } catch {
+          // Leave stash intact if pop fails.
+        }
+      }
       throw new WorkbenchError("revision_conflict", "合并主干时产生 Git 冲突，请派发 Agent 处理冲突");
     }
+
+    if (createdStash) {
+      try {
+        execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "pipe" });
+      } catch {
+        throw new WorkbenchError("revision_conflict", "主干已合并，但恢复工作区暂存改动时发生冲突，请派发 Agent 处理冲突");
+      }
+    }
   }
+
+  const preDetail = getRequirement(base, reqId);
+  const isDone = preDetail.state.stage === "done";
+  const snapAfter = await observeGitSnapshot(wt);
 
   withSandboxLockSync(() => {
     const all = readSandboxes();
     const key = sandboxKey(base, reqId);
     if (all[key]) {
-      all[key] = { ...all[key]!, baseHead: drift.mainHead };
+      all[key] = {
+        ...all[key]!,
+        baseHead: drift.mainHead,
+        ...(isDone && snapAfter?.fingerprint
+          ? { lastCleanSyncFingerprint: snapAfter.fingerprint }
+          : { lastCleanSyncFingerprint: undefined }),
+      };
       writeSandboxes(all);
     }
   });
 
-  const snapAfter = await observeGitSnapshot(wt);
+  const autoMergeHint = drift.driftStatus === "auto_mergeable" ? "（含同文件自动三路合并）" : "";
   const detail = await syncRequirementBaseline(base, reqId, {
     baselineHead: drift.mainHead,
     baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
     dirty: snapAfter?.dirty ?? false,
-    summary: `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并，请复跑验证）`,
+    preserveStage: isDone || preDetail.state.stage !== "awaiting_acceptance",
+    eventKind: "sandbox_synced",
+    summary: isDone
+      ? `已完成需求在无冲突状态下同步主干至 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，可直接交付 PR）`
+      : `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，请复跑验证）`,
     currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
   });
   syncRequirementMirrorToSandbox(base, reqId, wt);
-  const nextDrift = (await inspectRsiSandboxDrift(base, reqId)) ?? { ...drift, behindCount: 0, baseHead: drift.mainHead, canAutoSync: false };
+  const nextDrift =
+    (await inspectRsiSandboxDrift(base, reqId, { includeSiblings: true, fetchRemote: false })) ?? {
+      ...drift,
+      behindCount: 0,
+      baseHead: drift.mainHead,
+      driftStatus: "up_to_date" as const,
+      overlapFiles: [],
+      conflictFiles: [],
+      canAutoSync: false,
+    };
   return { synced: true, upToDate: false, conflictFiles: [], drift: nextDrift, detail };
+}
+
+/**
+ * Computes an optimal merge order across active sandboxes in a project using pairwise `git merge-tree`
+ * so parallel PRs minimize cascading merge conflicts.
+ */
+export async function recommendSandboxMergeOrder(
+  wbRoot: string,
+  options: { fetchRemote?: boolean } = {},
+): Promise<MergeOrderRecommendation> {
+  const base = canonicalRoot(wbRoot);
+  const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
+  const configuredBase = projectMeta?.github?.defaultBaseBranch ?? projectMeta?.gitee?.defaultBaseBranch;
+  if (options.fetchRemote) {
+    const remoteUrl = await getGitRemoteUrl(base);
+    if (remoteUrl) {
+      const pre = await resolveTargetMainRef(base, configuredBase);
+      if (pre?.baseBranch) await fetchRemoteBranch(base, pre.baseBranch);
+    }
+  }
+  const targetMain = await resolveTargetMainRef(base, configuredBase);
+  const mainHead = targetMain?.oid ?? "";
+  const baseBranch = targetMain?.baseBranch ?? configuredBase ?? "main";
+
+  const sandboxes = listProjectSandboxes(base);
+  interface Candidate {
+    sb: SandboxRecord;
+    detail: RequirementDetail;
+    drift: SandboxDriftInfo;
+    wtFiles: Set<string>;
+    wtTree: string;
+    wtHead: string;
+  }
+  const candidates: Candidate[] = [];
+  for (const sb of sandboxes) {
+    try {
+      const detail = getRequirement(base, sb.requirementId);
+      if (detail.state.stage === "cancelled") continue;
+      if (detail.state.stage === "done" && detail.state.github?.pr?.state === "merged") continue;
+      const drift = await inspectRsiSandboxDrift(base, sb.requirementId, { includeSiblings: false, fetchRemote: false });
+      if (!drift) continue;
+      const wt = canonicalRoot(sb.worktreePath);
+      const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const wtFiles = listWorktreeTouchedFiles(wt, drift.baseHead);
+      const wtTree = await captureWorkingTreeTreeOid(wt, wtHead);
+      candidates.push({ sb, detail, drift, wtFiles, wtTree, wtHead });
+    } catch {
+      // Ignore stale or unreadable sandbox entries.
+    }
+  }
+
+  const pairConflicts = new Map<string, Set<string>>();
+  const pairAutoMerge = new Map<string, Set<string>>();
+  for (const c of candidates) {
+    pairConflicts.set(c.sb.requirementId, new Set());
+    pairAutoMerge.set(c.sb.requirementId, new Set());
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const a = candidates[i]!;
+      const b = candidates[j]!;
+      const overlap = Array.from(a.wtFiles).filter((f) => b.wtFiles.has(f));
+      if (overlap.length === 0) continue;
+      let commonBase = a.drift.baseHead;
+      try {
+        const mb = execFileSync("git", ["-C", base, "merge-base", a.wtHead, b.wtHead], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        if (/^[0-9a-f]{7,64}$/i.test(mb)) commonBase = mb;
+      } catch {
+        // Use baseHead fallback.
+      }
+      const mt = await inspectMergeTreeConflict(base, {
+        baseRef: commonBase,
+        leftRef: a.wtTree,
+        rightRef: b.wtTree,
+      });
+      if (!mt.unavailable && mt.clean) {
+        pairAutoMerge.get(a.sb.requirementId)!.add(b.sb.requirementId);
+        pairAutoMerge.get(b.sb.requirementId)!.add(a.sb.requirementId);
+      } else {
+        pairConflicts.get(a.sb.requirementId)!.add(b.sb.requirementId);
+        pairConflicts.get(b.sb.requirementId)!.add(a.sb.requirementId);
+      }
+    }
+  }
+
+  const stageRank = (s: string) =>
+    s === "done" ? 0 : s === "awaiting_acceptance" ? 1 : s === "implementing" ? 2 : 3;
+
+  const entries: MergeOrderEntry[] = candidates.map((c) => {
+    const conflictsWith = Array.from(pairConflicts.get(c.sb.requirementId) ?? []).sort();
+    const autoWith = Array.from(pairAutoMerge.get(c.sb.requirementId) ?? []).sort();
+    const reason: MergeOrderEntry["reason"] =
+      c.drift.conflictFiles.length > 0
+        ? "main_conflict"
+        : conflictsWith.length > 0
+          ? "sibling_conflict"
+          : c.drift.driftStatus === "auto_mergeable" || autoWith.length > 0
+            ? "auto_mergeable"
+            : "clean_leaf";
+    return {
+      requirementId: c.sb.requirementId,
+      title: c.detail.state.title,
+      stage: c.detail.state.stage,
+      branch: c.sb.branch,
+      aheadCount: c.drift.aheadCount,
+      behindCount: c.drift.behindCount,
+      driftStatus: c.drift.driftStatus,
+      conflictFiles: c.drift.conflictFiles,
+      overlapFiles: c.drift.overlapFiles,
+      touchedFilesCount: c.wtFiles.size,
+      conflictsWithSiblings: conflictsWith,
+      autoMergeableSiblings: autoWith,
+      pr: c.detail.state.github?.pr ?? null,
+      reason,
+    };
+  });
+
+  entries.sort((a, b) => {
+    const aHasMainConflict = a.conflictFiles.length > 0 ? 1 : 0;
+    const bHasMainConflict = b.conflictFiles.length > 0 ? 1 : 0;
+    if (aHasMainConflict !== bHasMainConflict) return aHasMainConflict - bHasMainConflict;
+    const stageDiff = stageRank(a.stage) - stageRank(b.stage);
+    if (stageDiff !== 0) return stageDiff;
+    if (a.conflictsWithSiblings.length !== b.conflictsWithSiblings.length) {
+      return a.conflictsWithSiblings.length - b.conflictsWithSiblings.length;
+    }
+    if (a.touchedFilesCount !== b.touchedFilesCount) {
+      return a.touchedFilesCount - b.touchedFilesCount;
+    }
+    return a.requirementId.localeCompare(b.requirementId);
+  });
+
+  return {
+    generatedAt: Date.now(),
+    baseBranch,
+    mainHead,
+    ordered: entries,
+  };
+}
+
+/**
+ * Automatically cascade-syncs remaining non-conflicting sandboxes after one sandbox is merged/applied to main.
+ * Conflicting sandboxes are reported in the returned results without mutating their working trees.
+ */
+export async function cascadeSyncProjectSandboxes(
+  wbRoot: string,
+  mergedReqId?: string,
+): Promise<CascadeSyncItemResult[]> {
+  const base = canonicalRoot(wbRoot);
+  const siblings = listProjectSandboxes(base).filter((sb) => sb.requirementId !== mergedReqId);
+  const results: CascadeSyncItemResult[] = [];
+  for (const sb of siblings) {
+    try {
+      const detail = getRequirement(base, sb.requirementId);
+      if (detail.state.stage === "cancelled") continue;
+      if (detail.state.stage === "done" && detail.state.github?.pr?.state === "merged") continue;
+      const drift = await inspectRsiSandboxDrift(base, sb.requirementId, { includeSiblings: false, fetchRemote: false });
+      if (!drift) continue;
+      if (drift.behindCount === 0) {
+        results.push({ requirementId: sb.requirementId, status: "up_to_date", behindCount: 0, driftStatus: drift.driftStatus });
+        continue;
+      }
+      if (!drift.canAutoSync) {
+        results.push({
+          requirementId: sb.requirementId,
+          status: "conflict",
+          behindCount: drift.behindCount,
+          driftStatus: drift.driftStatus,
+          conflictFiles: drift.conflictFiles,
+        });
+        continue;
+      }
+      const synced = await syncRsiSandboxBase(base, sb.requirementId, { fetchRemote: false });
+      results.push({
+        requirementId: sb.requirementId,
+        status: synced.synced ? "synced" : "conflict",
+        behindCount: drift.behindCount,
+        driftStatus: drift.driftStatus,
+        ...(synced.conflictFiles.length > 0 ? { conflictFiles: synced.conflictFiles } : {}),
+      });
+    } catch (err) {
+      results.push({
+        requirementId: sb.requirementId,
+        status: "error",
+        behindCount: 0,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return results;
+}
+
+/** Transitions a requirement (`done` / `awaiting_acceptance`) into `implementing` for Agent conflict resolution without losing approval. */
+export async function prepareSandboxConflictResolution(
+  wbRoot: string,
+  reqId: string,
+): Promise<RequirementDetail> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  const codeRoot = sandbox ? sandbox.worktreePath : base;
+  const snap = await observeGitSnapshot(codeRoot);
+  const detail = await prepareRequirementForConflictSync(base, reqId, {
+    currentCodeSnapshotHash: snap?.fingerprint ?? null,
+  });
+  if (sandbox) {
+    syncRequirementMirrorToSandbox(base, reqId, sandbox.worktreePath);
+  }
+  return detail;
 }
 
 export async function applySandboxToMain(
@@ -887,6 +1343,7 @@ export async function applySandboxToMain(
   deletedFiles: string[];
   touchesWeb: boolean;
   touchesBackend: boolean;
+  cascadeResults: CascadeSyncItemResult[];
 }> {
   assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
@@ -904,7 +1361,11 @@ export async function applySandboxToMain(
       `需求 ${reqId} 尚未完成人工最终验收（当前阶段：${detail.state.stage}），禁止应用沙箱改动`,
     );
   }
-  if (!wtSnap || detail.state.acceptance.codeSnapshotHash !== wtSnap.fingerprint) {
+  const matchesAcceptance = detail.state.acceptance.codeSnapshotHash === wtSnap?.fingerprint;
+  const matchesCleanSync = Boolean(
+    sandbox.lastCleanSyncFingerprint && sandbox.lastCleanSyncFingerprint === wtSnap?.fingerprint,
+  );
+  if (!wtSnap || (!matchesAcceptance && !matchesCleanSync)) {
     throw new WorkbenchError(
       "acceptance_gate_failed",
       `需求 ${reqId} 的沙箱代码在验收后发生了变更，请重新打开需求验证并验收后再应用`,
@@ -1009,13 +1470,14 @@ export async function applySandboxToMain(
   }
 
   cleanupSandboxWorktree(base, reqId, sandbox);
+  const cascadeResults = await cascadeSyncProjectSandboxes(base, reqId);
 
   const allTouched = [...appliedFiles, ...deleted];
   const touchesWeb = allTouched.some((f) => f.startsWith("src/web/"));
   const touchesBackend = allTouched.some(
     (f) => f.startsWith("src/server/") || f.startsWith("src/hub/") || f.startsWith("src/core/"),
   );
-  return { appliedFiles, deletedFiles: deleted, touchesWeb, touchesBackend };
+  return { appliedFiles, deletedFiles: deleted, touchesWeb, touchesBackend, cascadeResults };
 }
 
 function cleanupSandboxWorktree(base: string, reqId: string, sandbox: SandboxRecord): void {
@@ -1057,6 +1519,7 @@ export async function syncRsiSandboxPrAndCleanup(
   mainSyncReasonRef?: StructuredMessageRef | null;
   touchesWeb: boolean;
   touchesBackend: boolean;
+  cascadeResults?: CascadeSyncItemResult[];
 }> {
   assertRequirementId(reqId);
   const base = canonicalRoot(wbRoot);
@@ -1087,6 +1550,13 @@ export async function syncRsiSandboxPrAndCleanup(
   if (shouldCleanup && sandbox) {
     cleanupSandboxWorktree(base, reqId, sandbox);
     cleanedSandbox = true;
+  }
+
+  let cascadeResults: CascadeSyncItemResult[] | undefined;
+  if (isMerged) {
+    // Ensure origin/<baseBranch> ref is fresh for remaining sandboxes even if main worktree is dirty or on another branch.
+    await fetchRemoteBranch(base, latestPr.baseBranch || "main", "origin");
+    cascadeResults = await cascadeSyncProjectSandboxes(base, reqId);
   }
 
   const snapAfter = await observeGitSnapshot(cleanedSandbox ? base : (sandbox?.worktreePath ?? base));
@@ -1124,6 +1594,7 @@ export async function syncRsiSandboxPrAndCleanup(
     ...(mainSyncReasonRef ? { mainSyncReasonRef } : {}),
     touchesWeb,
     touchesBackend,
+    ...(cascadeResults ? { cascadeResults } : {}),
   };
 }
 

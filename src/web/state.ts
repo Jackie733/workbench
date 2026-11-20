@@ -13,6 +13,7 @@ import type {
   ReviewVerdict,
   Stage,
   TaskStatus,
+  Track,
   ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
@@ -63,6 +64,8 @@ export type ModalState =
       giteeSearch?: string;
       selectedGiteeIssue?: GiteeIssueListItem | null;
       createGitHubIssue?: boolean;
+      createSandbox?: boolean;
+      stackedOnReqId?: string;
       attachments?: AttachmentMeta[];
     }
   | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
@@ -73,7 +76,7 @@ export type ModalState =
       reason: string;
       acceptedRisks: string[];
     }
-  | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string }
+  | { kind: "lifecycle"; action: "block" | "cancel" | "reopen"; reason: string; preserveApproval?: boolean }
   | {
       kind: "prompt_fallback";
       titleKey: MessageKey;
@@ -107,6 +110,15 @@ export type ModalState =
       giteeRepoDraft?: string;
       giteeEnterpriseDraft?: string;
       giteeBaseBranchDraft?: string;
+      fastCmdDraft?: string;
+      fullCmdDraft?: string;
+      autoScreenshotsDraft?: boolean;
+    }
+  | {
+      kind: "spawn_children";
+      parentId: string;
+      items: Array<{ title: string; goal: string }>;
+      track: Track;
     }
   | { kind: "annotate_anchor"; anchor: string; message: string; mode: "ask" | "refine" }
   | { kind: "handoff_preview"; markdown: string }
@@ -131,6 +143,7 @@ export type ModalState =
       branchName?: string;
       baseBranch?: string;
       prTitle?: string;
+      forceWithLease?: boolean;
     }
   | {
       kind: "link_issue";

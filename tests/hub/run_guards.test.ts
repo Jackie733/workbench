@@ -3,15 +3,28 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { approveDesign, createRequirement, getRequirement, initProject, propose, updateTasks } from "../../src/core/engine.ts";
+import {
+  addDiscussion,
+  approveDesign,
+  authorizeFastTrack,
+  createRequirement,
+  getRequirement,
+  initProject,
+  propose,
+  spawnSubRequirements,
+  updateProjectConfig,
+  updateTasks,
+} from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
+import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
   isModelCoolingDown,
   readModelTelemetry,
 } from "../../src/hub/telemetry.ts";
 import { buildExecutionPrompt, buildHarnessCommand, HubExecutor } from "../../src/hub/executor.ts";
 import { buildPresetRouting, detectModelUnavailableError } from "../../src/hub/routing.ts";
+import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import type { HarnessInfo } from "../../src/hub/types.ts";
 
 const tempDirs: string[] = [];
@@ -374,4 +387,243 @@ describe("execution guards", () => {
     expect(reviewPrompt).toContain("禁止在后台运行命令");
     expect(reviewPrompt).toContain("优先复用匹配证据");
   });
+
+  test("M1 session affinity: review session is never resumed by fix, while implement -> fix reuses same harness/session", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("affinity");
+    await initProject(repo, { name: "AffinityRepo", privacyMode: "local" });
+    await createRequirement(repo, { goal: "保持读写会话隔离并复用编码会话" });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# Design\n\nWrite code.",
+      criteria: [{ id: "AC-1", description: "passes", command: "echo ok", required: true }],
+      actor: "agent",
+    });
+    await approveDesign(repo, "REQ-001");
+
+    const routing = buildPresetRouting("balanced");
+    routing.autoReview = false;
+    routing.stages.implement = {
+      primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
+      fallbacks: [],
+    };
+    routing.stages.fix = {
+      primary: { harness: "codex", model: "gpt-6.2-sol" },
+      fallbacks: [],
+    };
+    routing.stages.review = {
+      primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
+      fallbacks: [],
+    };
+
+    const calls: Array<{
+      action: string;
+      harness: string;
+      model: string;
+      nativeSessionId: string | undefined;
+      prompt: string;
+    }> = [];
+    let executor!: HubExecutor;
+    const waitUntilCount = (n: number) =>
+      new Promise<void>((resolve) => {
+        const check = () => {
+          const runs = getRequirement(repo, "REQ-001").state.agentRuns ?? [];
+          if (runs.length >= n && runs.every((r) => r.status !== "running")) {
+            unsub();
+            resolve();
+          }
+        };
+        const unsub = executor.subscribe((ev) => {
+          if (ev.type === "agent.run.finished") check();
+        });
+        check();
+      });
+
+    executor = new HubExecutor({
+      initialHarnesses: [harness("qodercn", "qodercn"), harness("codex", "codex")],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: (target, ctx) => {
+        calls.push({
+          action: ctx.action,
+          harness: target.harness,
+          model: target.model,
+          nativeSessionId: ctx.nativeSessionId,
+          prompt: ctx.prompt,
+        });
+        if (ctx.action === "review") {
+          const reviewPayload = JSON.stringify({
+            verdict: "concern",
+            summary: "存在判空隐患",
+            findings: [
+              {
+                id: "F-1",
+                severity: "high",
+                title: "缺少判空",
+                files: ["src/app.ts"],
+                detail: "param may be undefined",
+                suggestion: "guard null before deref",
+              },
+            ],
+          });
+          return {
+            command: "bash",
+            args: [
+              "-c",
+              `printf 'session_id: sess-rev-222\\n\`\`\`json\\n%s\\n\`\`\`\\n' '${reviewPayload}'`,
+            ],
+            displayCommand: "mock-review",
+          };
+        }
+        const sid = ctx.action === "implement" ? "sess-impl-111" : "sess-fix-333";
+        return {
+          command: "bash",
+          args: ["-c", `printf 'session_id: %s\\nok\\n' '${sid}'`],
+          displayCommand: `mock-${ctx.action}`,
+        };
+      },
+    });
+
+    const w1 = waitUntilCount(1);
+    await executor.startRun({ root: repo, requirementId: "REQ-001", action: "implement" });
+    await w1;
+
+    // A read-only review runs on qodercn and emits sess-rev-222 + structured findings.
+    const w2 = waitUntilCount(2);
+    await executor.startRun({ root: repo, requirementId: "REQ-001", action: "review" });
+    await w2;
+
+    // Next fix must reuse qodercn (implement affinity), MUST NOT resume sess-rev-222,
+    // and compact resume context must include finding file:line, detail, and suggestion.
+    const w3 = waitUntilCount(3);
+    await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "fix",
+      mode: "refine",
+      message: "微调报错提示",
+    });
+    await w3;
+
+    expect(calls[0]!.harness).toBe("qodercn");
+    expect(calls[2]!.harness).toBe("qodercn");
+    expect(calls[2]!.nativeSessionId).not.toBe("sess-rev-222");
+    expect(calls[2]!.nativeSessionId).toBe("sess-impl-111");
+    expect(calls[2]!.prompt).toContain("src/app.ts");
+    expect(calls[2]!.prompt).toContain("param may be undefined");
+    expect(calls[2]!.prompt).toContain("guard null before deref");
+  }, { timeout: 15000 });
+
+  test("M1/M2/M3 handoff & prompt inject repo context/Q&A, strip Bun-specific boilerplate for Rust repos, and gate screenshots", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("rust-context");
+    fs.writeFileSync(path.join(repo, "AGENTS.md"), "# Workspace Rules\n\n## Core Invariants\nStrict typing.");
+    fs.writeFileSync(path.join(repo, "Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n");
+    fs.mkdirSync(path.join(repo, "src", "web"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "src", "web", "app.tsx"), "export const ui = 1;\n");
+
+    await initProject(repo, { name: "RustDemo", privacyMode: "local" });
+    await createRequirement(repo, { goal: "父架构设计" });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# Parent Architecture\n\n## Tasks\n- 拆分子模块 Rust Parser",
+      criteria: [{ id: "AC-1", description: "cargo check", command: "cargo check", required: true }],
+      actor: "agent",
+    });
+    const spawned = await spawnSubRequirements(repo, "REQ-001");
+    const childId = spawned.created[0]!.state.id;
+
+    await addDiscussion(repo, childId, {
+      actor: "human",
+      mode: "ask",
+      message: "为什么用 nom 而不是 regex？",
+    });
+    await addDiscussion(repo, childId, {
+      actor: "agent",
+      mode: "ask",
+      message: "nom 支持流式零拷贝解析。",
+    });
+    await updateProjectConfig(repo, { verification: { fastCommand: "echo cargo-ok", autoScreenshots: undefined } });
+    await authorizeFastTrack(repo, childId);
+
+    const { markdown, detail } = await synthesizeHandoffPacket(repo, childId, { action: "implement" });
+    expect(markdown).toContain("REQ-001");
+    expect(markdown).toContain("AGENTS.md");
+    expect(markdown).toContain("echo cargo-ok");
+    expect(markdown).toContain("为什么用 nom 而不是 regex");
+
+    // Non-Bun repos must not receive hardcoded bun test / tsc / EROFS boilerplate; fast_track skips checklist bloat.
+    const implPrompt = buildExecutionPrompt(detail, markdown, {
+      root: repo,
+      requirementId: childId,
+      action: "implement",
+    });
+    expect(implPrompt).not.toContain("EROFS");
+    expect(implPrompt).not.toContain("bun run typecheck");
+    expect(implPrompt).not.toContain("wb_update_tasks` 记录实施清单");
+
+    // Modified src/web file must NOT trigger auto screenshots when uiRelated !== true and autoScreenshots is unset.
+    await runVerification(repo, childId, { command: "echo cargo-ok", criterionIds: ["AC-1"] });
+    const toolRes = (await executeWorkbenchTool(repo, "wb_update_tasks", {
+      id: childId,
+      tasks: [{ title: "finish parser", status: "done" }],
+      readyForAcceptance: true,
+    })) as { screenshotCapture?: unknown };
+    expect(toolRes.screenshotCapture).toBeUndefined();
+  });
+
+  test("M2 skips automatic autoReview on fast_track implement runs", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("fast-no-autorev");
+    await initProject(repo, { name: "FastTrackAutoRev", privacyMode: "local" });
+    await createRequirement(repo, { goal: "快速修复文案" });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# Fast Plan",
+      criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
+      actor: "agent",
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const routing = buildPresetRouting("balanced");
+    routing.autoReview = true;
+    routing.stages.implement = {
+      primary: { harness: "codex", model: "gpt-6.2-sol" },
+      fallbacks: [],
+    };
+    routing.stages.review = {
+      primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
+      fallbacks: [],
+    };
+
+    const ranActions: string[] = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [harness("codex", "codex"), harness("qodercn", "qodercn")],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: (_target, ctx) => {
+        ranActions.push(ctx.action);
+        return { command: "bash", args: ["-c", "echo done"], displayCommand: `mock-${ctx.action}` };
+      },
+    });
+
+    const snap = (await observeGitSnapshot(repo))!;
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "quick change", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap.fingerprint,
+    });
+
+    let finishedRunId = "";
+    const done = new Promise<void>((resolve) => {
+      const unsub = executor.subscribe((ev) => {
+        if (ev.type === "agent.run.finished" && ev.runId === finishedRunId) {
+          unsub();
+          resolve();
+        }
+      });
+    });
+    const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "implement" });
+    finishedRunId = started.run.id;
+    await done;
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(ranActions).toEqual(["implement"]);
+  }, { timeout: 15000 });
 });

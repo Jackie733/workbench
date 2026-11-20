@@ -291,7 +291,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     }
   }, 30_000);
 
-  test("drawer model selector applies to runRefineFromDrawer and done requirements hide stale sandbox drift callout", async () => {
+  test("drawer model selector applies to runRefineFromDrawer and unmerged done requirements surface actionable sandbox drift", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "DrawerAndDrift", privacyMode: "local" });
@@ -369,7 +369,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
 
-      // 1. Switch scope to "all" so done REQ-001 appears, open it, and verify sandbox-drift-callout is NOT shown despite behind/conflict files
+      // 1. Switch scope to "all" so done REQ-001 appears, open it, and verify unmerged done sandbox still shows drift callout & resolve button
       await clickReady(page, '[data-action="set-scope"][data-value="all"]');
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForSelector('[data-testid="action-banner"]', { timeout: 5000 });
@@ -378,7 +378,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         { timeout: 5000 },
       );
       const hasDriftCallout = await page.evaluate(() => Boolean(document.querySelector('[data-testid="sandbox-drift-callout"]')));
-      expect(hasDriftCallout).toBe(false);
+      const hasResolveBtn = await page.evaluate(() => Boolean(document.querySelector('[data-testid="agent-sync-sandbox-btn"]')));
+      expect(hasDriftCallout).toBe(true);
+      expect(hasResolveBtn).toBe(true);
 
       // 2. Navigate back to home, open REQ-002, open RightDrawer, switch drawer-runner-select -> run-refine-btn
       await clickReady(page, '[data-testid="back-home-btn"]');
@@ -414,6 +416,98 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       }
 
       expect(dispatched).toEqual([{ action: "design", harness: "qodercn", model: "DeepSeek-Flash" }]);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("stage-aware RightDrawer routes refine to fix in implementing stage and disables refine in done stage", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "StageDrawer", privacyMode: "local" });
+    registerHubProject(repo);
+
+    await createRequirement(repo, {
+      goal: "Done req readonly drawer check",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nDone.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap.fingerprint,
+    });
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap.fingerprint });
+
+    await createRequirement(repo, {
+      goal: "Implementing req dispatches fix from drawer",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-002", { designMarkdown: "# Design\nReady.", actor: "agent" });
+    await approveDesign(repo, "REQ-002");
+
+    const dispatched: Array<{ action: string; harness: string; model: string }> = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex",
+          subscription: "Plus",
+          installed: true,
+          executable: "codex",
+          models: [{ id: "gpt-6.2-sol", tier: "sota", source: "detected" }],
+          defaultModel: "gpt-6.2-sol",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: (target, ctx) => {
+        dispatched.push({ action: ctx.action, harness: target.harness, model: target.model });
+        return { command: "bash", args: ["-c", "echo 'ok'"], displayCommand: `mock-${ctx.action}` };
+      },
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, executor });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+
+      // 1. In done REQ-001, RightDrawer run-refine-btn must be disabled (readonly stage)
+      await clickReady(page, '[data-action="set-scope"][data-value="all"]');
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="toggle-drawer-btn"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="run-refine-btn"]', { timeout: 5000 });
+      const doneRefineDisabled = await page.evaluate(() => {
+        const btn = document.querySelector('[data-testid="run-refine-btn"]') as HTMLButtonElement | null;
+        return Boolean(btn?.disabled);
+      });
+      expect(doneRefineDisabled).toBe(true);
+
+      // 2. In implementing REQ-002, RightDrawer run-refine-btn dispatches action = "fix"
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      await clickReady(page, '[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('#discuss-input', { timeout: 5000 });
+      await page.type("#discuss-input", "增加参数判空防御");
+      await clickReady(page, '[data-testid="run-refine-btn"]');
+
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        const runs = getRequirement(repo, "REQ-002").state.agentRuns ?? [];
+        if (runs.length >= 1 && runs[0]!.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      expect(dispatched).toEqual([{ action: "fix", harness: "codex", model: "gpt-6.2-sol" }]);
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import {
   acceptRequirement,
+  addDiscussion,
   approveDesign,
   authorizeFastTrack,
   blockRequirement,
@@ -21,10 +22,14 @@ import {
   recordVerification,
   reopenRequirement,
   requestChanges,
+  spawnSubRequirements,
   unblockRequirement,
+  updateProjectConfig,
   updateSpec,
   updateTasks,
 } from "../../src/core/engine.ts";
+import { discoverProjectContext } from "../../src/core/context.ts";
+import { distillRequirementToPlaybook } from "../../src/core/playbook.ts";
 import { WorkbenchError } from "../../src/core/errors.ts";
 import { resolveSafePath } from "../../src/core/fs.ts";
 import { sanitizeOutput } from "../../src/core/validate.ts";
@@ -441,5 +446,164 @@ describe("WB-01 core store and domain engine", () => {
     expect(corruptEntries).toHaveLength(1);
     expect(corruptEntries[0]!.id).toBe("REQ-002");
     expect(corruptEntries[0]!.code).toBe("corrupt_record");
+  });
+
+  test("discoverProjectContext extracts arch doc headings, stack commands, and respects verification overrides", async () => {
+    const dir = makeTempProject();
+    fs.writeFileSync(path.join(dir, "AGENTS.md"), "# Agent Rules\n\n## Boundaries\n\nKeep domain clean.\n");
+    fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "docs", "DESIGN.md"), "# Architecture\n\n## Data Flow\n");
+    fs.writeFileSync(path.join(dir, "bun.lock"), "");
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "sample", scripts: { typecheck: "tsc --noEmit", test: "bun test" } }),
+    );
+
+    const detected = discoverProjectContext(dir, null);
+    expect(detected.archDocs.map((d) => d.path)).toEqual(["AGENTS.md", "docs/DESIGN.md"]);
+    expect(detected.archDocs[0]!.headings).toEqual(["Agent Rules", "Boundaries"]);
+    expect(detected.commandSource).toBe("package.json");
+    expect(detected.fastCommand).toBe("bun run typecheck");
+    expect(detected.fullCommand).toBe("bun test");
+
+    await initProject(dir, { name: "Sample" });
+    const updated = await updateProjectConfig(dir, {
+      verification: {
+        fastCommand: "cargo check",
+        fullCommand: "cargo test --all",
+        autoScreenshots: false,
+      },
+    });
+    const configured = discoverProjectContext(dir, updated);
+    expect(configured.commandSource).toBe("configured");
+    expect(configured.fastCommand).toBe("cargo check");
+    expect(configured.fullCommand).toBe("cargo test --all");
+    expect(updated.verification?.autoScreenshots).toBe(false);
+  });
+
+  test("propose preserves approval on non-breaking refinements during implementing but drops it on breaking edits", async () => {
+    const dir = makeTempProject();
+    await initProject(dir, { name: "Elastic Gate" });
+    await createRequirement(dir, { goal: "实现弹性审批更新" });
+
+    await propose(dir, "REQ-001", {
+      designMarkdown: "# Design\n\nInitial plan.",
+      criteria: [{ id: "AC-1", description: "passes core tests", command: "bun test", required: true }],
+      actor: "agent",
+    });
+    const approved = await approveDesign(dir, "REQ-001");
+    expect(approved.state.stage).toBe("implementing");
+    const approvedHash = approved.state.approval!.designHash;
+
+    // Adding a criterion or enriching designMarkdown while preserving all required criteria keeps approval valid.
+    const refined = await propose(dir, "REQ-001", {
+      designMarkdown: "# Design\n\nInitial plan.\n\n## Edge Case Notes\nAdded detail.",
+      criteria: [
+        { id: "AC-1", description: "passes core tests", command: "bun test", required: true },
+        { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
+      ],
+      actor: "agent",
+    });
+    expect(refined.state.stage).toBe("implementing");
+    expect(refined.state.approval).not.toBeNull();
+    expect(refined.state.approval?.designHash).not.toBe(approvedHash);
+
+    // Mutating an existing required criterion's command or description drops approval back to awaiting_approval.
+    const cmdTamper = await propose(dir, "REQ-001", {
+      criteria: [
+        { id: "AC-1", description: "passes core tests", command: "echo ok", required: true },
+        { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
+      ],
+      actor: "agent",
+    });
+    expect(cmdTamper.state.stage).toBe("awaiting_approval");
+    expect(cmdTamper.state.approval).toBeNull();
+
+    // Re-approve before checking required: true -> false weakening.
+    await approveDesign(dir, "REQ-001");
+    const breaking = await propose(dir, "REQ-001", {
+      criteria: [
+        { id: "AC-1", description: "passes core tests", command: "echo ok", required: false },
+      ],
+      actor: "agent",
+    });
+    expect(breaking.state.stage).toBe("awaiting_approval");
+    expect(breaking.state.approval).toBeNull();
+  });
+
+  test("authorizeFastTrack auto-populates AC-1 when project.verification.fastCommand is configured", async () => {
+    const dir = makeTempProject();
+    await initProject(dir, { name: "FastTrack Auto" });
+    await updateProjectConfig(dir, { verification: { fastCommand: "npm run lint" } });
+    await createRequirement(dir, { goal: "快速修复样式与类型" });
+
+    const fast = await authorizeFastTrack(dir, "REQ-001");
+    expect(fast.state.stage).toBe("implementing");
+    expect(fast.state.criteria).toEqual([
+      {
+        id: "AC-1",
+        description: "项目快速基线验证通过",
+        command: "npm run lint",
+        required: true,
+      },
+    ]);
+  });
+
+  test("spawnSubRequirements links children via parentId and Playbook filters conversational/review noise", async () => {
+    const dir = makeTempProject();
+    await initProject(dir, { name: "Spawn & Playbook" });
+    await createRequirement(dir, { goal: "整体系统重构架构方案" });
+    await propose(dir, "REQ-001", {
+      designMarkdown: [
+        "# 整体方案",
+        "",
+        "## 认证模块拆分",
+        "拆分并重构认证模块与路由校验。",
+        "",
+        "## 分层缓存实现",
+        "增加分层缓存与失效清理逻辑。",
+      ].join("\n"),
+      criteria: [{ id: "AC-1", description: "pass", command: "bun test", required: true }],
+      actor: "agent",
+    });
+
+    const spawned = await spawnSubRequirements(dir, "REQ-001");
+    expect(spawned.created).toHaveLength(2);
+    expect(spawned.created[0]!.state.parentId).toBe("REQ-001");
+    expect(spawned.created[1]!.state.parentId).toBe("REQ-001");
+    const parentDetail = getRequirement(dir, "REQ-001");
+    expect(parentDetail.subRequirements?.map((r) => r.id).sort()).toEqual(["REQ-002", "REQ-003"]);
+
+    await addDiscussion(dir, "REQ-001", {
+      actor: "human",
+      mode: "refine",
+      message: "接纳，请你更新方案",
+    });
+    await addDiscussion(dir, "REQ-001", {
+      actor: "human",
+      mode: "refine",
+      message: "审查结论：阻止验收，请补齐空指针检查",
+    });
+    await addDiscussion(dir, "REQ-001", {
+      actor: "human",
+      mode: "refine",
+      message: "请采纳此研讨结论并修改代码、运行验证：\n建议拆分成纯函数",
+    });
+    await addDiscussion(dir, "REQ-001", {
+      actor: "human",
+      mode: "refine",
+      message: "所有状态变更必须经过 withProjectWriteLock 串行持久化",
+    });
+
+    const latest = getRequirement(dir, "REQ-001");
+    const pb = await distillRequirementToPlaybook(dir, latest);
+    expect(pb.added).toBe(1);
+    expect(pb.markdown).toContain("withProjectWriteLock");
+    expect(pb.markdown).not.toContain("接纳，请你更新方案");
+    expect(pb.markdown).not.toContain("审查结论：");
+    expect(pb.markdown).not.toContain("请采纳此研讨结论");
+
+    await cancelRequirement(dir, "REQ-001", { reason: "不再拆分子需求" });
+    await expect(spawnSubRequirements(dir, "REQ-001")).rejects.toThrow("已取消");
   });
 });

@@ -79,13 +79,16 @@ export async function writePlaybook(
 }
 
 const CONVERSATIONAL_ACK_RE =
-  /^(?:接纳|同意|收到|确认|好的|没问题|按此执行|继续|ok|lgtm)(?:[，,。.!！\s]*(?:请你?|麻烦)?(?:更新|修改|补充)?(?:方案|规范|代码)?)?[。.!！\s]*$/i;
+  /^(?:接纳|同意|收到|确认|好的|没问题|按此执行|继续|采纳(?:此回复)?|ok|lgtm)(?:[，,。.!！\s]*(?:并据此)?(?:请你?|麻烦)?(?:采纳|更新|修改|补充|落实|执行)?(?:此回复|方案|规范|代码|验证)?)?[。.!！\s]*$/i;
+
+const PROCEDURAL_NOISE_RE =
+  /^(?:审查结论[:：]|请根据跨模型\s*Code\s*Review|请采纳(?:并落实)?此研讨结论|请结合以下\s*\d+\s*条批注)/i;
 
 function isNoisyRuleText(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 6) return true;
   if (CONVERSATIONAL_ACK_RE.test(trimmed)) return true;
-  if (/^审查结论[:：]/.test(trimmed)) return true;
+  if (PROCEDURAL_NOISE_RE.test(trimmed)) return true;
   return false;
 }
 

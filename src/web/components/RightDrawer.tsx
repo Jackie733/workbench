@@ -237,6 +237,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
   const effectiveWidth = clampDrawerWidth(drawerWidth, maxWidth);
   const discussions = d?.state.discussions ?? [];
+  const stage = d?.state.stage;
+  const isImplOrAccept = stage === "implementing" || stage === "awaiting_acceptance";
+  const isReadonlyStage = stage === "done" || stage === "cancelled" || stage === "blocked";
 
   return (
     <>
@@ -370,14 +373,16 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             </div>
                           )}
                           <MarkdownView markdown={item.message} className="md-body xs" />
-                          {item.actor === "agent" && item.mode === "ask" && (
+                          {item.actor === "agent" && item.mode === "ask" && !isReadonlyStage && (
                             <div style={{ marginTop: 6 }}>
                               <button
                                 className="btn ghost xs"
                                 type="button"
+                                data-testid="adopt-discussion-btn"
                                 onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                               >
-                                <Icon icon={Check} size={14} /> {t(language, "drawer.adopt")}
+                                <Icon icon={Check} size={14} />{" "}
+                                {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
                               </button>
                             </div>
                           )}
@@ -426,9 +431,14 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       data-testid="discuss-input"
                       rows={3}
                       value={discussDraft}
-                      placeholder={t(language, "drawer.placeholder")}
+                      placeholder={t(language, isImplOrAccept ? "drawer.placeholderFix" : "drawer.placeholder")}
                       onChange={(e) => setDiscussDraft(e.target.value)}
                     />
+                    {isReadonlyStage && (
+                      <div className="xs muted" style={{ marginTop: 4 }}>
+                        {t(language, "drawer.readonlyHint")}
+                      </div>
+                    )}
                     <div className="drawer-composer-actions">
                       <button
                         className="btn"
@@ -445,10 +455,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         type="button"
                         data-action="run-refine"
                         data-testid="run-refine-btn"
-                        disabled={busy || Boolean(activeRun)}
+                        disabled={busy || Boolean(activeRun) || isReadonlyStage}
                         onClick={() => void runRefineFromDrawer(d.state.id)}
                       >
-                        <Icon icon={Pencil} size={14} /> {t(language, "drawer.refine")}
+                        <Icon icon={Pencil} size={14} /> {t(language, isImplOrAccept ? "drawer.refineCode" : "drawer.refine")}
                       </button>
                     </div>
                   </div>

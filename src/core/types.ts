@@ -94,6 +94,12 @@ export interface ProjectGiteeConfig {
   defaultBaseBranch?: string;
 }
 
+export interface ProjectVerificationConfig {
+  fastCommand?: string;
+  fullCommand?: string;
+  autoScreenshots?: boolean;
+}
+
 export interface ProjectMetadata {
   schemaVersion: typeof SCHEMA_VERSION;
   projectId: string;
@@ -103,6 +109,7 @@ export interface ProjectMetadata {
   outputLanguage?: OutputLanguage;
   github?: ProjectGitHubConfig;
   gitee?: ProjectGiteeConfig;
+  verification?: ProjectVerificationConfig;
   createdAt: number;
   updatedAt: number;
 }
@@ -317,6 +324,69 @@ export interface DeliveryCandidateFile {
   inAcceptedSnapshot: boolean;
 }
 
+export type SandboxDriftStatus = "up_to_date" | "clean_behind" | "auto_mergeable" | "true_conflict";
+
+export interface SiblingConflictInfo {
+  requirementId: string;
+  title: string;
+  branch: string;
+  stage: Stage;
+  conflictFiles: string[];
+  overlapFiles: string[];
+  autoMergeable: boolean;
+}
+
+export interface SandboxDriftInfo {
+  requirementId: string;
+  branch: string;
+  baseBranch?: string;
+  baseHead: string;
+  mainHead: string;
+  targetRef?: string;
+  remoteAheadCount?: number;
+  behindCount: number;
+  aheadCount: number;
+  mainDirty: boolean;
+  driftStatus: SandboxDriftStatus;
+  overlapFiles: string[];
+  conflictFiles: string[];
+  canAutoSync: boolean;
+  siblingConflicts?: SiblingConflictInfo[];
+}
+
+export interface MergeOrderEntry {
+  requirementId: string;
+  title: string;
+  stage: Stage;
+  branch: string;
+  aheadCount: number;
+  behindCount: number;
+  driftStatus: SandboxDriftStatus;
+  conflictFiles: string[];
+  overlapFiles: string[];
+  touchedFilesCount: number;
+  conflictsWithSiblings: string[];
+  autoMergeableSiblings: string[];
+  pr?: RequirementGitHubPrLink | null;
+  reason: "clean_leaf" | "auto_mergeable" | "sibling_conflict" | "main_conflict";
+}
+
+export interface MergeOrderRecommendation {
+  generatedAt: number;
+  baseBranch: string;
+  mainHead: string;
+  ordered: MergeOrderEntry[];
+}
+
+export interface CascadeSyncItemResult {
+  requirementId: string;
+  status: "synced" | "up_to_date" | "conflict" | "error";
+  behindCount: number;
+  driftStatus?: SandboxDriftStatus;
+  conflictFiles?: string[];
+  error?: string;
+}
+
 export interface DeliveryPreview {
   requirementId: string;
   stage: Stage;
@@ -341,6 +411,9 @@ export interface DeliveryPreview {
   acceptedSnapshotFileCount: number;
   delivered: DeliveryRecord | null;
   githubPr: RequirementGitHubPrLink | null;
+  remoteBranchExists?: boolean;
+  remoteBranchDiverged?: boolean;
+  sandboxDrift?: SandboxDriftInfo | null;
 }
 
 export type TimelineEventKind =
@@ -368,7 +441,9 @@ export type TimelineEventKind =
   | "github_issue_linked"
   | "github_issue_synced"
   | "github_pr_created"
-  | "github_pr_synced";
+  | "github_pr_synced"
+  | "sandbox_synced"
+  | "sub_requirements_spawned";
 
 export interface RequirementGitHubIssueLink {
   /** GitHub uses positive integer numbers (e.g. 42); Gitee uses alphanumeric ident (e.g. "I8ABCD"). */
@@ -528,6 +603,7 @@ export interface TimelineEvent {
 export interface RequirementState {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
+  parentId?: string;
   title: string;
   stage: Stage;
   track: Track;
@@ -714,6 +790,7 @@ export interface ValidityReport {
 
 export interface RequirementSummary {
   id: string;
+  parentId?: string;
   title: string;
   stage: Stage;
   track: Track;
@@ -746,4 +823,6 @@ export interface RequirementDetail {
   validity: ValidityReport;
   /** Frozen acceptance artifact when available; lets the UI render immutable screenshot history. */
   acceptanceSnapshot?: AcceptanceSnapshot | null;
+  /** Child requirements spawned from this requirement (populated on detail reads). */
+  subRequirements?: RequirementSummary[];
 }

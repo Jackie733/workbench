@@ -1,10 +1,12 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { discoverProjectContext } from "../core/context.ts";
 import {
   addDiscussion,
   finishAgentRun,
+  getProjectStatus,
   getRequirement,
   markDesigning,
   recordReviewReport,
@@ -13,7 +15,7 @@ import {
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
-import { observeGitSnapshot } from "../core/git.ts";
+import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
 import {
   buildOutputLanguageDirective,
   buildResumeLanguageReminder,
@@ -35,16 +37,18 @@ import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
   inspectFinishedRunForPainPoints,
+  inspectRsiSandboxDrift,
+  prepareSandboxConflictResolution,
   reconcileRsiSandboxBaseline,
   syncRequirementMirrorToSandbox,
   type EvolutionPainPoint,
   type PainPointReportInput,
 } from "./evolution.ts";
-import { synthesizeHandoffPacket } from "./handoff.ts";
+import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
-import { recordModelRunOutcome } from "./telemetry.ts";
-import type { HarnessInfo, ModelTarget, RoutingConfig } from "./types.ts";
+import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
+import type { HarnessId, HarnessInfo, ModelTarget, RoutingConfig } from "./types.ts";
 
 export interface BuiltCommand {
   command: string;
@@ -88,6 +92,7 @@ export interface StartRunInput {
   isAutoReview?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  resolveConflict?: boolean;
 }
 
 export type TimeoutReason = "idle" | "max_duration";
@@ -364,7 +369,10 @@ function buildCompactResumeContext(
     );
     if (rev.findings && rev.findings.length > 0) {
       for (const f of rev.findings.slice(0, 10)) {
-        parts.push(`  - [${f.severity}] \`${f.id}\` ${f.title}`);
+        const loc = f.files && f.files.length > 0 ? ` (${f.files.join(", ")})` : "";
+        const detailHint = f.detail ? `：${f.detail}` : "";
+        const fixHint = f.suggestion ? ` → 建议：${f.suggestion}` : "";
+        parts.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${loc}${detailHint}${fixHint}`);
       }
     }
   }
@@ -388,10 +396,18 @@ export function buildExecutionPrompt(
   detail: RequirementDetail,
   handoffMarkdown: string,
   input: StartRunInput,
-  options: { resumedSession?: boolean; outputLanguage?: ResolvedOutputLanguage } = {},
+  options: {
+    resumedSession?: boolean;
+    outputLanguage?: ResolvedOutputLanguage;
+    fastCommand?: string | null;
+    fullCommand?: string | null;
+  } = {},
 ): string {
   const reqId = detail.state.id;
   const lang: ResolvedOutputLanguage = options.outputLanguage ?? "zh-CN";
+  const fastVerifyHint = options.fastCommand
+    ? `快速检查（\`${options.fastCommand}\`）及针对改动模块的轻量测试`
+    : "快速类型/语法检查及针对改动模块的轻量测试";
 
   if (input.action === "ask") {
     const langInstruction =
@@ -426,8 +442,10 @@ export function buildExecutionPrompt(
       "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
       "- 优先复用匹配证据：先核验 `.workbench/items/" +
         reqId +
-        "/evidence/` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行 `bun run typecheck` 及针对本次改动模块的轻量测试，无需重复运行全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。",
-      "- 注：若当前处于只读沙箱且需要可写临时目录的浏览器/Puppeteer 用例因 EROFS 无法启动，请直接核验 `.workbench/items/" + reqId + "/evidence/` 既有真实运行日志并执行 `tsc --noEmit` 与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
+        `/evidence/\` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行${fastVerifyHint}，无需重复运行全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。`,
+      "- 注：若当前处于只读沙箱且需要可写目录的端到端/浏览器用例因只读限制无法启动，请直接核验 `.workbench/items/" +
+        reqId +
+        "/evidence/` 既有真实运行日志并执行静态检查与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
       buildOutputLanguageDirective(lang, "review"),
       "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下（`findings` 为可选结构化问题列表，有具体问题时建议填写以便前端逐条定位修复）：",
       lang === "en"
@@ -442,10 +460,13 @@ export function buildExecutionPrompt(
   const hasReviewToFix = Boolean(detail.state.reviewReport && detail.state.reviewReport.verdict !== "pass");
   const isCurrentReview = detail.validity.reviewValidity.effectiveState === "current";
   const hasHumanFeedback = Boolean(detail.state.lastFeedback) || Boolean(input.message?.trim());
+  const isFastTrack = detail.state.track === "fast_track";
   const modeVerb =
     input.action === "design"
-      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，例如若已有全量 \`bun test\`，仅在需独立隔离时保留子集测试以节省验证耗时），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
-      : input.action === "fix"
+      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，${options.fastCommand ? `常规快速检查可引用 \`${options.fastCommand}\`，` : ""}纯文档改动无需捆绑耗时的代码全量测试），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
+      : input.action === "fix" && input.resolveConflict
+        ? `本次任务仅聚焦将主干最新提交合并到当前沙箱分支并解决合并冲突（切勿重复返工已通过的既有实现或过期审查意见）：1) 若存在未提交业务改动请先安全暂存或提交（严禁提交 node_modules 或 .workbench）；2) 合并目标主干提交并完整保留本需求功能与主干新增改动；3) 运行 \`wb verify ${reqId} --all\` 验证全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+        : input.action === "fix"
         ? hasReviewToFix && isCurrentReview
           ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
           : hasReviewToFix && hasHumanFeedback
@@ -453,7 +474,9 @@ export function buildExecutionPrompt(
             : hasReviewToFix || hasHumanFeedback
               ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
               : `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-        : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
+        : isFastTrack
+          ? `请依据需求目标（快速通道）完成 ${reqId} 的代码修改与验证：改完后运行 \`wb verify ${reqId} --all\`（或 \`wb verify ${reqId} --cmd ...\`）获取真实验证证据，全部通过后直接执行 \`wb tasks ${reqId} --ready\` 提交人类验收（快速通道无需额外拆解任务清单）。`
+          : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
 
   const boundaryGuard =
     input.action === "design"
@@ -461,7 +484,7 @@ export function buildExecutionPrompt(
       : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证，勿留下后台未完成命令即结束本轮。";
 
   const screenshotHint =
-    input.action === "implement" || input.action === "fix"
+    (input.action === "implement" || input.action === "fix") && detail.state.uiRelated === true
       ? "若本次需求涉及 UI，提交验收时会自动采集界面截图证据；也可随时执行 `wb screenshot <REQ-ID>`（或 MCP wb_screenshot）补充采集。"
       : "";
 
@@ -474,7 +497,9 @@ export function buildExecutionPrompt(
     buildOutputLanguageDirective(lang, "plan"),
     "",
     options.resumedSession ? buildCompactResumeContext(detail, input, lang) : handoffMarkdown,
-  ].join("\n");
+  ]
+    .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
+    .join("\n");
 }
 
 function parseReviewFindings(rawFindings: unknown): ReviewFinding[] | undefined {
@@ -855,7 +880,10 @@ export class HubExecutor {
     const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
     const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
-    const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
+    let currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
+    if (input.action === "fix" && input.resolveConflict && (currentDetail.state.stage === "done" || currentDetail.state.stage === "awaiting_acceptance")) {
+      currentDetail = await prepareSandboxConflictResolution(base, id);
+    }
     if (input.action === "implement" || input.action === "fix") {
       const stage = currentDetail.state.stage;
       if (stage !== "implementing" && stage !== "awaiting_acceptance") {
@@ -872,14 +900,37 @@ export class HubExecutor {
         );
       }
     }
-    const prevRun = (currentDetail.state.agentRuns ?? []).slice(-1)[0] ?? null;
+    const runsList = currentDetail.state.agentRuns ?? [];
+    const prevRun = runsList.slice(-1)[0] ?? null;
 
-    const override: Partial<ModelTarget> | null =
+    let override: Partial<ModelTarget> | null =
       input.harness && input.model
         ? { harness: input.harness as ModelTarget["harness"], model: input.model, reasoningEffort: input.reasoningEffort }
         : input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
           : null;
+
+    // Session affinity: when action is "fix" with no explicit override or fallback request,
+    // prefer the most recent healthy implement/fix runner instead of cold-starting a third harness.
+    if (!input.harness && !input.model && !input.useFallback && input.action === "fix") {
+      const lastImplRun = [...runsList]
+        .reverse()
+        .find((r) => (r.action === "implement" || r.action === "fix") && r.status === "succeeded" && !r.rateLimited);
+      const isRunnable =
+        lastImplRun &&
+        (harnesses.some((h) => h.id === lastImplRun.harness && h.installed) || Boolean(this.commandBuilder));
+      if (lastImplRun && isRunnable && !isModelCoolingDown(lastImplRun.harness, lastImplRun.model)) {
+        override = {
+          harness: lastImplRun.harness as HarnessId,
+          model: lastImplRun.model,
+          ...(input.reasoningEffort
+            ? { reasoningEffort: input.reasoningEffort }
+            : lastImplRun.reasoningEffort
+              ? { reasoningEffort: lastImplRun.reasoningEffort as ModelTarget["reasoningEffort"] }
+              : {}),
+        };
+      }
+    }
     const candidates = resolveRouteCandidates(activeRouting, harnesses, input.action, override);
 
     let target = candidates[0]!;
@@ -907,6 +958,55 @@ export class HubExecutor {
       await markDesigning(base, id);
     }
 
+    let conflictContext: ConflictHandoffContext | undefined;
+    if (input.action === "fix" && input.resolveConflict) {
+      const driftInfo = await inspectRsiSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(() => null);
+      if (driftInfo) {
+        let mainCommitsSummary = "";
+        try {
+          mainCommitsSummary = execFileSync(
+            "git",
+            ["-C", base, "log", "--oneline", "-n", "15", `${driftInfo.baseHead}..${driftInfo.mainHead}`],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+          ).trim();
+        } catch {
+          mainCommitsSummary = "";
+        }
+        let conflictExcerpt = await extractMergeConflictContext(codeRoot, 2600);
+        if (!conflictExcerpt && driftInfo.conflictFiles.length > 0) {
+          try {
+            conflictExcerpt = execFileSync(
+              "git",
+              [
+                "-C",
+                base,
+                "diff",
+                driftInfo.baseHead,
+                driftInfo.mainHead,
+                "--",
+                ...driftInfo.conflictFiles.slice(0, 6),
+              ],
+              { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            )
+              .trim()
+              .slice(0, 2600);
+          } catch {
+            conflictExcerpt = "";
+          }
+        }
+        conflictContext = {
+          branch: driftInfo.branch,
+          baseHead: driftInfo.baseHead,
+          mainHead: driftInfo.mainHead,
+          targetRef: driftInfo.targetRef,
+          behindCount: driftInfo.behindCount,
+          conflictFiles: driftInfo.conflictFiles,
+          ...(mainCommitsSummary ? { mainCommitsSummary } : {}),
+          ...(conflictExcerpt ? { conflictExcerpt } : {}),
+        };
+      }
+    }
+
     const prevTail = prevRun ? (this.runLogs.get(prevRun.id) ?? undefined) : undefined;
     const {
       markdown: handoffMd,
@@ -919,21 +1019,29 @@ export class HubExecutor {
       previousRun: prevRun,
       previousLogTail: prevTail,
       hubOutputLanguage,
+      resolveConflict: input.resolveConflict,
+      conflictContext,
     });
 
-    // Determine whether we can safely use same-harness native session resume
+    // Determine whether we can safely use same-harness native session resume.
+    // Skip read-only "review" runs so persona stays clean while still resuming the prior write session.
+    const prevWriteRun = [...runsList].reverse().find((r) => r.action !== "review") ?? null;
     const canResumeSameHarness =
       !input.useFallback &&
-      prevRun &&
-      prevRun.harness === target.harness &&
-      Boolean(prevRun.nativeSessionId) &&
-      prevRun.status !== "cancelled" &&
-      !prevRun.rateLimited &&
+      prevWriteRun &&
+      prevWriteRun.harness === target.harness &&
+      Boolean(prevWriteRun.nativeSessionId) &&
+      prevWriteRun.status !== "cancelled" &&
+      !prevWriteRun.rateLimited &&
       input.action !== "review";
 
+    const projectMeta = getProjectStatus(base).project;
+    const projectContext = discoverProjectContext(codeRoot, projectMeta);
     const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
       resumedSession: Boolean(canResumeSameHarness),
       outputLanguage,
+      fastCommand: projectContext.fastCommand,
+      fullCommand: projectContext.fullCommand,
     });
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
@@ -941,14 +1049,14 @@ export class HubExecutor {
           requirementId: id,
           action: input.action,
           prompt,
-          nativeSessionId: canResumeSameHarness ? prevRun!.nativeSessionId : undefined,
+          nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
           harnesses,
         })
       : buildHarnessCommand(target, {
           root: codeRoot,
           action: input.action,
           prompt,
-          nativeSessionId: canResumeSameHarness ? prevRun!.nativeSessionId : undefined,
+          nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
           harnesses,
         });
 
@@ -1345,11 +1453,13 @@ export class HubExecutor {
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
 
-      // Auto-trigger cross-model review once implement/fix succeeds and submits for acceptance.
+      // Auto-trigger cross-model review once plan_first implement/fix succeeds and submits for acceptance.
+      // Fast-track skips automatic review so humans can inspect Diff and accept directly (or trigger review manually).
       if (
         status === "succeeded" &&
         (input.action === "implement" || input.action === "fix") &&
         postRunDetail &&
+        postRunDetail.state.track !== "fast_track" &&
         postRunDetail.state.stage === "awaiting_acceptance" &&
         postRunDetail.validity.acceptanceGate.ok &&
         postRunDetail.validity.reviewValidity.effectiveState !== "current"
