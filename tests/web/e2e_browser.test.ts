@@ -1106,8 +1106,97 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expect(responsiveState.timelineActive).toBe(true);
         expect(Math.abs(responsiveState.scrollTop - startingScrollTop)).toBeLessThan(20);
         if (width === 1440) expect(responsiveState.layoutMode).toBe("column");
-        if ([1360, 1280, 1024].includes(width)) expect(responsiveState.layoutMode).toBe("overlay");
+        if ([1360, 1280, 1024].includes(width)) {
+          expect(responsiveState.layoutMode).toBe("overlay");
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+          const overlayCloseButton = await page.evaluate(() => {
+            const button = document.querySelector('[data-testid="right-drawer"] [data-testid="drawer-close-btn"]') as HTMLElement | null;
+            const rect = button?.getBoundingClientRect();
+            return {
+              visible: Boolean(button && getComputedStyle(button).display !== "none" && rect && rect.width > 0 && rect.height > 0),
+              width: rect?.width ?? 0,
+              height: rect?.height ?? 0,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+            };
+          });
+          expect(overlayCloseButton.visible).toBe(true);
+          expect(overlayCloseButton.width).toBeGreaterThanOrEqual(44);
+          expect(overlayCloseButton.height).toBeGreaterThanOrEqual(44);
+          expect(overlayCloseButton.overflow).toBe(false);
+          await clickReady(page, '[data-testid="drawer-close-btn"]');
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+            },
+            { timeout: 5000 },
+          );
+        }
       }
+
+      // 6b. At 320px the drawer fills the viewport, so close it from its own 44px header control.
+      await page.setViewport({ width: 320, height: 820 });
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") === "overlay",
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      const closeButtonBox = await page.evaluate(() => {
+        const drawer = document.querySelector('[data-testid="right-drawer"]');
+        const button = drawer?.querySelector('[data-testid="drawer-close-btn"]') as HTMLElement | null;
+        const rect = button?.getBoundingClientRect();
+        return {
+          inHeader: Boolean(drawer?.querySelector(".drawer-head")?.contains(button ?? null)),
+          visible: Boolean(button && getComputedStyle(button).display !== "none" && rect && rect.width > 0 && rect.height > 0),
+          width: rect?.width ?? 0,
+          height: rect?.height ?? 0,
+          overflow: document.documentElement.scrollWidth > window.innerWidth,
+        };
+      });
+      expect(closeButtonBox.inHeader).toBe(true);
+      expect(closeButtonBox.visible).toBe(true);
+      expect(closeButtonBox.width).toBeGreaterThanOrEqual(44);
+      expect(closeButtonBox.height).toBeGreaterThanOrEqual(44);
+      expect(closeButtonBox.overflow).toBe(false);
+      await clickReady(page, '[data-testid="drawer-close-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="tab-spec"]');
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      const closedDrawerState = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+        timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+      }));
+      expect(closedDrawerState.overflow).toBe(false);
+      expect(closedDrawerState.selectedRequirement).toBe("REQ-001");
+      expect(closedDrawerState.timelineActive).toBe(true);
+
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      const reopenedDrawerState = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+        timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+        closeVisible: getComputedStyle(document.querySelector('[data-testid="drawer-close-btn"]') as HTMLElement).display !== "none",
+      }));
+      expect(reopenedDrawerState.overflow).toBe(false);
+      expect(reopenedDrawerState.selectedRequirement).toBe("REQ-001");
+      expect(reopenedDrawerState.timelineActive).toBe(true);
+      expect(reopenedDrawerState.closeVisible).toBe(true);
+      await clickReady(page, '[data-testid="drawer-close-btn"]');
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("aria-hidden") === "true",
+        { timeout: 5000 },
+      );
 
       // 7. On mobile, opening the sidebar while the drawer is open closes the drawer instead of stacking overlays.
       await page.setViewport({ width: 820, height: 820 });

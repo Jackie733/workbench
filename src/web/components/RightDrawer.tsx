@@ -328,6 +328,16 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     <Icon icon={FileDiff} size={14} /> {t(language, "drawer.tab.diff")}
                   </button>
                 </div>
+                {overlayMode && (
+                  <button
+                    className="drawer-close-btn"
+                    type="button"
+                    data-testid="drawer-close-btn"
+                    onClick={() => setDrawerOpen(false)}
+                  >
+                    <Icon icon={X} size={16} />
+                  </button>
+                )}
               </div>
 
               {drawerTab === "diff" ? (
