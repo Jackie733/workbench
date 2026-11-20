@@ -48,6 +48,7 @@ import {
   executeVerify,
   handleBannerAction,
   invalidateAllWorkbenchQueries,
+  notifyCascadeSyncResults,
   openHandoff,
   openRequirement,
   openRunConsole,
@@ -1720,6 +1721,7 @@ export function WorkspaceView() {
       } else {
         showToastKey("toast.prStatus", { num: res.pr.number, state: prStateRef(res.pr.state) });
       }
+      notifyCascadeSyncResults(res.cascadeResults);
     }
   };
 
@@ -1834,6 +1836,29 @@ export function WorkspaceView() {
                     {t(language, "ws.menu.handoff")}
                   </button>
                 </DropdownItem>
+                {!reqData?.sandbox &&
+                  project?.git?.isGitRepo &&
+                  s.stage !== "done" &&
+                  s.stage !== "cancelled" && (
+                    <DropdownItem asChild>
+                      <button
+                        type="button"
+                        data-testid="menu-enable-sandbox-btn"
+                        onClick={async () => {
+                          const out = await runBusy(() => api.createRequirementSandbox(s.id));
+                          if (out) {
+                            await invalidateAllWorkbenchQueries();
+                            showToastKey("ws.sandboxEnabledToast", {
+                              id: s.id,
+                              branch: out.sandbox.branch,
+                            });
+                          }
+                        }}
+                      >
+                        {t(language, "ws.menu.enableSandbox")}
+                      </button>
+                    </DropdownItem>
+                  )}
                 {!s.github?.issue ? (
                   <DropdownItem asChild>
                     <button
@@ -1910,7 +1935,12 @@ export function WorkspaceView() {
                     <button
                       type="button"
                       onClick={() => {
-                        setModal({ kind: "lifecycle", action: "reopen", reason: "" });
+                        setModal({
+                          kind: "lifecycle",
+                          action: "reopen",
+                          reason: "",
+                          preserveApproval: d.validity.approval.valid,
+                        });
                       }}
                     >
                       {t(language, "ws.menu.reopen")}
@@ -1958,78 +1988,155 @@ export function WorkspaceView() {
 
       {reqData?.sandbox &&
         reqData.sandboxDrift &&
-        s.stage !== "done" &&
         s.stage !== "cancelled" &&
-        (reqData.sandboxDrift.behindCount > 0 || reqData.sandboxDrift.conflictFiles.length > 0) && (
-          <div
-            className={`callout ${reqData.sandboxDrift.conflictFiles.length > 0 ? "danger" : "warning"}`}
-            data-testid="sandbox-drift-callout"
-            style={{
-              marginBottom: 14,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 10,
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <Icon icon={GitBranch} size={14} />
-                <strong>
-                  {t(language, "ws.sandboxDrift.title", {
-                    branch: reqData.sandboxDrift.branch,
-                    count: reqData.sandboxDrift.behindCount,
-                  })}
-                </strong>
-                {reqData.sandboxDrift.conflictFiles.length > 0 && (
-                  <span className="badge danger">
-                    {t(language, "ws.sandboxDrift.conflictBadge", {
-                      count: reqData.sandboxDrift.conflictFiles.length,
+        !(s.stage === "done" && s.github?.pr?.state === "merged") &&
+        (reqData.sandboxDrift.behindCount > 0 ||
+          reqData.sandboxDrift.conflictFiles.length > 0 ||
+          (reqData.sandboxDrift.siblingConflicts?.length ?? 0) > 0) && (() => {
+          const drift = reqData.sandboxDrift!;
+          const hasTrueConflict = drift.conflictFiles.length > 0;
+          const isAutoMergeable = !hasTrueConflict && drift.driftStatus === "auto_mergeable";
+          const siblingList = drift.siblingConflicts ?? [];
+          const hasSiblingTrueConflict = siblingList.some((sc) => sc.conflictFiles.length > 0);
+          const canAgentResolveNow =
+            s.stage === "implementing" ||
+            s.stage === "awaiting_acceptance" ||
+            s.stage === "done" ||
+            (s.stage === "awaiting_approval" && s.designHash !== "");
+          const sep = language === "en" ? ", " : "、";
+          return (
+            <div
+              className={`callout ${hasTrueConflict ? "danger" : "warning"}`}
+              data-testid="sandbox-drift-callout"
+              style={{
+                marginBottom: 14,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <Icon icon={GitBranch} size={14} />
+                  <strong>
+                    {drift.behindCount > 0
+                      ? t(language, "ws.sandboxDrift.title", {
+                          branch: drift.branch,
+                          count: drift.behindCount,
+                        })
+                      : t(language, "ws.sandboxDrift.radarOnlyTitle", { branch: drift.branch })}
+                  </strong>
+                  {hasTrueConflict && (
+                    <span className="badge danger">
+                      {t(language, "ws.sandboxDrift.conflictBadge", {
+                        count: drift.conflictFiles.length,
+                      })}
+                    </span>
+                  )}
+                  {isAutoMergeable && (
+                    <span className="badge info">
+                      {t(language, "ws.sandboxDrift.autoMergeBadge", {
+                        count: drift.overlapFiles.length,
+                      })}
+                    </span>
+                  )}
+                </div>
+                {hasTrueConflict ? (
+                  <div className="xs" style={{ marginTop: 4 }}>
+                    {t(language, "ws.sandboxDrift.conflictDetail", {
+                      files:
+                        drift.conflictFiles.slice(0, 6).join(sep) +
+                        (drift.conflictFiles.length > 6 ? "…" : ""),
                     })}
-                  </span>
+                  </div>
+                ) : isAutoMergeable ? (
+                  <div className="xs muted" style={{ marginTop: 4 }}>
+                    {t(language, "ws.sandboxDrift.autoMergeDetail", {
+                      files:
+                        drift.overlapFiles.slice(0, 6).join(sep) +
+                        (drift.overlapFiles.length > 6 ? "…" : ""),
+                    })}
+                  </div>
+                ) : drift.behindCount > 0 ? (
+                  <div className="xs muted" style={{ marginTop: 4 }}>
+                    {t(language, "ws.sandboxDrift.safeDetail")}
+                  </div>
+                ) : null}
+                {siblingList.length > 0 && (
+                  <div
+                    className="xs"
+                    data-testid="sibling-conflict-radar"
+                    style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
+                  >
+                    <span className={hasSiblingTrueConflict ? "danger" : "muted"} style={{ fontWeight: 600 }}>
+                      {t(language, "ws.sandboxDrift.siblingTitle")}
+                    </span>
+                    {siblingList.map((sc) => {
+                      const filesText =
+                        (sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).slice(0, 3).join(sep) +
+                        ((sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).length > 3 ? "…" : "");
+                      return (
+                        <button
+                          key={sc.requirementId}
+                          type="button"
+                          className={`badge ${sc.conflictFiles.length > 0 ? "danger" : "neutral"}`}
+                          style={{ cursor: "pointer", border: "none" }}
+                          onClick={() => void openRequirement(sc.requirementId)}
+                        >
+                          {t(
+                            language,
+                            sc.conflictFiles.length > 0
+                              ? "ws.sandboxDrift.siblingConflict"
+                              : "ws.sandboxDrift.siblingAuto",
+                            { id: sc.requirementId, files: filesText },
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {hasTrueConflict && !canAgentResolveNow && (
+                  <div className="xs muted" style={{ marginTop: 4 }}>
+                    {t(language, "ws.sandboxDrift.needDesignFirst")}
+                  </div>
                 )}
               </div>
-              {reqData.sandboxDrift.conflictFiles.length > 0 ? (
-                <div className="xs" style={{ marginTop: 4 }}>
-                  {t(language, "ws.sandboxDrift.conflictDetail", {
-                    files:
-                      reqData.sandboxDrift.conflictFiles.slice(0, 6).join(language === "en" ? ", " : "、") +
-                      (reqData.sandboxDrift.conflictFiles.length > 6 ? "…" : ""),
-                  })}
-                </div>
-              ) : (
-                <div className="xs muted" style={{ marginTop: 4 }}>
-                  {t(language, "ws.sandboxDrift.safeDetail")}
-                </div>
-              )}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {drift.canAutoSync && (
+                  <button
+                    className="btn primary xs"
+                    type="button"
+                    data-testid="sync-sandbox-base-btn"
+                    disabled={busy || runningThis}
+                    onClick={() => void syncSandboxBaseAction(s.id)}
+                  >
+                    <Icon icon={RefreshCw} size={14} />{" "}
+                    {t(language, isAutoMergeable ? "ws.sandboxDrift.syncAutoMerge" : "ws.sandboxDrift.sync")}
+                  </button>
+                )}
+                {hasTrueConflict && canAgentResolveNow && (
+                  <button
+                    className="btn primary xs"
+                    type="button"
+                    data-testid="agent-sync-sandbox-btn"
+                    disabled={busy || runningThis}
+                    onClick={() => void dispatchSyncBaseWithAgent(d, drift, bridgeConnected)}
+                  >
+                    <Icon icon={Wrench} size={14} />{" "}
+                    {t(
+                      language,
+                      s.stage === "awaiting_approval"
+                        ? "ws.sandboxDrift.approveAndSyncWithAgent"
+                        : "ws.sandboxDrift.syncWithAgent",
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {reqData.sandboxDrift.canAutoSync && (
-                <button
-                  className="btn primary xs"
-                  type="button"
-                  data-testid="sync-sandbox-base-btn"
-                  disabled={busy || runningThis}
-                  onClick={() => void syncSandboxBaseAction(s.id)}
-                >
-                  <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
-                </button>
-              )}
-              {reqData.sandboxDrift.conflictFiles.length > 0 && (
-                <button
-                  className="btn primary xs"
-                  type="button"
-                  data-testid="agent-sync-sandbox-btn"
-                  disabled={busy || runningThis}
-                  onClick={() => void dispatchSyncBaseWithAgent(d, reqData.sandboxDrift!, bridgeConnected)}
-                >
-                  <Icon icon={Wrench} size={14} /> {t(language, "ws.sandboxDrift.syncWithAgent")}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
       <section className={`banner ${banner.tone}`} data-testid="action-banner">
         <div>
@@ -2167,7 +2274,7 @@ export function WorkspaceView() {
               data-testid="apply-sandbox-btn"
               disabled={busy}
               onClick={async () => {
-                const res = await runBusy(() => api.applyRsiSandbox(s.id));
+                const res = await runBusy(() => api.applySandbox(s.id));
                 if (res) {
                   await invalidateAllWorkbenchQueries();
                   showToastKey(
@@ -2178,6 +2285,7 @@ export function WorkspaceView() {
                         : "toast.applied",
                     { count: res.appliedFiles.length },
                   );
+                  notifyCascadeSyncResults(res.cascadeResults);
                 }
               }}
             >

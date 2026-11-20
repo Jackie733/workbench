@@ -291,7 +291,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     }
   }, 30_000);
 
-  test("drawer model selector applies to runRefineFromDrawer and done requirements hide stale sandbox drift callout", async () => {
+  test("drawer model selector applies to runRefineFromDrawer and unmerged done requirements surface actionable sandbox drift", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "DrawerAndDrift", privacyMode: "local" });
@@ -369,7 +369,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
 
-      // 1. Switch scope to "all" so done REQ-001 appears, open it, and verify sandbox-drift-callout is NOT shown despite behind/conflict files
+      // 1. Switch scope to "all" so done REQ-001 appears, open it, and verify unmerged done sandbox still shows drift callout & resolve button
       await clickReady(page, '[data-action="set-scope"][data-value="all"]');
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForSelector('[data-testid="action-banner"]', { timeout: 5000 });
@@ -378,7 +378,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         { timeout: 5000 },
       );
       const hasDriftCallout = await page.evaluate(() => Boolean(document.querySelector('[data-testid="sandbox-drift-callout"]')));
-      expect(hasDriftCallout).toBe(false);
+      const hasResolveBtn = await page.evaluate(() => Boolean(document.querySelector('[data-testid="agent-sync-sandbox-btn"]')));
+      expect(hasDriftCallout).toBe(true);
+      expect(hasResolveBtn).toBe(true);
 
       // 2. Navigate back to home, open REQ-002, open RightDrawer, switch drawer-runner-select -> run-refine-btn
       await clickReady(page, '[data-testid="back-home-btn"]');

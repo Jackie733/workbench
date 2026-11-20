@@ -2,11 +2,13 @@ import type {
   AgentAction,
   AgentRunRecord,
   AttachmentMeta,
+  CascadeSyncItemResult,
   CriterionInput,
   DeliveryPreview,
   DeliveryRecord,
   DiscussionEntry,
   GitRemoteProvider,
+  MergeOrderRecommendation,
   OutputLanguage,
   PrivacyMode,
   ProjectGiteeConfig,
@@ -18,6 +20,7 @@ import type {
   RequirementGitHubLink,
   RequirementGitHubPrLink,
   RequirementSummary,
+  SandboxDriftInfo,
   ScreenshotCaptureResult,
   Stage,
   Track,
@@ -34,7 +37,6 @@ import type {
   PainPointCategory,
   PainPointContext,
   PainPointSource,
-  SandboxDriftInfo,
 } from "../hub/evolution.ts";
 import type { ModelStageStats } from "../hub/telemetry.ts";
 import type {
@@ -99,9 +101,15 @@ export interface PlaybookResponse {
 
 export interface EvolutionSandboxItem extends SandboxRecord {
   stage?: Stage | null;
+  title?: string;
   canApply?: boolean;
   github?: RequirementGitHubLink | null;
   drift?: SandboxDriftInfo | null;
+}
+
+export interface ProjectSandboxesResponse {
+  sandboxes: EvolutionSandboxItem[];
+  mergeOrder: MergeOrderRecommendation | null;
 }
 
 export interface EvolutionStateResponse {
@@ -288,6 +296,7 @@ export const api = {
       touchesBackend: boolean;
       webReloaded: boolean;
       restartRecommended: boolean;
+      cascadeResults?: CascadeSyncItemResult[];
     }>(`/api/hub/evolution/apply/${encodeURIComponent(reqId)}`, {
       method: "POST",
     }),
@@ -311,6 +320,7 @@ export const api = {
       mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded: boolean;
       restartRecommended: boolean;
+      cascadeResults?: CascadeSyncItemResult[];
     }>(`/api/hub/evolution/sync-pr/${encodeURIComponent(reqId)}`, {
       method: "POST",
       body: JSON.stringify(input ?? {}),
@@ -368,6 +378,63 @@ export const api = {
       withProjectParam(suffix ? `/api/gitee/issues?${suffix}` : "/api/gitee/issues"),
     );
   },
+  getProjectSandboxes: (fetchRemote = false) =>
+    requestJson<ProjectSandboxesResponse>(
+      withProjectParam(fetchRemote ? "/api/project/sandboxes?fetch=1" : "/api/project/sandboxes"),
+    ),
+  createRequirementSandbox: (
+    id: string,
+    input?: { branchPrefix?: "rsi" | "feat"; branchName?: string; stackedOnReqId?: string },
+  ) =>
+    requestJson<{ sandbox: SandboxRecord; detail: RequirementDetail; sandboxDrift?: SandboxDriftInfo | null }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sandbox`),
+      { method: "POST", body: JSON.stringify(input ?? {}) },
+    ),
+  syncSandboxBase: (id: string, input?: { fetchRemote?: boolean }) =>
+    requestJson<{
+      synced: boolean;
+      upToDate: boolean;
+      conflictFiles: string[];
+      drift: SandboxDriftInfo;
+      detail: RequirementDetail;
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sync-base`), {
+      method: "POST",
+      body: JSON.stringify(input ?? {}),
+    }),
+  applySandbox: (id: string) =>
+    requestJson<{
+      appliedFiles: string[];
+      deletedFiles: string[];
+      touchesWeb: boolean;
+      touchesBackend: boolean;
+      webReloaded: boolean;
+      restartRecommended: boolean;
+      cascadeResults?: CascadeSyncItemResult[];
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/apply-sandbox`), {
+      method: "POST",
+    }),
+  syncResolveSandbox: (
+    id: string,
+    input: {
+      approveFirst?: boolean;
+      expectedRevision?: number;
+      useCli?: boolean;
+      dispatchAgent?: boolean;
+      harness?: string;
+      model?: string;
+      reasoningEffort?: ModelTarget["reasoningEffort"];
+      message?: string;
+    },
+  ) =>
+    requestJson<{
+      detail: RequirementDetail;
+      run?: AgentRunRecord;
+      target?: ModelTarget;
+      dispatch: DispatchOutcome | null;
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sync-resolve`), {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   listRequirements: (scope: "active" | "done" | "cancelled" | "all") =>
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null; bridge: BridgeStatus }>(
       withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
@@ -378,11 +445,14 @@ export const api = {
     parentId?: string;
     dispatchAgent?: boolean;
     createGitHubIssue?: boolean;
+    createSandbox?: boolean;
+    stackedOnReqId?: string;
     attachmentIds?: string[];
   }) =>
     requestJson<{
       detail: RequirementDetail;
       dispatch: DispatchOutcome | null;
+      sandbox?: SandboxRecord | null;
       githubWarning?: string;
       githubWarningRef?: StructuredMessageRef;
     }>(
@@ -498,6 +568,7 @@ export const api = {
       anchorIds?: string[];
       mode?: "ask" | "refine";
       useFallback?: boolean;
+      resolveConflict?: boolean;
     },
   ) =>
     requestJson<{ run: AgentRunRecord; detail: RequirementDetail; target: ModelTarget }>(
@@ -513,7 +584,10 @@ export const api = {
     requestJson<{ record: AgentRunRecord; log: string }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`),
     ),
-  approve: (id: string, input: { expectedRevision?: number; dispatchAgent?: boolean; note?: string }) =>
+  approve: (
+    id: string,
+    input: { expectedRevision?: number; dispatchAgent?: boolean; note?: string; createSandbox?: boolean; stackedOnReqId?: string },
+  ) =>
     requestJson<{ detail: RequirementDetail; dispatch: DispatchOutcome | null }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/approve`),
       { method: "POST", body: JSON.stringify(input) },
@@ -558,6 +632,7 @@ export const api = {
       baseBranch?: string;
       prTitle?: string;
       prBody?: string;
+      forceWithLease?: boolean;
     },
   ) =>
     requestJson<{
@@ -595,6 +670,7 @@ export const api = {
       mainSyncReasonRef?: StructuredMessageRef | null;
       webReloaded?: boolean;
       restartRecommended?: boolean;
+      cascadeResults?: CascadeSyncItemResult[];
     }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/github/pr-sync`), {
       method: "POST",
       body: JSON.stringify(input ?? {}),
@@ -614,7 +690,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  reopen: (id: string, input: { reason: string; expectedRevision?: number }) =>
+  reopen: (id: string, input: { reason: string; preserveApproval?: boolean; expectedRevision?: number }) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/reopen`), {
       method: "POST",
       body: JSON.stringify(input),

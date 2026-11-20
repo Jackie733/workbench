@@ -11,6 +11,8 @@ export interface SandboxRecord {
   worktreePath: string;
   branch: string;
   baseHead?: string;
+  /** Latest codeSnapshotHash recorded right after a clean main-baseline sync in `done` stage. */
+  lastCleanSyncFingerprint?: string;
   createdAt: number;
 }
 
@@ -57,6 +59,9 @@ export function readSandboxes(): Record<string, SandboxRecord> {
           worktreePath: rec.worktreePath,
           branch: rec.branch,
           ...(typeof rec.baseHead === "string" ? { baseHead: rec.baseHead } : {}),
+          ...(typeof rec.lastCleanSyncFingerprint === "string"
+            ? { lastCleanSyncFingerprint: rec.lastCleanSyncFingerprint }
+            : {}),
           createdAt: rec.createdAt,
         };
       }

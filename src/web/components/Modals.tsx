@@ -31,7 +31,9 @@ import {
 } from "../../hub/types.ts";
 import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse } from "../api.ts";
 import {
+  dispatchSyncBaseWithAgent,
   invalidateAllWorkbenchQueries,
+  notifyCascadeSyncResults,
   openRequirement,
   queryClient,
   queryKeys,
@@ -52,6 +54,7 @@ import {
   useHubStateQuery,
   usePlaybookQuery,
   useProjectQuery,
+  useProjectSandboxesQuery,
   useRequirementQuery,
 } from "../queries.ts";
 import {
@@ -106,6 +109,10 @@ export function Modals() {
   const { data: hub } = useHubStateQuery();
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
   const { data: project } = useProjectQuery(activeProjectId);
+  const { data: projectSandboxes } = useProjectSandboxesQuery(
+    activeProjectId,
+    Boolean(!noHubProject && project?.initialized && m?.kind === "new_req"),
+  );
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const { data: evolutionData } = useEvolutionQuery(m?.kind === "evolution");
   const { data: playbookData } = usePlaybookQuery(
@@ -242,6 +249,49 @@ export function Modals() {
                 </span>
               </label>
             )}
+            {project?.git?.isGitRepo && (
+              <div style={{ marginTop: 8 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    data-testid="new-req-create-sandbox"
+                    checked={Boolean(m.createSandbox)}
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "new_req" ? { ...prev, createSandbox: e.target.checked } : prev,
+                      )
+                    }
+                  />
+                  <span>{t(language, "newReq.createSandbox")}</span>
+                </label>
+                {m.createSandbox && (projectSandboxes?.sandboxes.length ?? 0) > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, paddingLeft: 22 }}>
+                    <span className="xs muted">{t(language, "newReq.stackedOn")}</span>
+                    <select
+                      className="select"
+                      data-testid="new-req-stack-select"
+                      value={m.stackedOnReqId ?? ""}
+                      onChange={(e) =>
+                        setModal((prev) =>
+                          prev?.kind === "new_req"
+                            ? { ...prev, stackedOnReqId: e.target.value || undefined }
+                            : prev,
+                        )
+                      }
+                    >
+                      <option value="">{t(language, "newReq.stackMain")}</option>
+                      {projectSandboxes!.sandboxes
+                        .filter((sb) => sb.stage !== "cancelled")
+                        .map((sb) => (
+                          <option key={sb.requirementId} value={sb.requirementId}>
+                            {sb.requirementId} ({sb.branch})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
                 {t(language, "common.cancel")}
@@ -258,6 +308,7 @@ export function Modals() {
                     bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
                   )
                 }
               >
@@ -275,6 +326,7 @@ export function Modals() {
                     bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
                   )
                 }
               >
@@ -1780,9 +1832,45 @@ export function Modals() {
         : m.action === "cancel"
           ? t(language, "lifecycle.cancelTitle")
           : t(language, "lifecycle.reopenTitle");
+    const canPreserveApproval = m.action === "reopen" && Boolean(detail?.validity.approval.valid);
+    const keepApproval = canPreserveApproval ? m.preserveApproval !== false : false;
     return (
       <ModalShell onClose={close}>
         <h3>{title}</h3>
+        {canPreserveApproval && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+            <label
+              className={`radio-card ${keepApproval ? "selected" : ""}`}
+              data-testid="reopen-keep-approval-option"
+              onClick={() =>
+                setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, preserveApproval: true } : prev))
+              }
+            >
+              <input type="radio" name="reopen-mode" checked={keepApproval} readOnly />
+              <div>
+                <strong style={{ fontSize: 13 }}>{t(language, "lifecycle.reopenKeepApprovalTitle")}</strong>
+                <div className="muted xs" style={{ marginTop: 2 }}>
+                  {t(language, "lifecycle.reopenKeepApprovalDesc")}
+                </div>
+              </div>
+            </label>
+            <label
+              className={`radio-card ${!keepApproval ? "selected" : ""}`}
+              data-testid="reopen-reset-draft-option"
+              onClick={() =>
+                setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, preserveApproval: false } : prev))
+              }
+            >
+              <input type="radio" name="reopen-mode" checked={!keepApproval} readOnly />
+              <div>
+                <strong style={{ fontSize: 13 }}>{t(language, "lifecycle.reopenResetDraftTitle")}</strong>
+                <div className="muted xs" style={{ marginTop: 2 }}>
+                  {t(language, "lifecycle.reopenResetDraftDesc")}
+                </div>
+              </div>
+            </label>
+          </div>
+        )}
         <textarea
           className="textarea"
           id="lifecycle-reason"
@@ -1800,8 +1888,9 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
+            data-testid="lifecycle-confirm-btn"
             disabled={busy}
-            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason)}
+            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
           >
             {t(language, "common.confirm")}
           </button>
@@ -2103,6 +2192,7 @@ export function Modals() {
         } else {
           showToastKey("evo.applied", { id: reqId, count: out.appliedFiles.length });
         }
+        notifyCascadeSyncResults(out.cascadeResults);
       }
     };
 
@@ -2126,6 +2216,7 @@ export function Modals() {
         } else {
           showToastKey("toast.prStatus", { num: out.pr.number, state: prStateRef(out.pr.state) });
         }
+        notifyCascadeSyncResults(out.cascadeResults);
       }
     };
 
@@ -2328,7 +2419,7 @@ export function Modals() {
                               className="btn xs"
                               type="button"
                               disabled={busy}
-                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!)}
+                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!, { useEvolutionHub: true })}
                             >
                               <Icon icon={RefreshCw} size={14} /> {t(language, "evo.syncBase")}
                             </button>
@@ -2679,6 +2770,7 @@ export function Modals() {
                 branchName: m.branchName?.trim() || undefined,
                 baseBranch: m.baseBranch?.trim() || undefined,
                 prTitle: m.prTitle?.trim() || undefined,
+                ...(m.forceWithLease || deliveryPreview?.remoteBranchDiverged ? { forceWithLease: m.forceWithLease ?? true } : {}),
               }
             : {}),
         }),
@@ -2753,6 +2845,59 @@ export function Modals() {
           {deliveryPreview?.githubRepo ? t(language, "deliver.repo", { repo: deliveryPreview.githubRepo }) : ""}
           {!createPr && t(language, "deliver.localNote")}
         </div>
+
+        {sandboxActive &&
+          deliveryPreview?.sandboxDrift &&
+          (deliveryPreview.sandboxDrift.behindCount > 0 || deliveryPreview.sandboxDrift.conflictFiles.length > 0) && (
+            <div
+              className={`callout ${deliveryPreview.sandboxDrift.conflictFiles.length > 0 ? "danger" : "warning"} xs`}
+              data-testid="deliver-drift-callout"
+              style={{
+                marginBottom: 10,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              <span>
+                {t(language, "deliver.driftWarn", {
+                  count: deliveryPreview.sandboxDrift.behindCount,
+                  conflict:
+                    deliveryPreview.sandboxDrift.conflictFiles.length > 0
+                      ? t(language, "deliver.driftConflictSuffix", {
+                          count: deliveryPreview.sandboxDrift.conflictFiles.length,
+                        })
+                      : "",
+                })}
+              </span>
+              {deliveryPreview.sandboxDrift.canAutoSync ? (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="deliver-sync-base-btn"
+                  disabled={busy}
+                  onClick={() => void syncSandboxBaseAction(detail.state.id)}
+                >
+                  <Icon icon={RefreshCw} size={14} /> {t(language, "deliver.driftSyncBtn")}
+                </button>
+              ) : (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="deliver-resolve-conflict-btn"
+                  disabled={busy}
+                  onClick={async () => {
+                    close();
+                    await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!, bridgeConnected);
+                  }}
+                >
+                  {t(language, "deliver.driftResolveBtn")}
+                </button>
+              )}
+            </div>
+          )}
 
         {(candidates.length > 0 || !canSubmitExistingCommits) && (
           <>
@@ -2898,6 +3043,28 @@ export function Modals() {
                 {t(language, "deliver.prBodyNotePrefix")}
                 <code>Closes #{detail.state.github.issue.number}</code>
                 {t(language, isGiteeDelivery ? "deliver.prBodyNoteSuffixGitee" : "deliver.prBodyNoteSuffix")}
+              </div>
+            )}
+            {(sandboxActive || deliveryPreview?.remoteBranchExists || deliveryPreview?.remoteBranchDiverged) && (
+              <div style={{ marginTop: 2 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5 }}>
+                  <input
+                    type="checkbox"
+                    data-testid="deliver-force-lease"
+                    checked={m.forceWithLease ?? Boolean(deliveryPreview?.remoteBranchDiverged)}
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "deliver" ? { ...prev, forceWithLease: e.target.checked } : prev,
+                      )
+                    }
+                  />
+                  <span>{t(language, "deliver.forceWithLeaseLabel")}</span>
+                </label>
+                {deliveryPreview?.remoteBranchDiverged && (
+                  <div className="xs muted" style={{ paddingLeft: 22, marginTop: 2 }}>
+                    {t(language, "deliver.forceWithLeaseWarn")}
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -1,14 +1,19 @@
 import { useLayoutEffect } from "react";
-import { ArrowRight, Plus, RefreshCw, WifiOff } from "lucide-react";
+import { ArrowRight, GitBranch, Plus, RefreshCw, WifiOff } from "lucide-react";
 import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
-import type { HubProjectSummary } from "../api.ts";
+import { api, type HubProjectSummary, type ProjectSandboxesResponse } from "../api.ts";
 import { t, translateRef } from "../i18n.ts";
 import {
   initProjectSubmit,
   invalidateAllWorkbenchQueries,
   openAddProjectModal,
   openRequirement,
+  queryClient,
+  queryKeys,
+  runBusy,
+  syncSandboxBaseAction,
   useProjectQuery,
+  useProjectSandboxesQuery,
   useRequirementsQuery,
 } from "../queries.ts";
 import { filteredItems, progressDetail, relativeTime, STAGE_META } from "../state.ts";
@@ -274,11 +279,15 @@ export function HomeView() {
   const setQuery = useUiStore((s) => s.setQuery);
   const setModal = useUiStore((s) => s.setModal);
 
+  const busy = useUiStore((s) => s.busy);
   const activeRuns = useStreamStore((s) => s.activeRuns);
 
   const { data: project } = useProjectQuery(activeProjectId);
   const { data: reqList } = useRequirementsQuery(activeProjectId, scope, Boolean(project?.initialized));
+  const { data: sandboxesData } = useProjectSandboxesQuery(activeProjectId, Boolean(project?.initialized));
   const rawItems = reqList?.items ?? [];
+  const mergeOrder = sandboxesData?.mergeOrder ?? null;
+  const activeSandboxes = sandboxesData?.sandboxes ?? [];
 
   useLayoutEffect(() => {
     if (homeScrollY > 0) {
@@ -409,6 +418,116 @@ export function HomeView() {
                 </button>
               </div>
             ))}
+          </section>
+        )}
+
+        {activeSandboxes.length > 0 && mergeOrder && mergeOrder.ordered.length > 0 && !query.trim() && (
+          <section
+            className="callout"
+            data-testid="worktree-merge-order-panel"
+            style={{ marginBottom: 14 }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <Icon icon={GitBranch} size={14} />
+                <strong style={{ fontSize: 13.5 }}>
+                  {t(language, "home.sandboxesTitle", { count: mergeOrder.ordered.length })}
+                </strong>
+              </div>
+              <button
+                className="btn ghost xs"
+                type="button"
+                data-testid="refresh-sandboxes-remote-btn"
+                disabled={busy}
+                onClick={async () => {
+                  const fresh = await runBusy(() => api.getProjectSandboxes(true));
+                  if (fresh) {
+                    queryClient.setQueryData<ProjectSandboxesResponse>(
+                      queryKeys.projectSandboxes(activeProjectId),
+                      fresh,
+                    );
+                    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+                  }
+                }}
+              >
+                <Icon icon={RefreshCw} size={14} /> {t(language, "home.sandboxesRefresh")}
+              </button>
+            </div>
+            <div className="xs muted" style={{ marginBottom: 8 }}>
+              {t(language, "home.mergeOrderHint")}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {mergeOrder.ordered.map((entry, idx) => {
+                const sbItem = activeSandboxes.find((s) => s.requirementId === entry.requirementId);
+                const canAutoSync = Boolean(sbItem?.drift?.canAutoSync);
+                const reasonKey = `home.orderReason.${entry.reason}` as const;
+                const reasonTone =
+                  entry.reason === "main_conflict"
+                    ? "danger"
+                    : entry.reason === "sibling_conflict"
+                      ? "warning"
+                      : entry.reason === "auto_mergeable"
+                        ? "info"
+                        : "success";
+                return (
+                  <div
+                    key={entry.requirementId}
+                    data-testid={`merge-order-row-${entry.requirementId}`}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                      padding: "6px 8px",
+                      borderRadius: 6,
+                      border: "1px solid var(--border)",
+                      background: "var(--surface)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
+                      <span className="badge neutral">#{idx + 1}</span>
+                      <span className="req-id">{entry.requirementId}</span>
+                      <span style={{ fontWeight: 500, fontSize: 13 }}>{entry.title}</span>
+                      <code className="xs muted">{entry.branch}</code>
+                      <span className={`badge ${STAGE_META[entry.stage].tone}`}>
+                        {STAGE_META[entry.stage].labels[language]}
+                      </span>
+                      <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
+                      {entry.behindCount > 0 && (
+                        <span className={`badge ${entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                          -{entry.behindCount}
+                        </span>
+                      )}
+                      {entry.conflictsWithSiblings.length > 0 && (
+                        <span className="xs muted">
+                          ↔ {entry.conflictsWithSiblings.join(", ")}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {canAutoSync && (
+                        <button
+                          className="btn xs"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void syncSandboxBaseAction(entry.requirementId)}
+                        >
+                          <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
+                        </button>
+                      )}
+                      <button
+                        className="btn xs"
+                        type="button"
+                        onClick={() => void openRequirement(entry.requirementId)}
+                      >
+                        {t(language, "home.goto")} <Icon icon={ArrowRight} size={14} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </section>
         )}
 

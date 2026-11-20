@@ -1,9 +1,8 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { GiteeIssueItem } from "../core/gitee.ts";
-import type { AgentAction, AgentRunRecord, RequirementDetail, Stage } from "../core/types.ts";
+import type { AgentAction, AgentRunRecord, CascadeSyncItemResult, RequirementDetail, SandboxDriftInfo, Stage } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
-import type { SandboxDriftInfo } from "../hub/evolution.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
 import { resolveWarningParam, type MessageKey } from "./i18n.ts";
 import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
@@ -27,6 +26,7 @@ export const queryKeys = {
   evolution: ["hub", "evolution"] as const,
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
+  projectSandboxes: (projectId: string | null) => ["project", "sandboxes", projectId] as const,
   githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
   giteeStatus: (projectId: string | null) => ["gitee", "status", projectId] as const,
   giteeIssues: (projectId: string | null, filter: string, state: string, q: string) =>
@@ -131,6 +131,14 @@ export function useProjectQuery(activeProjectId: string | null) {
       }
       return proj;
     },
+    enabled,
+  });
+}
+
+export function useProjectSandboxesQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.projectSandboxes(activeProjectId),
+    queryFn: () => api.getProjectSandboxes(false),
     enabled,
   });
 }
@@ -585,9 +593,16 @@ export async function dispatchFixFromReview(
   }
 }
 
-export async function syncSandboxBaseAction(reqId: string): Promise<boolean> {
+export async function syncSandboxBaseAction(
+  reqId: string,
+  options: { fetchRemote?: boolean; useEvolutionHub?: boolean } = {},
+): Promise<boolean> {
   const ui = useUiStore.getState();
-  const res = await runBusy(() => api.syncRsiSandboxBase(reqId));
+  const res = await runBusy(() =>
+    options.useEvolutionHub
+      ? api.syncRsiSandboxBase(reqId)
+      : api.syncSandboxBase(reqId, { fetchRemote: options.fetchRemote !== false }),
+  );
   if (!res) return false;
   await invalidateAllWorkbenchQueries();
   if (res.upToDate) {
@@ -602,39 +617,84 @@ export async function syncSandboxBaseAction(reqId: string): Promise<boolean> {
   return false;
 }
 
+export function notifyCascadeSyncResults(results?: CascadeSyncItemResult[]): void {
+  if (!results || results.length === 0) return;
+  const ui = useUiStore.getState();
+  const synced = results.filter((r) => r.status === "synced");
+  const conflicted = results.filter((r) => r.status === "conflict");
+  if (conflicted.length > 0) {
+    ui.showToastKey(
+      "home.cascadeConflict",
+      {
+        synced: synced.length,
+        conflicts: conflicted.map((c) => c.requirementId).join(", "),
+      },
+      true,
+    );
+  } else if (synced.length > 0) {
+    ui.showToastKey("home.cascadeSynced", {
+      count: synced.length,
+      ids: synced.map((s) => s.requirementId).join(", "),
+    });
+  }
+}
+
 export async function dispatchSyncBaseWithAgent(
   detail: RequirementDetail,
   drift: SandboxDriftInfo,
   bridgeConnected: boolean,
 ): Promise<void> {
   const id = detail.state.id;
+  const ui = useUiStore.getState();
   const conflicts = drift.conflictFiles.slice(0, 8).join(", ");
+  const targetLabel = drift.targetRef ?? drift.mainHead.slice(0, 7);
   const msg =
-    `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标提交 ${drift.mainHead.slice(0, 7)} 共 ${drift.behindCount} 个提交` +
-    (conflicts ? `，重叠冲突文件：${conflicts}` : "") +
-    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已过期的旧审查意见。同步主干步骤：\n` +
+    `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标 ${targetLabel} 共 ${drift.behindCount} 个提交` +
+    (conflicts ? `，真实冲突文件：${conflicts}` : "") +
+    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已通过的功能或已过期的旧审查意见。同步步骤：\n` +
     `1. 检查 git status：若存在未提交业务/测试改动，使用 git add -u 与显式业务文件路径暂存后 git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；严禁提交 node_modules 或临时目录；\n` +
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
     `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
   const useCli = shouldUseCliRunner("fix");
-  if (detail.state.stage === "awaiting_acceptance" || detail.state.stage === "implementing") {
-    const res = await runBusy(() =>
-      api.requestChanges(id, {
-        feedback: msg,
-        expectedRevision: detail.state.revision,
-        dispatchAgent: !useCli && bridgeConnected,
-      }),
-    );
-    if (!res) return;
-    await invalidateAllWorkbenchQueries();
-    if (useCli) {
-      await triggerActiveRun(id, "fix", { message: msg });
-    } else {
-      handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
-    }
-  } else if (useCli) {
-    await triggerActiveRun(id, "fix", { message: msg });
+  const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+  const drafts = useDraftStore.getState().runnerOverrides;
+  const override = drafts.fix;
+  const selectedRunnerKey = override?.key ?? "";
+  const selectedEffort = override?.effort ?? "";
+  const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, "fix", selectedEffort);
+  const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
+  const effectiveEffort =
+    effortCap.mode === "configurable"
+      ? choice.effort && effortCap.efforts.includes(choice.effort)
+        ? choice.effort
+        : undefined
+      : undefined;
+
+  const res = await runBusy(() =>
+    api.syncResolveSandbox(id, {
+      approveFirst: detail.state.stage === "awaiting_approval",
+      expectedRevision: detail.state.revision,
+      useCli,
+      dispatchAgent: !useCli && bridgeConnected,
+      harness: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
+      model: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
+      reasoningEffort: useCli ? effectiveEffort : undefined,
+      message: msg,
+    }),
+  );
+  if (!res) return;
+  if (res.run && res.target) {
+    useStreamStore.getState().setRunStarted({ ...res.run, requirementId: id });
+    ui.setDrawerOpen(true);
+    ui.setDrawerTab("console");
+    ui.showToastKey("toast.runStarted", {
+      target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
+      action: "fix",
+    });
+  } else if (res.dispatch) {
+    handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
   }
+  await invalidateAllWorkbenchQueries();
 }
 
 export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
@@ -806,7 +866,12 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "reopen":
-      ui.setModal({ kind: "lifecycle", action: "reopen", reason: "" });
+      ui.setModal({
+        kind: "lifecycle",
+        action: "reopen",
+        reason: "",
+        preserveApproval: detail.validity.approval.valid,
+      });
       break;
   }
 }
@@ -878,6 +943,7 @@ export async function submitNewRequirement(
   _bridgeConnected: boolean,
   createGitHubIssue?: boolean,
   attachmentIds: string[] = [],
+  sandboxOpts?: { createSandbox?: boolean; stackedOnReqId?: string },
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
@@ -891,6 +957,8 @@ export async function submitNewRequirement(
       goal,
       dispatchAgent: dispatchAgent && !useCli,
       ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
+      ...(sandboxOpts?.createSandbox ? { createSandbox: true } : {}),
+      ...(sandboxOpts?.stackedOnReqId ? { stackedOnReqId: sandboxOpts.stackedOnReqId } : {}),
       ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
     }),
   );
@@ -1080,6 +1148,7 @@ export async function submitLifecycle(
   detail: RequirementDetail,
   action: "block" | "cancel" | "reopen",
   reasonRaw: string,
+  opts?: { preserveApproval?: boolean },
 ): Promise<void> {
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
@@ -1090,7 +1159,11 @@ export async function submitLifecycle(
   const res = await runBusy(async () => {
     if (action === "block") return api.block(detail.state.id, { reason, expectedRevision: detail.state.revision });
     if (action === "cancel") return api.cancel(detail.state.id, { reason, expectedRevision: detail.state.revision });
-    return api.reopen(detail.state.id, { reason, expectedRevision: detail.state.revision });
+    return api.reopen(detail.state.id, {
+      reason,
+      ...(opts?.preserveApproval ? { preserveApproval: true } : {}),
+      expectedRevision: detail.state.revision,
+    });
   });
   if (res) {
     ui.setModal(null);
