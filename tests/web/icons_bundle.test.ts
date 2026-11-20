@@ -127,6 +127,12 @@ describe("icon dependency and bundle contract", () => {
       .readdirSync(path.join(WEB_DIR, "components"))
       .filter((file) => file.endsWith(".tsx"))
       .map((file) => path.join(WEB_DIR, "components", file))
+      .concat(
+        fs
+          .readdirSync(path.join(WEB_DIR, "components", "ui"))
+          .filter((file) => file.endsWith(".tsx"))
+          .map((file) => path.join(WEB_DIR, "components", "ui", file)),
+      )
       .concat([path.join(WEB_DIR, "app.tsx"), path.join(WEB_DIR, "state.ts"), path.join(WEB_DIR, "render.ts")]);
 
     for (const file of files) {

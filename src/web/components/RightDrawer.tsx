@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { FileText, Lightbulb, MessageSquare, Pencil, Terminal, X, Zap } from "lucide-react";
+import { AlertTriangle, Check, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
 import { api } from "../api.ts";
 import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
@@ -316,7 +316,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           type="button"
                           onClick={() => clearPendingAnnotations()}
                         >
-                          {t(language, "common.clear")}
+                          <Icon icon={Trash2} size={14} /> {t(language, "common.clear")}
                         </button>
                       </div>
                       {pendingAnnotations.map((a) => (
@@ -355,6 +355,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 : `${item.harness ?? "Agent"}${item.model ? ` · ${item.model}` : ""}`}
                             </span>
                             <span className={`badge ${item.mode === "ask" ? "info" : "warning"}`}>
+                              <Icon
+                                icon={item.mode === "ask" ? Lightbulb : item.resolved ? Check : MessageSquare}
+                                size={14}
+                              />{" "}
                               {item.mode === "ask"
                                 ? t(language, "drawer.mode.ask")
                                 : item.resolved
@@ -377,6 +381,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 data-testid="adopt-discussion-btn"
                                 onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                               >
+                                <Icon icon={Check} size={14} />{" "}
                                 {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
                               </button>
                             </div>
@@ -494,6 +499,17 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       <div className="console-status-bar">
                         <div>
                           <span className={`badge ${AGENT_RUN_TONE[currentRun.status]}`}>
+                            <Icon
+                              icon={
+                                currentRun.status === "running"
+                                  ? Loader2
+                                  : currentRun.status === "succeeded"
+                                    ? Check
+                                    : X
+                              }
+                              size={14}
+                              className={currentRun.status === "running" ? "spin" : undefined}
+                            />{" "}
                             {formatAgentStatusLabel(language, currentRun.status)}
                           </span>
                           <span className="xs" style={{ marginLeft: 6 }}>
@@ -514,7 +530,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               data-testid="cancel-run-btn"
                               onClick={() => void cancelRun(d.state.id, currentRun.id)}
                             >
-                              {t(language, "drawer.stop")}
+                              <Icon icon={Square} size={14} /> {t(language, "drawer.stop")}
                             </button>
                           ) : currentRun.status === "failed" || currentRun.rateLimited ? (
                             <button
@@ -523,14 +539,14 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               data-testid="retry-fallback-btn"
                               onClick={() => void triggerActiveRun(d.state.id, currentRun.action, { useFallback: true })}
                             >
-                              {t(language, "drawer.retryFallback")}
+                              <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.retryFallback")}
                             </button>
                           ) : null}
                         </div>
                       </div>
                       {currentRun.errorSummary && (
                         <div className="callout danger xs" style={{ marginBottom: 8 }}>
-                          {currentRun.errorSummary}
+                          <Icon icon={AlertTriangle} size={14} /> {currentRun.errorSummary}
                         </div>
                       )}
                       <ConsoleOutput

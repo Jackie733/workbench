@@ -395,6 +395,49 @@ export function filteredItems(items: RequirementSummary[], query: string, langua
   );
 }
 
+export interface RequirementRunLike {
+  requirementId: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  action: AgentAction;
+  harness: string;
+  model: string;
+  projectId?: string;
+}
+
+export function findActiveRequirementRun(
+  runs: Iterable<RequirementRunLike>,
+  requirementId: string,
+  projectId: string | null,
+): RequirementRunLike | undefined {
+  for (const run of runs) {
+    if (run.requirementId !== requirementId || run.status !== "running") continue;
+    // 只读咨询不改变待人工决策状态。
+    if (run.action === "ask") continue;
+    if (run.projectId && run.projectId !== projectId) continue;
+    return run;
+  }
+  return undefined;
+}
+
+export function partitionPendingDecisions(
+  items: RequirementSummary[],
+  runs: Iterable<RequirementRunLike>,
+  projectId: string | null,
+): { humanPending: RequirementSummary[]; agentProcessing: RequirementSummary[] } {
+  const runList = Array.from(runs);
+  const humanPending: RequirementSummary[] = [];
+  const agentProcessing: RequirementSummary[] = [];
+  for (const item of items) {
+    if (!item.needsDecision) continue;
+    if (findActiveRequirementRun(runList, item.id, projectId)) {
+      agentProcessing.push(item);
+    } else {
+      humanPending.push(item);
+    }
+  }
+  return { humanPending, agentProcessing };
+}
+
 /** 去除与阶段徽章重复的进度文本，仅保留增量信息。 */
 export function progressDetail(item: RequirementSummary, language: UiLanguage = "zh-CN"): string {
   switch (item.stage) {

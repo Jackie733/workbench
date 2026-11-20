@@ -32,6 +32,11 @@ const DETAIL = {
   },
 } as unknown as RequirementDetail;
 
+function badgePattern(tone: string, label: string): RegExp {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`class="badge ${tone}"[^>]*>(?:(?!</span>)[\\s\\S])*${escaped}`);
+}
+
 describe("REQ-009 Agent 运行状态色板", () => {
   test("四态映射稳定，执行中不得使用警示色", () => {
     expect(AGENT_RUN_TONE).toEqual({
@@ -46,10 +51,10 @@ describe("REQ-009 Agent 运行状态色板", () => {
   test("时间线运行徽标按状态渲染对应色板", () => {
     const html = renderToStaticMarkup(<TimelineRunsTab d={DETAIL} />);
 
-    expect(html).toContain('class="badge info">实施 · 执行中');
-    expect(html).not.toContain('class="badge danger">实施 · 执行中');
-    expect(html).toContain('class="badge success">设计 · 已完成');
-    expect(html).toContain('class="badge danger">实施 · 失败');
-    expect(html).toContain('class="badge neutral">实施 · 已终止');
+    expect(html).toMatch(badgePattern("info", "实施 · 执行中"));
+    expect(html).not.toMatch(badgePattern("danger", "实施 · 执行中"));
+    expect(html).toMatch(badgePattern("success", "设计 · 已完成"));
+    expect(html).toMatch(badgePattern("danger", "实施 · 失败"));
+    expect(html).toMatch(badgePattern("neutral", "实施 · 已终止"));
   });
 });
