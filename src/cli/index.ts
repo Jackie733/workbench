@@ -207,9 +207,9 @@ function helpText(): string {
     "  propose <REQ-ID> [--title] [--spec]        提交或更新规范、验收条件与技术方案",
     "                   [--design] [--criteria] [--summary] [--note] [--handoff-note] [--revision <n>]",
     "  tasks <REQ-ID> [--tasks <json|@file>]      查看或更新实施任务与提交待验收",
-    "                 [--ready] [--note <text>] [--revision <n>]",
+    "                 [--ready] [--note <text>] [--handoff-note <json|@file>] [--revision <n>]",
     "  screenshot <REQ-ID> [--label <text>]       采集 UI 截图验收证据（浏览器缺失时记录跳过批次）",
-    "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all) [--timeout <ms>]",
+    "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all [--force]) [--timeout <ms>]",
     "                                             运行真实验证命令并记录不可变证据",
     "  review <REQ-ID> --verdict <pass|concern|block> --summary <text> [--body <md|@file>]",
     "                                             提交跨模型代码审查结论（不绕过人工验收）",
@@ -837,9 +837,10 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const tasks = parsed.flags.get("tasks");
         const ready = parsed.flags.get("ready") === true;
         const note = parsed.flags.get("note");
+        const handoffNoteFlag = parsed.flags.get("handoff-note");
         const revision = parsed.flags.get("revision");
 
-        if (tasks === undefined && !ready && typeof note !== "string") {
+        if (tasks === undefined && !ready && typeof note !== "string" && typeof handoffNoteFlag !== "string") {
           const detail = (await executeWorkbenchTool(root, "wb_get", { id })) as {
             id: string;
             stage: string;
@@ -861,6 +862,12 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (typeof tasks === "string") payload.tasks = parseJsonValue<TaskInput[]>(tasks, "tasks");
         if (ready) payload.readyForAcceptance = true;
         if (typeof note === "string") payload.note = note;
+        if (typeof handoffNoteFlag === "string") {
+          payload.handoffNote = parseJsonValue<{ keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] }>(
+            handoffNoteFlag,
+            "handoff-note",
+          );
+        }
         if (typeof revision === "string") payload.expectedRevision = Number(revision);
 
         const res = await executeWorkbenchTool(root, "wb_update_tasks", payload);
@@ -887,7 +894,8 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const timeoutMs = typeof timeoutFlag === "string" ? Number(timeoutFlag) : undefined;
 
         if (parsed.flags.get("all") === true) {
-          const allRes = await runAllVerifications(root, id, { timeoutMs });
+          const force = parsed.flags.get("force") === true;
+          const allRes = await runAllVerifications(root, id, { timeoutMs, force });
           printResult(
             {
               id: allRes.detail.state.id,
@@ -898,6 +906,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
                 criterionIds: r.record.criterionIds,
                 passed: r.record.passed,
                 exitCode: r.record.exitCode,
+                ...(r.reused ? { reused: true } : {}),
               })),
               coverage: allRes.detail.validity.coverage,
             },

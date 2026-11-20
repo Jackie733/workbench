@@ -506,6 +506,7 @@ export interface AgentRunRecord {
   modelFallback?: boolean;
   reasoningEffort?: string;
   nativeSessionId?: string;
+  hubPid?: number;
   status: "running" | "succeeded" | "failed" | "cancelled";
   startedAt: number;
   endedAt: number | null;

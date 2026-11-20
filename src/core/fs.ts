@@ -217,7 +217,7 @@ export function atomicWriteJson(filePath: string, value: unknown, mode?: number)
   atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, mode);
 }
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -227,19 +227,19 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function tryBreakStaleLock(lockPath: string): boolean {
+function tryBreakStaleLock(lockPath: string, staleMs = LOCK_STALE_MS): boolean {
   try {
     const raw = fs.readFileSync(lockPath, "utf8");
     const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
     const dead = typeof parsed.pid === "number" && !isProcessAlive(parsed.pid);
-    const expired = typeof parsed.createdAt === "number" && Date.now() - parsed.createdAt > LOCK_STALE_MS;
+    const expired = typeof parsed.createdAt === "number" && Date.now() - parsed.createdAt > staleMs;
     if (dead || expired) {
       fs.rmSync(lockPath, { force: true });
       return true;
     }
   } catch {
     const stat = fs.lstatSync(lockPath, { throwIfNoEntry: false });
-    if (stat && Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+    if (stat && Date.now() - stat.mtimeMs > staleMs) {
       fs.rmSync(lockPath, { force: true });
       return true;
     }
@@ -269,16 +269,22 @@ function tryCreateLockFile(lockPath: string): string | null {
   }
 }
 
-async function acquireAdvisoryLock(lockPath: string): Promise<string> {
-  const deadline = Date.now() + LOCK_WAIT_MS;
+async function acquireAdvisoryLock(
+  lockPath: string,
+  options: { waitTimeoutMs?: number; staleMs?: number; pollMs?: number; busyMessage?: string } = {},
+): Promise<string> {
+  const waitTimeoutMs = options.waitTimeoutMs ?? LOCK_WAIT_MS;
+  const staleMs = options.staleMs ?? LOCK_STALE_MS;
+  const pollMs = options.pollMs ?? 25;
+  const deadline = Date.now() + waitTimeoutMs;
   while (true) {
     const token = tryCreateLockFile(lockPath);
     if (token) return token;
-    if (tryBreakStaleLock(lockPath)) continue;
+    if (tryBreakStaleLock(lockPath, staleMs)) continue;
     if (Date.now() >= deadline) {
-      throw new WorkbenchError("lock_timeout", "项目正在被另一个工作台进程写入，请稍后重试");
+      throw new WorkbenchError("lock_timeout", options.busyMessage ?? "项目正在被另一个工作台进程写入，请稍后重试");
     }
-    await delay(25);
+    await delay(pollMs);
   }
 }
 
@@ -317,6 +323,38 @@ export function withFileLockSync<T>(lockPath: string, fn: () => T): T {
     return fn();
   } finally {
     releaseAdvisoryLock(lockPath, token);
+  }
+}
+
+/** Serializes async operations both in-process and across CLI/MCP/Server processes using a named lock file. */
+export async function withNamedAdvisoryLock<T>(
+  lockPath: string,
+  fn: () => Promise<T> | T,
+  options: { waitTimeoutMs?: number; staleMs?: number; pollMs?: number; busyMessage?: string } = {},
+): Promise<T> {
+  const queueKey = path.resolve(lockPath);
+  const previous = inProcessQueue.get(queueKey) ?? Promise.resolve();
+  let releaseQueue!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseQueue = resolve;
+  });
+  const tail = previous.then(() => current, () => current);
+  inProcessQueue.set(queueKey, tail);
+
+  await previous.catch(() => {});
+  let token: string | null = null;
+  try {
+    fs.mkdirSync(path.dirname(queueKey), { recursive: true, mode: 0o700 });
+    token = await acquireAdvisoryLock(queueKey, options);
+    return await fn();
+  } finally {
+    if (token !== null) {
+      releaseAdvisoryLock(queueKey, token);
+    }
+    releaseQueue();
+    if (inProcessQueue.get(queueKey) === tail) {
+      inProcessQueue.delete(queueKey);
+    }
   }
 }
 

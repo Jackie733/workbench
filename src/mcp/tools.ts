@@ -176,7 +176,7 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
           items: { type: "string" },
           description: "Acceptance criterion IDs verified by this command.",
         },
-        timeoutMs: { type: "integer", minimum: 500, maximum: 300000 },
+        timeoutMs: { type: "integer", minimum: 500, maximum: 1800000 },
       },
     },
   },

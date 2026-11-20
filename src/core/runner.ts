@@ -1,18 +1,19 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getRequirement, recordVerification } from "./engine.ts";
 import { WorkbenchError } from "./errors.ts";
-import { canonicalRoot } from "./fs.ts";
+import { atomicWriteJson, canonicalRoot, readJsonStrict, withNamedAdvisoryLock } from "./fs.ts";
 import { observeGitSnapshot } from "./git.ts";
 import { resolveCodeRoot } from "./sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
 import { isSafeText, sanitizeOutput } from "./validate.ts";
 
-const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_TIMEOUT_MS = 600_000;
 const MIN_TIMEOUT_MS = 500;
-const MAX_TIMEOUT_MS = 900_000;
+const MAX_TIMEOUT_MS = 1_800_000;
 const PREVIEW_MAX_BYTES = 4096;
 
 export interface RunVerificationInput {
@@ -25,6 +26,7 @@ export interface RunVerificationResult {
   detail: RequirementDetail;
   record: VerificationRecord;
   log: string;
+  reused?: boolean;
 }
 
 interface CommandExecutionOutput {
@@ -119,6 +121,108 @@ function executeShellCommand(cwd: string, command: string, timeoutMs: number): P
   });
 }
 
+function isHeavyVerificationSegment(segment: string): boolean {
+  const parts = segment.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return false;
+  const bin = parts[0]!;
+  const sub = parts[1];
+  const rest = parts.slice(2);
+  if (bin === "bun" && sub === "test") {
+    const hasSpecificTarget = rest.some(
+      (token) =>
+        !token.startsWith("-") &&
+        (/\.(?:test|spec)\.(?:ts|tsx|js|jsx|mts|cts)$/.test(token) || token.includes("/")),
+    );
+    return !hasSpecificTarget;
+  }
+  if (
+    (bin === "bun" || bin === "npm" || bin === "pnpm" || bin === "yarn") &&
+    (sub === "test" || (sub === "run" && parts[2] === "test"))
+  ) {
+    return true;
+  }
+  if (bin === "playwright" && sub === "test") {
+    return rest.every((token) => token.startsWith("-"));
+  }
+  return false;
+}
+
+export function isHeavyVerificationCommand(command: string): boolean {
+  return command
+    .split(/&&|\|\||;/)
+    .some((segment) => isHeavyVerificationSegment(segment));
+}
+
+function isUnderTempRoot(codeRoot: string): boolean {
+  try {
+    const tmpBase = fs.realpathSync(os.tmpdir());
+    return codeRoot === tmpBase || codeRoot.startsWith(`${tmpBase}${path.sep}`);
+  } catch {
+    return false;
+  }
+}
+
+function resolveHubDataDir(): string {
+  const custom = process.env.WORKBENCH_HUB_DIR?.trim();
+  return custom ? path.resolve(custom) : path.join(os.homedir(), ".workbench-hub");
+}
+
+function resolveHeavyVerifyLockPath(): string {
+  return path.join(resolveHubDataDir(), "locks", "verify-heavy.lock");
+}
+
+const VERIFY_CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
+
+interface VerifyCacheEntry {
+  command: string;
+  codeSnapshotHash: string;
+  durationMs: number;
+  rawLog: string;
+  outputPreview: string;
+  truncated: boolean;
+  cachedAt: number;
+}
+
+function isVerifyCacheEnabled(codeRoot: string): boolean {
+  if (process.env.WORKBENCH_DISABLE_VERIFY_CACHE === "1") return false;
+  return !isUnderTempRoot(codeRoot) || Boolean(process.env.WORKBENCH_HUB_DIR?.trim());
+}
+
+function resolveVerifyCachePath(command: string, codeSnapshotHash: string): string {
+  const key = createHash("sha256").update(`${command}\0${codeSnapshotHash}`, "utf8").digest("hex");
+  return path.join(resolveHubDataDir(), "verify-cache", `${key}.json`);
+}
+
+function readVerifyCache(command: string, codeSnapshotHash: string): VerifyCacheEntry | null {
+  try {
+    const filePath = resolveVerifyCachePath(command, codeSnapshotHash);
+    if (!fs.existsSync(filePath)) return null;
+    const entry = readJsonStrict<VerifyCacheEntry>(filePath, MAX_EVIDENCE_BYTES + 16 * 1024);
+    if (
+      entry.command !== command ||
+      entry.codeSnapshotHash !== codeSnapshotHash ||
+      typeof entry.rawLog !== "string" ||
+      typeof entry.cachedAt !== "number" ||
+      Date.now() - entry.cachedAt > VERIFY_CACHE_TTL_MS
+    ) {
+      return null;
+    }
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function writeVerifyCache(entry: VerifyCacheEntry): void {
+  try {
+    const filePath = resolveVerifyCachePath(entry.command, entry.codeSnapshotHash);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    atomicWriteJson(filePath, entry, 0o600);
+  } catch {
+    // Cache write is strictly best-effort.
+  }
+}
+
 /** Runs a real verification command in the project root, snapshots git state, and records immutable evidence. */
 export async function runVerification(
   root: string,
@@ -157,7 +261,22 @@ export async function runVerification(
     );
   }
 
-  const execResult = await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
+  const useHeavyLock =
+    process.env.WORKBENCH_DISABLE_VERIFY_LOCK !== "1" &&
+    !isUnderTempRoot(codeRoot) &&
+    isHeavyVerificationCommand(command);
+  const execResult = useHeavyLock
+    ? await withNamedAdvisoryLock(
+        resolveHeavyVerifyLockPath(),
+        () => executeShellCommand(codeRoot, command, Math.floor(rawTimeout)),
+        {
+          waitTimeoutMs: MAX_TIMEOUT_MS,
+          staleMs: MAX_TIMEOUT_MS + 60_000,
+          pollMs: 250,
+          busyMessage: "另一个全量验证正在执行且排队等待超时，请稍后重试",
+        },
+      )
+    : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
   const postSnapshot = await observeGitSnapshot(codeRoot);
   if (!postSnapshot) {
     throw new WorkbenchError("execution_failed", "命令执行后无法读取 Git 代码快照");
@@ -192,6 +311,18 @@ export async function runVerification(
     currentCodeSnapshotHash: postSnapshot.fingerprint,
   });
 
+  if (passed && isVerifyCacheEnabled(codeRoot)) {
+    writeVerifyCache({
+      command,
+      codeSnapshotHash: postSnapshot.fingerprint,
+      durationMs: execResult.durationMs,
+      rawLog: fullSanitized.text,
+      outputPreview: previewSanitized.text,
+      truncated: record.truncated,
+      cachedAt: execResult.endedAt,
+    });
+  }
+
   return { detail, record, log: fullSanitized.text };
 }
 
@@ -211,7 +342,7 @@ function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
 export async function runAllVerifications(
   root: string,
   id: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; force?: boolean } = {},
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
@@ -230,11 +361,12 @@ export async function runAllVerifications(
     throw new WorkbenchError("invalid_input", "当前需求尚未给验收条件配置自动验证命令");
   }
 
-  // When exact `bun test` is already scheduled, merge pure file-subset `bun test <files>` ACs into it.
-  const fullBunIds = groups.get("bun test");
-  if (fullBunIds) {
+  // When exact full-suite `bun test` or `bun run test` is scheduled, merge pure file-subset `bun test <files>` ACs into it.
+  const fullCmdKey = groups.has("bun run test") ? "bun run test" : groups.has("bun test") ? "bun test" : null;
+  const fullBunIds = fullCmdKey ? groups.get(fullCmdKey) : undefined;
+  if (fullBunIds && fullCmdKey) {
     for (const [cmd, cids] of Array.from(groups.entries())) {
-      if (cmd === "bun test") continue;
+      if (cmd === fullCmdKey) continue;
       if (isSubsumedBunTestCommand(cmd, codeRoot)) {
         for (const cid of cids) {
           if (!fullBunIds.includes(cid)) fullBunIds.push(cid);
@@ -244,9 +376,61 @@ export async function runAllVerifications(
     }
   }
 
+  const preSnapshot = options.force === true ? null : await observeGitSnapshot(codeRoot);
   const runs: RunVerificationResult[] = [];
   let latestDetail = current;
   for (const [command, criterionIds] of groups.entries()) {
+    if (options.force !== true && preSnapshot) {
+      const existing = [...latestDetail.state.verifications].reverse().find(
+        (v) =>
+          v.passed &&
+          v.command === command &&
+          v.specHash === latestDetail.state.specHash &&
+          v.codeSnapshotHash === preSnapshot.fingerprint &&
+          criterionIds.every((cid) => v.criterionIds.includes(cid)),
+      );
+      if (existing) {
+        runs.push({ detail: latestDetail, record: existing, log: "", reused: true });
+        continue;
+      }
+
+      if (isVerifyCacheEnabled(codeRoot)) {
+        const cached = readVerifyCache(command, preSnapshot.fingerprint);
+        if (cached) {
+          const now = Date.now();
+          const verificationId = `V-${now}-${randomUUID().slice(0, 8)}`;
+          const rawWithNote = sanitizeOutput(
+            `[workbench] 命中同快照跨需求验证缓存 (${preSnapshot.fingerprint.slice(0, 12)})\n${cached.rawLog}`,
+            MAX_EVIDENCE_BYTES,
+          );
+          const preview = sanitizeOutput(rawWithNote.text, PREVIEW_MAX_BYTES);
+          const record: VerificationRecord = {
+            id: verificationId,
+            command,
+            cwd: ".",
+            criterionIds,
+            specHash: latestDetail.state.specHash,
+            codeSnapshotHash: preSnapshot.fingerprint,
+            exitCode: 0,
+            timedOut: false,
+            durationMs: cached.durationMs,
+            startedAt: now,
+            endedAt: now,
+            passed: true,
+            outputPath: `evidence/verify-${verificationId}.log`,
+            outputPreview: preview.text,
+            truncated: cached.truncated || rawWithNote.truncated,
+          };
+          latestDetail = await recordVerification(base, id, {
+            record,
+            rawLog: rawWithNote.text,
+            currentCodeSnapshotHash: preSnapshot.fingerprint,
+          });
+          runs.push({ detail: latestDetail, record, log: rawWithNote.text, reused: true });
+          continue;
+        }
+      }
+    }
     const result = await runVerification(base, id, {
       command,
       criterionIds,

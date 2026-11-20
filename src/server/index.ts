@@ -213,6 +213,13 @@ export async function startWorkbenchServer(options: {
     registerHubProject(defaultRoot, { activate: false });
   }
 
+  const recoveryRoots = hubMode
+    ? [defaultRoot, ...readHubConfig().projects.filter((p) => isLocalNodeId(p.nodeId)).map((p) => p.root)]
+    : [defaultRoot];
+  await executor.recoverOrphanedRuns(recoveryRoots).catch((err) => {
+    console.error(`[workbench] orphan run recovery warning: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   const uiSockets = new Set<ServerWebSocket<WsClientData>>();
   let bridgeSocket: ServerWebSocket<WsClientData> | null = null;
   let bridgeStatus: BridgeStatus = {

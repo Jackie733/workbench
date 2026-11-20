@@ -1326,7 +1326,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         deps.broadcastUi({ type: "verify.started", root: base, id, at: Date.now() });
         try {
           if (body.all === true || typeof body.command !== "string") {
-            const res = await runAllVerifications(base, id, { timeoutMs });
+            const force = body.force !== false;
+            const res = await runAllVerifications(base, id, { timeoutMs, force });
             deps.broadcastUi({ type: "workbench.updated", reason: "verified", root: base, id, at: Date.now() });
             return jsonResponse({ detail: res.detail, runs: res.runs.map((r) => r.record) });
           }

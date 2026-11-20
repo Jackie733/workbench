@@ -9,6 +9,7 @@ import {
   normalizeAttachments,
   painPointAttachmentsDir,
 } from "../core/attachments.ts";
+import { discoverProjectContext } from "../core/context.ts";
 import {
   createRequirement,
   getProjectStatus,
@@ -1668,21 +1669,24 @@ export async function promotePainPoint(
     ...attachmentLines,
   ].join("\n");
 
+  const projectCtx = discoverProjectContext(wbRoot, getProjectStatus(wbRoot).project);
+  const fastCmd = projectCtx.fastCommand ?? "bun run typecheck";
+  const fullCmd = projectCtx.fullCommand ?? "bun test";
   const criteria: CriterionInput[] =
     pain.category === "ui_anomaly"
       ? [
-          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
+          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: fastCmd },
           {
             id: "AC-2",
             description: "Web UI 浏览器 E2E 与图标契约测试通过",
             required: true,
             command: "bun test tests/web/icons.test.tsx tests/web/e2e_browser.test.ts",
           },
-          { id: "AC-3", description: "全量测试回归通过", required: true, command: "bun test" },
+          { id: "AC-3", description: "全量测试回归通过", required: true, command: fullCmd },
         ]
       : [
-          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: "bun run typecheck" },
-          { id: "AC-2", description: "全量测试回归通过", required: true, command: "bun test" },
+          { id: "AC-1", description: "TypeScript 类型检查通过", required: true, command: fastCmd },
+          { id: "AC-2", description: "全量测试回归通过", required: true, command: fullCmd },
         ];
 
   const snap = await observeGitSnapshot(wbRoot);

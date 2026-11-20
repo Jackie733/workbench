@@ -12,7 +12,7 @@
     "mcp": "bun run src/cli/index.ts mcp",
     "deploy": "bun run scripts/deploy.ts",
     "deploy:check": "bun run scripts/check-deployment.ts",
-    "test": "bun test",
+    "test": "bun run scripts/test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

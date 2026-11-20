@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getDaemonStatus, startDaemon, stopDaemon } from "../../src/cli/daemon.ts";
-import { approveDesign, createRequirement, getRequirement, initProject, propose, updateDesign } from "../../src/core/engine.ts";
+import { approveDesign, authorizeFastTrack, createRequirement, getRequirement, initProject, propose, startAgentRun, updateDesign } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { classifyTier, discoverHarnesses } from "../../src/hub/discovery.ts";
 import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
@@ -1478,7 +1478,13 @@ printf 'done\\n'
       model: "cancel-me",
     });
     const cancelledDone = waitFinished(cancelled.run.id);
-    await new Promise((r) => setTimeout(r, 120));
+    const cancelledLogPath = path.join(repo, ".workbench/items", cancelledReq, cancelled.run.logPath);
+    for (let i = 0; i < 80; i++) {
+      if (fs.existsSync(cancelledLogPath) && fs.readFileSync(cancelledLogPath, "utf8").includes("session id:")) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
     expect(executor.cancelRun(cancelled.run.id)).toBe(true);
     await cancelledDone;
     expect(getRequirement(repo, cancelledReq).state.agentRuns?.[0]).toMatchObject({ status: "cancelled" });
@@ -1606,5 +1612,97 @@ printf 'done\\n'
       model: SELECTED_MODEL,
       reasoningEffort: "high",
     });
+  });
+
+  test("recovers orphaned running agent runs from dead Hub hosts and preserves live-flushed logs", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("orphan-recovery");
+    await initProject(repo);
+    await createRequirement(repo, {
+      goal: "验证孤儿运行自动回收",
+      criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const runId = "RUN-1700000000000-orphan";
+    await startAgentRun(repo, "REQ-001", {
+      id: runId,
+      action: "implement",
+      harness: "codex",
+      model: SELECTED_MODEL,
+      hubPid: 999999999,
+      status: "running",
+      startedAt: Date.now() - 60_000,
+      endedAt: null,
+      exitCode: null,
+      durationMs: 0,
+      logPath: `runs/run-${runId}.log`,
+    });
+    const logPath = path.join(repo, ".workbench/items/REQ-001/runs", `run-${runId}.log`);
+    fs.writeFileSync(logPath, "$ codex exec ...\npartial output line\n", "utf8");
+
+    const executor = new HubExecutor({ initialHarnesses: [fakeCodexHarness("codex")] });
+    const recovered = await executor.recoverOrphanedRuns([repo]);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]!.runId).toBe(runId);
+
+    const detail = getRequirement(repo, "REQ-001");
+    const runRecord = detail.state.agentRuns?.find((r) => r.id === runId);
+    expect(runRecord?.status).toBe("failed");
+    expect(runRecord?.errorSummary).toContain("孤儿运行");
+    const persistedLog = fs.readFileSync(logPath, "utf8");
+    expect(persistedLog).toContain("partial output line");
+    expect(persistedLog).toContain("孤儿运行已自动回收");
+  });
+
+  test("streams live agent output to disk log before run finishes", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("live-disk-log");
+    await initProject(repo);
+    await createRequirement(repo, {
+      goal: "验证运行日志实时落盘",
+      criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const markerFile = path.join(repo, ".live-marker");
+    const executor = new HubExecutor({
+      initialHarnesses: [fakeCodexHarness("codex")],
+      commandBuilder: () => ({
+        command: process.execPath,
+        args: [
+          "-e",
+          `const fs = require("fs"); console.log("LIVE_CHUNK_ONE"); const deadline = Date.now() + 8000; while (!fs.existsSync(${JSON.stringify(markerFile)}) && Date.now() < deadline) { Bun.sleepSync(25); } console.log("LIVE_CHUNK_TWO");`,
+        ],
+        displayCommand: "fake-live-agent",
+      }),
+    });
+
+    const started = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "codex",
+      model: SELECTED_MODEL,
+    });
+    const diskLogPath = path.join(repo, ".workbench/items/REQ-001", started.run.logPath);
+
+    let sawLiveChunk = false;
+    for (let i = 0; i < 60; i++) {
+      if (fs.existsSync(diskLogPath) && fs.readFileSync(diskLogPath, "utf8").includes("LIVE_CHUNK_ONE")) {
+        sawLiveChunk = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    fs.writeFileSync(markerFile, "done", "utf8");
+    expect(sawLiveChunk).toBe(true);
+
+    for (let i = 0; i < 60; i++) {
+      const rec = getRequirement(repo, "REQ-001").state.agentRuns?.find((r) => r.id === started.run.id);
+      if (rec && rec.status !== "running") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(fs.readFileSync(diskLogPath, "utf8")).toContain("LIVE_CHUNK_TWO");
   });
 });

@@ -541,7 +541,16 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
       // Dirty tracked file right before Accept so server observes stale verification against current snapshot.
       fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 99;\n");
-      await page.click('[data-testid="action-accept"]');
+      try {
+        await page.click('[data-testid="action-accept"]');
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("detached")) {
+          await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
+          await page.click('[data-testid="action-accept"]');
+        } else {
+          throw err;
+        }
+      }
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll("[data-sonner-toast]")).some(

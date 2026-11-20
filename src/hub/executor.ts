@@ -8,13 +8,14 @@ import {
   finishAgentRun,
   getProjectStatus,
   getRequirement,
+  listRequirements,
   markDesigning,
   recordReviewReport,
   resolveDiscussions,
   startAgentRun,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
+import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText } from "../core/fs.ts";
 import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
 import {
   buildOutputLanguageDirective,
@@ -442,7 +443,8 @@ export function buildExecutionPrompt(
       "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
       "- 优先复用匹配证据：先核验 `.workbench/items/" +
         reqId +
-        `/evidence/\` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行${fastVerifyHint}，无需重复运行全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。`,
+        `/evidence/\` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行${fastVerifyHint}，禁止重跑耗时的全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。`,
+      "- 结论判定聚焦代码与 AC：只有实际代码缺陷、安全风险或必需 AC 未满足时才给出 `block` 或 `concern`；若代码与证据均已达标、仅存在待人工确认或非必需流程提醒，请给 `pass` 并在正文说明，切勿要求超出当前 AC 范围的额外宿主证明。",
       "- 注：若当前处于只读沙箱且需要可写目录的端到端/浏览器用例因只读限制无法启动，请直接核验 `.workbench/items/" +
         reqId +
         "/evidence/` 既有真实运行日志并执行静态检查与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
@@ -463,7 +465,7 @@ export function buildExecutionPrompt(
   const isFastTrack = detail.state.track === "fast_track";
   const modeVerb =
     input.action === "design"
-      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，${options.fastCommand ? `常规快速检查可引用 \`${options.fastCommand}\`，` : ""}纯文档改动无需捆绑耗时的代码全量测试），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
+      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（验收条件按分层设计：${options.fastCommand ? `AC-1 用 \`${options.fastCommand}\`、` : ""}AC-2 优先绑定针对改动模块的局部测试命令；仅在改动业务/测试代码时才增加一条 \`${options.fullCommand ?? "全量测试"}\` 作为最终门禁，纯文档/配置调整勿捆绑全量测试；若预计改动局限在少数文件且风险可控，可建议采用轻量快速方案），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
       : input.action === "fix" && input.resolveConflict
         ? `本次任务仅聚焦将主干最新提交合并到当前沙箱分支并解决合并冲突（切勿重复返工已通过的既有实现或过期审查意见）：1) 若存在未提交业务改动请先安全暂存或提交（严禁提交 node_modules 或 .workbench）；2) 合并目标主干提交并完整保留本需求功能与主干新增改动；3) 运行 \`wb verify ${reqId} --all\` 验证全部通过后执行 \`wb tasks ${reqId} --ready\`。`
         : input.action === "fix"
@@ -481,7 +483,13 @@ export function buildExecutionPrompt(
   const boundaryGuard =
     input.action === "design"
       ? "注意：你无权也无需执行批准或最终验收操作；本轮只产出方案，提交后立即停止，不要继续实施。"
-      : "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证，勿留下后台未完成命令即结束本轮。";
+      : [
+          "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证，勿留下后台未完成命令即结束本轮。",
+          "执行规范（减少无效耗时）：",
+          "- 开发调试期仅运行类型检查与针对当前改动模块的局部测试文件，禁止自行直接运行全量测试；全量验证统一通过 `wb verify <REQ-ID> --all` 触发（同快照已通过的条目会自动复用）。",
+          "- 严禁越界修改无关文件或试图修补与本需求无关的既有/偶发失败测试；遇无关失败先重试一次确认，并将情况记录到 `wb tasks <REQ-ID> --handoff-note` 即可。",
+          "- 更新交接/交付说明请使用 `wb tasks <REQ-ID> --handoff-note '{...}'`（或 MCP `wb_update_tasks`），禁止在实施或修复阶段为了写说明而调用 `wb propose`。",
+        ].join("\n");
 
   const screenshotHint =
     (input.action === "implement" || input.action === "fix") && detail.state.uiRelated === true
@@ -722,6 +730,9 @@ function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorRe
   }
   return { displayText: `${trimmed}\n`, replyText: null };
 }
+
+const ORPHAN_LEGACY_GRACE_MS = 5_000;
+const globalActiveRunIds = new Set<string>();
 
 export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
 
@@ -1068,6 +1079,7 @@ export class HubExecutor {
       harness: target.harness,
       model: target.model,
       ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+      hubPid: process.pid,
       status: "running",
       startedAt,
       endedAt: null,
@@ -1093,7 +1105,21 @@ export class HubExecutor {
       ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
     };
 
-    this.runLogs.set(runId, `$ ${built.displayCommand}\n`);
+    const liveLogPath = path.join(base, WORKBENCH_DIR, "items", id, "runs", `run-${runId}.log`);
+    const appendDiskLog = (text: string) => {
+      if (!text) return;
+      try {
+        if (fs.existsSync(path.dirname(liveLogPath))) {
+          fs.appendFileSync(liveLogPath, text, "utf8");
+        }
+      } catch {
+        // Real-time disk flush is best-effort; finalize writes the bounded log atomically.
+      }
+    };
+
+    const initialCmdLine = `$ ${built.displayCommand}\n`;
+    this.runLogs.set(runId, initialCmdLine);
+    appendDiskLog(initialCmdLine);
     const child = spawn(built.command, built.args, {
       cwd: codeRoot,
       detached: process.platform !== "win32",
@@ -1114,6 +1140,7 @@ export class HubExecutor {
       timeoutReason: null,
     };
     this.activeJobs.set(runId, job);
+    globalActiveRunIds.add(runId);
 
     this.emit({
       type: "agent.run.started",
@@ -1193,6 +1220,7 @@ export class HubExecutor {
       const cur = (this.runLogs.get(runId) ?? "") + text;
       const bounded = cur.length > MAX_EVIDENCE_BYTES ? cur.slice(cur.length - MAX_EVIDENCE_BYTES) : cur;
       this.runLogs.set(runId, bounded);
+      appendDiskLog(text);
       this.emit({
         type: "agent.run.output",
         root: base,
@@ -1248,6 +1276,7 @@ export class HubExecutor {
       if (livenessTimer) clearInterval(livenessTimer);
       if (job.killTimer) clearTimeout(job.killTimer);
       this.activeJobs.delete(runId);
+      globalActiveRunIds.delete(runId);
 
       if (target.harness === "qodercn" && stdoutLineBuf.trim()) {
         handleQoderLine(stdoutLineBuf);
@@ -1580,6 +1609,105 @@ export class HubExecutor {
     job.cancelled = true;
     this.killProcessGroup(job);
     return true;
+  }
+
+  /** Marks orphaned `running` records from dead Hub hosts as failed while preserving any flushed logs. */
+  async recoverOrphanedRuns(roots: string[]): Promise<Array<{ root: string; requirementId: string; runId: string }>> {
+    const recovered: Array<{ root: string; requirementId: string; runId: string }> = [];
+    const seenRoots = new Set<string>();
+    const now = Date.now();
+
+    for (const rawRoot of roots) {
+      let base: string;
+      try {
+        base = canonicalRoot(rawRoot);
+      } catch {
+        continue;
+      }
+      if (seenRoots.has(base)) continue;
+      seenRoots.add(base);
+
+      let summaries: ReturnType<typeof listRequirements>;
+      try {
+        summaries = listRequirements(base, { scope: "active" });
+      } catch {
+        continue;
+      }
+
+      for (const summary of summaries) {
+        let detail: RequirementDetail;
+        try {
+          detail = getRequirement(base, summary.id);
+        } catch {
+          continue;
+        }
+        const staleRuns = (detail.state.agentRuns ?? []).filter((run) => {
+          if (run.status !== "running") return false;
+          if (this.activeJobs.has(run.id) || globalActiveRunIds.has(run.id)) return false;
+          if (typeof run.hubPid === "number") {
+            return run.hubPid === process.pid || !isProcessAlive(run.hubPid);
+          }
+          return now - run.startedAt > ORPHAN_LEGACY_GRACE_MS;
+        });
+
+        for (const run of staleRuns) {
+          const logFile = path.join(base, WORKBENCH_DIR, "items", summary.id, run.logPath);
+          let existingLog = "";
+          try {
+            if (fs.existsSync(logFile)) {
+              existingLog = readBoundedText(logFile, MAX_EVIDENCE_BYTES);
+            }
+          } catch {
+            existingLog = "";
+          }
+          const note = "[workbench] 宿主进程已重启或异常退出，孤儿运行已自动回收。\n";
+          const rawLog = existingLog.includes(note.trim()) ? existingLog : `${existingLog}${existingLog.endsWith("\n") || !existingLog ? "" : "\n"}${note}`;
+          const endedAt = Date.now();
+          const errorSummary = "运行宿主已重启或异常退出（孤儿运行已自动回收）";
+          try {
+            await finishAgentRun(
+              base,
+              summary.id,
+              run.id,
+              {
+                status: "failed",
+                endedAt,
+                exitCode: null,
+                durationMs: Math.max(0, endedAt - run.startedAt),
+                errorSummary,
+              },
+              rawLog,
+            );
+            recovered.push({ root: base, requirementId: summary.id, runId: run.id });
+            this.emit({
+              type: "agent.run.finished",
+              root: base,
+              requirementId: summary.id,
+              runId: run.id,
+              action: run.action,
+              harness: run.harness,
+              model: run.model,
+              status: "failed",
+              errorSummary,
+              exitCode: null,
+              durationMs: Math.max(0, endedAt - run.startedAt),
+              at: endedAt,
+            });
+            this.emit({
+              type: "workbench.updated",
+              root: base,
+              requirementId: summary.id,
+              runId: run.id,
+              at: endedAt,
+            });
+          } catch {
+            // Best-effort recovery; never abort Hub startup on a single requirement error.
+          }
+        }
+      }
+    }
+
+    return recovered;
   }
 
   stopAllRuns(): void {

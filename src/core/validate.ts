@@ -925,6 +925,7 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
       "modelFallback",
       "reasoningEffort",
       "nativeSessionId",
+      "hubPid",
       "status",
       "startedAt",
       "endedAt",
@@ -944,6 +945,7 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     !isSafeText(raw.model, 200) ||
     (raw.effectiveModel !== undefined && !isSafeText(raw.effectiveModel, 200)) ||
     (raw.modelFallback !== undefined && typeof raw.modelFallback !== "boolean") ||
+    (raw.hubPid !== undefined && !isSafeInt(raw.hubPid, 1)) ||
     !["running", "succeeded", "failed", "cancelled"].includes(String(raw.status)) ||
     !isSafeInt(raw.startedAt, 0) ||
     (raw.endedAt !== null && !isSafeInt(raw.endedAt, 0)) ||

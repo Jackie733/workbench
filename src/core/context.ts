@@ -86,7 +86,7 @@ function detectRepoCommands(base: string): {
           if (typeof scripts.test === "string" && scripts.test.trim()) {
             const testBody = scripts.test.trim();
             if (!testBody.includes("no test specified")) {
-              fullCommand = pm === "bun" && testBody === "bun test" ? "bun test" : `${pm} test`;
+              fullCommand = pm === "bun" ? (testBody === "bun test" ? "bun test" : "bun run test") : `${pm} test`;
             }
           }
           if (fastCommand || fullCommand) {

@@ -857,7 +857,7 @@ export async function propose(
           specHash: nextSpecHash,
         };
       } else if (
-        state.stage === "implementing" &&
+        (state.stage === "implementing" || state.stage === "awaiting_acceptance") &&
         actor === "agent" &&
         nextSpec === current.specMarkdown &&
         nextTitle === state.title &&
@@ -865,7 +865,7 @@ export async function propose(
         isNonBreakingCriteriaUpdate(state.criteria, nextCriteria)
       ) {
         // Non-breaking implementation refinements (fixing verify commands, adding tests, or updating design notes) keep approval active.
-        nextStage = "implementing";
+        nextStage = state.stage;
         nextApproval = {
           ...nextApproval,
           specHash: nextSpecHash,
@@ -1214,8 +1214,8 @@ export async function updateTasks(
     if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不允许更新任务进度`);
     }
-    if (input.tasks === undefined && input.readyForAcceptance !== true) {
-      throw new WorkbenchError("invalid_input", "请提供 tasks 或设置 readyForAcceptance=true");
+    if (input.tasks === undefined && input.readyForAcceptance !== true && input.handoffNote === undefined) {
+      throw new WorkbenchError("invalid_input", "请提供 tasks、handoffNote 或设置 readyForAcceptance=true");
     }
 
     const nextTasks = input.tasks !== undefined ? normalizeTasks(input.tasks, state.tasks, now) : state.tasks;

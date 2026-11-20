@@ -466,6 +466,12 @@ describe("WB-01 core store and domain engine", () => {
     expect(detected.fastCommand).toBe("bun run typecheck");
     expect(detected.fullCommand).toBe("bun test");
 
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "sample", scripts: { typecheck: "tsc --noEmit", test: "bun run scripts/test.ts" } }),
+    );
+    expect(discoverProjectContext(dir, null).fullCommand).toBe("bun run test");
+
     await initProject(dir, { name: "Sample" });
     const updated = await updateProjectConfig(dir, {
       verification: {
@@ -605,5 +611,48 @@ describe("WB-01 core store and domain engine", () => {
 
     await cancelRequirement(dir, "REQ-001", { reason: "不再拆分子需求" });
     await expect(spawnSubRequirements(dir, "REQ-001")).rejects.toThrow("已取消");
+  });
+
+  test("preserves approval when agent updates design or handoffNote during awaiting_acceptance and supports standalone handoffNote in updateTasks", async () => {
+    const dir = makeTempProject();
+    await initProject(dir, { name: "NonBreaking Acceptance" });
+    await createRequirement(dir, { goal: "待验收期更新交付说明不清空批准" });
+
+    await propose(dir, "REQ-001", {
+      designMarkdown: "# Design\n\nInitial plan.",
+      criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
+      actor: "agent",
+    });
+    await approveDesign(dir, "REQ-001");
+    const specHash = getRequirement(dir, "REQ-001").state.specHash;
+    const snap1 = "a".repeat(64);
+    await recordVerification(dir, "REQ-001", {
+      record: makeVerification("V-100", specHash, snap1, ["AC-1"], true),
+      rawLog: "ok\n",
+      currentCodeSnapshotHash: snap1,
+    });
+    const submitted = await updateTasks(dir, "REQ-001", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap1,
+    });
+    expect(submitted.state.stage).toBe("awaiting_acceptance");
+
+    const updatedDesign = await propose(dir, "REQ-001", {
+      designMarkdown: "# Design\n\nInitial plan.\n\n## 交付说明\n已补充证据。",
+      handoffNote: { keyDecisions: ["keep approval"] },
+      actor: "agent",
+      currentCodeSnapshotHash: snap1,
+    });
+    expect(updatedDesign.state.stage).toBe("awaiting_acceptance");
+    expect(updatedDesign.state.approval).not.toBeNull();
+
+    const updatedNote = await updateTasks(dir, "REQ-001", {
+      handoffNote: { nextSteps: ["ready for human accept"] },
+      actor: "agent",
+      currentCodeSnapshotHash: snap1,
+    });
+    expect(updatedNote.state.stage).toBe("awaiting_acceptance");
+    expect(updatedNote.state.handoffNote?.nextSteps).toEqual(["ready for human accept"]);
   });
 });

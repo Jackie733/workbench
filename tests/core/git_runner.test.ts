@@ -13,7 +13,7 @@ import {
   updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitChanges, observeGitSnapshot } from "../../src/core/git.ts";
-import { runAllVerifications, runVerification } from "../../src/core/runner.ts";
+import { isHeavyVerificationCommand, runAllVerifications, runVerification } from "../../src/core/runner.ts";
 
 const tempDirs: string[] = [];
 
@@ -245,5 +245,83 @@ describe("WB-02 git observer and verification runner", () => {
     expect(res.runs[1]!.record.command).toBe("bun test tests/sample.test.ts -t ok");
     expect(res.runs[1]!.record.criterionIds).toEqual(["AC-3"]);
     expect(res.detail.validity.acceptanceGate.ok).toBe(true);
+  });
+
+  test("reuses matching passed verification on unchanged snapshot unless force is true, and classifies heavy commands", async () => {
+    expect(isHeavyVerificationCommand("bun test")).toBe(true);
+    expect(isHeavyVerificationCommand("bun run typecheck && bun test")).toBe(true);
+    expect(isHeavyVerificationCommand("bun test tests/core/git_runner.test.ts")).toBe(false);
+    expect(isHeavyVerificationCommand("bun run typecheck")).toBe(false);
+
+    const repo = initGitRepo(true);
+    await initProject(repo);
+    const stampFile = path.join(repo, ".run-count");
+    await createRequirement(repo, {
+      goal: "验证同快照幂等复用与 force 重跑",
+      criteria: [
+        {
+          id: "AC-1",
+          description: "计数验证",
+          required: true,
+          command: `bun -e 'const fs=require("fs");const f=${JSON.stringify(stampFile)};const n=(fs.existsSync(f)?Number(fs.readFileSync(f,"utf8")):0)+1;fs.writeFileSync(f,String(n));'`,
+        },
+      ],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const first = await runAllVerifications(repo, "REQ-001");
+    expect(first.runs).toHaveLength(1);
+    expect(first.runs[0]!.reused).toBeUndefined();
+    expect(fs.readFileSync(stampFile, "utf8")).toBe("1");
+
+    // Re-running without force reuses existing passing verification for unchanged spec & code snapshot.
+    const second = await runAllVerifications(repo, "REQ-001");
+    expect(second.runs).toHaveLength(1);
+    expect(second.runs[0]!.reused).toBe(true);
+    expect(second.runs[0]!.record.id).toBe(first.runs[0]!.record.id);
+    expect(fs.readFileSync(stampFile, "utf8")).toBe("1");
+
+    // Explicit force=true executes the command again.
+    const forced = await runAllVerifications(repo, "REQ-001", { force: true });
+    expect(forced.runs).toHaveLength(1);
+    expect(forced.runs[0]!.reused).toBeUndefined();
+    expect(fs.readFileSync(stampFile, "utf8")).toBe("2");
+  });
+
+  test("shares verify cache across requirements on identical git snapshot and subsumes bun test files under bun run test", async () => {
+    const repo = initGitRepo(true);
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-runner-cache-hub-"));
+    tempDirs.push(hubDir);
+    const prevHub = process.env.WORKBENCH_HUB_DIR;
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+    try {
+      await initProject(repo);
+      const stampFile = path.join(repo, ".cache-count");
+      const cmd = `bun -e 'const fs=require("fs");const f=${JSON.stringify(stampFile)};const n=(fs.existsSync(f)?Number(fs.readFileSync(f,"utf8")):0)+1;fs.writeFileSync(f,String(n));'`;
+      await createRequirement(repo, {
+        goal: "第一个需求生成验证缓存",
+        criteria: [{ id: "AC-1", description: "计数验证", required: true, command: cmd }],
+      });
+      await authorizeFastTrack(repo, "REQ-001");
+      const first = await runAllVerifications(repo, "REQ-001");
+      expect(first.runs[0]!.reused).toBeUndefined();
+      expect(fs.readFileSync(stampFile, "utf8")).toBe("1");
+
+      // Second requirement on the exact same git snapshot hits the cross-requirement verify cache.
+      await createRequirement(repo, {
+        goal: "第二个需求命中同快照验证缓存",
+        criteria: [{ id: "AC-1", description: "计数验证", required: true, command: cmd }],
+      });
+      await authorizeFastTrack(repo, "REQ-002");
+      const second = await runAllVerifications(repo, "REQ-002");
+      expect(second.runs).toHaveLength(1);
+      expect(second.runs[0]!.reused).toBe(true);
+      expect(second.runs[0]!.log).toContain("跨需求验证缓存");
+      expect(second.detail.validity.acceptanceGate.ok).toBe(true);
+      expect(fs.readFileSync(stampFile, "utf8")).toBe("1");
+    } finally {
+      if (prevHub === undefined) delete process.env.WORKBENCH_HUB_DIR;
+      else process.env.WORKBENCH_HUB_DIR = prevHub;
+    }
   });
 });
