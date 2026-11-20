@@ -53,6 +53,7 @@ import {
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
+  type ProjectVerificationConfig,
   type RequirementGitHubIssueLink,
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
@@ -378,6 +379,22 @@ function validateProjectGiteeConfig(raw: unknown): ProjectGiteeConfig | undefine
   return raw as unknown as ProjectGiteeConfig;
 }
 
+function validateProjectVerificationConfig(raw: unknown): ProjectVerificationConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json verification 配置必须是对象");
+  assertAllowedKeys(raw, ["fastCommand", "fullCommand", "autoScreenshots"], "project.verification");
+  if (raw.fastCommand !== undefined && !isSafeText(raw.fastCommand, 512, true)) {
+    throw new WorkbenchError("corrupt_record", "project.verification.fastCommand 格式不合法");
+  }
+  if (raw.fullCommand !== undefined && !isSafeText(raw.fullCommand, 512, true)) {
+    throw new WorkbenchError("corrupt_record", "project.verification.fullCommand 格式不合法");
+  }
+  if (raw.autoScreenshots !== undefined && typeof raw.autoScreenshots !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.verification.autoScreenshots 必须是布尔值");
+  }
+  return raw as unknown as ProjectVerificationConfig;
+}
+
 export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -398,6 +415,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   }
   validateProjectGitHubConfig(raw.github);
   validateProjectGiteeConfig(raw.gitee);
+  validateProjectVerificationConfig(raw.verification);
   return raw as unknown as ProjectMetadata;
 }
 
@@ -1081,6 +1099,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     typeof raw.id !== "string" ||
     !REQUIREMENT_ID_RE.test(raw.id) ||
     (expectedId && raw.id !== expectedId) ||
+    (raw.parentId !== undefined && (typeof raw.parentId !== "string" || !REQUIREMENT_ID_RE.test(raw.parentId) || raw.parentId === raw.id)) ||
     !isSafeText(raw.title, 400) ||
     !STAGES.includes(raw.stage as Stage) ||
     !TRACKS.includes(raw.track as Track) ||

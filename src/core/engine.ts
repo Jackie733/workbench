@@ -9,6 +9,7 @@ import {
   detectOmittedDiffContent,
   getGitRemoteUrl,
   getHeadCommitInfo,
+  inspectRemoteBranchDivergence,
   inspectWorkingTreeForDelivery,
   listCommittedFilesBetween,
   observeGitChanges,
@@ -67,6 +68,7 @@ import {
   type AgentRunRecord,
   type AttachmentMeta,
   type BaselineSnapshot,
+  type Criterion,
   type CriterionInput,
   type DeliveryCandidateFile,
   type DeliveryPreview,
@@ -80,6 +82,7 @@ import {
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
+  type ProjectVerificationConfig,
   type RequirementDetail,
   type RequirementDiffView,
   type RequirementGitHubIssueLink,
@@ -101,6 +104,7 @@ import {
   type VerificationRecord,
 } from "./types.ts";
 import {
+  assertRequirementId,
   deriveTitleFromGoal,
   isSafeText,
   normalizeCriteria,
@@ -221,6 +225,7 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
   const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
   return {
     id: state.id,
+    ...(state.parentId ? { parentId: state.parentId } : {}),
     title: state.title,
     stage: state.stage,
     track: state.track,
@@ -266,6 +271,7 @@ export async function updateProjectConfig(
     outputLanguage?: OutputLanguage | null;
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
+    verification?: ProjectVerificationConfig | null;
   },
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
@@ -348,6 +354,30 @@ export async function updateProjectConfig(
       }
     }
 
+    if (patch.verification === null) {
+      delete next.verification;
+    } else if (patch.verification !== undefined) {
+      const mergedVer: ProjectVerificationConfig = { ...(current.verification ?? {}) };
+      if (patch.verification.fastCommand !== undefined) {
+        const cleanFast = patch.verification.fastCommand.trim();
+        if (cleanFast) mergedVer.fastCommand = cleanFast;
+        else delete mergedVer.fastCommand;
+      }
+      if (patch.verification.fullCommand !== undefined) {
+        const cleanFull = patch.verification.fullCommand.trim();
+        if (cleanFull) mergedVer.fullCommand = cleanFull;
+        else delete mergedVer.fullCommand;
+      }
+      if (patch.verification.autoScreenshots !== undefined) {
+        mergedVer.autoScreenshots = Boolean(patch.verification.autoScreenshots);
+      }
+      if (Object.keys(mergedVer).length > 0) {
+        next.verification = mergedVer;
+      } else {
+        delete next.verification;
+      }
+    }
+
     const validated = validateProjectMetadata(next);
     atomicWriteJson(projectPath, validated);
     return validated;
@@ -408,7 +438,13 @@ export function getRequirement(
   options: { currentCodeSnapshotHash?: string | null } = {},
 ): RequirementDetail {
   const bundle = readRequirementBundle(root, id);
-  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+  const detail = toDetail(bundle, options.currentCodeSnapshotHash ?? null);
+  const subRequirements = listRequirements(root, {
+    scope: "all",
+    currentCodeSnapshotHash: options.currentCodeSnapshotHash ?? null,
+    onCorrupt: () => {},
+  }).filter((item) => item.parentId === id);
+  return subRequirements.length > 0 ? { ...detail, subRequirements } : detail;
 }
 
 export function getDesignHistoryVersion(root: string, id: string, version: number): string {
@@ -513,6 +549,7 @@ export async function createRequirement(
   input: {
     goal: string;
     title?: string;
+    parentId?: string;
     criteria?: CriterionInput[];
     track?: Track;
     uiRelated?: boolean;
@@ -528,6 +565,11 @@ export async function createRequirement(
   const criteria = input.criteria ? normalizeCriteria(input.criteria) : [];
   const track: Track = input.track === "fast_track" ? "fast_track" : "plan_first";
   const specHash = computeSpecHash(specMarkdown, criteria);
+  const parentId = input.parentId?.trim() ? assertRequirementId(input.parentId.trim()) : undefined;
+  if (parentId) {
+    // Ensure parent exists before linking.
+    readRequirementBundle(root, parentId);
+  }
 
   const bundle = await createRequirementFiles(root, (id, now) => {
     let attachments: AttachmentMeta[] = [];
@@ -543,6 +585,7 @@ export async function createRequirement(
     const state: RequirementState = {
       schemaVersion: SCHEMA_VERSION,
       id,
+      ...(parentId ? { parentId } : {}),
       title,
       stage: "draft",
       track,
@@ -729,6 +772,18 @@ export async function markDesigning(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
+function isNonBreakingCriteriaUpdate(prev: Criterion[], next: Criterion[]): boolean {
+  const nextById = new Map(next.map((c) => [c.id, c]));
+  for (const c of prev) {
+    if (!c.required) continue;
+    const matched = nextById.get(c.id);
+    if (!matched || !matched.required) return false;
+    if (matched.description !== c.description) return false;
+    if (c.command && matched.command !== c.command) return false;
+  }
+  return true;
+}
+
 export async function propose(
   root: string,
   id: string,
@@ -800,6 +855,22 @@ export async function propose(
         nextApproval = {
           ...state.approval,
           specHash: nextSpecHash,
+        };
+      } else if (
+        state.stage === "implementing" &&
+        actor === "agent" &&
+        nextSpec === current.specMarkdown &&
+        nextTitle === state.title &&
+        !(state.track === "plan_first" && nextDesignHash === "") &&
+        isNonBreakingCriteriaUpdate(state.criteria, nextCriteria)
+      ) {
+        // Non-breaking implementation refinements (fixing verify commands, adding tests, or updating design notes) keep approval active.
+        nextStage = "implementing";
+        nextApproval = {
+          ...nextApproval,
+          specHash: nextSpecHash,
+          designVersion: nextDesignVersion,
+          designHash: nextDesignHash,
         };
       } else {
         // Any change to spec/criteria/design invalidates prior approval and forces human re-check.
@@ -903,6 +974,9 @@ export async function authorizeFastTrack(
     currentCodeSnapshotHash?: string | null;
   } = {},
 ): Promise<RequirementDetail> {
+  const projectMeta = getProjectStatus(root).project;
+  const configuredFastCmd = projectMeta?.verification?.fastCommand?.trim() || null;
+
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
     if (state.stage !== "draft" && state.stage !== "designing" && state.stage !== "awaiting_approval") {
@@ -910,18 +984,32 @@ export async function authorizeFastTrack(
     }
     const note = input.note?.trim() ? normalizeReason(input.note, "授权说明") : undefined;
     const baseline = input.baseline ?? state.baseline;
+    const autoCriteria =
+      state.criteria.length === 0 && configuredFastCmd
+        ? [
+            {
+              id: "AC-1",
+              description: "项目快速基线验证通过",
+              required: true,
+              command: configuredFastCmd,
+            },
+          ]
+        : state.criteria;
+    const nextSpecHash = autoCriteria !== state.criteria ? computeSpecHash(current.specMarkdown, autoCriteria) : state.specHash;
     return {
       snapshotSpecRevision: state.revision,
       state: {
         ...state,
         track: "fast_track",
         stage: "implementing",
+        criteria: autoCriteria,
+        specHash: nextSpecHash,
         baseline,
         lastFeedback: null,
         approval: {
           approvedAt: now,
           track: "fast_track",
-          specHash: state.specHash,
+          specHash: nextSpecHash,
           designVersion: state.designVersion,
           designHash: state.designHash,
           baselineHead: baseline?.head ?? null,
@@ -937,6 +1025,137 @@ export async function authorizeFastTrack(
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+export interface SpawnSubRequirementItem {
+  title: string;
+  goal?: string;
+  track?: Track;
+}
+
+const SPAWN_SKIP_HEADING_RE = /^(?:总体思路|背景|概述|目标|验收|验证|目录|风险|回滚|overview|background|verification|testing|risks?)$/i;
+
+export function extractSpawnCandidatesFromRequirement(detail: RequirementDetail): SpawnSubRequirementItem[] {
+  if (detail.state.tasks.length > 0) {
+    return detail.state.tasks.slice(0, 12).map((t) => ({
+      title: t.title,
+      goal: t.note ? `${t.title}\n\n${t.note}` : t.title,
+    }));
+  }
+  const md = detail.designMarkdown.trim();
+  if (!md) return [];
+  const candidates: SpawnSubRequirementItem[] = [];
+  const lines = md.split(/\r?\n/);
+  let currentTitle: string | null = null;
+  let currentBody: string[] = [];
+  let inFence = false;
+  const flush = () => {
+    if (!currentTitle) return;
+    const body = currentBody.join("\n").trim();
+    const cleanTitle = currentTitle.replace(/^\d+(?:\.\d+)*[.)、\s]+/, "").trim() || currentTitle;
+    if (!SPAWN_SKIP_HEADING_RE.test(cleanTitle)) {
+      candidates.push({
+        title: cleanTitle.slice(0, 100),
+        goal: body ? body.slice(0, 2000) : cleanTitle,
+      });
+    }
+    currentTitle = null;
+    currentBody = [];
+  };
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      inFence = !inFence;
+    }
+    if (!inFence) {
+      const m = /^##\s+(.+?)\s*#*$/.exec(line.trim());
+      if (m) {
+        flush();
+        currentTitle = m[1]!.trim();
+        continue;
+      }
+    }
+    if (currentTitle) {
+      currentBody.push(line);
+    }
+  }
+  flush();
+  return candidates.slice(0, 12);
+}
+
+export async function spawnSubRequirements(
+  root: string,
+  parentId: string,
+  input: {
+    items?: SpawnSubRequirementItem[];
+    track?: Track;
+    currentCodeSnapshotHash?: string | null;
+  } = {},
+): Promise<{ parent: RequirementDetail; created: RequirementDetail[] }> {
+  const base = canonicalRoot(root);
+  const parent = getRequirement(base, parentId, { currentCodeSnapshotHash: input.currentCodeSnapshotHash });
+  if (parent.state.stage === "cancelled") {
+    throw new WorkbenchError("invalid_transition", "已取消的需求不能派生子需求");
+  }
+  const rawItems =
+    input.items && input.items.length > 0
+      ? input.items
+      : extractSpawnCandidatesFromRequirement(parent);
+  const items = rawItems
+    .map((item) => ({
+      title: item.title?.trim() ?? "",
+      goal: item.goal?.trim() || item.title?.trim() || "",
+      track: item.track ?? input.track ?? "plan_first",
+    }))
+    .filter((item) => item.title.length > 0)
+    .slice(0, 12);
+
+  if (items.length === 0) {
+    throw new WorkbenchError("invalid_input", "请提供至少一条子需求条目，或先在父需求生成任务/方案章节");
+  }
+
+  const keyDecisions = (parent.state.handoffNote?.keyDecisions ?? []).slice(0, 4);
+  const created: RequirementDetail[] = [];
+  for (const item of items) {
+    const goalLines: string[] = [
+      `# ${item.title}`,
+      "",
+      `> 派生自父架构需求 \`${parent.state.id}\`（${parent.state.title}）`,
+      `> 父方案参考：\`.workbench/items/${parent.state.id}/design.md\``,
+      "",
+      item.goal,
+    ];
+    if (keyDecisions.length > 0) {
+      goalLines.push("", "## 父架构关键约束", ...keyDecisions.map((d) => `- ${d}`));
+    }
+    const child = await createRequirement(base, {
+      title: item.title,
+      goal: goalLines.join("\n"),
+      parentId: parent.state.id,
+      track: item.track,
+      currentCodeSnapshotHash: input.currentCodeSnapshotHash ?? null,
+    });
+    created.push(child);
+  }
+
+  await mutateRequirement(base, parent.state.id, undefined, (current, now) => ({
+    state: {
+      ...current.state,
+      timeline: appendTimeline(
+        current.state.timeline,
+        makeEvent(
+          now,
+          "sub_requirements_spawned",
+          "human",
+          `派生 ${created.length} 条子需求：${created.map((c) => c.state.id).join("、")}`,
+        ),
+      ),
+    },
+  }));
+
+  const updatedParent = getRequirement(base, parent.state.id, {
+    currentCodeSnapshotHash: input.currentCodeSnapshotHash ?? null,
+  });
+  return { parent: updatedParent, created };
 }
 
 export async function requestChanges(
@@ -1745,6 +1964,11 @@ export async function getRequirementDeliveryPreview(
       ? tree.branch
       : `feat/${state.id.toLowerCase()}`;
 
+  const remoteDivergence =
+    tree.isGitRepo && suggestedBranch !== baseBranch
+      ? await inspectRemoteBranchDivergence(codeRoot, suggestedBranch, "origin")
+      : { remoteBranchExists: false, behindRemoteCount: 0, diverged: false };
+
   return {
     requirementId: state.id,
     stage: state.stage,
@@ -1769,6 +1993,8 @@ export async function getRequirementDeliveryPreview(
     acceptedSnapshotFileCount: acceptedSet.size,
     delivered: state.delivery ?? null,
     githubPr: state.github?.pr ?? null,
+    remoteBranchExists: remoteDivergence.remoteBranchExists,
+    remoteBranchDiverged: remoteDivergence.diverged,
   };
 }
 
@@ -1789,6 +2015,7 @@ export async function deliverRequirement(
     baseBranch?: string;
     prTitle?: string;
     prBody?: string;
+    forceWithLease?: boolean;
   },
   deps?: DeliveryCommandDeps,
 ): Promise<{
@@ -1999,7 +2226,12 @@ export async function deliverRequirement(
       buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title);
   }
 
-  await pushBranchToRemote(codeRoot, targetBranch, "origin");
+  const allowForceLease =
+    input.forceWithLease === true &&
+    targetBranch !== baseBranch &&
+    targetBranch !== "main" &&
+    targetBranch !== "master";
+  await pushBranchToRemote(codeRoot, targetBranch, "origin", { forceWithLease: allowForceLease });
 
   const firstLine = effectiveCommitMessage.split(/\r?\n/, 1)[0] ?? effectiveCommitMessage;
   const prTitle = (input.prTitle?.trim() || `${id}: ${preBundle.state.title}`).slice(0, 200);
@@ -2310,7 +2542,12 @@ export async function cancelRequirement(
 export async function reopenRequirement(
   root: string,
   id: string,
-  input: { reason: string; expectedRevision?: number; currentCodeSnapshotHash?: string | null },
+  input: {
+    reason: string;
+    preserveApproval?: boolean;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
 ): Promise<RequirementDetail> {
   const reason = normalizeReason(input.reason, "重开原因");
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
@@ -2318,18 +2555,27 @@ export async function reopenRequirement(
     if (state.stage !== "done" && state.stage !== "cancelled") {
       throw new WorkbenchError("invalid_transition", `只有已完成或已取消的需求才能重新打开（当前：${state.stage}）`);
     }
+    const canKeepApproval = input.preserveApproval === true && evaluateApproval(state).valid;
     return {
       state: {
         ...state,
-        stage: "draft",
-        approval: null,
+        stage: canKeepApproval ? "implementing" : "draft",
+        approval: canKeepApproval ? state.approval : null,
         acceptance: null,
         delivery: null,
         blockedFrom: null,
         blockedReason: null,
         timeline: appendTimeline(
           state.timeline,
-          makeEvent(now, "reopened", "human", "重新打开需求（历史批准与验收仅作存档，不自动复用）", reason),
+          makeEvent(
+            now,
+            "reopened",
+            "human",
+            canKeepApproval
+              ? "退回实施阶段（保留既有方案批准，历史验收记录仅作存档）"
+              : "重新打开需求（历史批准与验收仅作存档，不自动复用）",
+            reason,
+          ),
         ),
       },
     };
@@ -2590,13 +2836,14 @@ export async function syncRequirementBaseline(
     baselineFingerprint: string;
     dirty: boolean;
     preserveStage?: boolean;
+    eventKind?: TimelineEventKind;
     summary?: string;
     currentCodeSnapshotHash?: string | null;
   },
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled") {
+    if (state.stage === "cancelled" || (state.stage === "done" && !input.preserveStage)) {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能刷新基线`);
     }
     const nextStage: Stage =
@@ -2615,7 +2862,7 @@ export async function syncRequirementBaseline(
           state.timeline,
           makeEvent(
             now,
-            "tasks_updated",
+            input.eventKind ?? "sandbox_synced",
             "system",
             input.summary ?? `已同步主干基线至 ${input.baselineHead.slice(0, 7)}（需在新基线上复跑验证）`,
           ),
@@ -2624,4 +2871,51 @@ export async function syncRequirementBaseline(
     };
   });
   return toDetail(bundle, input.currentCodeSnapshotHash ?? input.baselineFingerprint);
+}
+
+/**
+ * Transitions an approved requirement from `done` or `awaiting_acceptance` to `implementing`
+ * specifically for sandbox conflict resolution without invalidating `approval` or polluting `lastFeedback`.
+ */
+export async function prepareRequirementForConflictSync(
+  root: string,
+  id: string,
+  input: { summary?: string; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "implementing") {
+      return { state };
+    }
+    if (state.stage !== "done" && state.stage !== "awaiting_acceptance") {
+      throw new WorkbenchError(
+        "invalid_transition",
+        `当前阶段（${state.stage}）不能直接进入主干同步消解冲突，请先批准方案`,
+      );
+    }
+    if (!evaluateApproval(state).valid) {
+      throw new WorkbenchError("approval_required", `${id} 尚未获得有效方案批准，请先批准方案`);
+    }
+    const wasDone = state.stage === "done";
+    return {
+      state: {
+        ...state,
+        stage: "implementing",
+        ...(wasDone ? { acceptance: null, delivery: null } : {}),
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "sandbox_synced",
+            "system",
+            input.summary ??
+              (wasDone
+                ? "因主干代码存在合并冲突，已轻量退回实施阶段消解冲突（保留既有方案批准）"
+                : "进入实施阶段同步主干基线并解决合并冲突"),
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }

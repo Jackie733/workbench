@@ -10,6 +10,7 @@ import {
   linkRequirementGitHubIssue,
   listRequirements,
   recordReviewReport,
+  spawnSubRequirements,
   updateProjectConfig,
 } from "../core/engine.ts";
 import { discardStagedAttachments, stageUpload } from "../core/attachments.ts";
@@ -194,13 +195,15 @@ function helpText(): string {
     "       [--lang <zh-CN|en|auto>]",
     "  config [--global] [--output-language <zh-CN|en|auto|inherit>]",
     "         [--github-repo <owner/repo>] [--auto-create-issue true|false]",
-    "                                             查看或修改全局/项目输出语言与 GitHub 配置",
+    "         [--fast-command <cmd>] [--full-command <cmd>]",
+    "                                             查看或修改全局/项目输出语言、GitHub 与分层验证配置",
     "  github status | import <issueRef> | link-issue <REQ-ID> [issueRef]",
     "                                             GitHub 仓库探测、Issue 导入或关联",
     "  list [--scope active|done|cancelled|all]   列出需求摘要",
     "  get <REQ-ID> [--diff]                      查看需求详情与覆盖状态",
-    "  create <goal|@file> [--title <title>] [--attach <文件路径> ...]",
+    "  create <goal|@file> [--title <title>] [--parent <REQ-ID>] [--attach <文件路径> ...]",
     "                                             创建一条新需求草稿（--attach 可重复）",
+    "  spawn <REQ-ID> [--fast-track]              从父需求的方案/任务一键派生子需求",
     "  propose <REQ-ID> [--title] [--spec]        提交或更新规范、验收条件与技术方案",
     "                   [--design] [--criteria] [--summary] [--note] [--handoff-note] [--revision <n>]",
     "  tasks <REQ-ID> [--tasks <json|@file>]      查看或更新实施任务与提交待验收",
@@ -523,6 +526,8 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const autoCreateFlag = parsed.flags.get("auto-create-issue");
         const autoSyncFlag = parsed.flags.get("auto-sync-issue");
         const baseBranchFlag = parsed.flags.get("base-branch");
+        const fastCmdFlag = parsed.flags.get("fast-command");
+        const fullCmdFlag = parsed.flags.get("full-command");
 
         if (isGlobal) {
           if (langFlag !== undefined) {
@@ -544,7 +549,9 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
           repoFlag !== undefined ||
           autoCreateFlag !== undefined ||
           autoSyncFlag !== undefined ||
-          baseBranchFlag !== undefined;
+          baseBranchFlag !== undefined ||
+          fastCmdFlag !== undefined ||
+          fullCmdFlag !== undefined;
 
         if (hasProjectUpdates) {
           let langPatch: OutputLanguage | null | undefined;
@@ -573,9 +580,18 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
                 }
               : undefined;
 
+          const verPatch =
+            fastCmdFlag !== undefined || fullCmdFlag !== undefined
+              ? {
+                  ...(typeof fastCmdFlag === "string" ? { fastCommand: fastCmdFlag } : {}),
+                  ...(typeof fullCmdFlag === "string" ? { fullCommand: fullCmdFlag } : {}),
+                }
+              : undefined;
+
           const updated = await updateProjectConfig(root, {
             ...(langPatch !== undefined ? { outputLanguage: langPatch } : {}),
             ...(ghPatch !== undefined ? { github: ghPatch } : {}),
+            ...(verPatch !== undefined ? { verification: verPatch } : {}),
           });
           printResult({ scope: "project", project: updated }, asJson);
           return 0;
@@ -592,6 +608,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
               hubLanguage: hubCfg.outputLanguage,
             }),
             github: proj?.github ?? null,
+            verification: proj?.verification ?? null,
           },
           asJson,
         );
@@ -717,12 +734,14 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         if (!goalRaw) throw new WorkbenchError("invalid_input", "请提供需求目标描述或 @文件路径");
         const goal = readValueOrFile(goalRaw);
         const titleFlag = parsed.flags.get("title");
+        const parentFlag = parsed.flags.get("parent");
         const attachmentIds = stageCliAttachments(parsed.attachments);
         let detail: Awaited<ReturnType<typeof createRequirement>>;
         try {
           detail = await createRequirement(root, {
             goal,
             title: typeof titleFlag === "string" ? titleFlag : undefined,
+            parentId: typeof parentFlag === "string" ? parentFlag : undefined,
             track: parsed.flags.get("fast-track") === true ? "fast_track" : "plan_first",
             ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
           });
@@ -733,11 +752,35 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         printResult(
           {
             id: detail.state.id,
+            ...(detail.state.parentId ? { parentId: detail.state.parentId } : {}),
             title: detail.state.title,
             stage: detail.state.stage,
             track: detail.state.track,
             revision: detail.state.revision,
             attachments: detail.state.attachments ?? [],
+          },
+          asJson,
+        );
+        return 0;
+      }
+
+      case "spawn": {
+        const parentId = parsed.positionals[0];
+        if (!parentId) throw new WorkbenchError("invalid_input", "请提供父需求编号，例如: wb spawn REQ-001");
+        const snap = await observeGitSnapshot(root);
+        const res = await spawnSubRequirements(root, parentId, {
+          track: parsed.flags.get("fast-track") === true ? "fast_track" : "plan_first",
+          currentCodeSnapshotHash: snap?.fingerprint ?? null,
+        });
+        printResult(
+          {
+            parentId: res.parent.state.id,
+            created: res.created.map((c) => ({
+              id: c.state.id,
+              title: c.state.title,
+              stage: c.state.stage,
+              track: c.state.track,
+            })),
           },
           asJson,
         );

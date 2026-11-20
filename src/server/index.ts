@@ -240,12 +240,12 @@ export async function startWorkbenchServer(options: {
     }
   };
 
-  const reloadWebBundle = async (): Promise<{ reloaded: boolean }> => {
+  const reloadWebBundle = async (opts?: { manual?: boolean }): Promise<{ reloaded: boolean }> => {
     const rebuilt = await buildWebBundle(webDir);
     if (!rebuilt) return { reloaded: false };
     cachedWeb = rebuilt;
     if (!isDevWeb) initialWebBundles.set(webDir, Promise.resolve(rebuilt));
-    broadcastUi({ type: "workbench.reload_ui", at: Date.now() });
+    broadcastUi({ type: "workbench.reload_ui", manual: opts?.manual === true, at: Date.now() });
     return { reloaded: true };
   };
 
@@ -895,7 +895,7 @@ export async function startWorkbenchServer(options: {
     }
 
     if (method === "POST" && pathname === "/api/hub/reload-web") {
-      const res = await reloadWebBundle();
+      const res = await reloadWebBundle({ manual: true });
       return jsonResponse({ ok: true, ...res });
     }
 

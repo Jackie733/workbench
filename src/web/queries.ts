@@ -1,9 +1,8 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { GiteeIssueItem } from "../core/gitee.ts";
-import type { AgentAction, AgentRunRecord, RequirementDetail } from "../core/types.ts";
+import type { AgentAction, AgentRunRecord, CascadeSyncItemResult, RequirementDetail, SandboxDriftInfo, Stage } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
-import type { SandboxDriftInfo } from "../hub/evolution.ts";
 import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
 import { resolveWarningParam, type MessageKey } from "./i18n.ts";
 import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
@@ -27,6 +26,7 @@ export const queryKeys = {
   evolution: ["hub", "evolution"] as const,
   playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
+  projectSandboxes: (projectId: string | null) => ["project", "sandboxes", projectId] as const,
   githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
   giteeStatus: (projectId: string | null) => ["gitee", "status", projectId] as const,
   giteeIssues: (projectId: string | null, filter: string, state: string, q: string) =>
@@ -135,6 +135,14 @@ export function useProjectQuery(activeProjectId: string | null) {
   });
 }
 
+export function useProjectSandboxesQuery(activeProjectId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.projectSandboxes(activeProjectId),
+    queryFn: () => api.getProjectSandboxes(false),
+    enabled,
+  });
+}
+
 export function useRequirementsQuery(activeProjectId: string | null, scope: Scope, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.requirements(activeProjectId, scope),
@@ -171,10 +179,89 @@ export async function invalidateAllWorkbenchQueries(): Promise<void> {
   await queryClient.invalidateQueries();
 }
 
+export type ReloadUiAction = "reload-now" | "defer";
+
+/**
+ * 决定收到 `workbench.reload_ui` 后是立即热刷新还是暂缓。
+ * 纯函数便于单测：手动触发的热重建优先；弹窗/忙碌/输入中一律暂缓，避免打断用户操作。
+ */
+export function resolveReloadUiAction(input: {
+  manual: boolean;
+  modalOpen: boolean;
+  busy: boolean;
+  activeTag?: string | null;
+  contentEditable?: boolean;
+}): ReloadUiAction {
+  if (input.manual) return "reload-now";
+  if (input.modalOpen || input.busy) return "defer";
+  const tag = input.activeTag?.toUpperCase();
+  if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return "defer";
+  if (input.contentEditable === true) return "defer";
+  return "reload-now";
+}
+
 export function useWorkbenchWsSync(enabled = true): void {
   useEffect(() => {
     if (!enabled) return;
     const finishedSeen = new Set<string>();
+
+    let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const readReloadGate = (manual: boolean): ReloadUiAction => {
+      const ui = useUiStore.getState();
+      const active = typeof document !== "undefined" ? document.activeElement : null;
+      return resolveReloadUiAction({
+        manual,
+        modalOpen: ui.modal !== null,
+        busy: ui.busy,
+        activeTag: active?.tagName,
+        contentEditable: active instanceof HTMLElement ? active.isContentEditable : false,
+      });
+    };
+
+    const deferReload = () => {
+      if (reloadTimer !== undefined) {
+        clearTimeout(reloadTimer);
+        reloadTimer = undefined;
+      }
+      const ui = useUiStore.getState();
+      ui.setPendingWebReload(true);
+      ui.showReloadPendingToast();
+    };
+
+    const scheduleReload = (manual: boolean) => {
+      const ui = useUiStore.getState();
+      ui.setPendingWebReload(false);
+      ui.dismissReloadPendingToast();
+      clearTimeout(reloadTimer);
+      ui.showToastKey("toast.reloadNow");
+      reloadTimer = setTimeout(() => {
+        reloadTimer = undefined;
+        // 定时器内复核：180ms 内若用户打开弹窗或开始输入，则转为暂缓而不是打断。
+        if (readReloadGate(manual) === "reload-now") {
+          window.location.reload();
+          return;
+        }
+        deferReload();
+      }, 180);
+    };
+
+    const requestReload = (manual: boolean) => {
+      if (readReloadGate(manual) === "reload-now") scheduleReload(manual);
+      else deferReload();
+    };
+
+    const drainPendingReload = () => {
+      if (!useUiStore.getState().pendingWebReload) return;
+      if (reloadTimer !== undefined) return;
+      if (readReloadGate(false) !== "reload-now") return;
+      scheduleReload(false);
+    };
+
+    const unsubscribeReloadDrain = useUiStore.subscribe(drainPendingReload);
+    const onFocusOut = () => drainPendingReload();
+    if (typeof document !== "undefined") document.addEventListener("focusout", onFocusOut);
+
     const disconnect = connectUiWebSocket((ev) => {
       const type = ev.type;
       if (type === "agent.run.started") {
@@ -250,13 +337,7 @@ export function useWorkbenchWsSync(enabled = true): void {
       }
 
       if (type === "workbench.reload_ui") {
-        const tag = document.activeElement?.tagName;
-        if (tag === "TEXTAREA" || tag === "INPUT") {
-          useUiStore.getState().showToastKey("toast.reloadPending");
-        } else {
-          useUiStore.getState().showToastKey("toast.reloadNow");
-          setTimeout(() => window.location.reload(), 180);
-        }
+        requestReload(ev.manual === true);
         return;
       }
 
@@ -264,7 +345,12 @@ export function useWorkbenchWsSync(enabled = true): void {
         void queryClient.invalidateQueries();
       }
     });
-    return disconnect;
+    return () => {
+      clearTimeout(reloadTimer);
+      unsubscribeReloadDrain();
+      if (typeof document !== "undefined") document.removeEventListener("focusout", onFocusOut);
+      disconnect();
+    };
   }, [enabled]);
 }
 
@@ -507,9 +593,16 @@ export async function dispatchFixFromReview(
   }
 }
 
-export async function syncSandboxBaseAction(reqId: string): Promise<boolean> {
+export async function syncSandboxBaseAction(
+  reqId: string,
+  options: { fetchRemote?: boolean; useEvolutionHub?: boolean } = {},
+): Promise<boolean> {
   const ui = useUiStore.getState();
-  const res = await runBusy(() => api.syncRsiSandboxBase(reqId));
+  const res = await runBusy(() =>
+    options.useEvolutionHub
+      ? api.syncRsiSandboxBase(reqId)
+      : api.syncSandboxBase(reqId, { fetchRemote: options.fetchRemote !== false }),
+  );
   if (!res) return false;
   await invalidateAllWorkbenchQueries();
   if (res.upToDate) {
@@ -524,39 +617,84 @@ export async function syncSandboxBaseAction(reqId: string): Promise<boolean> {
   return false;
 }
 
+export function notifyCascadeSyncResults(results?: CascadeSyncItemResult[]): void {
+  if (!results || results.length === 0) return;
+  const ui = useUiStore.getState();
+  const synced = results.filter((r) => r.status === "synced");
+  const conflicted = results.filter((r) => r.status === "conflict");
+  if (conflicted.length > 0) {
+    ui.showToastKey(
+      "home.cascadeConflict",
+      {
+        synced: synced.length,
+        conflicts: conflicted.map((c) => c.requirementId).join(", "),
+      },
+      true,
+    );
+  } else if (synced.length > 0) {
+    ui.showToastKey("home.cascadeSynced", {
+      count: synced.length,
+      ids: synced.map((s) => s.requirementId).join(", "),
+    });
+  }
+}
+
 export async function dispatchSyncBaseWithAgent(
   detail: RequirementDetail,
   drift: SandboxDriftInfo,
   bridgeConnected: boolean,
 ): Promise<void> {
   const id = detail.state.id;
+  const ui = useUiStore.getState();
   const conflicts = drift.conflictFiles.slice(0, 8).join(", ");
+  const targetLabel = drift.targetRef ?? drift.mainHead.slice(0, 7);
   const msg =
-    `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标提交 ${drift.mainHead.slice(0, 7)} 共 ${drift.behindCount} 个提交` +
-    (conflicts ? `，重叠冲突文件：${conflicts}` : "") +
-    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已过期的旧审查意见。同步主干步骤：\n` +
+    `当前工作目录是需求 ${id} 的隔离 Worktree 沙箱分支 ${drift.branch}（当前基线 ${drift.baseHead.slice(0, 7)}），落后主干目标 ${targetLabel} 共 ${drift.behindCount} 个提交` +
+    (conflicts ? `，真实冲突文件：${conflicts}` : "") +
+    `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已通过的功能或已过期的旧审查意见。同步步骤：\n` +
     `1. 检查 git status：若存在未提交业务/测试改动，使用 git add -u 与显式业务文件路径暂存后 git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；严禁提交 node_modules 或临时目录；\n` +
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
     `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
   const useCli = shouldUseCliRunner("fix");
-  if (detail.state.stage === "awaiting_acceptance" || detail.state.stage === "implementing") {
-    const res = await runBusy(() =>
-      api.requestChanges(id, {
-        feedback: msg,
-        expectedRevision: detail.state.revision,
-        dispatchAgent: !useCli && bridgeConnected,
-      }),
-    );
-    if (!res) return;
-    await invalidateAllWorkbenchQueries();
-    if (useCli) {
-      await triggerActiveRun(id, "fix", { message: msg });
-    } else {
-      handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
-    }
-  } else if (useCli) {
-    await triggerActiveRun(id, "fix", { message: msg });
+  const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+  const drafts = useDraftStore.getState().runnerOverrides;
+  const override = drafts.fix;
+  const selectedRunnerKey = override?.key ?? "";
+  const selectedEffort = override?.effort ?? "";
+  const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, "fix", selectedEffort);
+  const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
+  const effectiveEffort =
+    effortCap.mode === "configurable"
+      ? choice.effort && effortCap.efforts.includes(choice.effort)
+        ? choice.effort
+        : undefined
+      : undefined;
+
+  const res = await runBusy(() =>
+    api.syncResolveSandbox(id, {
+      approveFirst: detail.state.stage === "awaiting_approval",
+      expectedRevision: detail.state.revision,
+      useCli,
+      dispatchAgent: !useCli && bridgeConnected,
+      harness: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
+      model: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
+      reasoningEffort: useCli ? effectiveEffort : undefined,
+      message: msg,
+    }),
+  );
+  if (!res) return;
+  if (res.run && res.target) {
+    useStreamStore.getState().setRunStarted({ ...res.run, requirementId: id });
+    ui.setDrawerOpen(true);
+    ui.setDrawerTab("console");
+    ui.showToastKey("toast.runStarted", {
+      target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
+      action: "fix",
+    });
+  } else if (res.dispatch) {
+    handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
   }
+  await invalidateAllWorkbenchQueries();
 }
 
 export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
@@ -728,7 +866,12 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "reopen":
-      ui.setModal({ kind: "lifecycle", action: "reopen", reason: "" });
+      ui.setModal({
+        kind: "lifecycle",
+        action: "reopen",
+        reason: "",
+        preserveApproval: detail.validity.approval.valid,
+      });
       break;
   }
 }
@@ -800,6 +943,7 @@ export async function submitNewRequirement(
   _bridgeConnected: boolean,
   createGitHubIssue?: boolean,
   attachmentIds: string[] = [],
+  sandboxOpts?: { createSandbox?: boolean; stackedOnReqId?: string },
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
@@ -813,6 +957,8 @@ export async function submitNewRequirement(
       goal,
       dispatchAgent: dispatchAgent && !useCli,
       ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
+      ...(sandboxOpts?.createSandbox ? { createSandbox: true } : {}),
+      ...(sandboxOpts?.stackedOnReqId ? { stackedOnReqId: sandboxOpts.stackedOnReqId } : {}),
       ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
     }),
   );
@@ -1002,6 +1148,7 @@ export async function submitLifecycle(
   detail: RequirementDetail,
   action: "block" | "cancel" | "reopen",
   reasonRaw: string,
+  opts?: { preserveApproval?: boolean },
 ): Promise<void> {
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
@@ -1012,7 +1159,11 @@ export async function submitLifecycle(
   const res = await runBusy(async () => {
     if (action === "block") return api.block(detail.state.id, { reason, expectedRevision: detail.state.revision });
     if (action === "cancel") return api.cancel(detail.state.id, { reason, expectedRevision: detail.state.revision });
-    return api.reopen(detail.state.id, { reason, expectedRevision: detail.state.revision });
+    return api.reopen(detail.state.id, {
+      reason,
+      ...(opts?.preserveApproval ? { preserveApproval: true } : {}),
+      expectedRevision: detail.state.revision,
+    });
   });
   if (res) {
     ui.setModal(null);
@@ -1066,15 +1217,39 @@ export async function runAskFromDrawer(reqId: string): Promise<void> {
   await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
 }
 
+function resolveRefineActionForStage(stage?: Stage): "design" | "fix" | "readonly" {
+  if (stage === "done" || stage === "cancelled" || stage === "blocked") {
+    return "readonly";
+  }
+  if (stage === "implementing" || stage === "awaiting_acceptance") {
+    return "fix";
+  }
+  return "design";
+}
+
+function readCachedRequirementStage(reqId: string): Stage | undefined {
+  const ui = useUiStore.getState();
+  const cached = queryClient.getQueryData<{ detail?: RequirementDetail }>(
+    queryKeys.requirement(ui.activeProjectId, reqId),
+  );
+  return cached?.detail?.state.stage;
+}
+
 export async function runRefineFromDrawer(reqId: string): Promise<void> {
   const draft = useDraftStore.getState();
   const ui = useUiStore.getState();
+  const stage = readCachedRequirementStage(reqId);
+  const targetAction = resolveRefineActionForStage(stage);
+  if (targetAction === "readonly") {
+    ui.showToastKey("drawer.stageReadonly", undefined, true);
+    return;
+  }
   const msg = draft.discussDraft.trim();
   const anchorIds = draft.pendingAnnotations.map((a) => a.id);
   const summary =
     msg ||
     (draft.pendingAnnotations.length > 0
-      ? `请结合以下 ${draft.pendingAnnotations.length} 条批注修订技术方案：\n${draft.pendingAnnotations
+      ? `请结合以下 ${draft.pendingAnnotations.length} 条批注${targetAction === "fix" ? "修改代码并验证" : "修订技术方案"}：\n${draft.pendingAnnotations
           .map((a) => `- [${a.anchor}] ${a.message}`)
           .join("\n")}`
       : "");
@@ -1085,12 +1260,22 @@ export async function runRefineFromDrawer(reqId: string): Promise<void> {
   draft.setDiscussDraft("");
   draft.setDiscussAnchor(null);
   draft.clearPendingAnnotations();
-  await triggerActiveRun(reqId, "design", { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
+  await triggerActiveRun(reqId, targetAction, { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
 }
 
 export async function adoptDiscussion(reqId: string, discId: string, message: string): Promise<void> {
-  await triggerActiveRun(reqId, "design", {
-    message: `请采纳并落实此研讨结论：\n${message}`,
+  const ui = useUiStore.getState();
+  const stage = readCachedRequirementStage(reqId);
+  const targetAction = resolveRefineActionForStage(stage);
+  if (targetAction === "readonly") {
+    ui.showToastKey("drawer.stageReadonly", undefined, true);
+    return;
+  }
+  await triggerActiveRun(reqId, targetAction, {
+    message:
+      targetAction === "fix"
+        ? `请采纳此研讨结论并修改代码、运行验证：\n${message}`
+        : `请采纳并落实此研讨结论：\n${message}`,
     anchorIds: [discId],
     mode: "refine",
   });

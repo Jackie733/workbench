@@ -20,7 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { StructuredMessageRef } from "../../core/errors.ts";
-import type { GitRemoteProvider, OutputLanguage, PrivacyMode } from "../../core/types.ts";
+import type { GitRemoteProvider, OutputLanguage, PrivacyMode, Track } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   ROUTING_STAGES,
@@ -31,7 +31,9 @@ import {
 } from "../../hub/types.ts";
 import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse } from "../api.ts";
 import {
+  dispatchSyncBaseWithAgent,
   invalidateAllWorkbenchQueries,
+  notifyCascadeSyncResults,
   openRequirement,
   queryClient,
   queryKeys,
@@ -52,6 +54,7 @@ import {
   useHubStateQuery,
   usePlaybookQuery,
   useProjectQuery,
+  useProjectSandboxesQuery,
   useRequirementQuery,
 } from "../queries.ts";
 import {
@@ -106,6 +109,10 @@ export function Modals() {
   const { data: hub } = useHubStateQuery();
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
   const { data: project } = useProjectQuery(activeProjectId);
+  const { data: projectSandboxes } = useProjectSandboxesQuery(
+    activeProjectId,
+    Boolean(!noHubProject && project?.initialized && m?.kind === "new_req"),
+  );
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const { data: evolutionData } = useEvolutionQuery(m?.kind === "evolution");
   const { data: playbookData } = usePlaybookQuery(
@@ -242,6 +249,49 @@ export function Modals() {
                 </span>
               </label>
             )}
+            {project?.git?.isGitRepo && (
+              <div style={{ marginTop: 8 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    data-testid="new-req-create-sandbox"
+                    checked={Boolean(m.createSandbox)}
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "new_req" ? { ...prev, createSandbox: e.target.checked } : prev,
+                      )
+                    }
+                  />
+                  <span>{t(language, "newReq.createSandbox")}</span>
+                </label>
+                {m.createSandbox && (projectSandboxes?.sandboxes.length ?? 0) > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, paddingLeft: 22 }}>
+                    <span className="xs muted">{t(language, "newReq.stackedOn")}</span>
+                    <select
+                      className="select"
+                      data-testid="new-req-stack-select"
+                      value={m.stackedOnReqId ?? ""}
+                      onChange={(e) =>
+                        setModal((prev) =>
+                          prev?.kind === "new_req"
+                            ? { ...prev, stackedOnReqId: e.target.value || undefined }
+                            : prev,
+                        )
+                      }
+                    >
+                      <option value="">{t(language, "newReq.stackMain")}</option>
+                      {projectSandboxes!.sandboxes
+                        .filter((sb) => sb.stage !== "cancelled")
+                        .map((sb) => (
+                          <option key={sb.requirementId} value={sb.requirementId}>
+                            {sb.requirementId} ({sb.branch})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
                 {t(language, "common.cancel")}
@@ -258,6 +308,7 @@ export function Modals() {
                     bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
                   )
                 }
               >
@@ -275,6 +326,7 @@ export function Modals() {
                     bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
                   )
                 }
               >
@@ -839,6 +891,10 @@ export function Modals() {
       m.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
     const giteeBaseValue =
       m.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
+    const fastCmdValue = m.fastCmdDraft ?? project?.project?.verification?.fastCommand ?? "";
+    const fullCmdValue = m.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
+    const existingAutoScreenshots = project?.project?.verification?.autoScreenshots;
+    const autoScreenshotsValue = m.autoScreenshotsDraft ?? (existingAutoScreenshots === true);
 
     const syncHubStatePatch = async (
       patch: Partial<
@@ -905,6 +961,15 @@ export function Modals() {
       const out = await runBusy(() =>
         api.updateProjectSettings({
           outputLanguage: projLangValue,
+          verification: {
+            fastCommand: fastCmdValue.trim(),
+            fullCommand: fullCmdValue.trim(),
+            ...(m.autoScreenshotsDraft !== undefined
+              ? { autoScreenshots: m.autoScreenshotsDraft }
+              : existingAutoScreenshots !== undefined
+                ? { autoScreenshots: existingAutoScreenshots }
+                : {}),
+          },
           ...(projProviderValue === "gitee"
             ? {
                 gitee: {
@@ -1465,6 +1530,80 @@ export function Modals() {
                       </>
                     )}
                   </div>
+
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                    <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+                      {t(language, "routing.verificationTitle")}
+                    </strong>
+                    <div style={{ marginBottom: 10 }}>
+                      <span className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                        {t(language, "routing.archDocsLabel")}
+                      </span>
+                      {project.context?.archDocs && project.context.archDocs.length > 0 ? (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {project.context.archDocs.map((doc) => (
+                            <span
+                              key={doc.path}
+                              className="badge info"
+                              title={doc.headings.join(" / ")}
+                              data-testid={`proj-arch-doc-${doc.path}`}
+                            >
+                              {doc.path}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="xs muted">{t(language, "routing.archDocsNone")}</span>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          {t(language, "routing.fastCmdLabel")}
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-fast-cmd-input"
+                          value={fastCmdValue}
+                          placeholder={project.context?.fastCommand ?? t(language, "routing.fastCmdPlaceholder")}
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, fastCmdDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          {t(language, "routing.fullCmdLabel")}
+                        </label>
+                        <input
+                          className="input"
+                          data-testid="project-full-cmd-input"
+                          value={fullCmdValue}
+                          placeholder={project.context?.fullCommand ?? t(language, "routing.fullCmdPlaceholder")}
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing" ? { ...prev, fullCmdDraft: e.target.value } : prev,
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="project-auto-screenshots"
+                        checked={autoScreenshotsValue}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, autoScreenshotsDraft: e.target.checked } : prev,
+                          )
+                        }
+                      />
+                      <span>{t(language, "routing.autoScreenshotsLabel")}</span>
+                    </label>
+                  </div>
                 </div>
 
                 <div className="modal-actions">
@@ -1693,9 +1832,45 @@ export function Modals() {
         : m.action === "cancel"
           ? t(language, "lifecycle.cancelTitle")
           : t(language, "lifecycle.reopenTitle");
+    const canPreserveApproval = m.action === "reopen" && Boolean(detail?.validity.approval.valid);
+    const keepApproval = canPreserveApproval ? m.preserveApproval !== false : false;
     return (
       <ModalShell onClose={close}>
         <h3>{title}</h3>
+        {canPreserveApproval && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+            <label
+              className={`radio-card ${keepApproval ? "selected" : ""}`}
+              data-testid="reopen-keep-approval-option"
+              onClick={() =>
+                setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, preserveApproval: true } : prev))
+              }
+            >
+              <input type="radio" name="reopen-mode" checked={keepApproval} readOnly />
+              <div>
+                <strong style={{ fontSize: 13 }}>{t(language, "lifecycle.reopenKeepApprovalTitle")}</strong>
+                <div className="muted xs" style={{ marginTop: 2 }}>
+                  {t(language, "lifecycle.reopenKeepApprovalDesc")}
+                </div>
+              </div>
+            </label>
+            <label
+              className={`radio-card ${!keepApproval ? "selected" : ""}`}
+              data-testid="reopen-reset-draft-option"
+              onClick={() =>
+                setModal((prev) => (prev?.kind === "lifecycle" ? { ...prev, preserveApproval: false } : prev))
+              }
+            >
+              <input type="radio" name="reopen-mode" checked={!keepApproval} readOnly />
+              <div>
+                <strong style={{ fontSize: 13 }}>{t(language, "lifecycle.reopenResetDraftTitle")}</strong>
+                <div className="muted xs" style={{ marginTop: 2 }}>
+                  {t(language, "lifecycle.reopenResetDraftDesc")}
+                </div>
+              </div>
+            </label>
+          </div>
+        )}
         <textarea
           className="textarea"
           id="lifecycle-reason"
@@ -1713,8 +1888,9 @@ export function Modals() {
           <button
             className="btn primary"
             type="button"
+            data-testid="lifecycle-confirm-btn"
             disabled={busy}
-            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason)}
+            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
           >
             {t(language, "common.confirm")}
           </button>
@@ -2016,6 +2192,7 @@ export function Modals() {
         } else {
           showToastKey("evo.applied", { id: reqId, count: out.appliedFiles.length });
         }
+        notifyCascadeSyncResults(out.cascadeResults);
       }
     };
 
@@ -2039,6 +2216,7 @@ export function Modals() {
         } else {
           showToastKey("toast.prStatus", { num: out.pr.number, state: prStateRef(out.pr.state) });
         }
+        notifyCascadeSyncResults(out.cascadeResults);
       }
     };
 
@@ -2241,7 +2419,7 @@ export function Modals() {
                               className="btn xs"
                               type="button"
                               disabled={busy}
-                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!)}
+                              onClick={() => void syncSandboxBaseAction(p.promotedReqId!, { useEvolutionHub: true })}
                             >
                               <Icon icon={RefreshCw} size={14} /> {t(language, "evo.syncBase")}
                             </button>
@@ -2592,6 +2770,7 @@ export function Modals() {
                 branchName: m.branchName?.trim() || undefined,
                 baseBranch: m.baseBranch?.trim() || undefined,
                 prTitle: m.prTitle?.trim() || undefined,
+                ...(m.forceWithLease || deliveryPreview?.remoteBranchDiverged ? { forceWithLease: m.forceWithLease ?? true } : {}),
               }
             : {}),
         }),
@@ -2666,6 +2845,59 @@ export function Modals() {
           {deliveryPreview?.githubRepo ? t(language, "deliver.repo", { repo: deliveryPreview.githubRepo }) : ""}
           {!createPr && t(language, "deliver.localNote")}
         </div>
+
+        {sandboxActive &&
+          deliveryPreview?.sandboxDrift &&
+          (deliveryPreview.sandboxDrift.behindCount > 0 || deliveryPreview.sandboxDrift.conflictFiles.length > 0) && (
+            <div
+              className={`callout ${deliveryPreview.sandboxDrift.conflictFiles.length > 0 ? "danger" : "warning"} xs`}
+              data-testid="deliver-drift-callout"
+              style={{
+                marginBottom: 10,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              <span>
+                {t(language, "deliver.driftWarn", {
+                  count: deliveryPreview.sandboxDrift.behindCount,
+                  conflict:
+                    deliveryPreview.sandboxDrift.conflictFiles.length > 0
+                      ? t(language, "deliver.driftConflictSuffix", {
+                          count: deliveryPreview.sandboxDrift.conflictFiles.length,
+                        })
+                      : "",
+                })}
+              </span>
+              {deliveryPreview.sandboxDrift.canAutoSync ? (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="deliver-sync-base-btn"
+                  disabled={busy}
+                  onClick={() => void syncSandboxBaseAction(detail.state.id)}
+                >
+                  <Icon icon={RefreshCw} size={14} /> {t(language, "deliver.driftSyncBtn")}
+                </button>
+              ) : (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-testid="deliver-resolve-conflict-btn"
+                  disabled={busy}
+                  onClick={async () => {
+                    close();
+                    await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!, bridgeConnected);
+                  }}
+                >
+                  {t(language, "deliver.driftResolveBtn")}
+                </button>
+              )}
+            </div>
+          )}
 
         {(candidates.length > 0 || !canSubmitExistingCommits) && (
           <>
@@ -2813,6 +3045,28 @@ export function Modals() {
                 {t(language, isGiteeDelivery ? "deliver.prBodyNoteSuffixGitee" : "deliver.prBodyNoteSuffix")}
               </div>
             )}
+            {(sandboxActive || deliveryPreview?.remoteBranchExists || deliveryPreview?.remoteBranchDiverged) && (
+              <div style={{ marginTop: 2 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5 }}>
+                  <input
+                    type="checkbox"
+                    data-testid="deliver-force-lease"
+                    checked={m.forceWithLease ?? Boolean(deliveryPreview?.remoteBranchDiverged)}
+                    onChange={(e) =>
+                      setModal((prev) =>
+                        prev?.kind === "deliver" ? { ...prev, forceWithLease: e.target.checked } : prev,
+                      )
+                    }
+                  />
+                  <span>{t(language, "deliver.forceWithLeaseLabel")}</span>
+                </label>
+                {deliveryPreview?.remoteBranchDiverged && (
+                  <div className="xs muted" style={{ paddingLeft: 22, marginTop: 2 }}>
+                    {t(language, "deliver.forceWithLeaseWarn")}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -2842,6 +3096,142 @@ export function Modals() {
             {createPr
               ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
               : t(language, "deliver.submitLocal")}
+          </button>
+        </div>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "spawn_children") {
+    const validItems = m.items.filter((it) => it.title.trim().length > 0);
+    const submitSpawn = async () => {
+      if (validItems.length === 0) {
+        showToastKey("spawn.emptyError", undefined, true);
+        return;
+      }
+      const res = await runBusy(() =>
+        api.spawnSubRequirements(m.parentId, {
+          items: validItems.map((it) => ({ title: it.title.trim(), goal: it.goal.trim() || it.title.trim() })),
+          track: m.track,
+        }),
+      );
+      if (res) {
+        await invalidateAllWorkbenchQueries();
+        setModal(null);
+        showToastKey("spawn.createdToast", { count: res.created.length });
+      }
+    };
+    return (
+      <ModalShell onClose={close} wide testId="spawn-children-modal">
+        <h3>{t(language, "spawn.title")}</h3>
+        <p className="xs muted" style={{ margin: "0 0 10px" }}>
+          {t(language, "spawn.desc")}
+        </p>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <span className="muted xs">{t(language, "spawn.trackLabel")}</span>
+            <select
+              className="select xs"
+              data-testid="spawn-track-select"
+              value={m.track}
+              onChange={(e) =>
+                setModal((prev) =>
+                  prev?.kind === "spawn_children" ? { ...prev, track: e.target.value as Track } : prev,
+                )
+              }
+            >
+              <option value="plan_first">{t(language, "spawn.trackPlan")}</option>
+              <option value="fast_track">{t(language, "spawn.trackFast")}</option>
+            </select>
+          </label>
+          <button
+            className="btn xs"
+            type="button"
+            data-testid="spawn-add-item-btn"
+            onClick={() =>
+              setModal((prev) =>
+                prev?.kind === "spawn_children"
+                  ? { ...prev, items: [...prev.items, { title: "", goal: "" }] }
+                  : prev,
+              )
+            }
+          >
+            + {t(language, "spawn.addItem")}
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
+          {m.items.map((item, idx) => (
+            <div
+              key={idx}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: 8,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input
+                  className="input"
+                  data-testid={`spawn-item-title-${idx}`}
+                  value={item.title}
+                  placeholder={t(language, "spawn.itemTitlePlaceholder")}
+                  onChange={(e) =>
+                    setModal((prev) => {
+                      if (prev?.kind !== "spawn_children") return prev;
+                      const next = [...prev.items];
+                      next[idx] = { ...next[idx]!, title: e.target.value };
+                      return { ...prev, items: next };
+                    })
+                  }
+                />
+                <button
+                  className="btn ghost xs"
+                  type="button"
+                  aria-label={t(language, "common.delete")}
+                  onClick={() =>
+                    setModal((prev) =>
+                      prev?.kind === "spawn_children"
+                        ? { ...prev, items: prev.items.filter((_, i) => i !== idx) }
+                        : prev,
+                    )
+                  }
+                >
+                  <Icon icon={Trash2} size={14} />
+                </button>
+              </div>
+              <textarea
+                className="textarea"
+                rows={2}
+                data-testid={`spawn-item-goal-${idx}`}
+                value={item.goal}
+                placeholder={t(language, "spawn.itemGoalPlaceholder")}
+                onChange={(e) =>
+                  setModal((prev) => {
+                    if (prev?.kind !== "spawn_children") return prev;
+                    const next = [...prev.items];
+                    next[idx] = { ...next[idx]!, goal: e.target.value };
+                    return { ...prev, items: next };
+                  })
+                }
+              />
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="btn" type="button" onClick={close}>
+            {t(language, "common.cancel")}
+          </button>
+          <button
+            className="btn primary"
+            type="button"
+            data-testid="spawn-submit-btn"
+            disabled={busy || validItems.length === 0}
+            onClick={() => void submitSpawn()}
+          >
+            {t(language, "spawn.submit", { count: validItems.length })}
           </button>
         </div>
       </ModalShell>

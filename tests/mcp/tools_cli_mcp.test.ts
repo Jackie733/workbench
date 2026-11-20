@@ -254,4 +254,38 @@ describe("WB-03 MCP Server and wb CLI", () => {
     expect(submitted.status).toBe(0);
     expect(JSON.parse(submitted.stdout).stage).toBe("awaiting_acceptance");
   });
+
+  test("wb config verification flags and wb spawn CLI", async () => {
+    const root = initGitRepo();
+    expect(runCliSubprocess(root, ["init", "--name", "CLISpawn"]).status).toBe(0);
+    const cfg = runCliSubprocess(root, [
+      "config",
+      "--fast-command",
+      "bun run typecheck",
+      "--full-command",
+      "bun test",
+    ]);
+    expect(cfg.status).toBe(0);
+    const cfgJson = JSON.parse(cfg.stdout);
+    expect(cfgJson.project.verification.fastCommand).toBe("bun run typecheck");
+    expect(cfgJson.project.verification.fullCommand).toBe("bun test");
+
+    const cfgRead = runCliSubprocess(root, ["config"]);
+    expect(cfgRead.status).toBe(0);
+    expect(JSON.parse(cfgRead.stdout).verification).toEqual({
+      fastCommand: "bun run typecheck",
+      fullCommand: "bun test",
+    });
+
+    expect(runCliSubprocess(root, ["create", "主架构拆分"]).status).toBe(0);
+    const designText = "## 模块 A 拆分\n职责 A\n\n## 模块 B 拆分\n职责 B\n";
+    expect(runCliSubprocess(root, ["propose", "REQ-001", "--design", designText]).status).toBe(0);
+
+    const spawned = runCliSubprocess(root, ["spawn", "REQ-001", "--fast-track"]);
+    expect(spawned.status).toBe(0);
+    const spawnedJson = JSON.parse(spawned.stdout) as { parentId: string; created: Array<{ id: string; track: string }> };
+    expect(spawnedJson.parentId).toBe("REQ-001");
+    expect(spawnedJson.created.map((c) => c.id)).toEqual(["REQ-002", "REQ-003"]);
+    expect(spawnedJson.created.every((c) => c.track === "fast_track")).toBe(true);
+  });
 });

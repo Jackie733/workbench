@@ -423,7 +423,14 @@ export async function executeWorkbenchTool(
       if (args.readyForAcceptance === true && detail.state.stage === "awaiting_acceptance") {
         try {
           const codeRoot = resolveCodeRoot(base, args.id);
-          if (await isUiRelatedRequirement(detail.state, codeRoot)) {
+          const autoScreenshots = getProjectStatus(base).project?.verification?.autoScreenshots;
+          const shouldCapture =
+            autoScreenshots === false
+              ? false
+              : autoScreenshots === true
+                ? await isUiRelatedRequirement(detail.state, codeRoot)
+                : detail.state.uiRelated === true;
+          if (shouldCapture) {
             screenshotCapture = await captureRequirementScreenshots(base, args.id, {
               trigger: "auto_submit",
               actor: "agent",
