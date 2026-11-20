@@ -117,6 +117,8 @@ export interface DaemonInfo {
   url: string;
   startedAt: number;
   version: string;
+  /** True when launched by systemd/launchd user service; unmanaged stopDaemon must not terminate it. */
+  managedService?: boolean;
 }
 
 export interface BrowseEntry {

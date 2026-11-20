@@ -1088,6 +1088,7 @@ export class HubExecutor {
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
       WORKBENCH_ROOT: base,
       WORKBENCH_REQ_ID: id,
+      WORKBENCH_HUB_PID: String(process.pid),
       WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
       ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
     };

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -30,13 +30,20 @@ import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/serv
 const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
+const origHubPidEnv = process.env.WORKBENCH_HUB_PID;
+let activeTempHub: string | null = null;
 
 function makeTempHub(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-hub-test-"));
   tempDirs.push(dir);
+  activeTempHub = dir;
   process.env.WORKBENCH_HUB_DIR = dir;
   return dir;
 }
+
+beforeEach(() => {
+  makeTempHub();
+});
 
 function makeGitRepo(name = "repo"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `wb-${name}-`));
@@ -54,7 +61,12 @@ afterEach(async () => {
   while (servers.length > 0) {
     servers.pop()!.stop();
   }
-  await stopDaemon().catch(() => {});
+  if (activeTempHub && process.env.WORKBENCH_HUB_DIR === activeTempHub) {
+    await stopDaemon().catch(() => {});
+  }
+  activeTempHub = null;
+  if (origHubPidEnv === undefined) delete process.env.WORKBENCH_HUB_PID;
+  else process.env.WORKBENCH_HUB_PID = origHubPidEnv;
   if (origHubEnv === undefined) delete process.env.WORKBENCH_HUB_DIR;
   else process.env.WORKBENCH_HUB_DIR = origHubEnv;
   while (tempDirs.length > 0) {
@@ -152,6 +164,52 @@ describe("WB-08 multi-project hub registry and daemon", () => {
     expect(stopped.stopped).toBe(true);
     const afterStop = await getDaemonStatus();
     expect(afterStop.running).toBe(false);
+  });
+
+  test("stopDaemon refuses to kill managed user services or parent Hub processes", async () => {
+    const hubDir = makeTempHub();
+    const daemonPath = path.join(hubDir, "daemon.json");
+
+    // 1. Managed systemd/launchd service entry must never be killed via stopDaemon()
+    fs.writeFileSync(
+      daemonPath,
+      JSON.stringify({
+        pid: process.pid,
+        port: 4318,
+        hostname: "0.0.0.0",
+        url: "http://0.0.0.0:4318",
+        startedAt: Date.now(),
+        version: "5.0.0",
+        managedService: true,
+      }),
+    );
+    const managedRes = await stopDaemon();
+    expect(managedRes).toEqual({ stopped: false, pid: process.pid });
+    expect(fs.existsSync(daemonPath)).toBe(true);
+
+    // 2. Ancestor Hub matching WORKBENCH_HUB_PID must also be protected
+    const sleepChild = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      process.env.WORKBENCH_HUB_PID = String(sleepChild.pid);
+      fs.writeFileSync(
+        daemonPath,
+        JSON.stringify({
+          pid: sleepChild.pid,
+          port: 4318,
+          hostname: "127.0.0.1",
+          url: "http://127.0.0.1:4318",
+          startedAt: Date.now(),
+          version: "5.0.0",
+        }),
+      );
+      const ancestorRes = await stopDaemon();
+      expect(ancestorRes).toEqual({ stopped: false, pid: sleepChild.pid });
+      expect(fs.existsSync(daemonPath)).toBe(true);
+    } finally {
+      delete process.env.WORKBENCH_HUB_PID;
+      sleepChild.kill("SIGKILL");
+      await sleepChild.exited;
+    }
   });
 
   test("does not expose defaultRoot or user home directory in hub state unless manually added", async () => {

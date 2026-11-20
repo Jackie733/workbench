@@ -121,6 +121,15 @@ export async function stopDaemon(): Promise<{ stopped: boolean; pid: number | nu
     removeDaemonInfo(info.pid);
     return { stopped: false, pid: info.pid };
   }
+  const parentHubPid = Number(process.env.WORKBENCH_HUB_PID);
+  if (
+    info.managedService === true ||
+    info.pid === process.pid ||
+    info.pid === process.ppid ||
+    (Number.isSafeInteger(parentHubPid) && parentHubPid > 0 && info.pid === parentHubPid)
+  ) {
+    return { stopped: false, pid: info.pid };
+  }
 
   try {
     process.kill(info.pid, "SIGTERM");

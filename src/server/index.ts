@@ -1281,6 +1281,7 @@ export async function startWorkbenchServer(options: {
     writeServerDiscovery(info);
   }
   if (hubMode) {
+    const managedService = Boolean(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME);
     writeDaemonInfo({
       pid: process.pid,
       port: actualPort,
@@ -1288,6 +1289,7 @@ export async function startWorkbenchServer(options: {
       url: serverUrl,
       startedAt: info.startedAt,
       version: packageInfo.version,
+      ...(managedService ? { managedService: true } : {}),
     });
   }
 
