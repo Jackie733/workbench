@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   BarChart3,
@@ -27,6 +27,25 @@ export function Topbar() {
   const theme = useUiStore((s) => s.theme);
   const language = useUiStore((s) => s.language);
   const mainView = useUiStore((s) => s.mainView);
+  const headerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const header = headerRef.current;
+    if (!header) return;
+    const root = document.documentElement;
+    const syncHeaderHeight = () => {
+      const height = Math.ceil(header.getBoundingClientRect().height);
+      if (height > 0) root.style.setProperty("--mobile-header-h", `${height}px`);
+    };
+    syncHeaderHeight();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(syncHeaderHeight);
+    observer?.observe(header);
+    window.addEventListener("resize", syncHeaderHeight);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", syncHeaderHeight);
+      root.style.removeProperty("--mobile-header-h");
+    };
+  }, []);
   const setMainView = useUiStore((s) => s.setMainView);
   const selectedId = useUiStore((s) => s.selectedId);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
@@ -71,7 +90,7 @@ export function Topbar() {
       : t(language, "topbar.expandSidebar");
 
   return (
-    <header className="topbar app-header" data-testid="app-header">
+    <header ref={headerRef} className="topbar app-header" data-testid="app-header">
       <div className="topbar-left">
         <button
           className="app-brand-btn"

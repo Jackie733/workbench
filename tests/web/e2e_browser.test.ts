@@ -1449,20 +1449,105 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // 7. At 820px, each visible topbar switch must be hit-testable and switch overlays in one click.
-      await page.setViewport({ width: 820, height: 820 });
-      await page.waitForFunction(() => window.innerWidth === 820 && window.innerHeight === 820, { timeout: 5000 });
+      // 7. At supported narrow widths, the measured full header stays above both overlays and remains hit-testable.
+      const waitForMobileHeader = async (width: number) => {
+        await page.setViewport({ width, height: 820 });
+        await page.waitForFunction(`window.innerWidth === ${width} && window.innerHeight === 820`, { timeout: 5000 });
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        await page.waitForFunction(
+          () => {
+            const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+            const height = header?.getBoundingClientRect().height ?? 0;
+            const measured = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobile-header-h"));
+            return height > 0 && Math.abs(measured - Math.ceil(height)) < 0.1;
+          },
+          { timeout: 5000 },
+        );
+      };
+
+      const waitForPanelState = async (sidebarOpen: boolean, drawerOpen: boolean) => {
+        const expected = { sidebarOpen, drawerOpen };
+        await page.waitForFunction(
+          `Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("open")) === ${sidebarOpen} && ` +
+            `Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("open")) === ${drawerOpen}`,
+          { timeout: 5000 },
+        );
+        const actual = await page.evaluate(() => ({
+          sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("open")),
+          drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("open")),
+        }));
+        expect(actual).toEqual(expected);
+      };
+
+      const auditHeader = async (width: number) => {
+        const report = await page.evaluate(() => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          if (!header) return null;
+          const rect = header.getBoundingClientRect();
+          const controls = Array.from(header.querySelectorAll<HTMLElement>("button, select")).map((control) => {
+            const controlRect = control.getBoundingClientRect();
+            const style = getComputedStyle(control);
+            const hit = document.elementFromPoint(
+              controlRect.left + controlRect.width / 2,
+              controlRect.top + controlRect.height / 2,
+            );
+            return {
+              name: control.getAttribute("data-testid") ?? control.getAttribute("aria-label") ?? control.tagName,
+              visible:
+                controlRect.width > 0 &&
+                controlRect.height > 0 &&
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                Number(style.opacity) > 0,
+              withinHeader:
+                controlRect.left >= rect.left - 1 &&
+                controlRect.right <= rect.right + 1 &&
+                controlRect.top >= rect.top - 1 &&
+                controlRect.bottom <= rect.bottom + 1,
+              withinViewport:
+                controlRect.left >= -1 &&
+                controlRect.right <= window.innerWidth + 1 &&
+                controlRect.top >= -1 &&
+                controlRect.bottom <= window.innerHeight + 1,
+              hit: Boolean(hit && (hit === control || control.contains(hit))),
+            };
+          });
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            overflow: document.documentElement.scrollWidth > window.innerWidth,
+            controls,
+          };
+        });
+        if (!report) throw new Error("app header is missing");
+        expect(report.left).toBeGreaterThanOrEqual(-1);
+        expect(report.right).toBeLessThanOrEqual(width + 1);
+        expect(report.top).toBeGreaterThanOrEqual(-1);
+        expect(report.bottom).toBeLessThanOrEqual(820 + 1);
+        expect(report.overflow).toBe(false);
+        expect(report.controls.length).toBeGreaterThan(0);
+        for (const control of report.controls) {
+          expect(control.visible, `${width}px header control ${control.name} must remain visible`).toBe(true);
+          expect(control.withinHeader, `${width}px header control ${control.name} must fit inside the header`).toBe(true);
+          expect(control.withinViewport, `${width}px header control ${control.name} must fit inside the viewport`).toBe(true);
+          expect(control.hit, `${width}px header control ${control.name} must win the hit-test`).toBe(true);
+        }
+      };
 
       const expectTopbarToggleHit = async (testId: string) => {
         const hit = await page.evaluate((id: string) => {
           const button = document.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
           if (!button) return { visible: false, disabled: true, topButtonTestId: "" };
           const rect = button.getBoundingClientRect();
-          const x = rect.left + rect.width / 2;
-          const y = rect.top + rect.height / 2;
-          const top = document.elementFromPoint(x, y);
+          const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
           return {
-            visible: rect.width > 0 && rect.height > 0 && getComputedStyle(button).visibility !== "hidden",
+            visible:
+              rect.width > 0 &&
+              rect.height > 0 &&
+              getComputedStyle(button).display !== "none" &&
+              getComputedStyle(button).visibility !== "hidden",
             disabled: button.disabled,
             topButtonTestId: top?.closest("button")?.getAttribute("data-testid") ?? "",
           };
@@ -1472,59 +1557,129 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expect(hit.topButtonTestId).toBe(testId);
       };
 
-      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
-      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
-      await expectTopbarToggleHit("toggle-sidebar-btn");
-      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
-        { timeout: 5000 },
-      );
-      const mobilePanelState = await page.evaluate(() => ({
-        sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
-        drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
-      }));
-      expect(mobilePanelState).toEqual({ sidebarOpen: true, drawerOpen: false });
-      const sidebarCloseHit = await page.evaluate(() => {
-        const sidebar = document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]');
-        const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
-        const button = sidebar?.querySelector<HTMLButtonElement>(".sb-close-btn");
-        const rect = button?.getBoundingClientRect();
-        if (!sidebar || !header || !button || !rect) return null;
-        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-        return {
-          visible: rect.width > 0 && rect.height > 0 && getComputedStyle(button).visibility !== "hidden",
-          closeButtonHit: hit?.closest("button") === button,
-          sidebarZ: Number(getComputedStyle(sidebar).zIndex),
-          headerZ: Number(getComputedStyle(header).zIndex),
-        };
-      });
-      expect(sidebarCloseHit?.visible).toBe(true);
-      expect(sidebarCloseHit?.closeButtonHit).toBe(true);
-      expect(sidebarCloseHit?.sidebarZ).toBeGreaterThan(sidebarCloseHit?.headerZ ?? 0);
-      await expectTopbarToggleHit("toggle-drawer-btn");
-      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="right-drawer"].open')) && !document.querySelector('[data-testid="hub-sidebar"].open'),
-        { timeout: 5000 },
-      );
-      const switchedBackToDrawer = await page.evaluate(() => ({
-        sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
-        drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
-      }));
-      expect(switchedBackToDrawer).toEqual({ sidebarOpen: false, drawerOpen: true });
-      await expectTopbarToggleHit("toggle-sidebar-btn");
-      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
-        { timeout: 5000 },
-      );
-      // The backdrop remains a close-only exit path; it must not open the drawer.
-      await page.click(".sidebar-backdrop");
-      await page.waitForFunction(
-        () => !document.querySelector('[data-testid="hub-sidebar"].open') && !document.querySelector('[data-testid="right-drawer"].open'),
-        { timeout: 5000 },
-      );
+      const auditOpenPanel = async (kind: "sidebar" | "drawer") => {
+        const report = await page.evaluate((panelKind: "sidebar" | "drawer") => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          const panel = document.querySelector<HTMLElement>(
+            panelKind === "sidebar" ? '[data-testid="hub-sidebar"]' : '[data-testid="right-drawer"]',
+          );
+          const content = panel?.querySelector<HTMLElement>(panelKind === "sidebar" ? ".sidebar-inner" : ".drawer-inner");
+          const close = panel?.querySelector<HTMLElement>(
+            panelKind === "sidebar" ? ".sb-close-btn" : '[data-testid="drawer-close-btn"]',
+          );
+          const headerRect = header?.getBoundingClientRect();
+          const panelRect = panel?.getBoundingClientRect();
+          const contentRect = content?.getBoundingClientRect();
+          const closeRect = close?.getBoundingClientRect();
+          const closeHit = closeRect
+            ? document.elementFromPoint(closeRect.left + closeRect.width / 2, closeRect.top + closeRect.height / 2)
+            : null;
+          return {
+            open: Boolean(panel?.classList.contains("open")),
+            headerBottom: headerRect?.bottom ?? -1,
+            panelTop: panelRect?.top ?? -1,
+            panelBottom: panelRect?.bottom ?? -1,
+            contentTop: contentRect?.top ?? -1,
+            closeVisible: Boolean(
+              close &&
+                closeRect &&
+                closeRect.width > 0 &&
+                closeRect.height > 0 &&
+                getComputedStyle(close).display !== "none" &&
+                getComputedStyle(close).visibility !== "hidden",
+            ),
+            closeHit: Boolean(close && closeHit?.closest("button") === close),
+            headerZ: Number(header ? getComputedStyle(header).zIndex : 0),
+            panelZ: Number(panel ? getComputedStyle(panel).zIndex : 0),
+          };
+        }, kind);
+        expect(report.open).toBe(true);
+        expect(report.panelTop).toBeGreaterThanOrEqual(report.headerBottom - 1);
+        expect(report.contentTop).toBeGreaterThanOrEqual(report.headerBottom - 1);
+        expect(report.panelBottom).toBeLessThanOrEqual(821);
+        expect(report.closeVisible).toBe(true);
+        expect(report.closeHit).toBe(true);
+        expect(report.headerZ).toBeGreaterThan(report.panelZ);
+      };
+
+      const clickBackdropAndAssertOnlyClose = async (kind: "sidebar" | "drawer") => {
+        const point = await page.evaluate((backdropKind: "sidebar" | "drawer") => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          const backdrop = document.querySelector<HTMLElement>(
+            backdropKind === "sidebar" ? ".sidebar-backdrop" : ".drawer-backdrop.overlay-mode",
+          );
+          const panel = document.querySelector<HTMLElement>(
+            backdropKind === "sidebar" ? '[data-testid="hub-sidebar"]' : '[data-testid="right-drawer"]',
+          );
+          if (!header || !backdrop || !panel) return null;
+          const headerBottom = header.getBoundingClientRect().bottom;
+          const panelRect = panel.getBoundingClientRect();
+          const x = backdropKind === "sidebar" ? window.innerWidth - 4 : 4;
+          const y = Math.min(window.innerHeight - 4, Math.ceil(headerBottom + 16));
+          const hit = document.elementFromPoint(x, y);
+          return { x, y, hitBackdrop: hit === backdrop || Boolean(hit && backdrop.contains(hit)), panelLeft: panelRect.left };
+        }, kind);
+        if (!point) throw new Error(`${kind} backdrop is missing`);
+        expect(point.hitBackdrop).toBe(true);
+        if (kind === "sidebar") expect(point.x).toBeGreaterThanOrEqual(360);
+        if (kind === "drawer") expect(point.x).toBeLessThan(point.panelLeft);
+        await page.mouse.move(point.x, point.y);
+        await page.mouse.down();
+        await page.mouse.up();
+        await waitForPanelState(false, false);
+      };
+
+      for (const width of [320, 375, 390, 768, 820]) {
+        await waitForMobileHeader(width);
+        await waitForPanelState(false, false);
+        await auditHeader(width);
+
+        // Drawer open -> the sidebar switch is the actual top hit and its first click switches panels.
+        await expectTopbarToggleHit("toggle-drawer-btn");
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await waitForPanelState(false, true);
+        await auditHeader(width);
+        await auditOpenPanel("drawer");
+        await expectTopbarToggleHit("toggle-sidebar-btn");
+        await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+        await waitForPanelState(true, false);
+        await auditHeader(width);
+        await auditOpenPanel("sidebar");
+
+        // The sidebar's own X closes only the current panel.
+        await clickReady(page, '[data-testid="hub-sidebar"] .sb-close-btn');
+        await waitForPanelState(false, false);
+
+        // Sidebar open -> the drawer switch is the actual top hit and its first click switches panels.
+        await expectTopbarToggleHit("toggle-sidebar-btn");
+        await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+        await waitForPanelState(true, false);
+        await auditHeader(width);
+        await auditOpenPanel("sidebar");
+        await expectTopbarToggleHit("toggle-drawer-btn");
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await waitForPanelState(false, true);
+        await auditHeader(width);
+        await auditOpenPanel("drawer");
+
+        // The drawer's own X closes only the current panel.
+        await clickReady(page, '[data-testid="drawer-close-btn"]');
+        await waitForPanelState(false, false);
+
+        // At 375px and wider the sidebar leaves an exposed backdrop strip; backdrop clicks only close it.
+        if (width >= 375) {
+          await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+          await waitForPanelState(true, false);
+          await clickBackdropAndAssertOnlyClose("sidebar");
+        }
+
+        // The drawer leaves an exposed backdrop area at 768px and 820px.
+        if (width >= 768) {
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await waitForPanelState(false, true);
+          await clickBackdropAndAssertOnlyClose("drawer");
+        }
+      }
 
       // 8. An in-progress design draft survives further narrow/wide transitions; routing settings stay inside the viewport.
       await page.setViewport({ width: 1440, height: 820 });
@@ -1559,7 +1714,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   test("REQ-009: 需求详情固定顶部区域，仅 Tabs 下方内容拥有独立垂直滚动", async () => {
     const repo = initGitRepo();
