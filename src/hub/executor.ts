@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -15,7 +15,7 @@ import {
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot } from "../core/fs.ts";
-import { observeGitSnapshot } from "../core/git.ts";
+import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
 import {
   buildOutputLanguageDirective,
   buildResumeLanguageReminder,
@@ -37,12 +37,14 @@ import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
   inspectFinishedRunForPainPoints,
+  inspectRsiSandboxDrift,
+  prepareSandboxConflictResolution,
   reconcileRsiSandboxBaseline,
   syncRequirementMirrorToSandbox,
   type EvolutionPainPoint,
   type PainPointReportInput,
 } from "./evolution.ts";
-import { synthesizeHandoffPacket } from "./handoff.ts";
+import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
 import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
@@ -90,6 +92,7 @@ export interface StartRunInput {
   isAutoReview?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
+  resolveConflict?: boolean;
 }
 
 export type TimeoutReason = "idle" | "max_duration";
@@ -461,7 +464,9 @@ export function buildExecutionPrompt(
   const modeVerb =
     input.action === "design"
       ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（设计验收条件时避免命令重复包含，${options.fastCommand ? `常规快速检查可引用 \`${options.fastCommand}\`，` : ""}纯文档改动无需捆绑耗时的代码全量测试），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
-      : input.action === "fix"
+      : input.action === "fix" && input.resolveConflict
+        ? `本次任务仅聚焦将主干最新提交合并到当前沙箱分支并解决合并冲突（切勿重复返工已通过的既有实现或过期审查意见）：1) 若存在未提交业务改动请先安全暂存或提交（严禁提交 node_modules 或 .workbench）；2) 合并目标主干提交并完整保留本需求功能与主干新增改动；3) 运行 \`wb verify ${reqId} --all\` 验证全部通过后执行 \`wb tasks ${reqId} --ready\`。`
+        : input.action === "fix"
         ? hasReviewToFix && isCurrentReview
           ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
           : hasReviewToFix && hasHumanFeedback
@@ -875,7 +880,10 @@ export class HubExecutor {
     const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
     const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
-    const currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
+    let currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
+    if (input.action === "fix" && input.resolveConflict && (currentDetail.state.stage === "done" || currentDetail.state.stage === "awaiting_acceptance")) {
+      currentDetail = await prepareSandboxConflictResolution(base, id);
+    }
     if (input.action === "implement" || input.action === "fix") {
       const stage = currentDetail.state.stage;
       if (stage !== "implementing" && stage !== "awaiting_acceptance") {
@@ -950,6 +958,55 @@ export class HubExecutor {
       await markDesigning(base, id);
     }
 
+    let conflictContext: ConflictHandoffContext | undefined;
+    if (input.action === "fix" && input.resolveConflict) {
+      const driftInfo = await inspectRsiSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(() => null);
+      if (driftInfo) {
+        let mainCommitsSummary = "";
+        try {
+          mainCommitsSummary = execFileSync(
+            "git",
+            ["-C", base, "log", "--oneline", "-n", "15", `${driftInfo.baseHead}..${driftInfo.mainHead}`],
+            { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+          ).trim();
+        } catch {
+          mainCommitsSummary = "";
+        }
+        let conflictExcerpt = await extractMergeConflictContext(codeRoot, 2600);
+        if (!conflictExcerpt && driftInfo.conflictFiles.length > 0) {
+          try {
+            conflictExcerpt = execFileSync(
+              "git",
+              [
+                "-C",
+                base,
+                "diff",
+                driftInfo.baseHead,
+                driftInfo.mainHead,
+                "--",
+                ...driftInfo.conflictFiles.slice(0, 6),
+              ],
+              { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            )
+              .trim()
+              .slice(0, 2600);
+          } catch {
+            conflictExcerpt = "";
+          }
+        }
+        conflictContext = {
+          branch: driftInfo.branch,
+          baseHead: driftInfo.baseHead,
+          mainHead: driftInfo.mainHead,
+          targetRef: driftInfo.targetRef,
+          behindCount: driftInfo.behindCount,
+          conflictFiles: driftInfo.conflictFiles,
+          ...(mainCommitsSummary ? { mainCommitsSummary } : {}),
+          ...(conflictExcerpt ? { conflictExcerpt } : {}),
+        };
+      }
+    }
+
     const prevTail = prevRun ? (this.runLogs.get(prevRun.id) ?? undefined) : undefined;
     const {
       markdown: handoffMd,
@@ -962,6 +1019,8 @@ export class HubExecutor {
       previousRun: prevRun,
       previousLogTail: prevTail,
       hubOutputLanguage,
+      resolveConflict: input.resolveConflict,
+      conflictContext,
     });
 
     // Determine whether we can safely use same-harness native session resume.

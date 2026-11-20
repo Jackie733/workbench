@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { KeyRound, Lock } from "lucide-react";
+import { AlertTriangle, KeyRound, Lock } from "lucide-react";
 import { api, ApiClientError } from "../api.ts";
 import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -91,6 +91,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
 
         {error && (
           <div className="callout danger xs" style={{ marginBottom: 12 }} data-testid="login-error">
+            <Icon icon={AlertTriangle} size={14} />{" "}
             {error.key ? t(language, error.key, error.params) : error.text}
           </div>
         )}

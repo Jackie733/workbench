@@ -238,7 +238,7 @@ export function ConsoleOutput({
             data-testid="console-mode-structured"
             onClick={() => setViewMode("structured")}
           >
-            {t(language, "console.modeStructured")}
+            <Icon icon={Layers} size={14} /> {t(language, "console.modeStructured")}
           </button>
           <button
             type="button"
@@ -246,7 +246,7 @@ export function ConsoleOutput({
             data-testid="console-mode-raw"
             onClick={() => setViewMode("raw")}
           >
-            {t(language, "console.modeRaw")}
+            <Icon icon={Terminal} size={14} /> {t(language, "console.modeRaw")}
           </button>
         </div>
 
@@ -258,6 +258,7 @@ export function ConsoleOutput({
               data-testid="console-toggle-secondary-btn"
               onClick={toggleAllSecondary}
             >
+              <Icon icon={hasCollapsedSecondary ? ChevronRight : ChevronDown} size={14} />{" "}
               {t(language, hasCollapsedSecondary ? "console.expandAll" : "console.collapseSecondary")}
             </button>
           )}

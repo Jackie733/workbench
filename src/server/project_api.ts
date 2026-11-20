@@ -68,7 +68,7 @@ import {
 import { normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
-import { getSandboxForRequirement, resolveCodeRoot } from "../core/sandbox.ts";
+import { getSandboxForRequirement, listProjectSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
 import { isProjectInitialized, readRequirementScreenshot } from "../core/store.ts";
 import {
@@ -85,9 +85,14 @@ import {
 } from "../core/types.ts";
 import { isRecord, sanitizeOutput, validateGiteeIssueIdent } from "../core/validate.ts";
 import {
+  applySandboxToMain,
+  createOrReuseWorktree,
   inspectRsiSandboxDrift,
+  prepareSandboxConflictResolution,
+  recommendSandboxMergeOrder,
   reconcileRsiSandboxBaseline,
   syncRequirementMirrorToSandbox,
+  syncRsiSandboxBase,
   syncRsiSandboxPrAndCleanup,
 } from "../hub/evolution.ts";
 import type { HubExecutor } from "../hub/executor.ts";
@@ -451,6 +456,37 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
       deps.broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
       return jsonResponse({ project });
+    }
+
+    if (method === "GET" && pathname === "/api/project/sandboxes") {
+      if (!isProjectInitialized(base)) {
+        return jsonResponse({ sandboxes: [], mergeOrder: null });
+      }
+      const fetchRemote = url.searchParams.get("fetch") === "1";
+      const mergeOrder = await recommendSandboxMergeOrder(base, { fetchRemote }).catch(() => null);
+      const sandboxes = await Promise.all(
+        listProjectSandboxes(base).map(async (sb) => {
+          const drift = await inspectRsiSandboxDrift(base, sb.requirementId, {
+            includeSiblings: true,
+            fetchRemote: false,
+          }).catch(() => null);
+          let detail: RequirementDetail | null = null;
+          try {
+            detail = getRequirement(base, sb.requirementId);
+          } catch {
+            detail = null;
+          }
+          return {
+            ...sb,
+            stage: detail?.state.stage ?? null,
+            title: detail?.state.title ?? sb.requirementId,
+            canApply: Boolean(detail && detail.state.stage === "done" && detail.state.acceptance !== null),
+            github: detail?.state.github ?? null,
+            ...(drift ? { drift } : {}),
+          };
+        }),
+      );
+      return jsonResponse({ sandboxes, mergeOrder });
     }
 
     if (method === "GET" && pathname === "/api/github/status") {
@@ -855,11 +891,22 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         githubWarningRef = linked.warningRef;
       }
 
+      let sandbox = null;
+      if (body.createSandbox === true && snapshot?.head) {
+        sandbox = await createOrReuseWorktree(base, detail.state.id, {
+          branchPrefix: "feat",
+          ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
+            ? { stackedOnReqId: body.stackedOnReqId.trim() }
+            : {}),
+        });
+      }
+
       let dispatch: DispatchOutcome | null = null;
       if (body.dispatchAgent === true) {
         detail = await markDesigning(base, detail.state.id, {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
+        if (sandbox) syncRequirementMirrorToSandbox(base, detail.state.id, sandbox.worktreePath);
         const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
         dispatch = await deps.dispatchToBridge(detail.state.id, "design", "send", prompt);
       }
@@ -869,6 +916,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         {
           detail,
           dispatch,
+          ...(sandbox ? { sandbox } : {}),
           ...(githubWarning ? { githubWarning } : {}),
           ...(githubWarningRef ? { githubWarningRef } : {}),
         },
@@ -1083,10 +1131,105 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           anchorIds: Array.isArray(body.anchorIds) ? body.anchorIds.filter((x): x is string => typeof x === "string") : undefined,
           mode: body.mode === "refine" ? "refine" : body.mode === "ask" ? "ask" : undefined,
           useFallback: body.useFallback === true,
+          resolveConflict: body.resolveConflict === true,
           timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
           idleTimeoutMs: typeof body.idleTimeoutMs === "number" ? body.idleTimeoutMs : undefined,
         });
         return jsonResponse(started, 202);
+      }
+
+      if (method === "POST" && sub === "sandbox") {
+        const body = await readBody(req);
+        const sandbox = await createOrReuseWorktree(base, id, {
+          branchPrefix: body.branchPrefix === "rsi" ? "rsi" : "feat",
+          ...(typeof body.branchName === "string" && body.branchName.trim() ? { branchName: body.branchName.trim() } : {}),
+          ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
+            ? { stackedOnReqId: body.stackedOnReqId.trim() }
+            : {}),
+        });
+        const snapshot = await observeGitSnapshot(sandbox.worktreePath);
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        const sandboxDrift = await inspectRsiSandboxDrift(base, id).catch(() => null);
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "hub.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
+        return jsonResponse({ sandbox, detail, sandboxDrift }, 201);
+      }
+
+      if (method === "POST" && sub === "sync-base") {
+        const body = await readBody(req);
+        const res = await syncRsiSandboxBase(base, id, {
+          fetchRemote: body.fetchRemote !== false,
+        });
+        deps.broadcastUi({ type: "hub.updated", reason: "evolution.base_synced", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.base_synced", root: base, id, at: Date.now() });
+        return jsonResponse(res);
+      }
+
+      if (method === "POST" && sub === "apply-sandbox") {
+        const applied = await applySandboxToMain(base, id);
+        const reloadRes = applied.touchesWeb ? await deps.reloadWebBundle() : { reloaded: false };
+        deps.broadcastUi({ type: "hub.updated", reason: "evolution.applied", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.applied", root: base, id, at: Date.now() });
+        return jsonResponse({
+          ...applied,
+          webReloaded: reloadRes.reloaded,
+          restartRecommended: applied.touchesBackend,
+        });
+      }
+
+      if (method === "POST" && sub === "sync-resolve") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        if (detail.state.stage === "awaiting_approval" && body.approveFirst === true) {
+          detail = await approveDesign(base, id, {
+            expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : detail.state.revision,
+            baseline: snapshot,
+            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          });
+        } else if (detail.state.stage === "done" || detail.state.stage === "awaiting_acceptance") {
+          detail = await prepareSandboxConflictResolution(base, id);
+        } else if (detail.state.stage !== "implementing") {
+          throw new WorkbenchError(
+            "approval_required",
+            `${id} 当前阶段（${detail.state.stage}）需要先批准方案后才能同步主干并解决冲突`,
+          );
+        }
+
+        if (body.useCli === true) {
+          const started = await deps.executor.startRun({
+            root: base,
+            requirementId: id,
+            action: "fix",
+            resolveConflict: true,
+            harness: typeof body.harness === "string" ? body.harness : undefined,
+            model: typeof body.model === "string" ? body.model : undefined,
+            reasoningEffort:
+              typeof body.reasoningEffort === "string" &&
+              (REASONING_EFFORTS as readonly string[]).includes(body.reasoningEffort)
+                ? (body.reasoningEffort as ReasoningEffort)
+                : undefined,
+            message: typeof body.message === "string" ? body.message : undefined,
+          });
+          deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.sync_resolve", root: base, id, at: Date.now() });
+          return jsonResponse({ detail: started.detail, run: started.run, target: started.target, dispatch: null }, 202);
+        }
+
+        const drift = await inspectRsiSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(
+          () => null,
+        );
+        const conflicts = drift?.conflictFiles.slice(0, 8).join(", ") ?? "";
+        const prompt =
+          typeof body.message === "string" && body.message.trim()
+            ? body.message.trim()
+            : `请处理工作台需求 ${id} 沙箱分支 ${drift?.branch ?? ""} 的主干同步与合并冲突${
+                conflicts ? `（冲突文件：${conflicts}）` : ""
+              }：保留未提交改动，合并 ${drift?.targetRef ?? drift?.mainHead ?? "main"}，解决冲突后运行 wb verify ${id} --all 与 wb tasks ${id} --ready。`;
+        const dispatch =
+          body.dispatchAgent === true ? await deps.dispatchToBridge(id, "fix", "send", prompt) : null;
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.sync_resolve", root: base, id, at: Date.now() });
+        return jsonResponse({ detail, dispatch });
       }
 
       const runCancelMatch = /^runs\/([^/]+)\/cancel$/.exec(sub);
@@ -1109,6 +1252,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
 
       if (method === "POST" && sub === "approve") {
         const body = await readBody(req);
+        if (body.createSandbox === true) {
+          await createOrReuseWorktree(base, id, {
+            branchPrefix: "feat",
+            ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
+              ? { stackedOnReqId: body.stackedOnReqId.trim() }
+              : {}),
+          });
+        }
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await approveDesign(base, id, {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
@@ -1237,7 +1388,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           giteeDeps: deps.giteeDeps,
           giteeToken: resolveGiteeToken(),
         });
-        return jsonResponse(preview);
+        const sandboxDrift = preview.sandboxActive
+          ? await inspectRsiSandboxDrift(base, id, { includeSiblings: true, fetchRemote: false }).catch(() => null)
+          : null;
+        return jsonResponse({ ...preview, ...(sandboxDrift ? { sandboxDrift } : {}) });
       }
 
       if (method === "POST" && sub === "deliver") {
@@ -1257,6 +1411,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : undefined,
             prTitle: typeof body.prTitle === "string" ? body.prTitle : undefined,
             prBody: typeof body.prBody === "string" ? body.prBody : undefined,
+            forceWithLease: body.forceWithLease === true,
           },
           {
             ...deps.githubDeps,
@@ -1519,6 +1674,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await reopenRequirement(base, id, {
           reason: typeof body.reason === "string" ? body.reason : "",
+          preserveApproval: body.preserveApproval === true,
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });

@@ -9,6 +9,7 @@ import {
   detectOmittedDiffContent,
   getGitRemoteUrl,
   getHeadCommitInfo,
+  inspectRemoteBranchDivergence,
   inspectWorkingTreeForDelivery,
   listCommittedFilesBetween,
   observeGitChanges,
@@ -1963,6 +1964,11 @@ export async function getRequirementDeliveryPreview(
       ? tree.branch
       : `feat/${state.id.toLowerCase()}`;
 
+  const remoteDivergence =
+    tree.isGitRepo && suggestedBranch !== baseBranch
+      ? await inspectRemoteBranchDivergence(codeRoot, suggestedBranch, "origin")
+      : { remoteBranchExists: false, behindRemoteCount: 0, diverged: false };
+
   return {
     requirementId: state.id,
     stage: state.stage,
@@ -1987,6 +1993,8 @@ export async function getRequirementDeliveryPreview(
     acceptedSnapshotFileCount: acceptedSet.size,
     delivered: state.delivery ?? null,
     githubPr: state.github?.pr ?? null,
+    remoteBranchExists: remoteDivergence.remoteBranchExists,
+    remoteBranchDiverged: remoteDivergence.diverged,
   };
 }
 
@@ -2007,6 +2015,7 @@ export async function deliverRequirement(
     baseBranch?: string;
     prTitle?: string;
     prBody?: string;
+    forceWithLease?: boolean;
   },
   deps?: DeliveryCommandDeps,
 ): Promise<{
@@ -2217,7 +2226,12 @@ export async function deliverRequirement(
       buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title);
   }
 
-  await pushBranchToRemote(codeRoot, targetBranch, "origin");
+  const allowForceLease =
+    input.forceWithLease === true &&
+    targetBranch !== baseBranch &&
+    targetBranch !== "main" &&
+    targetBranch !== "master";
+  await pushBranchToRemote(codeRoot, targetBranch, "origin", { forceWithLease: allowForceLease });
 
   const firstLine = effectiveCommitMessage.split(/\r?\n/, 1)[0] ?? effectiveCommitMessage;
   const prTitle = (input.prTitle?.trim() || `${id}: ${preBundle.state.title}`).slice(0, 200);
@@ -2528,7 +2542,12 @@ export async function cancelRequirement(
 export async function reopenRequirement(
   root: string,
   id: string,
-  input: { reason: string; expectedRevision?: number; currentCodeSnapshotHash?: string | null },
+  input: {
+    reason: string;
+    preserveApproval?: boolean;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
 ): Promise<RequirementDetail> {
   const reason = normalizeReason(input.reason, "重开原因");
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
@@ -2536,18 +2555,27 @@ export async function reopenRequirement(
     if (state.stage !== "done" && state.stage !== "cancelled") {
       throw new WorkbenchError("invalid_transition", `只有已完成或已取消的需求才能重新打开（当前：${state.stage}）`);
     }
+    const canKeepApproval = input.preserveApproval === true && evaluateApproval(state).valid;
     return {
       state: {
         ...state,
-        stage: "draft",
-        approval: null,
+        stage: canKeepApproval ? "implementing" : "draft",
+        approval: canKeepApproval ? state.approval : null,
         acceptance: null,
         delivery: null,
         blockedFrom: null,
         blockedReason: null,
         timeline: appendTimeline(
           state.timeline,
-          makeEvent(now, "reopened", "human", "重新打开需求（历史批准与验收仅作存档，不自动复用）", reason),
+          makeEvent(
+            now,
+            "reopened",
+            "human",
+            canKeepApproval
+              ? "退回实施阶段（保留既有方案批准，历史验收记录仅作存档）"
+              : "重新打开需求（历史批准与验收仅作存档，不自动复用）",
+            reason,
+          ),
         ),
       },
     };
@@ -2808,13 +2836,14 @@ export async function syncRequirementBaseline(
     baselineFingerprint: string;
     dirty: boolean;
     preserveStage?: boolean;
+    eventKind?: TimelineEventKind;
     summary?: string;
     currentCodeSnapshotHash?: string | null;
   },
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled") {
+    if (state.stage === "cancelled" || (state.stage === "done" && !input.preserveStage)) {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能刷新基线`);
     }
     const nextStage: Stage =
@@ -2833,7 +2862,7 @@ export async function syncRequirementBaseline(
           state.timeline,
           makeEvent(
             now,
-            "tasks_updated",
+            input.eventKind ?? "sandbox_synced",
             "system",
             input.summary ?? `已同步主干基线至 ${input.baselineHead.slice(0, 7)}（需在新基线上复跑验证）`,
           ),
@@ -2842,4 +2871,51 @@ export async function syncRequirementBaseline(
     };
   });
   return toDetail(bundle, input.currentCodeSnapshotHash ?? input.baselineFingerprint);
+}
+
+/**
+ * Transitions an approved requirement from `done` or `awaiting_acceptance` to `implementing`
+ * specifically for sandbox conflict resolution without invalidating `approval` or polluting `lastFeedback`.
+ */
+export async function prepareRequirementForConflictSync(
+  root: string,
+  id: string,
+  input: { summary?: string; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "implementing") {
+      return { state };
+    }
+    if (state.stage !== "done" && state.stage !== "awaiting_acceptance") {
+      throw new WorkbenchError(
+        "invalid_transition",
+        `当前阶段（${state.stage}）不能直接进入主干同步消解冲突，请先批准方案`,
+      );
+    }
+    if (!evaluateApproval(state).valid) {
+      throw new WorkbenchError("approval_required", `${id} 尚未获得有效方案批准，请先批准方案`);
+    }
+    const wasDone = state.stage === "done";
+    return {
+      state: {
+        ...state,
+        stage: "implementing",
+        ...(wasDone ? { acceptance: null, delivery: null } : {}),
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "sandbox_synced",
+            "system",
+            input.summary ??
+              (wasDone
+                ? "因主干代码存在合并冲突，已轻量退回实施阶段消解冲突（保留既有方案批准）"
+                : "进入实施阶段同步主干基线并解决合并冲突"),
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }

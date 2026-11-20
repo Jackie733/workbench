@@ -324,6 +324,69 @@ export interface DeliveryCandidateFile {
   inAcceptedSnapshot: boolean;
 }
 
+export type SandboxDriftStatus = "up_to_date" | "clean_behind" | "auto_mergeable" | "true_conflict";
+
+export interface SiblingConflictInfo {
+  requirementId: string;
+  title: string;
+  branch: string;
+  stage: Stage;
+  conflictFiles: string[];
+  overlapFiles: string[];
+  autoMergeable: boolean;
+}
+
+export interface SandboxDriftInfo {
+  requirementId: string;
+  branch: string;
+  baseBranch?: string;
+  baseHead: string;
+  mainHead: string;
+  targetRef?: string;
+  remoteAheadCount?: number;
+  behindCount: number;
+  aheadCount: number;
+  mainDirty: boolean;
+  driftStatus: SandboxDriftStatus;
+  overlapFiles: string[];
+  conflictFiles: string[];
+  canAutoSync: boolean;
+  siblingConflicts?: SiblingConflictInfo[];
+}
+
+export interface MergeOrderEntry {
+  requirementId: string;
+  title: string;
+  stage: Stage;
+  branch: string;
+  aheadCount: number;
+  behindCount: number;
+  driftStatus: SandboxDriftStatus;
+  conflictFiles: string[];
+  overlapFiles: string[];
+  touchedFilesCount: number;
+  conflictsWithSiblings: string[];
+  autoMergeableSiblings: string[];
+  pr?: RequirementGitHubPrLink | null;
+  reason: "clean_leaf" | "auto_mergeable" | "sibling_conflict" | "main_conflict";
+}
+
+export interface MergeOrderRecommendation {
+  generatedAt: number;
+  baseBranch: string;
+  mainHead: string;
+  ordered: MergeOrderEntry[];
+}
+
+export interface CascadeSyncItemResult {
+  requirementId: string;
+  status: "synced" | "up_to_date" | "conflict" | "error";
+  behindCount: number;
+  driftStatus?: SandboxDriftStatus;
+  conflictFiles?: string[];
+  error?: string;
+}
+
 export interface DeliveryPreview {
   requirementId: string;
   stage: Stage;
@@ -348,6 +411,9 @@ export interface DeliveryPreview {
   acceptedSnapshotFileCount: number;
   delivered: DeliveryRecord | null;
   githubPr: RequirementGitHubPrLink | null;
+  remoteBranchExists?: boolean;
+  remoteBranchDiverged?: boolean;
+  sandboxDrift?: SandboxDriftInfo | null;
 }
 
 export type TimelineEventKind =
@@ -376,6 +442,7 @@ export type TimelineEventKind =
   | "github_issue_synced"
   | "github_pr_created"
   | "github_pr_synced"
+  | "sandbox_synced"
   | "sub_requirements_spawned";
 
 export interface RequirementGitHubIssueLink {

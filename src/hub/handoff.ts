@@ -13,6 +13,17 @@ import { readHubConfig } from "./registry.ts";
 const HANDOFF_MAX_BYTES = 24 * 1024;
 const PLAYBOOK_SECTION_MAX_BYTES = 1200;
 
+export interface ConflictHandoffContext {
+  branch: string;
+  baseHead: string;
+  mainHead: string;
+  targetRef?: string;
+  behindCount: number;
+  conflictFiles: string[];
+  mainCommitsSummary?: string;
+  conflictExcerpt?: string;
+}
+
 export interface HandoffSynthesisOptions {
   action: AgentAction;
   humanInstruction?: string;
@@ -20,6 +31,8 @@ export interface HandoffSynthesisOptions {
   previousRun?: AgentRunRecord | null;
   previousLogTail?: string;
   hubOutputLanguage?: OutputLanguage;
+  resolveConflict?: boolean;
+  conflictContext?: ConflictHandoffContext;
 }
 
 interface BudgetedSection {
@@ -188,9 +201,45 @@ export async function synthesizeHandoffPacket(
     Boolean(review) &&
     (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement" || options.action === "review");
   const hasSteering =
-    includeReviewDetail || pendingNotes.length > 0 || Boolean(state.lastFeedback) || Boolean(options.humanInstruction?.trim());
+    Boolean(options.resolveConflict) ||
+    includeReviewDetail ||
+    pendingNotes.length > 0 ||
+    Boolean(state.lastFeedback) ||
+    Boolean(options.humanInstruction?.trim());
 
-  if (hasSteering) {
+  if (options.resolveConflict) {
+    const cc = options.conflictContext;
+    const steerLines: string[] = ["## 1. 主干同步与冲突消解任务（最高优先级）"];
+    if (cc) {
+      steerLines.push(
+        `- **沙箱分支**：\`${cc.branch}\`（当前基线 \`${cc.baseHead.slice(0, 7)}\`，落后目标主干 \`${cc.targetRef ?? cc.mainHead.slice(0, 7)}\` 共 ${cc.behindCount} 个提交）`,
+      );
+      if (cc.conflictFiles.length > 0) {
+        steerLines.push(`- **冲突文件清单**：${cc.conflictFiles.map((f) => `\`${f}\``).join("、")}`);
+      }
+      if (cc.mainCommitsSummary?.trim()) {
+        steerLines.push("- **主干新增提交摘要**：");
+        steerLines.push("```text");
+        steerLines.push(sanitizeOutput(cc.mainCommitsSummary.trim(), 1400).text);
+        steerLines.push("```");
+      }
+      if (cc.conflictExcerpt?.trim()) {
+        steerLines.push("- **冲突片段预览**：");
+        steerLines.push("```diff");
+        steerLines.push(sanitizeOutput(cc.conflictExcerpt.trim(), 2600).text);
+        steerLines.push("```");
+      }
+    }
+    if (options.humanInstruction?.trim()) {
+      steerLines.push(`- **同步指令**：${sanitizeOutput(options.humanInstruction.trim(), 2000).text}`);
+    }
+    steerLines.push("");
+    sections.push({
+      key: "steering",
+      priority: 1,
+      text: clipTextByBytes(steerLines.join("\n"), 7500),
+    });
+  } else if (hasSteering) {
     const steerLines: string[] = ["## 1. 跨模型审查待修复项与人类最新反馈（最高优先级）"];
     const hasFreshHumanGuidance = Boolean(state.lastFeedback) || Boolean(options.humanInstruction?.trim());
     const prioritizeHumanOverStaleReview =
