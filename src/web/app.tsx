@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
+import { Crosshair, X } from "lucide-react";
 import { Toaster } from "sonner";
 import { api } from "./api.ts";
 import { EmptyHubCard, HomeView, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
 import { HubSidebar } from "./components/HubSidebar.tsx";
+import { Icon } from "./components/Icon.tsx";
 import { LoginView } from "./components/LoginView.tsx";
 import { Modals } from "./components/Modals.tsx";
 import { RightDrawer } from "./components/RightDrawer.tsx";
@@ -150,7 +152,8 @@ function DomElementPicker() {
           fontSize: 13,
         }}
       >
-        <span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <Icon icon={Crosshair} size={14} />
           {hoverLabel
             ? t(language, "picker.bannerTarget", { selector: hoverLabel })
             : t(language, "picker.banner")}
@@ -163,7 +166,7 @@ function DomElementPicker() {
             setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, pickingElement: false } : prev))
           }
         >
-          {t(language, "picker.cancel")}
+          <Icon icon={X} size={14} /> {t(language, "picker.cancel")}
         </button>
       </div>
     </>

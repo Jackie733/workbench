@@ -1,5 +1,24 @@
 import { useLayoutEffect } from "react";
-import { ArrowRight, GitBranch, Plus, RefreshCw, WifiOff } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Check,
+  CircleAlert,
+  Clock,
+  Columns3,
+  FolderGit2,
+  FolderPlus,
+  GitBranch,
+  GitPullRequest,
+  Info,
+  Link2,
+  List,
+  Plus,
+  RefreshCw,
+  Search,
+  WifiOff,
+  X,
+} from "lucide-react";
 import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
 import { api, type HubProjectSummary, type ProjectSandboxesResponse } from "../api.ts";
 import { t, translateRef } from "../i18n.ts";
@@ -19,7 +38,7 @@ import {
 import { filteredItems, progressDetail, relativeTime, STAGE_META } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
-import { Icon } from "./Icon.tsx";
+import { Icon, STAGE_ICONS } from "./Icon.tsx";
 
 function isBlockingDecision(item: RequirementSummary): boolean {
   if (item.decisionReasonKey) {
@@ -49,6 +68,7 @@ export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary 
         {t(language, "remote.descSuffix")}
       </p>
       <div className="callout info xs" style={{ marginBottom: 14 }}>
+        <Icon icon={Info} size={14} />{" "}
         {t(language, "remote.hintPrefix")}
         <strong>{nodeLabel}</strong>
         {t(language, "remote.hintMiddle")}
@@ -70,7 +90,10 @@ export function EmptyHubCard() {
   const language = useUiStore((s) => s.language);
   return (
     <div className="empty-card" data-testid="empty-hub-card">
-      <h2 style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>{t(language, "hub.emptyTitle")}</h2>
+      <h2 className="icon-heading" style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>
+        <Icon icon={FolderPlus} size={20} />
+        <span>{t(language, "hub.emptyTitle")}</span>
+      </h2>
       <p className="muted" style={{ margin: "0 0 16px" }}>
         {t(language, "hub.emptyDesc")}
       </p>
@@ -102,7 +125,10 @@ export function InitCard() {
 
   return (
     <div className="init-card" data-testid="init-card">
-      <h2>{t(language, "init.title")}</h2>
+      <h2 className="icon-heading">
+        <Icon icon={FolderGit2} size={20} />
+        <span>{t(language, "init.title")}</span>
+      </h2>
       <p className="muted" style={{ margin: "0 0 14px" }}>
         {t(language, "init.descPrefix")}
         <code>{rootLabel}</code>
@@ -175,7 +201,7 @@ export function InitCard() {
         disabled={busy}
         onClick={() => void initProjectSubmit()}
       >
-        {t(language, "init.submit")}
+        <Icon icon={Check} size={14} /> {t(language, "init.submit")}
       </button>
     </div>
   );
@@ -199,7 +225,10 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
     <>
       {blockedItems.length > 0 && (
         <div className="callout danger" style={{ marginBottom: 14 }}>
-          <strong>{t(language, "board.blocked", { count: blockedItems.length })}</strong>
+          <strong className="callout-lead">
+            <Icon icon={AlertTriangle} size={14} />
+            <span>{t(language, "board.blocked", { count: blockedItems.length })}</span>
+          </strong>
           {blockedItems.map((b) => (
             <button
               key={b.id}
@@ -247,7 +276,9 @@ function RequirementBoard({ items }: { items: RequirementSummary[] }) {
                     >
                       <div className="board-card-top">
                         <span className="req-id">{item.id}</span>
-                        <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
+                        <span className={`badge ${meta.tone}`}>
+                          <Icon icon={STAGE_ICONS[item.stage]} size={14} /> {meta.labels[language]}
+                        </span>
                       </div>
                       <div style={{ fontWeight: 500, fontSize: 13.5, marginBottom: 6 }}>{item.title}</div>
                       {detail && (
@@ -325,15 +356,18 @@ export function HomeView() {
       </div>
 
       <div className="toolbar">
-        <input
-          className="search-box"
-          id="search-input"
-          data-testid="search-input"
-          type="search"
-          value={query}
-          placeholder={t(language, "home.searchPlaceholder")}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <div className="search-wrap">
+          <Icon icon={Search} size={14} />
+          <input
+            className="search-box"
+            id="search-input"
+            data-testid="search-input"
+            type="search"
+            value={query}
+            placeholder={t(language, "home.searchPlaceholder")}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
         <div className="segmented" role="tablist" data-testid="scope-tabs">
           {(["active", "done", "all"] as const).map((sc) => (
             <button
@@ -360,7 +394,7 @@ export function HomeView() {
             data-value="list"
             onClick={() => setLayout("list")}
           >
-            {t(language, "home.layout.list")}
+            <Icon icon={List} size={14} /> {t(language, "home.layout.list")}
           </button>
           <button
             type="button"
@@ -369,7 +403,7 @@ export function HomeView() {
             data-value="board"
             onClick={() => setLayout("board")}
           >
-            {t(language, "home.layout.board")}
+            <Icon icon={Columns3} size={14} /> {t(language, "home.layout.board")}
           </button>
         </div>
         <button
@@ -386,7 +420,10 @@ export function HomeView() {
       <div id="home-content">
         {pendingDecisions.length > 0 && !query.trim() && (
           <section className="decision-box" data-testid="decision-box">
-            <h2>{t(language, "home.decisionBox", { count: pendingDecisions.length })}</h2>
+            <h2>
+              <Icon icon={AlertTriangle} size={14} />
+              <span>{t(language, "home.decisionBox", { count: pendingDecisions.length })}</span>
+            </h2>
             {pendingDecisions.map((item) => (
               <div key={item.id} className="decision-row">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -402,6 +439,7 @@ export function HomeView() {
                     {item.title}
                   </span>
                   <span className={`badge ${isBlockingDecision(item) ? "danger" : "warning"}`}>
+                    <Icon icon={isBlockingDecision(item) ? CircleAlert : Clock} size={14} />{" "}
                     {translateRef(
                       language,
                       item.decisionReasonKey,
@@ -491,6 +529,7 @@ export function HomeView() {
                       <span style={{ fontWeight: 500, fontSize: 13 }}>{entry.title}</span>
                       <code className="xs muted">{entry.branch}</code>
                       <span className={`badge ${STAGE_META[entry.stage].tone}`}>
+                        <Icon icon={STAGE_ICONS[entry.stage]} size={14} />
                         {STAGE_META[entry.stage].labels[language]}
                       </span>
                       <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
@@ -559,7 +598,7 @@ export function HomeView() {
                 data-action="clear-search"
                 onClick={() => setQuery("")}
               >
-                {t(language, "home.clearSearch")}
+                <Icon icon={X} size={14} /> {t(language, "home.clearSearch")}
               </button>
             </div>
           ) : layout === "list" ? (
@@ -593,13 +632,17 @@ export function HomeView() {
                     <div data-testid={`req-card-${item.id}`}>
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
-                        <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
+                        <span className={`badge ${meta.tone}`}>
+                          <Icon icon={STAGE_ICONS[item.stage]} size={14} /> {meta.labels[language]}
+                        </span>
                         {item.github?.issue && (
-                          <span className="badge neutral">Issue #{item.github.issue.number}</span>
+                          <span className="badge neutral">
+                            <Icon icon={Link2} size={14} /> Issue #{item.github.issue.number}
+                          </span>
                         )}
                         {item.github?.pr && (
                           <span className={`badge ${item.github.pr.state === "merged" ? "success" : "info"}`}>
-                            PR #{item.github.pr.number}
+                            <Icon icon={GitPullRequest} size={14} /> PR #{item.github.pr.number}
                           </span>
                         )}
                         {activeReqRun && (

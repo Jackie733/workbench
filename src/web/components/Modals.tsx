@@ -1,22 +1,52 @@
 import { useRef } from "react";
 import {
+  Activity,
   AlertTriangle,
+  ArrowLeft,
   ArrowUp,
+  Ban,
+  BookOpen,
+  Bug,
   Check,
+  CircleAlert,
+  CircleHelp,
+  CircleOff,
+  ClipboardCheck,
+  Copy,
   Crosshair,
+  Download,
   ExternalLink,
+  FileText,
   Flame,
   Folder,
+  FolderOpen,
+  FolderPlus,
+  GitBranch,
+  GitCommit,
+  GitFork,
   GitPullRequest,
   Globe,
+  Inbox,
+  Info,
   Laptop,
   Lightbulb,
   Link2,
+  ListChecks,
+  MessageSquare,
   Pencil,
+  Plus,
   RefreshCw,
+  RotateCcw,
+  Save,
+  Send,
   Server,
+  Settings,
   Sparkles,
+  Terminal,
   Trash2,
+  Wrench,
+  X,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type { StructuredMessageRef } from "../../core/errors.ts";
@@ -175,7 +205,10 @@ export function Modals() {
     return (
       <ModalShell onClose={close} wide={mode === "import_issue" && isGiteeProject} testId="new-req-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>{t(language, "newReq.title")}</h3>
+          <h3 className="icon-heading" style={{ margin: 0 }}>
+            <Icon icon={Plus} size={20} />
+            <span>{t(language, "newReq.title")}</span>
+          </h3>
           <div className="segmented" role="tablist" aria-label={t(language, "newReq.modeAria")}>
             <button
               type="button"
@@ -187,7 +220,7 @@ export function Modals() {
                 setModal((prev) => (prev?.kind === "new_req" ? { ...prev, mode: "create" } : prev))
               }
             >
-              {t(language, "newReq.modeCreate")}
+              <Icon icon={Pencil} size={14} /> {t(language, "newReq.modeCreate")}
             </button>
             <button
               type="button"
@@ -201,7 +234,7 @@ export function Modals() {
                 )
               }
             >
-              {t(language, isGiteeProject ? "newReq.modeImportGitee" : "newReq.modeImport")}
+              <Icon icon={Link2} size={14} /> {t(language, isGiteeProject ? "newReq.modeImportGitee" : "newReq.modeImport")}
             </button>
           </div>
         </div>
@@ -294,7 +327,7 @@ export function Modals() {
             )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                {t(language, "common.cancel")}
+                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </button>
               <button
                 className="btn"
@@ -312,7 +345,7 @@ export function Modals() {
                   )
                 }
               >
-                {t(language, "newReq.saveDraft")}
+                <Icon icon={Save} size={14} /> {t(language, "newReq.saveDraft")}
               </button>
               <button
                 className="btn primary"
@@ -330,7 +363,7 @@ export function Modals() {
                   )
                 }
               >
-                {t(language, "newReq.createDispatch")}
+                <Icon icon={Zap} size={14} /> {t(language, "newReq.createDispatch")}
               </button>
             </div>
           </>
@@ -338,7 +371,9 @@ export function Modals() {
           <div data-testid="gitee-import-pane">
             {giteeStatus && !giteeStatus.authenticated ? (
               <div className="callout warning xs" style={{ marginBottom: 10 }}>
-                <div style={{ marginBottom: 6 }}>{formatGiteeStatusReason(language, giteeStatus)}</div>
+                <div style={{ marginBottom: 6 }}>
+                  <Icon icon={AlertTriangle} size={14} /> {formatGiteeStatusReason(language, giteeStatus)}
+                </div>
                 <button
                   className="btn xs"
                   type="button"
@@ -351,7 +386,7 @@ export function Modals() {
                     })
                   }
                 >
-                  {t(language, "gitee.gotoSettings")}
+                  <Icon icon={Settings} size={14} /> {t(language, "gitee.gotoSettings")}
                 </button>
               </div>
             ) : (
@@ -449,7 +484,7 @@ export function Modals() {
                     </div>
                   ) : giteeIssuesQuery.isError ? (
                     <div className="callout danger xs">
-                      {t(language, "gitee.loadFailed")}
+                      <Icon icon={AlertTriangle} size={14} /> {t(language, "gitee.loadFailed")}
                       {describeClientError(language, giteeIssuesQuery.error)}
                     </div>
                   ) : (giteeIssuesQuery.data?.items.length ?? 0) === 0 ? (
@@ -515,7 +550,7 @@ export function Modals() {
                                 void openRequirement(item.importedRequirementId!);
                               }}
                             >
-                              {t(language, "gitee.imported", { id: item.importedRequirementId })}
+                              <Icon icon={ExternalLink} size={14} /> {t(language, "gitee.imported", { id: item.importedRequirementId })}
                             </button>
                           )}
                         </div>
@@ -545,7 +580,7 @@ export function Modals() {
             />
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                {t(language, "common.cancel")}
+                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </button>
               <button
                 className="btn"
@@ -560,7 +595,7 @@ export function Modals() {
                   })
                 }
               >
-                {t(language, "gitee.importDraft")}
+                <Icon icon={Download} size={14} /> {t(language, "gitee.importDraft")}
               </button>
               <button
                 className="btn primary"
@@ -575,7 +610,7 @@ export function Modals() {
                   })
                 }
               >
-                {t(language, "gitee.importDispatch")}
+                <Icon icon={Zap} size={14} /> {t(language, "gitee.importDispatch")}
               </button>
             </div>
           </div>
@@ -599,12 +634,12 @@ export function Modals() {
             />
             {githubStatus && !githubStatus.ready && (
               <div className="callout warning xs" style={{ marginTop: 8 }}>
-                {formatGitHubStatusReason(language, githubStatus)}
+                <Icon icon={AlertTriangle} size={14} /> {formatGitHubStatusReason(language, githubStatus)}
               </div>
             )}
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                {t(language, "common.cancel")}
+                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </button>
               <button
                 className="btn"
@@ -613,7 +648,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", false)}
               >
-                {t(language, "newReq.importDraft")}
+                <Icon icon={Download} size={14} /> {t(language, "newReq.importDraft")}
               </button>
               <button
                 className="btn primary"
@@ -622,7 +657,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", true)}
               >
-                {t(language, "newReq.importDispatch")}
+                <Icon icon={Zap} size={14} /> {t(language, "newReq.importDispatch")}
               </button>
             </div>
           </>
@@ -687,7 +722,10 @@ export function Modals() {
     return (
       <ModalShell onClose={close} wide testId="add-project-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>{t(language, "addProject.title")}</h3>
+          <h3 className="icon-heading" style={{ margin: 0 }}>
+            <Icon icon={FolderPlus} size={20} />
+            <span>{t(language, "addProject.title")}</span>
+          </h3>
           <button
             className="btn ghost xs"
             type="button"
@@ -696,6 +734,7 @@ export function Modals() {
               setModal((prev) => (prev?.kind === "add_project" ? { ...prev, showNodeHelp: !prev.showNodeHelp } : prev))
             }
           >
+            <Icon icon={CircleHelp} size={14} />{" "}
             {m.showNodeHelp ? t(language, "addProject.helpClose") : t(language, "addProject.helpOpen")}
           </button>
         </div>
@@ -726,7 +765,10 @@ export function Modals() {
         {m.showNodeHelp && (
           <div className="callout info xs" style={{ marginBottom: 10 }} data-testid="node-connect-guide">
             <div>
-              <strong>{t(language, "addProject.helpTitle")}</strong>
+              <strong className="callout-lead">
+                <Icon icon={Info} size={14} />
+                <span>{t(language, "addProject.helpTitle")}</span>
+              </strong>
             </div>
             <div style={{ marginTop: 4 }}>
               {t(language, "addProject.helpDesc")}
@@ -763,7 +805,7 @@ export function Modals() {
             data-testid="browse-go-btn"
             onClick={() => void browseDir(m.pathInput)}
           >
-            {t(language, "addProject.open")}
+            <Icon icon={FolderOpen} size={14} /> {t(language, "addProject.open")}
           </button>
         </div>
         <div className="browse-box" data-testid="fs-browse-list">
@@ -773,7 +815,9 @@ export function Modals() {
                 <span className="xs muted">{browse.currentPath}</span>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   {browse.isGitRepo ? (
-                    <span className="badge success">{t(language, "addProject.gitRepo")}</span>
+                    <span className="badge success">
+                      <Icon icon={GitBranch} size={14} /> {t(language, "addProject.gitRepo")}
+                    </span>
                   ) : (
                     <span className="badge neutral">{t(language, "addProject.plainDir")}</span>
                   )}
@@ -857,7 +901,7 @@ export function Modals() {
         </div>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -866,7 +910,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => void submitAddProject()}
           >
-            {t(language, "addProject.submit")}
+            <Icon icon={Plus} size={14} /> {t(language, "addProject.submit")}
           </button>
         </div>
       </ModalShell>
@@ -1000,7 +1044,10 @@ export function Modals() {
     return (
       <ModalShell onClose={close} wide testId="routing-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>{t(language, "routing.title")}</h3>
+          <h3 className="icon-heading" style={{ margin: 0 }}>
+            <Icon icon={Settings} size={20} />
+            <span>{t(language, "routing.title")}</span>
+          </h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <div className="segmented" role="tablist" aria-label={t(language, "routing.scopeAria")}>
               <button
@@ -1195,7 +1242,7 @@ export function Modals() {
             )}
 
             <div className="callout info xs" style={{ margin: "12px 0" }}>
-              {t(language, "routing.outputLanguageCallout")}
+              <Icon icon={Info} size={14} /> {t(language, "routing.outputLanguageCallout")}
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, alignItems: "end" }}>
@@ -1239,6 +1286,16 @@ export function Modals() {
                     }`}
                     data-testid="hub-gitee-token-status"
                   >
+                    <Icon
+                      icon={
+                        m.clearGiteeToken
+                          ? Trash2
+                          : hub?.giteeTokenConfigured
+                            ? Check
+                            : AlertTriangle
+                      }
+                      size={14}
+                    />{" "}
                     {m.clearGiteeToken
                       ? t(language, "gitee.tokenClearOnSave")
                       : hub?.giteeTokenConfigured
@@ -1280,7 +1337,7 @@ export function Modals() {
                         )
                       }
                     >
-                      {t(language, "gitee.tokenClear")}
+                      <Icon icon={X} size={14} /> {t(language, "gitee.tokenClear")}
                     </button>
                   )}
                 </div>
@@ -1289,7 +1346,7 @@ export function Modals() {
 
             <div className="modal-actions">
               <button className="btn" type="button" onClick={close}>
-                {t(language, "common.cancel")}
+                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </button>
               <button
                 className="btn primary"
@@ -1298,7 +1355,7 @@ export function Modals() {
                 disabled={busy}
                 onClick={() => void saveGlobal()}
               >
-                {t(language, "routing.saveGlobal")}
+                <Icon icon={Save} size={14} /> {t(language, "routing.saveGlobal")}
               </button>
             </div>
           </div>
@@ -1387,6 +1444,7 @@ export function Modals() {
                               className={`badge ${giteeStatus.ready ? "success" : "warning"}`}
                               data-testid="project-provider-status"
                             >
+                              <Icon icon={giteeStatus.ready ? Check : AlertTriangle} size={14} />
                               {giteeStatus.ready
                                 ? t(language, "gitee.statusReady", { account: giteeStatus.account ?? "authenticated" })
                                 : formatGiteeStatusReason(language, giteeStatus)}
@@ -1397,6 +1455,7 @@ export function Modals() {
                               className={`badge ${githubStatus.ready ? "success" : "warning"}`}
                               data-testid="project-provider-status"
                             >
+                              <Icon icon={githubStatus.ready ? Check : AlertTriangle} size={14} />
                               {githubStatus.ready
                                 ? t(language, "gitee.statusGhReady", { account: githubStatus.account ?? "authenticated" })
                                 : formatGitHubStatusReason(language, githubStatus)}
@@ -1608,7 +1667,7 @@ export function Modals() {
 
                 <div className="modal-actions">
                   <button className="btn" type="button" onClick={close}>
-                    {t(language, "common.cancel")}
+                    <Icon icon={X} size={14} /> {t(language, "common.cancel")}
                   </button>
                   <button
                     className="btn primary"
@@ -1617,7 +1676,7 @@ export function Modals() {
                     disabled={busy}
                     onClick={() => void saveProject()}
                   >
-                    {t(language, "routing.saveProject")}
+                    <Icon icon={Save} size={14} /> {t(language, "routing.saveProject")}
                   </button>
                 </div>
               </>
@@ -1631,7 +1690,10 @@ export function Modals() {
   if (m.kind === "annotate_anchor") {
     return (
       <ModalShell onClose={close} testId="annotate-modal">
-        <h3>{t(language, "annotate.title")}</h3>
+        <h3 className="icon-heading">
+          <Icon icon={MessageSquare} size={20} />
+          <span>{t(language, "annotate.title")}</span>
+        </h3>
         <div className="xs muted" style={{ marginBottom: 8 }}>
           {t(language, "annotate.anchor", { anchor: m.anchor })}
         </div>
@@ -1650,7 +1712,7 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn"
@@ -1676,7 +1738,10 @@ export function Modals() {
   if (m.kind === "handoff_preview") {
     return (
       <ModalShell onClose={close} wide testId="handoff-modal">
-        <h3>{t(language, "handoff.title")}</h3>
+        <h3 className="icon-heading">
+          <Icon icon={FileText} size={20} />
+          <span>{t(language, "handoff.title")}</span>
+        </h3>
         <p className="xs muted" style={{ margin: "0 0 10px" }}>
           {t(language, "handoff.desc")}
         </p>
@@ -1685,7 +1750,7 @@ export function Modals() {
         </div>
         <div className="modal-actions">
           <button className="btn primary" type="button" onClick={close}>
-            {t(language, "common.close")}
+            <Icon icon={X} size={14} /> {t(language, "common.close")}
           </button>
         </div>
       </ModalShell>
@@ -1700,7 +1765,10 @@ export function Modals() {
     const reviewReport = detail?.state.reviewReport;
     return (
       <ModalShell onClose={close} testId="feedback-modal">
-        <h3>{isDesignStage ? t(language, "feedback.titleDesign") : t(language, "feedback.titleFix")}</h3>
+        <h3 className="icon-heading">
+          <Icon icon={Pencil} size={20} />
+          <span>{isDesignStage ? t(language, "feedback.titleDesign") : t(language, "feedback.titleFix")}</span>
+        </h3>
         <p className="xs muted" style={{ margin: "0 0 8px" }}>
           {isDesignStage ? t(language, "feedback.descDesign") : t(language, "feedback.descFix")}
         </p>
@@ -1715,7 +1783,7 @@ export function Modals() {
                 setModal((prev) => (prev?.kind === "feedback" ? { ...prev, feedback: snippet } : prev));
               }}
             >
-              {t(language, "feedback.fillReview")}
+              <Icon icon={ClipboardCheck} size={14} /> {t(language, "feedback.fillReview")}
             </button>
           </div>
         )}
@@ -1748,7 +1816,7 @@ export function Modals() {
         </label>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1757,6 +1825,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
+            <Icon icon={Send} size={14} />{" "}
             {isDesignStage ? t(language, "feedback.submitDesign") : t(language, "feedback.submitFix")}
           </button>
         </div>
@@ -1809,7 +1878,7 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "acceptOverride.back")}
+            <Icon icon={ArrowLeft} size={14} /> {t(language, "acceptOverride.back")}
           </button>
           <button
             className="btn primary"
@@ -1818,7 +1887,7 @@ export function Modals() {
             disabled={busy || (isBlock && !m.reason.trim())}
             onClick={() => detail && void submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks)}
           >
-            {t(language, "acceptOverride.confirm")}
+            <Icon icon={Check} size={14} /> {t(language, "acceptOverride.confirm")}
           </button>
         </div>
       </ModalShell>
@@ -1836,7 +1905,13 @@ export function Modals() {
     const keepApproval = canPreserveApproval ? m.preserveApproval !== false : false;
     return (
       <ModalShell onClose={close}>
-        <h3>{title}</h3>
+        <h3 className="icon-heading">
+          <Icon
+            icon={m.action === "block" ? Ban : m.action === "cancel" ? XCircle : RotateCcw}
+            size={20}
+          />
+          <span>{title}</span>
+        </h3>
         {canPreserveApproval && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
             <label
@@ -1883,7 +1958,7 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -1892,7 +1967,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
           >
-            {t(language, "common.confirm")}
+            <Icon icon={Check} size={14} /> {t(language, "common.confirm")}
           </button>
         </div>
       </ModalShell>
@@ -1912,7 +1987,10 @@ export function Modals() {
 
     return (
       <ModalShell onClose={close} testId="prompt-fallback-modal">
-        <h3>{t(language, m.titleKey, m.titleParams)}</h3>
+        <h3 className="icon-heading">
+          <Icon icon={Terminal} size={20} />
+          <span>{t(language, m.titleKey, m.titleParams)}</span>
+        </h3>
         <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
           {t(language, m.subtitleKey, m.subtitleParams)}
         </p>
@@ -1926,10 +2004,10 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" data-action="close-modal" onClick={close}>
-            {t(language, "common.close")}
+            <Icon icon={X} size={14} /> {t(language, "common.close")}
           </button>
           <button className="btn primary" type="button" onClick={() => void copyPrompt()}>
-            {t(language, "fallback.copy")}
+            <Icon icon={Copy} size={14} /> {t(language, "fallback.copy")}
           </button>
         </div>
       </ModalShell>
@@ -2116,7 +2194,7 @@ export function Modals() {
         )}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -2125,7 +2203,7 @@ export function Modals() {
             disabled={busy}
             onClick={() => void submitQuickReport()}
           >
-            {t(language, "report.submit")}
+            <Icon icon={Send} size={14} /> {t(language, "report.submit")}
           </button>
         </div>
       </ModalShell>
@@ -2258,6 +2336,7 @@ export function Modals() {
               data-testid="evo-tab-inbox"
               onClick={() => setModal({ ...m, tab: "inbox" })}
             >
+              <Icon icon={Inbox} size={14} />{" "}
               {t(language, "evo.tab.inbox", { count: painPoints.filter((p) => p.status === "open").length })}
             </button>
             <button
@@ -2268,6 +2347,7 @@ export function Modals() {
               data-testid="evo-tab-playbook"
               onClick={() => setModal({ ...m, tab: "playbook", playbookDraft: null })}
             >
+              <Icon icon={BookOpen} size={14} />{" "}
               {t(language, "evo.tab.playbook", {
                 count: playbookData?.rules.length ?? evolutionData?.playbook.rules.length ?? 0,
               })}
@@ -2280,7 +2360,7 @@ export function Modals() {
               data-testid="evo-tab-telemetry"
               onClick={() => setModal({ ...m, tab: "telemetry" })}
             >
-              {t(language, "evo.tab.telemetry", { count: telemetry.entries.length })}
+              <Icon icon={Activity} size={14} /> {t(language, "evo.tab.telemetry", { count: telemetry.entries.length })}
             </button>
           </div>
         </div>
@@ -2325,6 +2405,10 @@ export function Modals() {
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
                             <span className={`badge ${p.status === "open" ? "warning" : p.status === "promoted" ? "info" : "neutral"}`}>
+                              <Icon
+                                icon={p.status === "open" ? CircleAlert : p.status === "promoted" ? Sparkles : CircleOff}
+                                size={14}
+                              />{" "}
                               {p.status === "open"
                                 ? t(language, "evo.status.open")
                                 : p.status === "promoted"
@@ -2356,11 +2440,14 @@ export function Modals() {
                               </span>
                             )}
                             {sandboxItem?.github?.issue && (
-                              <span className="badge info">Issue #{sandboxItem.github.issue.number}</span>
+                              <span className="badge info">
+                                <Icon icon={Link2} size={14} /> Issue #{sandboxItem.github.issue.number}
+                              </span>
                             )}
                             {sandboxItem?.github?.pr && (
                               <span className={`badge ${sandboxItem.github.pr.state === "merged" ? "success" : "info"}`}>
-                                PR #{sandboxItem.github.pr.number} · {formatPrStateLabel(language, sandboxItem.github.pr.state)}
+                                <Icon icon={GitPullRequest} size={14} /> PR #{sandboxItem.github.pr.number} ·{" "}
+                                {formatPrStateLabel(language, sandboxItem.github.pr.state)}
                               </span>
                             )}
                             <span className="xs muted">{formatDateTime(p.updatedAt, language)}</span>
@@ -2499,7 +2586,7 @@ export function Modals() {
                     disabled={busy}
                     onClick={() => void handleSavePlaybook()}
                   >
-                    {t(language, "evo.savePlaybook")}
+                    <Icon icon={Save} size={14} /> {t(language, "evo.savePlaybook")}
                   </button>
                 </div>
               </>
@@ -2528,7 +2615,7 @@ export function Modals() {
                       }
                     }}
                   >
-                    {t(language, "evo.clearCooldown", { count: telemetry.activeCooldowns.length })}
+                    <Icon icon={RotateCcw} size={14} /> {t(language, "evo.clearCooldown", { count: telemetry.activeCooldowns.length })}
                   </button>
                 )}
                 <button
@@ -2592,7 +2679,7 @@ export function Modals() {
 
         <div className="modal-actions">
           <button className="btn" type="button" data-action="close-modal" onClick={close}>
-            {t(language, "common.close")}
+            <Icon icon={X} size={14} /> {t(language, "common.close")}
           </button>
         </div>
       </ModalShell>
@@ -2643,7 +2730,10 @@ export function Modals() {
     return (
       <ModalShell onClose={close} testId="link-issue-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>{t(language, isGiteeLink ? "gitee.linkTitle" : "linkIssue.title")}</h3>
+          <h3 className="icon-heading" style={{ margin: 0 }}>
+            <Icon icon={Link2} size={20} />
+            <span>{t(language, isGiteeLink ? "gitee.linkTitle" : "linkIssue.title")}</span>
+          </h3>
           {!isGiteeLink && (
             <div className="segmented" role="tablist">
               <button
@@ -2651,21 +2741,21 @@ export function Modals() {
                 className={m.mode === "create" ? "active" : ""}
                 onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "create" } : prev))}
               >
-                {t(language, "linkIssue.modeCreate")}
+                <Icon icon={Plus} size={14} /> {t(language, "linkIssue.modeCreate")}
               </button>
               <button
                 type="button"
                 className={m.mode === "link" ? "active" : ""}
                 onClick={() => setModal((prev) => (prev?.kind === "link_issue" ? { ...prev, mode: "link" } : prev))}
               >
-                {t(language, "linkIssue.modeLink")}
+                <Icon icon={Link2} size={14} /> {t(language, "linkIssue.modeLink")}
               </button>
             </div>
           )}
         </div>
         {!isGiteeLink && m.mode === "create" ? (
           <div className="callout info xs">
-            {t(language, "linkIssue.createDescPrefix")}
+            <Icon icon={Info} size={14} /> {t(language, "linkIssue.createDescPrefix")}
             <strong>{m.requirementId}</strong>
             {t(language, "linkIssue.createDescMiddle")}
             {githubStatus?.repo ? ` (${githubStatus.repo}) ` : " "}
@@ -2690,12 +2780,12 @@ export function Modals() {
         )}
         {(isGiteeLink ? giteeStatus && !giteeStatus.authenticated : githubStatus && !githubStatus.ready) && (
           <div className="callout warning xs" style={{ marginTop: 8 }}>
-            {remoteReason}
+            <Icon icon={AlertTriangle} size={14} /> {remoteReason}
           </div>
         )}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -2810,10 +2900,13 @@ export function Modals() {
     return (
       <ModalShell onClose={close} testId="deliver-modal">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>
-            {createPr
-              ? t(language, "deliver.titlePrPlatform", { platform: prPlatformLabel })
-              : t(language, "deliver.titleLocal")}
+          <h3 className="icon-heading" style={{ margin: 0 }}>
+            <Icon icon={createPr ? GitPullRequest : GitCommit} size={20} />
+            <span>
+              {createPr
+                ? t(language, "deliver.titlePrPlatform", { platform: prPlatformLabel })
+                : t(language, "deliver.titleLocal")}
+            </span>
           </h3>
           {!sandboxActive && (
             <div className="segmented" role="tablist" aria-label={t(language, "deliver.modeAria")}>
@@ -2823,7 +2916,7 @@ export function Modals() {
                 data-testid="deliver-mode-local"
                 onClick={() => setModal((prev) => (prev?.kind === "deliver" ? { ...prev, createPr: false } : prev))}
               >
-                {t(language, "deliver.modeLocal")}
+                <Icon icon={GitCommit} size={14} /> {t(language, "deliver.modeLocal")}
               </button>
               <button
                 type="button"
@@ -2862,6 +2955,7 @@ export function Modals() {
               }}
             >
               <span>
+                <Icon icon={AlertTriangle} size={14} />{" "}
                 {t(language, "deliver.driftWarn", {
                   count: deliveryPreview.sandboxDrift.behindCount,
                   conflict:
@@ -2893,7 +2987,7 @@ export function Modals() {
                     await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!, bridgeConnected);
                   }}
                 >
-                  {t(language, "deliver.driftResolveBtn")}
+                  <Icon icon={Wrench} size={14} /> {t(language, "deliver.driftResolveBtn")}
                 </button>
               )}
             </div>
@@ -2911,14 +3005,14 @@ export function Modals() {
               <div style={{ display: "flex", gap: 6 }}>
                 {candidates.some((c) => c.inAcceptedSnapshot) && (
                   <button className="btn xs" type="button" onClick={() => selectPreset("accepted")}>
-                    {t(language, "deliver.selectAccepted")}
+                    <Icon icon={Check} size={14} /> {t(language, "deliver.selectAccepted")}
                   </button>
                 )}
                 <button className="btn xs" type="button" onClick={() => selectPreset("all")}>
-                  {t(language, "deliver.selectAll")}
+                  <Icon icon={ListChecks} size={14} /> {t(language, "deliver.selectAll")}
                 </button>
                 <button className="btn xs" type="button" onClick={() => selectPreset("none")}>
-                  {t(language, "deliver.clear")}
+                  <Icon icon={X} size={14} /> {t(language, "deliver.clear")}
                 </button>
               </div>
             </div>
@@ -2971,7 +3065,7 @@ export function Modals() {
 
         {canSubmitExistingCommits && (
           <div className="callout info xs" style={{ marginBottom: 10 }}>
-            {t(language, "deliver.existingCommitsPrefix")}
+            <Icon icon={Info} size={14} /> {t(language, "deliver.existingCommitsPrefix")}
             <strong>{deliveryPreview?.aheadCommitsCount}</strong>
             {t(language, "deliver.existingCommitsSuffix")}
           </div>
@@ -3084,7 +3178,7 @@ export function Modals() {
         />
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -3093,6 +3187,7 @@ export function Modals() {
             disabled={busy || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onClick={() => void submitDeliver()}
           >
+            <Icon icon={createPr ? GitPullRequest : GitCommit} size={14} />{" "}
             {createPr
               ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
               : t(language, "deliver.submitLocal")}
@@ -3123,7 +3218,10 @@ export function Modals() {
     };
     return (
       <ModalShell onClose={close} wide testId="spawn-children-modal">
-        <h3>{t(language, "spawn.title")}</h3>
+        <h3 className="icon-heading">
+          <Icon icon={GitFork} size={20} />
+          <span>{t(language, "spawn.title")}</span>
+        </h3>
         <p className="xs muted" style={{ margin: "0 0 10px" }}>
           {t(language, "spawn.desc")}
         </p>
@@ -3156,7 +3254,7 @@ export function Modals() {
               )
             }
           >
-            + {t(language, "spawn.addItem")}
+            <Icon icon={Plus} size={14} /> {t(language, "spawn.addItem")}
           </button>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
@@ -3222,7 +3320,7 @@ export function Modals() {
         </div>
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
-            {t(language, "common.cancel")}
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </button>
           <button
             className="btn primary"
@@ -3231,7 +3329,7 @@ export function Modals() {
             disabled={busy || validItems.length === 0}
             onClick={() => void submitSpawn()}
           >
-            {t(language, "spawn.submit", { count: validItems.length })}
+            <Icon icon={GitFork} size={14} /> {t(language, "spawn.submit", { count: validItems.length })}
           </button>
         </div>
       </ModalShell>
@@ -3240,11 +3338,14 @@ export function Modals() {
 
   return (
     <ModalShell onClose={close}>
-      <h3>{t(language, "debug.title")}</h3>
+      <h3 className="icon-heading">
+        <Icon icon={Bug} size={20} />
+        <span>{t(language, "debug.title")}</span>
+      </h3>
       <pre className="evidence-log">{m.text}</pre>
       <div className="modal-actions">
         <button className="btn primary" type="button" onClick={close}>
-          {t(language, "common.close")}
+          <Icon icon={X} size={14} /> {t(language, "common.close")}
         </button>
       </div>
     </ModalShell>
