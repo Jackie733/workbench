@@ -1073,6 +1073,34 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       });
       expect(startingScrollTop).toBeGreaterThan(0);
 
+      const expectedHeaderControlIds = await page.evaluate(() => {
+        const controls = Array.from(
+          document
+            .querySelector('[data-testid="app-header"]')
+            ?.querySelectorAll<HTMLElement>(".topbar-left button, .topbar-right button, .topbar-right select") ?? [],
+        );
+        return controls.map(
+          (control, index) =>
+            control.dataset.testid ??
+            control.dataset.action ??
+            (control.classList.contains("app-brand-btn") ? "app-brand-btn" : `header-control-${index}`),
+        );
+      });
+      for (const controlId of [
+        "app-brand-btn",
+        "toggle-sidebar-btn",
+        "back-home-btn",
+        "ui-language-select",
+        "topbar-insights-btn",
+        "open-evolution-btn",
+        "open-quick-report-btn",
+        "open-routing-btn",
+        "toggle-theme",
+        "toggle-drawer-btn",
+      ]) {
+        expect(expectedHeaderControlIds).toContain(controlId);
+      }
+
       const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
       for (const width of responsiveWidths) {
         await page.setViewport({ width, height: 820 });
@@ -1109,9 +1137,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           const narrowContentVisibility = await page.evaluate(() => {
             const header = document.querySelector('[data-testid="app-header"]');
             const headerRect = header?.getBoundingClientRect() ?? null;
-            const controls = Array.from(
+            const allControls = Array.from(
               header?.querySelectorAll<HTMLElement>(".topbar-left button, .topbar-right button, .topbar-right select") ?? [],
-            ).filter((control) => {
+            );
+            const controlId = (control: HTMLElement, index: number) =>
+              control.dataset.testid ??
+              control.dataset.action ??
+              (control.classList.contains("app-brand-btn") ? "app-brand-btn" : `header-control-${index}`);
+            const allControlIds = allControls.map(controlId);
+            const controls = allControls.filter((control) => {
               const rect = control.getBoundingClientRect();
               const style = getComputedStyle(control);
               return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
@@ -1143,7 +1177,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
               const hit = document.elementFromPoint(x, y);
               const hitControl = hit?.closest("button, select") ?? null;
               return {
-                id: control.dataset.testid ?? control.dataset.action ?? control.tagName.toLowerCase(),
+                id: controlId(control, allControls.indexOf(control)),
                 withinHeader: Boolean(
                   headerRect && rect.top >= headerRect.top - 0.5 && rect.bottom <= headerRect.bottom + 0.5,
                 ),
@@ -1160,7 +1194,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
                 const overlapHeight = Math.min(controlRect.bottom, componentRect.bottom) - Math.max(controlRect.top, componentRect.top);
                 if (overlapWidth > 0.5 && overlapHeight > 0.5) {
                   overlaps.push({
-                    control: control.dataset.testid ?? control.dataset.action ?? control.tagName.toLowerCase(),
+                    control: controlId(control, allControls.indexOf(control)),
                     step: component.step.textContent?.trim() ?? `step-${component.index + 1}`,
                     part: component.name,
                     width: overlapWidth,
@@ -1207,6 +1241,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
               firstStepLabel: firstLabel?.textContent?.trim() ?? "",
               firstStepFullyVisible,
               stepperStartsBelowHeader: Boolean(headerRect && stepperRect && stepperRect.top >= headerRect.bottom - 0.5),
+              allControlIds,
               controlHits: visibleControls,
               overlaps,
               hitTests,
@@ -1216,14 +1251,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           expect(narrowContentVisibility.firstStepLabel).toBe("1. 需求草稿");
           expect(narrowContentVisibility.firstStepFullyVisible).toBe(true);
           expect(narrowContentVisibility.stepperStartsBelowHeader).toBe(true);
-          for (const requiredControl of [
-            "ui-language-select",
-            "topbar-insights-btn",
-            "open-evolution-btn",
-            "open-quick-report-btn",
-            "open-routing-btn",
-            "toggle-drawer-btn",
-          ]) {
+          for (const requiredControl of expectedHeaderControlIds) {
+            expect(narrowContentVisibility.allControlIds).toContain(requiredControl);
             expect(narrowContentVisibility.controlHits.map((control) => control.id)).toContain(requiredControl);
           }
           expect(narrowContentVisibility.controlHits.length).toBeGreaterThan(0);
