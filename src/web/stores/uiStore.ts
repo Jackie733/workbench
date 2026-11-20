@@ -14,7 +14,16 @@ import {
   type MessageParams,
   type UiLanguage,
 } from "../i18n.ts";
-import { initialTheme, type DrawerTab, type LayoutMode, type ModalState, type Scope, type WorkspaceTab } from "../state.ts";
+import {
+  initialTheme,
+  type DiffViewMode,
+  type DrawerTab,
+  type ModalState,
+  type ProjectGroupMode,
+  type ProjectSortMode,
+  type Scope,
+  type WorkspaceTab,
+} from "../state.ts";
 
 export const DEFAULT_DRAWER_WIDTH = 720;
 export const MIN_DRAWER_WIDTH = 320;
@@ -24,6 +33,26 @@ export const RELOAD_PENDING_TOAST_ID = "web-reload-pending";
 function initialDesktopSidebarOpen(): boolean {
   const saved = readStorageItem("wb-sidebar-open");
   return saved === "false" ? false : true;
+}
+
+function initialProjectSort(): ProjectSortMode {
+  const saved = readStorageItem("wb-project-sort");
+  if (saved === "attention" || saved === "recent" || saved === "name" || saved === "added") {
+    return saved;
+  }
+  return "attention";
+}
+
+function initialProjectGroup(): ProjectGroupMode {
+  const saved = readStorageItem("wb-project-group");
+  if (saved === "none" || saved === "node" || saved === "status" || saved === "category") {
+    return saved;
+  }
+  return "none";
+}
+
+function initialProjectsCollapsed(): boolean {
+  return readStorageItem("wb-projects-collapsed") === "true";
 }
 
 function initialDrawerWidth(): number {
@@ -40,12 +69,14 @@ export interface UiStoreState {
   busy: boolean;
   sidebarOpen: boolean;
   desktopSidebarOpen: boolean;
+  projectSort: ProjectSortMode;
+  projectGroup: ProjectGroupMode;
+  projectsCollapsed: boolean;
   activeProjectId: string | null;
   initPrivacy: "local" | "tracked";
   initName: string;
   initOutputLanguage: OutputLanguage | "inherit";
   scope: Scope;
-  layout: LayoutMode;
   query: string;
   homeScrollY: number;
   /** 有热刷新被暂缓（弹窗/忙碌/输入中），等待空闲后补刷；仅内存态。 */
@@ -54,6 +85,9 @@ export interface UiStoreState {
   selectedId: string | null;
   workspaceTab: WorkspaceTab;
   selectedDiffFile: string | null;
+  diffViewMode: DiffViewMode;
+  diffExpandedHeight: boolean;
+  diffFileQuery: string;
 
   designViewVersion: number | null;
   designComparePrev: boolean;
@@ -71,18 +105,23 @@ export interface UiStoreState {
   setBusy: (busy: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setDesktopSidebarOpen: (open: boolean) => void;
+  setProjectSort: (sort: ProjectSortMode) => void;
+  setProjectGroup: (group: ProjectGroupMode) => void;
+  setProjectsCollapsed: (collapsed: boolean) => void;
   setActiveProjectId: (id: string | null) => void;
   setInitPrivacy: (p: "local" | "tracked") => void;
   setInitName: (name: string) => void;
   setInitOutputLanguage: (lang: OutputLanguage | "inherit") => void;
   setScope: (scope: Scope) => void;
-  setLayout: (layout: LayoutMode) => void;
   setQuery: (query: string) => void;
   setHomeScrollY: (y: number) => void;
   setPendingWebReload: (pending: boolean) => void;
   setSelectedId: (id: string | null) => void;
   setWorkspaceTab: (tab: WorkspaceTab) => void;
   setSelectedDiffFile: (file: string | null) => void;
+  setDiffViewMode: (mode: DiffViewMode) => void;
+  setDiffExpandedHeight: (expanded: boolean) => void;
+  setDiffFileQuery: (query: string) => void;
   setDesignViewVersion: (v: number | null) => void;
   setDesignComparePrev: (v: boolean) => void;
   setDesignCompareText: (t: { prev: string; curr: string; prevVer: number; currVer: number } | null) => void;
@@ -106,12 +145,14 @@ export const useUiStore = create<UiStoreState>((set) => ({
   busy: false,
   sidebarOpen: false,
   desktopSidebarOpen: initialDesktopSidebarOpen(),
+  projectSort: initialProjectSort(),
+  projectGroup: initialProjectGroup(),
+  projectsCollapsed: initialProjectsCollapsed(),
   activeProjectId: null,
   initPrivacy: "local",
   initName: "",
   initOutputLanguage: "inherit",
   scope: "active",
-  layout: "list",
   query: "",
   homeScrollY: 0,
   pendingWebReload: false,
@@ -119,6 +160,9 @@ export const useUiStore = create<UiStoreState>((set) => ({
   selectedId: null,
   workspaceTab: "spec",
   selectedDiffFile: null,
+  diffViewMode: "split",
+  diffExpandedHeight: false,
+  diffFileQuery: "",
 
   designViewVersion: null,
   designComparePrev: false,
@@ -151,18 +195,32 @@ export const useUiStore = create<UiStoreState>((set) => ({
     writeStorageItem("wb-sidebar-open", String(desktopSidebarOpen));
     set({ desktopSidebarOpen });
   },
+  setProjectSort: (projectSort) => {
+    writeStorageItem("wb-project-sort", projectSort);
+    set({ projectSort });
+  },
+  setProjectGroup: (projectGroup) => {
+    writeStorageItem("wb-project-group", projectGroup);
+    set({ projectGroup });
+  },
+  setProjectsCollapsed: (projectsCollapsed) => {
+    writeStorageItem("wb-projects-collapsed", String(projectsCollapsed));
+    set({ projectsCollapsed });
+  },
   setActiveProjectId: (activeProjectId) => set({ activeProjectId }),
   setInitPrivacy: (initPrivacy) => set({ initPrivacy }),
   setInitName: (initName) => set({ initName }),
   setInitOutputLanguage: (initOutputLanguage) => set({ initOutputLanguage }),
   setScope: (scope) => set({ scope }),
-  setLayout: (layout) => set({ layout }),
   setQuery: (query) => set({ query }),
   setHomeScrollY: (homeScrollY) => set({ homeScrollY }),
   setPendingWebReload: (pendingWebReload) => set({ pendingWebReload }),
-  setSelectedId: (selectedId) => set({ selectedId }),
+  setSelectedId: (selectedId) => set({ selectedId, diffFileQuery: "" }),
   setWorkspaceTab: (workspaceTab) => set({ workspaceTab }),
   setSelectedDiffFile: (selectedDiffFile) => set({ selectedDiffFile }),
+  setDiffViewMode: (diffViewMode) => set({ diffViewMode }),
+  setDiffExpandedHeight: (diffExpandedHeight) => set({ diffExpandedHeight }),
+  setDiffFileQuery: (diffFileQuery) => set({ diffFileQuery }),
   setDesignViewVersion: (designViewVersion) => set({ designViewVersion }),
   setDesignComparePrev: (designComparePrev) => set({ designComparePrev }),
   setDesignCompareText: (designCompareText) => set({ designCompareText }),

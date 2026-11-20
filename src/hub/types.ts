@@ -72,6 +72,10 @@ export interface HubProjectEntry {
   nodeName?: string;
   addedAt: number;
   lastOpenedAt: number;
+  /** 是否在侧边栏项目列表中置顶/收藏 */
+  pinned?: boolean;
+  /** 用户自定义项目分类标签（如 "前端"、"核心"） */
+  category?: string;
 }
 
 export interface NodeUpdateStatus {

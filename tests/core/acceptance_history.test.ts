@@ -383,4 +383,33 @@ describe("REQ-003 acceptance snapshot preservation and history fidelity", () => 
     expect(summaryList[0]?.requiredTotal).toBe(1);
     void MAX_ACCEPTANCE_SNAPSHOT_BYTES;
   });
+
+  test("preserves 300KB+ acceptance diff without truncation under the 512KB / 2MB limits", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("wb-acc-bigdiff-");
+    await initProject(repo, { name: "BigDiffRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Large diff preservation",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Big Diff", actor: "agent" });
+    const baseSnap = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: baseSnap });
+
+    const bigLines = Array.from({ length: 5000 }, (_, i) => `export const line_${i} = "${"x".repeat(50)}";`).join("\n");
+    fs.writeFileSync(path.join(repo, "large.ts"), `${bigLines}\n`);
+    execFileSync("git", ["add", "large.ts"], { cwd: repo, stdio: "ignore" });
+    expect(Buffer.byteLength(bigLines, "utf8")).toBeGreaterThan(250 * 1024);
+    expect(Buffer.byteLength(bigLines, "utf8")).toBeLessThan(MAX_ACCEPTANCE_DIFF_BYTES);
+
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = await observeGitSnapshot(repo);
+    const done = await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap!.fingerprint });
+    expect(done.state.stage).toBe("done");
+
+    const frozen = await getRequirementDiff(repo, "REQ-001");
+    expect(frozen.status).toBe("captured");
+    expect(frozen.observation?.diffTruncated).toBe(false);
+    expect(frozen.observation?.diff).toContain("line_4999");
+  });
 });

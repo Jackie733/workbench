@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Content as DropdownContent,
   Item as DropdownItem,
@@ -16,6 +16,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleOff,
+  Columns2,
   Ellipsis,
   Eye,
   EyeOff,
@@ -31,7 +32,10 @@ import {
   Link2,
   Loader2,
   Lock,
+  Maximize2,
   MessageSquare,
+  Minimize2,
+  PanelRightOpen,
   Pencil,
   Play,
   Plus,
@@ -103,6 +107,7 @@ import {
   STAGE_META,
   TASK_META,
   VERDICT_META,
+  type DiffViewMode,
 } from "../state.ts";
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
@@ -293,6 +298,8 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   const setModal = useUiStore((s) => s.setModal);
   const showToast = useUiStore((s) => s.showToast);
   const showToastKey = useUiStore((s) => s.showToastKey);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
   const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
   const setDesignComparePrev = useUiStore((s) => s.setDesignComparePrev);
   const setDesignCompareText = useUiStore((s) => s.setDesignCompareText);
@@ -498,6 +505,17 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 onClick={() => void triggerActiveRun(s.id, "review")}
               >
                 <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
+              </button>
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="review-compare-diff-btn"
+                onClick={() => {
+                  setDrawerOpen(true);
+                  setDrawerTab("diff");
+                }}
+              >
+                <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
               </button>
             </div>
           </div>
@@ -1232,19 +1250,412 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
   );
 }
 
+export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail; inDrawer?: boolean }) {
+  const language = useUiStore((s) => s.language);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const storeSelectedDiffFile = useUiStore((s) => s.selectedDiffFile);
+  const storeDiffViewMode = useUiStore((s) => s.diffViewMode);
+  const diffExpandedHeight = useUiStore((s) => s.diffExpandedHeight);
+  const storeDiffFileQuery = useUiStore((s) => s.diffFileQuery);
+  const storeSetSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
+  const storeSetDiffViewMode = useUiStore((s) => s.setDiffViewMode);
+  const setDiffExpandedHeight = useUiStore((s) => s.setDiffExpandedHeight);
+  const storeSetDiffFileQuery = useUiStore((s) => s.setDiffFileQuery);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
+  const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
+  const showToastKey = useUiStore((s) => s.showToastKey);
+
+  const [drawerSelectedFile, setDrawerSelectedFile] = useState<string | null>(null);
+  const [drawerViewMode, setDrawerViewMode] = useState<DiffViewMode>("split");
+  const [drawerFileQuery, setDrawerFileQuery] = useState("");
+  const [showLiveComparison, setShowLiveComparison] = useState(false);
+
+  const { state: s, validity } = d;
+  useEffect(() => {
+    if (inDrawer) {
+      setDrawerSelectedFile(null);
+      setDrawerFileQuery("");
+    }
+  }, [inDrawer, s.id]);
+
+  const selectedDiffFile = inDrawer ? drawerSelectedFile : storeSelectedDiffFile;
+  const setSelectedDiffFile = inDrawer ? setDrawerSelectedFile : storeSetSelectedDiffFile;
+  const diffViewMode = inDrawer ? drawerViewMode : storeDiffViewMode;
+  const setDiffViewMode = inDrawer ? setDrawerViewMode : storeSetDiffViewMode;
+  const diffFileQuery = inDrawer ? drawerFileQuery : storeDiffFileQuery;
+  const setDiffFileQuery = inDrawer ? setDrawerFileQuery : storeSetDiffFileQuery;
+  const tid = (base: string) => (inDrawer ? `drawer-${base}` : base);
+
+  const isDone = s.stage === "done";
+  const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true, false);
+  const { data: liveDiffRes } = useDiffQuery(activeProjectId, s.id, isDone && showLiveComparison, true);
+  const diffObs = diffRes?.observation ?? diffRes?.changes ?? null;
+  const liveDiffObs = liveDiffRes?.observation ?? liveDiffRes?.changes ?? null;
+  const evidenceSummary = describeEvidenceContext(validity, diffRes ?? null, language);
+
+  const rawDiffText = diffObs?.diff ?? "";
+  const parsedFiles = useMemo(
+    () => (rawDiffText ? parseUnifiedDiff(rawDiffText).map((f) => ({ ...f, html: renderDiffLinesHtml(f.lines) })) : []),
+    [rawDiffText],
+  );
+  const rawDiffHtml = useMemo(
+    () => (rawDiffText && parsedFiles.length === 0 ? renderDiffLinesHtml(rawDiffText.split("\n")) : ""),
+    [rawDiffText, parsedFiles.length],
+  );
+  const { totalAdditions, totalDeletions } = useMemo(
+    () => ({
+      totalAdditions: parsedFiles.reduce((acc, f) => acc + f.additions, 0),
+      totalDeletions: parsedFiles.reduce((acc, f) => acc + f.deletions, 0),
+    }),
+    [parsedFiles],
+  );
+  const normalizedQuery = diffFileQuery.trim().toLowerCase();
+  const visibleFiles = useMemo(
+    () => (normalizedQuery ? parsedFiles.filter((f) => f.path.toLowerCase().includes(normalizedQuery)) : parsedFiles),
+    [parsedFiles, normalizedQuery],
+  );
+  const activeDiffFile =
+    visibleFiles.find((f) => f.path === selectedDiffFile) ?? visibleFiles[0] ?? null;
+
+  const liveDiffText = liveDiffObs?.diff ?? "";
+  const liveParsedFiles = useMemo(() => (liveDiffText ? parseUnifiedDiff(liveDiffText) : []), [liveDiffText]);
+  const liveDiffHtml = useMemo(
+    () => (liveDiffText ? renderDiffLinesHtml(liveDiffText.split("\n")) : ""),
+    [liveDiffText],
+  );
+
+  const effectiveMode = inDrawer && diffViewMode === "split" && parsedFiles.length <= 1 ? "unified" : diffViewMode;
+  const isExpanded = !inDrawer && diffExpandedHeight;
+
+  return (
+    <>
+      <div className={`card diff-panel-card ${inDrawer ? "in-drawer" : ""}`} data-testid={inDrawer ? "drawer-diff-panel" : "diff-viewer-panel"}>
+        <div className="card-head">
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <h3>{isDone ? t(language, "changes.diffTitleDone") : t(language, "changes.diffTitleLive")}</h3>
+            {isDone && (
+              <span
+                className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}
+                data-testid={tid("diff-context-badge")}
+              >
+                <Icon
+                  icon={evidenceSummary.tone === "success" ? ShieldCheck : AlertTriangle}
+                  size={14}
+                />{" "}
+                {evidenceSummary.title}
+              </span>
+            )}
+            {parsedFiles.length > 0 && (
+              <span className="badge info" data-testid={tid("diff-stats-badge")}>
+                {t(language, "changes.statsSummary", {
+                  files: parsedFiles.length,
+                  add: totalAdditions,
+                  del: totalDeletions,
+                })}
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {parsedFiles.length > 0 && (
+              <div className="segmented" data-testid={tid("diff-view-mode-toggle")}>
+                <button
+                  type="button"
+                  className={effectiveMode === "split" ? "active" : ""}
+                  onClick={() => setDiffViewMode("split")}
+                >
+                  <Icon icon={Columns2} size={14} /> {t(language, "changes.viewMode.split")}
+                </button>
+                <button
+                  type="button"
+                  className={effectiveMode === "unified" ? "active" : ""}
+                  onClick={() => setDiffViewMode("unified")}
+                >
+                  <Icon icon={FileText} size={14} /> {t(language, "changes.viewMode.unified")}
+                </button>
+              </div>
+            )}
+            {!inDrawer && parsedFiles.length > 0 && (
+              <button
+                className="btn xs"
+                type="button"
+                data-testid="diff-expand-height-btn"
+                onClick={() => setDiffExpandedHeight(!diffExpandedHeight)}
+              >
+                <Icon icon={diffExpandedHeight ? Minimize2 : Maximize2} size={14} />{" "}
+                {diffExpandedHeight ? t(language, "changes.collapseHeight") : t(language, "changes.expandHeight")}
+              </button>
+            )}
+            <button
+              className="btn xs"
+              type="button"
+              data-testid={tid("dock-diff-to-drawer-btn")}
+              onClick={() => {
+                if (inDrawer) {
+                  setWorkspaceTab("diff");
+                } else {
+                  setDrawerOpen(true);
+                  setDrawerTab("diff");
+                }
+              }}
+            >
+              <Icon icon={PanelRightOpen} size={14} />{" "}
+              {inDrawer ? t(language, "changes.openInMain") : t(language, "changes.dockToDrawer")}
+            </button>
+            {isDone ? (
+              <button
+                className="btn xs"
+                type="button"
+                data-testid={tid("toggle-live-diff-btn")}
+                onClick={() => setShowLiveComparison((prev) => !prev)}
+              >
+                {showLiveComparison ? (
+                  <><Icon icon={EyeOff} size={14} /> {t(language, "changes.hideCompare")}</>
+                ) : (
+                  <><Icon icon={FileDiff} size={14} /> {t(language, "changes.compareLive")}</>
+                )}
+              </button>
+            ) : (
+              <button
+                className="btn xs"
+                type="button"
+                onClick={() => {
+                  void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, false) });
+                  showToastKey("changes.refreshedDiff");
+                }}
+              >
+                <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshDiff")}
+              </button>
+            )}
+          </div>
+        </div>
+        {isDone && (
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }} data-testid={tid("diff-provenance-meta")}>
+            {evidenceSummary.acceptedAtText && (
+              <span>{t(language, "spec.evidenceTimeLabel", { time: evidenceSummary.acceptedAtText })} · </span>
+            )}
+            <span>{evidenceSummary.provenanceText}</span>
+            {evidenceSummary.scopeNote && <div>{evidenceSummary.scopeNote}</div>}
+          </div>
+        )}
+        {evidenceSummary.truncationFlags.length > 0 && (
+          <div className="callout warning" data-testid={tid("diff-truncation-notice")} style={{ marginBottom: 10, fontSize: 12.5 }}>
+            <Icon icon={AlertTriangle} size={14} />{" "}
+            {evidenceSummary.truncationFlags.join(t(language, "changes.truncJoin"))}
+          </div>
+        )}
+        {!diffRes ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {t(language, "changes.loading")}
+          </p>
+        ) : diffRes.status === "unavailable" || !diffObs ? (
+          <div className="callout warning" data-testid={tid("diff-unavailable-notice")} style={{ fontSize: 13, margin: 0 }}>
+            <Icon icon={AlertTriangle} size={14} />{" "}
+            <strong>{t(language, "changes.unavailable")}</strong>：
+            {translateRef(
+              language,
+              diffRes.reasonKey,
+              evidenceSummary.unavailableReason ?? diffRes.reason ?? "",
+              diffRes.reasonParams,
+            ) || t(language, "changes.cannotLoad")}
+          </div>
+        ) : !diffObs.isGitRepo ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {t(language, "changes.notGit")}
+          </p>
+        ) : diffRes.status === "empty" || diffObs.files.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {isDone ? t(language, "changes.emptyDone") : t(language, "changes.emptyLive")}
+          </p>
+        ) : effectiveMode === "unified" ? (
+          <div className={`diff-unified-list ${isExpanded ? "expanded" : ""}`} data-testid={tid("diff-unified-list")}>
+            {parsedFiles.length > 3 && (
+              <div className="search-wrap" style={{ marginBottom: 4 }}>
+                <Icon icon={Search} size={14} />
+                <input
+                  className="search-box"
+                  data-testid={tid("diff-file-search")}
+                  type="search"
+                  value={diffFileQuery}
+                  placeholder={t(language, "changes.fileSearchPlaceholder")}
+                  onChange={(e) => setDiffFileQuery(e.target.value)}
+                />
+              </div>
+            )}
+            {parsedFiles.length === 0 ? (
+              rawDiffHtml ? (
+                <div
+                  className={`diff-code ${isExpanded ? "expanded" : ""}`}
+                  dangerouslySetInnerHTML={{ __html: rawDiffHtml }}
+                />
+              ) : (
+                <div className="diff-files" style={{ maxHeight: "none" }}>
+                  {diffObs.files.map((f) => (
+                    <div key={f.path} className="diff-file-btn" style={{ cursor: "default" }}>
+                      <span>{f.path}</span>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : visibleFiles.length === 0 ? (
+              <div className="callout" data-testid={tid("diff-empty-filter")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span className="muted">{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
+                <button
+                  type="button"
+                  className="btn xs"
+                  data-testid={tid("diff-clear-filter-btn")}
+                  onClick={() => setDiffFileQuery("")}
+                >
+                  <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
+                </button>
+              </div>
+            ) : (
+              visibleFiles.map((f, idx) => (
+                <div key={`${f.path}-${idx}`} className="diff-unified-file">
+                  <div className="diff-unified-head">
+                    <span style={{ fontFamily: "var(--mono)", fontSize: 12.5, fontWeight: 600 }}>{f.path}</span>
+                    <span className="muted xs">+{f.additions}/-{f.deletions}</span>
+                  </div>
+                  <div
+                    className={`diff-code ${isExpanded ? "expanded" : ""}`}
+                    dangerouslySetInnerHTML={{ __html: f.html }}
+                  />
+                </div>
+              ))
+            )}
+          </div>
+        ) : (
+          <div className={`diff-split ${isExpanded ? "expanded" : ""} ${inDrawer ? "in-drawer" : ""}`}>
+            <div className="diff-files">
+              {parsedFiles.length > 3 && (
+                <div className="diff-file-search-wrap">
+                  <div className="search-wrap" style={{ border: 0, borderBottom: "1px solid var(--border)", borderRadius: 0 }}>
+                    <Icon icon={Search} size={14} />
+                    <input
+                      className="search-box"
+                      data-testid={tid("diff-file-search")}
+                      type="search"
+                      value={diffFileQuery}
+                      placeholder={t(language, "changes.fileSearchPlaceholder")}
+                      onChange={(e) => setDiffFileQuery(e.target.value)}
+                    />
+                  </div>
+                </div>
+              )}
+              {visibleFiles.length === 0 && parsedFiles.length > 0 ? (
+                <div className="muted xs" style={{ padding: "10px" }}>
+                  {t(language, "changes.noFilterMatch", { query: diffFileQuery })}
+                </div>
+              ) : (
+                visibleFiles.map((f, idx) => (
+                  <button
+                    key={`${f.path}-${idx}`}
+                    className={`diff-file-btn ${activeDiffFile?.path === f.path ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setSelectedDiffFile(f.path)}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.path}</span>
+                    <span className="muted" style={{ fontSize: 11 }}>
+                      +{f.additions}/-{f.deletions}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+            {parsedFiles.length > 0 && visibleFiles.length === 0 ? (
+              <div className="callout" data-testid={tid("diff-empty-filter")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, alignSelf: "start" }}>
+                <span className="muted">{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
+                <button
+                  type="button"
+                  className="btn xs"
+                  data-testid={tid("diff-clear-filter-btn")}
+                  onClick={() => setDiffFileQuery("")}
+                >
+                  <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
+                </button>
+              </div>
+            ) : (
+              <div
+                className={`diff-code ${isExpanded ? "expanded" : ""}`}
+                dangerouslySetInnerHTML={{
+                  __html: activeDiffFile ? activeDiffFile.html : rawDiffHtml,
+                }}
+              />
+            )}
+          </div>
+        )}
+      </div>
+
+      {isDone && showLiveComparison && (
+        <div className="card" data-testid={tid("live-diff-comparison-card")}>
+          <div className="card-head">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <h3>{t(language, "changes.liveTitle")}</h3>
+              <span className="badge info">{t(language, "changes.liveBadge")}</span>
+            </div>
+            <button
+              className="btn xs"
+              type="button"
+              onClick={() => {
+                void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, true) });
+                showToastKey("changes.refreshedCompare");
+              }}
+            >
+              <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshCompare")}
+            </button>
+          </div>
+          {!liveDiffRes ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              {t(language, "changes.loadingCompare")}
+            </p>
+          ) : liveDiffRes.status === "unavailable" || !liveDiffObs ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              {t(language, "changes.compareUnavailable", {
+                reason:
+                  translateRef(
+                    language,
+                    liveDiffRes.reasonKey,
+                    liveDiffRes.reason ?? t(language, "changes.cannotRead"),
+                    liveDiffRes.reasonParams,
+                  ) || t(language, "changes.cannotRead"),
+              })}
+            </p>
+          ) : liveDiffObs.files.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+              {t(language, "changes.compareEmpty")}
+            </p>
+          ) : (
+            <div className="muted" style={{ fontSize: 12.5 }}>
+              {t(language, "changes.compareSummary", {
+                files: liveDiffObs.files.length,
+                patches: liveParsedFiles.length,
+              })}
+              <div
+                className="diff-code"
+                style={{ marginTop: 8, maxHeight: 420, overflow: "auto" }}
+                dangerouslySetInnerHTML={{
+                  __html: liveDiffHtml,
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const busy = useUiStore((s) => s.busy);
-  const selectedDiffFile = useUiStore((s) => s.selectedDiffFile);
   const expandedLogs = useUiStore((s) => s.expandedLogs);
-  const setSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
-  const showToast = useUiStore((s) => s.showToast);
   const showToastKey = useUiStore((s) => s.showToastKey);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
 
   const [manualCmd, setManualCmd] = useState("");
   const [manualCriteria, setManualCriteria] = useState("");
-  const [showLiveComparison, setShowLiveComparison] = useState(false);
 
   const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
   const { state: s, validity } = d;
@@ -1253,9 +1664,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
   const isDone = s.stage === "done";
   const isTerminal = isDone || s.stage === "cancelled";
   const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true, false);
-  const { data: liveDiffRes } = useDiffQuery(activeProjectId, s.id, isDone && showLiveComparison, true);
   const diffObs = diffRes?.observation ?? diffRes?.changes ?? null;
-  const liveDiffObs = liveDiffRes?.observation ?? liveDiffRes?.changes ?? null;
   const evidenceSummary = describeEvidenceContext(validity, diffRes ?? null, language);
 
   const tasksDone = s.tasks.filter((t) => t.status === "done").length;
@@ -1265,10 +1674,6 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
     grouped.set(ev.record.command, { command: ev.record.command, latest: ev });
   }
   const evCards = Array.from(grouped.values()).reverse();
-
-  const parsedFiles = diffObs ? parseUnifiedDiff(diffObs.diff) : [];
-  const activeDiffFile = parsedFiles.find((f) => f.path === selectedDiffFile) ?? parsedFiles[0] ?? null;
-  const liveParsedFiles = liveDiffObs ? parseUnifiedDiff(liveDiffObs.diff) : [];
 
   const runManualVerify = async () => {
     const command = manualCmd.trim();
@@ -1482,173 +1887,43 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
 
       <ScreenshotEvidenceSection d={d} />
 
-      <div className="card">
-        <div className="card-head">
+      <div className="card" data-testid="verify-diff-shortcut-card">
+        <div className="card-head" style={{ marginBottom: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <h3>{isDone ? t(language, "changes.diffTitleDone") : t(language, "changes.diffTitleLive")}</h3>
             {isDone && (
-              <span
-                className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}
-                data-testid="diff-context-badge"
-              >
-                <Icon
-                  icon={evidenceSummary.tone === "success" ? ShieldCheck : AlertTriangle}
-                  size={14}
-                />{" "}
+              <span className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}>
+                <Icon icon={evidenceSummary.tone === "success" ? ShieldCheck : AlertTriangle} size={14} />{" "}
                 {evidenceSummary.title}
               </span>
             )}
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {isDone ? (
-              <button
-                className="btn xs"
-                type="button"
-                data-testid="toggle-live-diff-btn"
-                onClick={() => setShowLiveComparison((prev) => !prev)}
-              >
-                {showLiveComparison ? (
-                  <><Icon icon={EyeOff} size={14} /> {t(language, "changes.hideCompare")}</>
-                ) : (
-                  <><Icon icon={FileDiff} size={14} /> {t(language, "changes.compareLive")}</>
-                )}
-              </button>
-            ) : (
-              <button
-                className="btn xs"
-                type="button"
-                onClick={() => {
-                  void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, false) });
-                  showToastKey("changes.refreshedDiff");
-                }}
-              >
-                <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshDiff")}
-              </button>
+            {diffObs && diffObs.files.length > 0 && (
+              <span className="badge info">{diffObs.files.length}</span>
             )}
           </div>
-        </div>
-        {isDone && (
-          <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }} data-testid="diff-provenance-meta">
-            {evidenceSummary.acceptedAtText && (
-              <span>{t(language, "spec.evidenceTimeLabel", { time: evidenceSummary.acceptedAtText })} · </span>
-            )}
-            <span>{evidenceSummary.provenanceText}</span>
-            {evidenceSummary.scopeNote && <div>{evidenceSummary.scopeNote}</div>}
-          </div>
-        )}
-        {evidenceSummary.truncationFlags.length > 0 && (
-          <div className="callout warning" data-testid="diff-truncation-notice" style={{ marginBottom: 10, fontSize: 12.5 }}>
-            <Icon icon={AlertTriangle} size={14} />{" "}
-            {evidenceSummary.truncationFlags.join(t(language, "changes.truncJoin"))}
-          </div>
-        )}
-        {!diffRes ? (
-          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            {t(language, "changes.loading")}
-          </p>
-        ) : diffRes.status === "unavailable" || !diffObs ? (
-          <div className="callout warning" data-testid="diff-unavailable-notice" style={{ fontSize: 13, margin: 0 }}>
-            <Icon icon={AlertTriangle} size={14} />{" "}
-            <strong>{t(language, "changes.unavailable")}</strong>：
-            {translateRef(
-              language,
-              diffRes.reasonKey,
-              evidenceSummary.unavailableReason ?? diffRes.reason ?? "",
-              diffRes.reasonParams,
-            ) || t(language, "changes.cannotLoad")}
-          </div>
-        ) : !diffObs.isGitRepo ? (
-          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            {t(language, "changes.notGit")}
-          </p>
-        ) : diffRes.status === "empty" || diffObs.files.length === 0 ? (
-          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-            {isDone ? t(language, "changes.emptyDone") : t(language, "changes.emptyLive")}
-          </p>
-        ) : (
-          <div className="diff-split">
-            <div className="diff-files">
-              {parsedFiles.map((f) => (
-                <button
-                  key={f.path}
-                  className={`diff-file-btn ${activeDiffFile?.path === f.path ? "active" : ""}`}
-                  type="button"
-                  onClick={() => setSelectedDiffFile(f.path)}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.path}</span>
-                  <span className="muted" style={{ fontSize: 11 }}>
-                    +{f.additions}/-{f.deletions}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <div
-              className="diff-code"
-              dangerouslySetInnerHTML={{
-                __html: activeDiffFile
-                  ? renderDiffLinesHtml(activeDiffFile.lines)
-                  : renderDiffLinesHtml(diffObs.diff.split("\n")),
-              }}
-            />
-          </div>
-        )}
-      </div>
-
-      {isDone && showLiveComparison && (
-        <div className="card" data-testid="live-diff-comparison-card">
-          <div className="card-head">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <h3>{t(language, "changes.liveTitle")}</h3>
-              <span className="badge info">{t(language, "changes.liveBadge")}</span>
-            </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button
+              className="btn primary xs"
+              type="button"
+              data-testid="open-diff-tab-btn"
+              onClick={() => setWorkspaceTab("diff")}
+            >
+              <Icon icon={FileDiff} size={14} /> {t(language, "changes.openDiffTab")}
+            </button>
             <button
               className="btn xs"
               type="button"
+              data-testid="verify-dock-diff-btn"
               onClick={() => {
-                void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, true) });
-                showToastKey("changes.refreshedCompare");
+                setDrawerOpen(true);
+                setDrawerTab("diff");
               }}
             >
-              <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshCompare")}
+              <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
             </button>
           </div>
-          {!liveDiffRes ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.loadingCompare")}
-            </p>
-          ) : liveDiffRes.status === "unavailable" || !liveDiffObs ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.compareUnavailable", {
-                reason:
-                  translateRef(
-                    language,
-                    liveDiffRes.reasonKey,
-                    liveDiffRes.reason ?? t(language, "changes.cannotRead"),
-                    liveDiffRes.reasonParams,
-                  ) || t(language, "changes.cannotRead"),
-              })}
-            </p>
-          ) : liveDiffObs.files.length === 0 ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.compareEmpty")}
-            </p>
-          ) : (
-            <div className="muted" style={{ fontSize: 12.5 }}>
-              {t(language, "changes.compareSummary", {
-                files: liveDiffObs.files.length,
-                patches: liveParsedFiles.length,
-              })}
-              <div
-                className="diff-code"
-                style={{ marginTop: 8, maxHeight: 320, overflow: "auto" }}
-                dangerouslySetInnerHTML={{
-                  __html: renderDiffLinesHtml(liveDiffObs.diff.split("\n")),
-                }}
-              />
-            </div>
-          )}
         </div>
-      )}
+      </div>
     </>
   );
 }
@@ -2402,6 +2677,14 @@ export function WorkspaceView() {
           <Icon icon={FileText} size={14} /> {t(language, "ws.tab.spec")}
         </button>
         <button
+          className={`tab ${workspaceTab === "diff" ? "active" : ""}`}
+          type="button"
+          data-testid="tab-diff"
+          onClick={() => setWorkspaceTab("diff")}
+        >
+          <Icon icon={FileDiff} size={14} /> {t(language, "ws.tab.diff")}
+        </button>
+        <button
           className={`tab ${workspaceTab === "changes" ? "active" : ""}`}
           type="button"
           data-testid="tab-changes"
@@ -2422,6 +2705,8 @@ export function WorkspaceView() {
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (
           <SpecDesignTab d={d} bridgeConnected={bridgeConnected} />
+        ) : workspaceTab === "diff" ? (
+          <DiffViewerPanel d={d} />
         ) : workspaceTab === "changes" ? (
           <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
         ) : (

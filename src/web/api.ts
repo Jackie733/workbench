@@ -220,6 +220,11 @@ export const api = {
       `/api/hub/projects/${encodeURIComponent(projectId)}/activate`,
       { method: "POST" },
     ),
+  updateHubProjectMeta: (body: { projectId: string; pinned?: boolean; category?: string | null }) =>
+    requestJson<{ ok: boolean }>("/api/hub/projects/meta", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   removeHubProject: (projectId: string) =>
     requestJson<{ activeProjectId: string | null; projects: HubProjectSummary[] }>(
       `/api/hub/projects/${encodeURIComponent(projectId)}`,

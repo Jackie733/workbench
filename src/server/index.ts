@@ -65,6 +65,7 @@ import {
   resolveHubDir,
   setActiveHubProject,
   updateHubPreferences,
+  updateHubProjectMeta,
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
@@ -689,6 +690,26 @@ export async function startWorkbenchServer(options: {
       broadcastUi({ type: "hub.updated", reason: "project.activated", projectId: project.id, at: Date.now() });
       const { cfg, projects } = await buildHubProjectsSnapshot();
       return jsonResponse({ project, activeProjectId: cfg.activeProjectId, projects });
+    }
+
+    if (method === "POST" && pathname === "/api/hub/projects/meta") {
+      const body = await readBody(req);
+      const id = typeof body.projectId === "string" ? body.projectId.trim() : "";
+      if (!id) throw new WorkbenchError("invalid_input", "projectId 不能为空");
+      if (body.pinned !== undefined && typeof body.pinned !== "boolean") {
+        throw new WorkbenchError("invalid_input", "pinned 必须是布尔值");
+      }
+      if (body.category !== undefined && body.category !== null && typeof body.category !== "string") {
+        throw new WorkbenchError("invalid_input", "category 必须是字符串或 null");
+      }
+      if (body.pinned === undefined && body.category === undefined) {
+        throw new WorkbenchError("invalid_input", "请提供 pinned 或 category 字段");
+      }
+      const pinned = body.pinned as boolean | undefined;
+      const category = body.category as string | null | undefined;
+      updateHubProjectMeta(id, { pinned, category });
+      broadcastUi({ type: "hub.updated", reason: "project.meta", projectId: id, at: Date.now() });
+      return jsonResponse({ ok: true });
     }
 
     const hubDeleteMatch = /^\/api\/hub\/projects\/([^/]+)$/.exec(pathname);

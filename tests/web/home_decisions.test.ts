@@ -2,8 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { RequirementSummary } from "../../src/core/types.ts";
 import {
   findActiveRequirementRun,
+  groupHubProjects,
   partitionPendingDecisions,
+  pickDefaultRequirementId,
+  sortHubProjects,
   type RequirementRunLike,
+  type SortableProjectLike,
 } from "../../src/web/state.ts";
 
 function summary(id: string, extra: Partial<RequirementSummary> = {}): RequirementSummary {
@@ -96,5 +100,67 @@ describe("首页待拍板与 Agent 运行态分组", () => {
     expect(findActiveRequirementRun(runs, "REQ-001", "proj-a")?.requirementId).toBe("REQ-001");
     expect(findActiveRequirementRun(runs, "REQ-002", "proj-a")).toBeUndefined();
     expect(findActiveRequirementRun(runs, "REQ-003", "proj-a")).toBeUndefined();
+  });
+});
+
+function proj(id: string, extra: Partial<SortableProjectLike> = {}): SortableProjectLike {
+  return {
+    id,
+    name: `Proj-${id}`,
+    addedAt: 100,
+    lastOpenedAt: 100,
+    activeCount: 0,
+    decisionCount: 0,
+    runningCount: 0,
+    ...extra,
+  };
+}
+
+describe("IDE 默认需求选中、项目排序与分类", () => {
+  test("pickDefaultRequirementId 按阻塞待拍板 -> 普通待拍板 -> 活跃需求 -> 首个需求选择", () => {
+    expect(pickDefaultRequirementId([], [], "proj-a")).toBeNull();
+    const doneItem = summary("REQ-001", { stage: "done", needsDecision: false });
+    const activeItem = summary("REQ-002", { stage: "implementing", needsDecision: false, updatedAt: 5 });
+    const pendingItem = summary("REQ-003", { stage: "awaiting_approval", needsDecision: true, updatedAt: 10 });
+    const blockedItem = summary("REQ-004", {
+      stage: "blocked",
+      needsDecision: true,
+      decisionReasonKey: "core.decision.blocked",
+      updatedAt: 20,
+    });
+    expect(pickDefaultRequirementId([doneItem], [], "proj-a")).toBe("REQ-001");
+    expect(pickDefaultRequirementId([doneItem, activeItem], [], "proj-a")).toBe("REQ-002");
+    expect(pickDefaultRequirementId([doneItem, activeItem, pendingItem], [], "proj-a")).toBe("REQ-003");
+    expect(pickDefaultRequirementId([doneItem, activeItem, pendingItem, blockedItem], [], "proj-a")).toBe("REQ-004");
+  });
+
+  test("sortHubProjects 置顶优先，并支持 attention / recent / name / added 四种排序", () => {
+    const a = proj("a", { name: "Beta", addedAt: 10, lastOpenedAt: 300, activeCount: 1, decisionCount: 0 });
+    const b = proj("b", { name: "Alpha", addedAt: 30, lastOpenedAt: 100, activeCount: 3, decisionCount: 2 });
+    const c = proj("c", { name: "Gamma", addedAt: 20, lastOpenedAt: 200, pinned: true });
+
+    expect(sortHubProjects([a, b, c], "attention").map((p) => p.id)).toEqual(["c", "b", "a"]);
+    expect(sortHubProjects([a, b, c], "recent").map((p) => p.id)).toEqual(["c", "a", "b"]);
+    expect(sortHubProjects([a, b, c], "name").map((p) => p.id)).toEqual(["c", "b", "a"]);
+    expect(sortHubProjects([a, b, c], "added").map((p) => p.id)).toEqual(["c", "b", "a"]);
+  });
+
+  test("groupHubProjects 支持 none / node / status / category 四种分组", () => {
+    const localActive = proj("p1", { name: "wb", activeCount: 2, category: "核心" });
+    const remoteIdle = proj("p2", { name: "app", nodeId: "wsl", nodeName: "WSL2" });
+
+    expect(groupHubProjects([localActive, remoteIdle], "none", "attention").map((s) => s.key)).toEqual(["all"]);
+    expect(groupHubProjects([localActive, remoteIdle], "node", "attention").map((s) => s.key)).toEqual([
+      "node:local",
+      "node:wsl",
+    ]);
+    expect(groupHubProjects([localActive, remoteIdle], "status", "attention").map((s) => s.key)).toEqual([
+      "status:active",
+      "status:idle",
+    ]);
+    expect(groupHubProjects([localActive, remoteIdle], "category", "attention").map((s) => s.key)).toEqual([
+      "cat:核心",
+      "cat:__none__",
+    ]);
   });
 });

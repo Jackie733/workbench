@@ -4,8 +4,8 @@ export const WORKBENCH_DIR = ".workbench" as const;
 /** Schema of the immutable acceptance artifact written at human acceptance (REQ-003). */
 export const ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 /** Frozen cap for the accepted diff, mirroring the live observer limit. */
-export const MAX_ACCEPTANCE_DIFF_BYTES = 128 * 1024;
-export const MAX_ACCEPTANCE_SNAPSHOT_BYTES = 1024 * 1024;
+export const MAX_ACCEPTANCE_DIFF_BYTES = 512 * 1024;
+export const MAX_ACCEPTANCE_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 export const MAX_SNAPSHOT_VERIFICATIONS = 64;
 
 export const MAX_SPEC_BYTES = 128 * 1024;

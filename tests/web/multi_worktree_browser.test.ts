@@ -183,7 +183,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
 
-      // 1. HomeView renders Merge Order Panel with REQ-002 ranked before conflicted REQ-001
+      // 1. HomeView renders Merge Order Panel with REQ-002 ranked before conflicted REQ-001, and toggle collapses/expands cleanly
       await page.waitForSelector('[data-testid="worktree-merge-order-panel"]', { timeout: 5000 });
       const orderedIds = await page.evaluate(() =>
         Array.from(document.querySelectorAll('[data-testid^="merge-order-row-"]')).map((el) =>
@@ -191,6 +191,16 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
         ),
       );
       expect(orderedIds).toEqual(["merge-order-row-REQ-002", "merge-order-row-REQ-001"]);
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="toggle-sandbox-order-btn"]')?.getAttribute("aria-expanded")),
+      ).toBe("true");
+      await clickReady(page, '[data-testid="toggle-sandbox-order-btn"]');
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid^="merge-order-row-"]').length === 0, { timeout: 5000 });
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="toggle-sandbox-order-btn"]')?.getAttribute("aria-expanded")),
+      ).toBe("false");
+      await clickReady(page, '[data-testid="toggle-sandbox-order-btn"]');
+      await page.waitForSelector('[data-testid="merge-order-row-REQ-002"]', { timeout: 5000 });
 
       // 2. New Requirement modal exposes Worktree sandbox checkbox & stack selector
       await clickReady(page, '[data-testid="new-req-btn"]');

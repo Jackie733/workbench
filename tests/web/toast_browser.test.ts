@@ -64,7 +64,28 @@ async function newPage(server: WorkbenchServerHandle, width = 1280, height = 860
 
 /** 打开新建需求弹窗并以空目标保存，触发错误提示「请先输入需求描述」。 */
 async function triggerErrorToast(page: BrowserPage): Promise<void> {
-  await page.click('[data-testid="new-req-btn"]');
+  const target = await page.evaluate(() => {
+    const emptyBtn = document.querySelector('[data-testid="empty-new-req-btn"]') as HTMLElement | null;
+    if (emptyBtn) {
+      const r = emptyBtn.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return "empty";
+    }
+    const sbBtn = document.querySelector('[data-testid="new-req-btn"]') as HTMLElement | null;
+    if (sbBtn) {
+      const r = sbBtn.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return "sidebar-visible";
+    }
+    return "open-mobile-sidebar";
+  });
+  if (target === "empty") {
+    await page.click('[data-testid="empty-new-req-btn"]');
+  } else {
+    if (target === "open-mobile-sidebar") {
+      await page.click('[data-testid="toggle-sidebar-btn"]');
+      await page.waitForSelector('[data-testid="hub-sidebar"].open', { timeout: 5000 });
+    }
+    await page.click('[data-testid="new-req-btn"]');
+  }
   await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 5000 });
   await page.click('[data-testid="save-draft-btn"]');
   await page.waitForSelector(TOAST_SEL, { timeout: 5000 });

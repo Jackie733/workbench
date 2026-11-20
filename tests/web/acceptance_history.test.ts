@@ -213,8 +213,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       expect(bannerText1).toContain("已固化验收快照");
       expect(bannerText1).toContain("验收时间");
 
-      // Switch to Changes & Verify tab -> shows frozen diff and separate live comparison
-      await page.click('[data-testid="tab-changes"]');
+      // Switch to Code Changes tab -> shows frozen diff and separate live comparison
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-context-badge"]', { timeout: 5000 });
       const diffHtml1 = await page.evaluate(() => document.body.innerText);
       expect(diffHtml1).toContain("acceptedMarker");
@@ -233,8 +233,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 5000 });
       await page.click('[data-testid="req-row-REQ-002"]');
-      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 5000 });
-      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 5000 });
       const unavailText = await page.evaluate(() => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "");
       expect(unavailText).toContain("历史代码差异不可用");
@@ -303,8 +303,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       // 1. Live workspace diff unavailable notice shows localized English prompt & preserves short hash
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
-      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
       const liveEnText = await page.evaluate(
         () => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "",
@@ -329,8 +329,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-002"]');
-      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
-      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="toggle-live-diff-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="toggle-live-diff-btn"]');
       await page.waitForSelector('[data-testid="live-diff-comparison-card"]', { timeout: 10_000 });
@@ -395,8 +395,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       // Missing snapshot artifact in EN then ZH
       await page.waitForSelector(`[data-testid="req-row-${reqMissing.state.id}"]`, { timeout: 10_000 });
       await page.click(`[data-testid="req-row-${reqMissing.state.id}"]`);
-      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
-      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
       await page.waitForFunction(
         () =>
@@ -426,8 +426,8 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector(`[data-testid="req-row-${reqCorrupt.state.id}"]`, { timeout: 10_000 });
       await page.click(`[data-testid="req-row-${reqCorrupt.state.id}"]`);
-      await page.waitForSelector('[data-testid="tab-changes"]', { timeout: 10_000 });
-      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 10_000 });
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 10_000 });
       await page.waitForFunction(
         () =>

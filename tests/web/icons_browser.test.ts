@@ -576,13 +576,10 @@ describe("REQ-010 icon coverage across home and workspace", () => {
       });
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
 
-      // Home: layout toggle and search affordance.
-      const layoutIcons = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[data-testid="layout-toggle"] button')).map(
-          (button) => button.querySelectorAll("svg.ui-icon").length,
-        ),
-      );
-      expect(layoutIcons).toEqual([1, 1]);
+      // Sidebar requirement nav: search affordance and new-req button.
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-testid="new-req-btn"] svg.ui-icon').length),
+      ).toBe(1);
       expect(
         await page.evaluate(() => document.querySelectorAll(".search-wrap svg.ui-icon").length),
       ).toBe(1);
@@ -626,7 +623,7 @@ describe("REQ-010 icon coverage across home and workspace", () => {
           (tab) => tab.querySelectorAll("svg.ui-icon").length,
         ),
       );
-      expect(tabIcons).toEqual([1, 1, 1]);
+      expect(tabIcons).toEqual([1, 1, 1, 1]);
 
       // Spec tab: edit affordances carry icons.
       expect(

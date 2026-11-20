@@ -52,6 +52,7 @@ export function Topbar() {
   const { data: project } = useProjectQuery(activeProjectId);
 
   const isHub = Boolean(hub?.hubMode);
+  const hasSidebar = Boolean(isHub || project?.initialized);
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
   const activeSummary = hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
   const isRemoteProj = Boolean(activeSummary?.nodeId && activeSummary.nodeId !== "local");
@@ -81,7 +82,7 @@ export function Topbar() {
           <span className="app-brand-name">Workbench</span>
         </button>
 
-        {isHub && (
+        {hasSidebar && (
           <button
             className="btn ghost xs"
             type="button"

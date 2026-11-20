@@ -18,6 +18,7 @@ import {
   registerHubProject,
   removeHubProject,
   setActiveHubProject,
+  updateHubProjectMeta,
 } from "../../src/hub/registry.ts";
 import { buildPresetRouting, detectRateLimitOrQuotaError, resolveRouteCandidates } from "../../src/hub/routing.ts";
 import { clearModelCooldown, isModelCoolingDown, recordModelRunOutcome } from "../../src/hub/telemetry.ts";
@@ -96,6 +97,38 @@ describe("WB-08 multi-project hub registry and daemon", () => {
     };
     expect(listA.items.map((i) => i.title)).toEqual(["Alpha only task"]);
     expect(listB.items.map((i) => i.title)).toEqual(["Beta only task"]);
+
+    // Persists project pin and custom category via API and registry helper
+    const metaResp = await fetch(`${server.url}/api/hub/projects/meta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: pA.id, pinned: true, category: "核心项目" }),
+    });
+    expect(metaResp.status).toBe(200);
+    const updatedCfg = readHubConfig();
+    const updatedA = updatedCfg.projects.find((p) => p.id === pA.id);
+    expect(updatedA?.pinned).toBe(true);
+    expect(updatedA?.category).toBe("核心项目");
+
+    updateHubProjectMeta(pA.id, { pinned: false, category: null });
+    const clearedA = readHubConfig().projects.find((p) => p.id === pA.id);
+    expect(clearedA?.pinned).toBeUndefined();
+    expect(clearedA?.category).toBeUndefined();
+
+    // Rejects invalid metadata payloads and control characters
+    const emptyMetaResp = await fetch(`${server.url}/api/hub/projects/meta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: pA.id }),
+    });
+    expect(emptyMetaResp.status).toBe(400);
+
+    const ctrlCatResp = await fetch(`${server.url}/api/hub/projects/meta`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: pA.id, category: "bad\ncat" }),
+    });
+    expect(ctrlCatResp.status).toBe(400);
 
     removeHubProject(pB.id);
     expect(readHubConfig().projects.length).toBe(1);

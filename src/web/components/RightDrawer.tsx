@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AlertTriangle, Check, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, Check, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
 import { api } from "../api.ts";
 import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
@@ -20,6 +20,7 @@ import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/ui
 import { ConsoleOutput } from "./ConsoleOutput.tsx";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
+import { DiffViewerPanel } from "./WorkspaceView.tsx";
 
 function computeMaxDrawerWidth(workspaceEl: HTMLElement | null): number {
   if (!workspaceEl) return DEFAULT_DRAWER_WIDTH;
@@ -302,10 +303,24 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />
                     )}
                   </button>
+                  <button
+                    className={`drawer-tab ${drawerTab === "diff" ? "active" : ""}`}
+                    type="button"
+                    data-action="set-drawer-tab"
+                    data-tab="diff"
+                    data-testid="drawer-tab-diff"
+                    onClick={() => setDrawerTab("diff")}
+                  >
+                    <Icon icon={FileDiff} size={14} /> {t(language, "drawer.tab.diff")}
+                  </button>
                 </div>
               </div>
 
-              {drawerTab === "discuss" ? (
+              {drawerTab === "diff" ? (
+                <div className="drawer-body drawer-diff-body" data-testid="drawer-diff-pane">
+                  <DiffViewerPanel d={d} inDrawer />
+                </div>
+              ) : drawerTab === "discuss" ? (
                 <div className="drawer-body" data-testid="discuss-pane">
                   {pendingAnnotations.length > 0 && (
                     <div className="annot-queue" data-testid="pending-annotations">

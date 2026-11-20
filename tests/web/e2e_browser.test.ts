@@ -190,27 +190,24 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       const allRows = await page.evaluate(() => document.querySelectorAll(".req-row").length);
       expect(allRows).toBe(22);
 
-      // Scroll down to REQ-005, open it, return home -> scroll position preserved!
+      // Scroll down inside sidebar requirement list to REQ-005, open it -> scroll position preserved & detail switches!
       await page.evaluate(() => {
         document.querySelector('[data-testid="req-row-REQ-005"]')?.scrollIntoView({ block: "center" });
       });
-      const scrolledY = await page.evaluate(() => window.scrollY);
-      expect(scrolledY).toBeGreaterThan(200);
+      const scrolledY = await page.evaluate(() => document.querySelector(".sb-req-scroll")?.scrollTop ?? 0);
+      expect(scrolledY).toBeGreaterThan(100);
       await clickReady(page, '[data-testid="req-row-REQ-005"]');
       await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="back-home-btn"]');
-      await page.waitForSelector('[data-testid="req-list"]');
       await new Promise((r) => setTimeout(r, 80));
-      const restoredY = await page.evaluate(() => window.scrollY);
+      const restoredY = await page.evaluate(() => document.querySelector(".sb-req-scroll")?.scrollTop ?? 0);
       expect(Math.abs(restoredY - scrolledY)).toBeLessThan(20);
 
-      // Switch to 4-column board view
-      await page.click('[data-action="set-layout"][data-value="board"]');
-      await page.waitForSelector('[data-testid="req-board"]');
-      const colTitles = await page.evaluate(() =>
-        Array.from(document.querySelectorAll(".board-col-head span:first-child")).map((el) => el.textContent),
-      );
-      expect(colTitles).toEqual(["准备中", "执行中", "待验收", "已完成"]);
+      // Dedicated Code Changes tab + right drawer Diff tab
+      await clickReady(page, '[data-testid="tab-diff"]');
+      await page.waitForSelector('[data-testid="diff-viewer-panel"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
+      await page.waitForSelector('[data-testid="drawer-diff-pane"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
 
       // Toggle dark theme and verify 375px narrow width has no horizontal page overflow
       await page.click('[data-action="toggle-theme"]');
@@ -295,11 +292,28 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 5000 });
 
-      // Inspect Changes & Verification tab + Diff + Log
-      await page.click('[data-testid="tab-changes"]');
-      await page.waitForSelector(".diff-code", { timeout: 5000 });
-      const gitDiffText = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
+      // Inspect Code Changes tab (split/unified/expand + isolated drawer) and Verify & Shots tab (shortcut + log)
+      await page.click('[data-testid="tab-diff"]');
+      await page.waitForSelector('[data-testid="diff-viewer-panel"] .diff-code', { timeout: 5000 });
+      const gitDiffText = await page.evaluate(() => document.querySelector('[data-testid="diff-viewer-panel"] .diff-code')?.textContent ?? "");
       expect(gitDiffText).toContain("export const sub");
+      await clickReady(page, '[data-testid="diff-view-mode-toggle"] button:nth-child(2)');
+      await page.waitForSelector('[data-testid="diff-unified-list"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="diff-expand-height-btn"]');
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="diff-unified-list"]')?.classList.contains("expanded")),
+      ).toBe(true);
+      await clickReady(page, '[data-testid="diff-expand-height-btn"]');
+      await clickReady(page, '[data-testid="diff-view-mode-toggle"] button:nth-child(1)');
+
+      await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
+      await page.waitForSelector('[data-testid="drawer-diff-pane"]', { timeout: 5000 });
+      expect(await page.evaluate(() => document.querySelectorAll('[data-testid="diff-view-mode-toggle"]').length)).toBe(1);
+      expect(await page.evaluate(() => document.querySelectorAll('[data-testid="drawer-diff-view-mode-toggle"]').length)).toBe(1);
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="verify-diff-shortcut-card"]', { timeout: 5000 });
       await page.click('[data-action="toggle-log"]');
       await page.waitForSelector(".evidence-log", { timeout: 5000 });
 
@@ -467,6 +481,23 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       });
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+
+      // 1b. Sidebar project sorting, grouping, pin, and custom category persistence
+      await clickReady(page, `[data-testid="pin-project-${alphaId}"]`);
+      await page.waitForFunction(
+        (id: unknown) => Boolean(document.querySelector(`[data-testid="pin-project-${String(id)}"]`)?.classList.contains("pinned")),
+        { timeout: 5000 },
+        alphaId,
+      );
+      await clickReady(page, `[data-testid="category-project-${alphaId}"]`);
+      await page.waitForSelector(`[data-testid="category-input-${alphaId}"]`, { timeout: 5000 });
+      await page.type(`[data-testid="category-input-${alphaId}"]`, "核心");
+      await clickReady(page, `[data-testid="category-save-${alphaId}"]`);
+      await page.waitForSelector(`[data-testid="project-cat-badge-${alphaId}"]`, { timeout: 5000 });
+      await page.select('[data-testid="project-sort-select"]', "name");
+      await page.select('[data-testid="project-group-select"]', "category");
+      await page.waitForSelector('[data-testid="project-group-cat:核心"]', { timeout: 5000 });
+      await page.select('[data-testid="project-group-select"]', "none");
 
       // 2. Routing Center: switch preset + set effort + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
@@ -849,7 +880,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="app-header"]', { timeout: 5000 });
       await page.waitForSelector('[data-testid="hub-sidebar"]', { timeout: 5000 });
 
-      // 1. Global Header spans full width above the 3 columns, and drawer button is disabled on HomeView
+      // 1. Global Header spans full width above the 3 columns, and drawer button is enabled once default requirement is selected
       const headerBox = await page.evaluate(() => {
         const h = document.querySelector('[data-testid="app-header"]')?.getBoundingClientRect();
         const sb = document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect();
@@ -864,10 +895,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       });
       expect(headerBox.headerWidth).toBeGreaterThanOrEqual(1900);
       expect(headerBox.sidebarTop).toBeGreaterThanOrEqual(headerBox.headerBottom - 1);
-      expect(headerBox.sidebarWidth).toBe(240);
-      expect(headerBox.drawerBtnDisabled).toBe(true);
+      expect(headerBox.sidebarWidth).toBe(310);
+      expect(headerBox.drawerBtnDisabled).toBe(false);
 
-      // 2. Desktop left sidebar collapses cleanly to 0px and expands back to 240px
+      // 2. Desktop left sidebar collapses cleanly to 0px and expands back to 310px
       await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
       await page.waitForFunction(
         () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("settled")),
@@ -915,7 +946,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(initialDrawer.width).toBe(720);
       expect(initialDrawer.hasHeadCloseX).toBe(false);
 
-      // 4. Drag resizer left to reach 50% equal width (840px on 1920px viewport with 240px sidebar)
+      // 4. Drag resizer left to reach 50% equal width (805px on 1920px viewport with 310px sidebar)
       const resizerRect = await page.evaluate(() => {
         const r = document.querySelector('[data-testid="drawer-resizer"]')?.getBoundingClientRect();
         return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
@@ -938,7 +969,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           saved: localStorage.getItem("wb-drawer-width"),
         };
       });
-      // Clamped at 50% of hub-workspace (1680 * 0.5 = 840), matching main-stage width
+      // Clamped at 50% of hub-workspace (1610 * 0.5 = 805), matching main-stage width
       expect(resizedMetrics.drawerWidth).toBe(Math.floor(resizedMetrics.wsWidth * 0.5));
       expect(Math.abs(resizedMetrics.drawerWidth - resizedMetrics.mainWidth)).toBeLessThanOrEqual(2);
       expect(resizedMetrics.saved).toBe(String(resizedMetrics.drawerWidth));
@@ -1157,8 +1188,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(before.windowScrollY).toBe(0);
       expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
 
-      // Tabs 栏不能被内容区挤压成细条，三个按钮必须完整位于栏内且仍可点击。
-      expect(before.buttons.map((b) => b.text)).toEqual(["规范与方案", "变更与验证", "时间线与运行"]);
+      // Tabs 栏不能被内容区挤压成细条，四个按钮必须完整位于栏内且仍可点击。
+      expect(before.buttons.map((b) => b.text)).toEqual(["规范与方案", "代码变更", "验证与截图", "时间线与运行"]);
       expect(before.tabsHeight).toBeGreaterThan(30);
       for (const button of before.buttons) {
         expect(button.height).toBeGreaterThan(30);
@@ -1169,7 +1200,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       // Tabs 栏与下方滚动内容不重叠，滚动条出现在内容区而不是覆盖按钮。
       expect(before.tabsBottom).toBeLessThanOrEqual(before.scrollTop + 0.5);
 
-      for (const tab of ["tab-changes", "tab-timeline", "tab-spec"] as const) {
+      for (const tab of ["tab-diff", "tab-changes", "tab-timeline", "tab-spec"] as const) {
         await page.click(`[data-testid="${tab}"]`);
         await new Promise((r) => setTimeout(r, 100));
         const after = await readTabs();
@@ -1754,6 +1785,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     };
 
     try {
+      await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
@@ -2147,12 +2179,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="req-row-REQ-003"]');
       await page.waitForSelector('[data-testid="evidence-provenance-banner"]', { timeout: 5000 });
       expect(await bodyText()).toContain("Legacy acceptance record (no diff snapshot)");
-      await page.click('[data-testid="tab-changes"]');
+      await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-unavailable-notice"]', { timeout: 5000 });
       const legacyEvidenceText = await bodyText();
       expect(legacyEvidenceText).toContain("Historical code diff unavailable");
-      expect(legacyEvidenceText).toContain("echo 旧版历史证据原文");
-      expect(legacyEvidenceText).toContain("旧版历史证据原文");
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid^="ev-"]', { timeout: 5000 });
+      const legacyVerifyText = await bodyText();
+      expect(legacyVerifyText).toContain("echo 旧版历史证据原文");
+      expect(legacyVerifyText).toContain("旧版历史证据原文");
       await page.click('[data-action="toggle-log"]');
       await page.waitForFunction(
         () =>
@@ -2351,7 +2386,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       });
       await page.select('[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 5000 });
-      expect(await bodyText()).toContain("变更与验证");
+      expect(await bodyText()).toContain("验证与截图");
       await page.evaluate(() => {
         const proto = Storage.prototype as unknown as Record<string, unknown>;
         proto.getItem = proto.__origGet as typeof Storage.prototype.getItem;
@@ -2389,4 +2424,117 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.close();
     }
   }, 60_000);
+
+  test("IDE 侧栏待拍板过滤无裁剪、Diff 多文件搜索隔离与 backHome 非破坏性编辑保护", async () => {
+    const root = initGitRepo();
+    await initProject(root, { name: "ReviewFixRepo", privacyMode: "local" });
+    await createRequirement(root, {
+      goal: "待拍板与多文件 Diff 测试",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(root, "REQ-001", {
+      designMarkdown: "# 多文件变更方案\n",
+      actor: "agent",
+    });
+    await createRequirement(root, { goal: "普通草稿需求" });
+
+    // Edit 4 files so DiffViewerPanel displays diff-file-search
+    for (const file of ["alpha.ts", "beta.ts", "gamma.ts", "delta.ts"]) {
+      fs.writeFileSync(path.join(root, file), `export const name = "${file}";\n`);
+    }
+
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
+    servers.push(server);
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="scope-tabs"]', { timeout: 5000 });
+
+      // 1. All 4 scope tabs (including "待拍板 (1)") fit cleanly inside the 310px sidebar without overflow/clipping
+      const tabsFit = await page.evaluate(() => {
+        const container = document.querySelector('[data-testid="scope-tabs"]') as HTMLElement | null;
+        if (!container) return null;
+        const cr = container.getBoundingClientRect();
+        const btns = Array.from(container.querySelectorAll("button")).map((b) => {
+          const r = b.getBoundingClientRect();
+          return {
+            text: b.textContent?.trim() ?? "",
+            role: b.getAttribute("role"),
+            overflowX: b.scrollWidth > b.clientWidth + 1,
+            outside: r.right > cr.right + 1 || r.left < cr.left - 1,
+          };
+        });
+        return { containerOverflow: container.scrollWidth > container.clientWidth + 1, btns };
+      });
+      expect(tabsFit?.containerOverflow).toBe(false);
+      expect(tabsFit?.btns.every((b) => b.role === "tab" && !b.overflowX && !b.outside)).toBe(true);
+
+      // 2. "decisions" scope tab filters to only pending-decision REQ-001
+      await clickReady(page, '[data-action="set-scope"][data-value="decisions"]');
+      await page.waitForFunction(() => document.querySelectorAll(".req-row").length === 1, { timeout: 5000 });
+      expect(
+        await page.evaluate(() => document.querySelector(".req-row")?.getAttribute("data-testid")),
+      ).toBe("req-row-REQ-001");
+      await clickReady(page, '[data-action="set-scope"][data-value="active"]');
+
+      // 3. Multi-file diff filtering, zero-match empty state, and independent drawer filter state
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await clickReady(page, '[data-testid="tab-diff"]');
+      await page.waitForSelector('[data-testid="diff-file-search"]', { timeout: 5000 });
+      await page.type('[data-testid="diff-file-search"]', "beta");
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length === 1,
+        { timeout: 5000 },
+      );
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="diff-viewer-panel"] .diff-code')?.textContent ?? ""),
+      ).toContain("beta.ts");
+
+      await page.type('[data-testid="diff-file-search"]', "zzz-nonexistent");
+      await page.waitForSelector('[data-testid="diff-empty-filter"]', { timeout: 5000 });
+      expect(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="diff-viewer-panel"] .diff-code'))),
+      ).toBe(false);
+      await clickReady(page, '[data-testid="diff-clear-filter-btn"]');
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length === 4,
+        { timeout: 5000 },
+      );
+
+      await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="drawer-diff-panel"]')?.getBoundingClientRect().width ?? 0) >= 300,
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="drawer-diff-file-search"]');
+      await page.type('[data-testid="drawer-diff-file-search"]', "gamma");
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="drawer-diff-panel"] .diff-file-btn').length === 1,
+        { timeout: 5000 },
+      );
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length),
+      ).toBe(4);
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+
+      // 4. Clicking back-home-btn preserves in-progress design editing draft
+      await clickReady(page, '[data-testid="tab-spec"]');
+      await page.waitForSelector('[data-testid="start-edit-design-btn"]', { timeout: 5000 });
+      await page.evaluate(() => {
+        document.querySelector('[data-testid="start-edit-design-btn"]')?.scrollIntoView({ block: "center" });
+      });
+      await clickReady(page, '[data-testid="start-edit-design-btn"]');
+      await page.waitForSelector('[data-testid="save-design-btn"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="back-home-btn"]');
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="save-design-btn"]')))).toBe(true);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 40_000);
 });

@@ -145,9 +145,10 @@ export function useProjectSandboxesQuery(activeProjectId: string | null, enabled
 }
 
 export function useRequirementsQuery(activeProjectId: string | null, scope: Scope, enabled: boolean) {
+  const fetchScope = scope === "decisions" ? "active" : scope;
   return useQuery({
-    queryKey: queryKeys.requirements(activeProjectId, scope),
-    queryFn: () => api.listRequirements(scope),
+    queryKey: queryKeys.requirements(activeProjectId, fetchScope),
+    queryFn: () => api.listRequirements(fetchScope),
     enabled,
   });
 }
@@ -410,12 +411,15 @@ export function handleDispatchOutcome(dispatch: DispatchOutcome | null, fallback
 
 export async function openRequirement(id: string): Promise<void> {
   const ui = useUiStore.getState();
-  if (!ui.selectedId) {
-    ui.setHomeScrollY(window.scrollY);
+  const scrollEl = typeof document !== "undefined" ? document.querySelector(".sb-req-scroll") : null;
+  if (scrollEl) {
+    ui.setHomeScrollY(scrollEl.scrollTop);
   }
   ui.setSelectedId(id);
+  ui.setSidebarOpen(false);
   ui.setWorkspaceTab("spec");
   ui.setSelectedDiffFile(null);
+  ui.setDiffFileQuery("");
   ui.setDesignViewVersion(null);
   ui.setDesignComparePrev(false);
   ui.setDesignCompareText(null);
@@ -429,12 +433,17 @@ export async function openRequirement(id: string): Promise<void> {
 export function backHome(): void {
   const ui = useUiStore.getState();
   const savedY = ui.homeScrollY;
-  ui.setSelectedId(null);
-  ui.setSelectedDiffFile(null);
-  useDraftStore.getState().cancelEditSpec();
-  useDraftStore.getState().cancelEditDesign();
+  const isMobile = typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches;
+  if (isMobile) {
+    ui.setSidebarOpen(true);
+  } else {
+    ui.setDesktopSidebarOpen(true);
+  }
   void queryClient.invalidateQueries({ queryKey: ["requirements"] });
-  requestAnimationFrame(() => window.scrollTo(0, savedY));
+  requestAnimationFrame(() => {
+    const scrollEl = typeof document !== "undefined" ? document.querySelector(".sb-req-scroll") : null;
+    if (scrollEl && savedY > 0) scrollEl.scrollTop = savedY;
+  });
 }
 
 export async function switchProject(pid: string): Promise<void> {
@@ -447,6 +456,7 @@ export async function switchProject(pid: string): Promise<void> {
     ui.setSelectedId(null);
     ui.setSelectedDiffFile(null);
     ui.setQuery("");
+    ui.setHomeScrollY(0);
     return true;
   });
   if (ok) {

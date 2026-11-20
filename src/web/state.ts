@@ -35,10 +35,12 @@ import {
   type UiLanguage,
 } from "./i18n.ts";
 
-export type Scope = "active" | "done" | "cancelled" | "all";
-export type LayoutMode = "list" | "board";
-export type WorkspaceTab = "spec" | "changes" | "timeline";
-export type DrawerTab = "discuss" | "console";
+export type Scope = "active" | "decisions" | "done" | "cancelled" | "all";
+export type WorkspaceTab = "spec" | "diff" | "changes" | "timeline";
+export type DrawerTab = "discuss" | "console" | "diff";
+export type ProjectSortMode = "attention" | "recent" | "name" | "added";
+export type ProjectGroupMode = "none" | "node" | "status" | "category";
+export type DiffViewMode = "split" | "unified";
 
 export interface CriterionDraft {
   id: string;
@@ -383,6 +385,22 @@ export function formatDateTime(ms: number, language: UiLanguage = "zh-CN"): stri
   return formatDateTimeIn(language, ms);
 }
 
+export function filterRequirementsByScope(
+  items: readonly RequirementSummary[],
+  scope: Exclude<Scope, "decisions">,
+): RequirementSummary[] {
+  switch (scope) {
+    case "all":
+      return [...items];
+    case "active":
+      return items.filter((i) => i.stage !== "done" && i.stage !== "cancelled");
+    case "done":
+      return items.filter((i) => i.stage === "done");
+    case "cancelled":
+      return items.filter((i) => i.stage === "cancelled");
+  }
+}
+
 export function filteredItems(items: RequirementSummary[], query: string, language: UiLanguage = "zh-CN"): RequirementSummary[] {
   const q = query.trim().toLowerCase();
   if (!q) return items;
@@ -436,6 +454,155 @@ export function partitionPendingDecisions(
     }
   }
   return { humanPending, agentProcessing };
+}
+
+export function isBlockingDecisionRequirement(item: RequirementSummary): boolean {
+  if (item.decisionReasonKey) {
+    return item.decisionReasonKey === "core.decision.blocked" || item.decisionReasonKey === "core.decision.reviewBlock";
+  }
+  return item.stage === "blocked";
+}
+
+export function pickDefaultRequirementId(
+  items: RequirementSummary[],
+  runs: Iterable<RequirementRunLike>,
+  projectId: string | null,
+): string | null {
+  if (items.length === 0) return null;
+  const pending = partitionPendingDecisions(items, runs, projectId).humanPending.sort((a, b) => {
+    const aBlock = isBlockingDecisionRequirement(a) ? 0 : 1;
+    const bBlock = isBlockingDecisionRequirement(b) ? 0 : 1;
+    if (aBlock !== bBlock) return aBlock - bBlock;
+    return a.updatedAt - b.updatedAt;
+  });
+  if (pending.length > 0) return pending[0]!.id;
+  const active = items.find((i) => i.stage !== "done" && i.stage !== "cancelled");
+  if (active) return active.id;
+  return items[0]!.id;
+}
+
+export interface SortableProjectLike {
+  id: string;
+  name: string;
+  nodeId?: string;
+  nodeName?: string;
+  addedAt: number;
+  lastOpenedAt: number;
+  activeCount: number;
+  decisionCount: number;
+  runningCount: number;
+  pinned?: boolean;
+  category?: string;
+}
+
+export interface ProjectGroupSection<T extends SortableProjectLike> {
+  key: string;
+  label: string;
+  projects: T[];
+}
+
+export function sortHubProjects<T extends SortableProjectLike>(
+  projects: readonly T[],
+  sortMode: ProjectSortMode,
+): T[] {
+  return [...projects].sort((a, b) => {
+    const aPin = a.pinned ? 1 : 0;
+    const bPin = b.pinned ? 1 : 0;
+    if (aPin !== bPin) return bPin - aPin;
+    switch (sortMode) {
+      case "attention": {
+        if (a.decisionCount !== b.decisionCount) return b.decisionCount - a.decisionCount;
+        if (a.runningCount !== b.runningCount) return b.runningCount - a.runningCount;
+        if (a.activeCount !== b.activeCount) return b.activeCount - a.activeCount;
+        return b.lastOpenedAt - a.lastOpenedAt || a.name.localeCompare(b.name, "zh-CN");
+      }
+      case "recent":
+        return b.lastOpenedAt - a.lastOpenedAt || a.name.localeCompare(b.name, "zh-CN");
+      case "name":
+        return a.name.localeCompare(b.name, "zh-CN") || b.lastOpenedAt - a.lastOpenedAt;
+      case "added":
+        return b.addedAt - a.addedAt || a.name.localeCompare(b.name, "zh-CN");
+    }
+  });
+}
+
+export function groupHubProjects<T extends SortableProjectLike>(
+  projects: readonly T[],
+  groupMode: ProjectGroupMode,
+  sortMode: ProjectSortMode,
+  language: UiLanguage = "zh-CN",
+): ProjectGroupSection<T>[] {
+  const sorted = sortHubProjects(projects, sortMode);
+  if (groupMode === "none" || sorted.length === 0) {
+    return [{ key: "all", label: "", projects: sorted }];
+  }
+  if (groupMode === "node") {
+    const local: T[] = [];
+    const byNode = new Map<string, { label: string; list: T[] }>();
+    for (const p of sorted) {
+      const isRemote = Boolean(p.nodeId && p.nodeId !== "local");
+      if (!isRemote) {
+        local.push(p);
+      } else {
+        const key = p.nodeId!;
+        let entry = byNode.get(key);
+        if (!entry) {
+          entry = { label: p.nodeName ?? key, list: [] };
+          byNode.set(key, entry);
+        }
+        entry.list.push(p);
+      }
+    }
+    const sections: ProjectGroupSection<T>[] = [];
+    if (local.length > 0) {
+      sections.push({ key: "node:local", label: t(language, "sidebar.group.local"), projects: local });
+    }
+    for (const [nodeId, entry] of byNode.entries()) {
+      sections.push({ key: `node:${nodeId}`, label: entry.label, projects: entry.list });
+    }
+    return sections;
+  }
+  if (groupMode === "status") {
+    const active: T[] = [];
+    const idle: T[] = [];
+    for (const p of sorted) {
+      if (p.decisionCount > 0 || p.runningCount > 0 || p.activeCount > 0) active.push(p);
+      else idle.push(p);
+    }
+    const sections: ProjectGroupSection<T>[] = [];
+    if (active.length > 0) {
+      sections.push({ key: "status:active", label: t(language, "sidebar.group.active"), projects: active });
+    }
+    if (idle.length > 0) {
+      sections.push({ key: "status:idle", label: t(language, "sidebar.group.idle"), projects: idle });
+    }
+    return sections;
+  }
+  // groupMode === "category"
+  const byCat = new Map<string, T[]>();
+  const uncategorized: T[] = [];
+  for (const p of sorted) {
+    const cat = p.category?.trim() ?? "";
+    if (!cat) {
+      uncategorized.push(p);
+    } else {
+      const list = byCat.get(cat) ?? [];
+      list.push(p);
+      byCat.set(cat, list);
+    }
+  }
+  const sections: ProjectGroupSection<T>[] = [];
+  for (const [cat, list] of Array.from(byCat.entries()).sort((a, b) => a[0].localeCompare(b[0], "zh-CN"))) {
+    sections.push({ key: `cat:${cat}`, label: cat, projects: list });
+  }
+  if (uncategorized.length > 0) {
+    sections.push({
+      key: "cat:__none__",
+      label: t(language, "sidebar.group.uncategorized"),
+      projects: uncategorized,
+    });
+  }
+  return sections;
 }
 
 /** 去除与阶段徽章重复的进度文本，仅保留增量信息。 */

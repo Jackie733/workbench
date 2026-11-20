@@ -99,6 +99,11 @@ export function readHubConfig(): HubConfig {
       const dedupeKey = `${nodeId ?? LOCAL_NODE_ID}::${obj.root}`;
       if ((!nodeId && !fs.existsSync(obj.root)) || seenKeys.has(dedupeKey)) continue;
       seenKeys.add(dedupeKey);
+      const pinned = obj.pinned === true ? true : undefined;
+      const category =
+        typeof obj.category === "string"
+          ? obj.category.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 32) || undefined
+          : undefined;
       projects.push({
         id: obj.id,
         name: typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : path.basename(obj.root),
@@ -107,6 +112,8 @@ export function readHubConfig(): HubConfig {
         ...(nodeName ? { nodeName } : {}),
         addedAt: typeof obj.addedAt === "number" ? obj.addedAt : Date.now(),
         lastOpenedAt: typeof obj.lastOpenedAt === "number" ? obj.lastOpenedAt : Date.now(),
+        ...(pinned ? { pinned: true } : {}),
+        ...(category ? { category } : {}),
       });
     }
 
@@ -212,6 +219,31 @@ export function setActiveHubProject(projectId: string): { config: HubConfig; pro
   config.activeProjectId = found.id;
   writeHubConfig(config);
   return { config, project: found };
+}
+
+export function updateHubProjectMeta(
+  projectId: string,
+  patch: { pinned?: boolean; category?: string | null },
+): HubConfig {
+  const cfg = readHubConfig();
+  const target = cfg.projects.find((p) => p.id === projectId);
+  if (!target) {
+    throw new WorkbenchError("not_found", `未找到已注册的项目: ${projectId}`);
+  }
+  if (patch.pinned !== undefined) {
+    if (patch.pinned) target.pinned = true;
+    else delete target.pinned;
+  }
+  if (patch.category !== undefined) {
+    if (patch.category !== null && /[\u0000-\u001f\u007f]/.test(patch.category)) {
+      throw new WorkbenchError("invalid_input", "项目分类不能包含控制字符或换行");
+    }
+    const clean = typeof patch.category === "string" ? patch.category.trim().slice(0, 32) : "";
+    if (clean) target.category = clean;
+    else delete target.category;
+  }
+  writeHubConfig(cfg);
+  return cfg;
 }
 
 export function updateHubRouting(routing: RoutingConfig): HubConfig {

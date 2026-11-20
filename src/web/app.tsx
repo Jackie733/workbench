@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { Crosshair, X } from "lucide-react";
 import { Toaster } from "sonner";
 import { api } from "./api.ts";
-import { EmptyHubCard, HomeView, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
+import { EmptyHubCard, EmptyRequirementsCard, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
 import { HubSidebar } from "./components/HubSidebar.tsx";
 import { Icon } from "./components/Icon.tsx";
 import { LoginView } from "./components/LoginView.tsx";
@@ -18,8 +18,17 @@ import {
   useAuthStatusQuery,
   useHubStateQuery,
   useProjectQuery,
+  useRequirementQuery,
+  useRequirementsQuery,
   useWorkbenchWsSync,
 } from "./queries.ts";
+import {
+  filterRequirementsByScope,
+  partitionPendingDecisions,
+  pickDefaultRequirementId,
+  type WorkspaceTab,
+} from "./state.ts";
+import { useStreamStore } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
 import { applyDocumentLanguage, t } from "./i18n.ts";
 
@@ -179,9 +188,27 @@ function WorkbenchShell() {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
+  const scope = useUiStore((s) => s.scope);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
   const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
+  const activeRuns = useStreamStore((s) => s.activeRuns);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const urlInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (urlInitializedRef.current || typeof window === "undefined") return;
+    urlInitializedRef.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const reqParam = params.get("req")?.trim();
+    const tabParam = params.get("tab")?.trim() as WorkspaceTab | null;
+    const ui = useUiStore.getState();
+    if (reqParam && /^REQ-\d+$/i.test(reqParam)) {
+      ui.setSelectedId(reqParam.toUpperCase());
+    }
+    if (tabParam === "spec" || tabParam === "diff" || tabParam === "changes" || tabParam === "timeline") {
+      ui.setWorkspaceTab(tabParam);
+    }
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -264,16 +291,46 @@ function WorkbenchShell() {
   const { data: hub, isLoading: hubLoading } = useHubStateQuery();
   const { data: project, isLoading: projectLoading } = useProjectQuery(activeProjectId);
 
-  const showSidebar = Boolean(hub?.hubMode);
   const noHubProject = Boolean(hub?.hubMode && hub.projects.length === 0);
   const activeSummary =
     hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
   const remoteOffline = Boolean(hub?.hubMode && activeSummary && activeSummary.nodeOnline === false);
+  const projectReady = Boolean(project?.initialized && !noHubProject && !remoteOffline);
+  const showSidebar = Boolean(hub?.hubMode || project?.initialized);
   const showDrawer = Boolean(selectedId) && drawerOpen && !remoteOffline;
+
+  const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", projectReady);
+  const { isError: selectedReqError } = useRequirementQuery(activeProjectId, projectReady ? selectedId : null);
+
+  useEffect(() => {
+    if (!projectReady || !selectedId || !selectedReqError) return;
+    useUiStore.getState().setSelectedId(null);
+  }, [projectReady, selectedId, selectedReqError]);
+
+  useEffect(() => {
+    if (!projectReady || selectedId !== null || !allReqList) return;
+    const allItems = allReqList.items;
+    if (allItems.length === 0) return;
+    const runsList = Object.values(activeRuns);
+    const activeItems = filterRequirementsByScope(allItems, "active");
+    const scopedItems =
+      scope === "decisions"
+        ? partitionPendingDecisions(activeItems, runsList, activeProjectId).humanPending
+        : filterRequirementsByScope(allItems, scope);
+    const candidates = scopedItems.length > 0 ? scopedItems : allItems;
+    const defaultId = pickDefaultRequirementId(candidates, runsList, activeProjectId);
+    if (defaultId) {
+      const ui = useUiStore.getState();
+      if (scopedItems.length === 0 && scope === "active") {
+        ui.setScope("all");
+      }
+      ui.setSelectedId(defaultId);
+    }
+  }, [projectReady, selectedId, scope, allReqList, activeRuns, activeProjectId]);
 
   return (
     <>
-      <div id="main-root" className={`app-shell ${selectedId ? "detail-mode" : ""}`}>
+      <div id="main-root" className={`app-shell ${projectReady ? "detail-mode" : ""}`}>
         <Topbar />
         <div
           className={`hub-layout ${showSidebar ? "with-sidebar" : ""} ${showSidebar && !desktopSidebarOpen ? "sidebar-collapsed" : ""} ${showDrawer ? "with-drawer" : ""}`}
@@ -293,7 +350,7 @@ function WorkbenchShell() {
                 ) : selectedId ? (
                   <WorkspaceView />
                 ) : (
-                  <HomeView />
+                  <EmptyRequirementsCard />
                 )}
               </div>
             </div>

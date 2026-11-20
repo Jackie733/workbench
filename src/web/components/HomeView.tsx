@@ -1,25 +1,25 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   Check,
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
   Clock,
-  Columns3,
   FolderGit2,
   FolderPlus,
   GitBranch,
   GitPullRequest,
   Info,
   Link2,
-  List,
   Plus,
   RefreshCw,
   Search,
   WifiOff,
   X,
 } from "lucide-react";
-import type { OutputLanguage, RequirementSummary, Stage } from "../../core/types.ts";
+import type { OutputLanguage } from "../../core/types.ts";
 import { api, type HubProjectSummary, type ProjectSandboxesResponse } from "../api.ts";
 import { t, translateRef } from "../i18n.ts";
 import {
@@ -35,17 +35,19 @@ import {
   useProjectSandboxesQuery,
   useRequirementsQuery,
 } from "../queries.ts";
-import { filteredItems, findActiveRequirementRun, partitionPendingDecisions, progressDetail, relativeTime, STAGE_META } from "../state.ts";
+import {
+  filteredItems,
+  filterRequirementsByScope,
+  findActiveRequirementRun,
+  isBlockingDecisionRequirement,
+  partitionPendingDecisions,
+  progressDetail,
+  relativeTime,
+  STAGE_META,
+} from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon, STAGE_ICONS } from "./Icon.tsx";
-
-function isBlockingDecision(item: RequirementSummary): boolean {
-  if (item.decisionReasonKey) {
-    return item.decisionReasonKey === "core.decision.blocked" || item.decisionReasonKey === "core.decision.reviewBlock";
-  }
-  return item.stage === "blocked";
-}
 
 export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
   const language = useUiStore((s) => s.language);
@@ -104,6 +106,28 @@ export function EmptyHubCard() {
         onClick={() => void openAddProjectModal()}
       >
         <Icon icon={Plus} size={16} /> {t(language, "hub.addLocal")}
+      </button>
+    </div>
+  );
+}
+
+export function EmptyRequirementsCard() {
+  const language = useUiStore((s) => s.language);
+  const setModal = useUiStore((s) => s.setModal);
+  return (
+    <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
+      <p style={{ margin: "0 0 8px", fontWeight: 600, fontSize: 16 }}>{t(language, "home.emptyTitle")}</p>
+      <p className="muted" style={{ margin: "0 0 16px", fontSize: 13 }}>
+        {t(language, "home.emptyDesc")}
+      </p>
+      <button
+        className="btn primary"
+        type="button"
+        data-action="open-new-req"
+        data-testid="empty-new-req-btn"
+        onClick={() => setModal({ kind: "new_req", goal: "" })}
+      >
+        <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
       </button>
     </div>
   );
@@ -207,159 +231,93 @@ export function InitCard() {
   );
 }
 
-function RequirementBoard({ items }: { items: RequirementSummary[] }) {
-  const language = useUiStore((s) => s.language);
-  const cols: Array<{ key: string; title: string; stages: Stage[] }> = [
-    {
-      key: "prep",
-      title: t(language, "board.preparing"),
-      stages: ["draft", "designing", "awaiting_approval"],
-    },
-    { key: "doing", title: t(language, "board.doing"), stages: ["implementing"] },
-    { key: "accept", title: t(language, "board.accepting"), stages: ["awaiting_acceptance"] },
-    { key: "done", title: t(language, "board.completed"), stages: ["done"] },
-  ];
-  const blockedItems = items.filter((i) => i.stage === "blocked");
-
-  return (
-    <>
-      {blockedItems.length > 0 && (
-        <div className="callout danger" style={{ marginBottom: 14 }}>
-          <strong className="callout-lead">
-            <Icon icon={AlertTriangle} size={14} />
-            <span>{t(language, "board.blocked", { count: blockedItems.length })}</span>
-          </strong>
-          {blockedItems.map((b) => (
-            <button
-              key={b.id}
-              className="btn ghost xs"
-              type="button"
-              onClick={() => void openRequirement(b.id)}
-            >
-              {b.id} · {b.title}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="board" data-testid="req-board">
-        {cols.map((col) => {
-          const list = items.filter((item) => col.stages.includes(item.stage));
-          return (
-            <div key={col.key} className="board-col">
-              <div className="board-col-head">
-                <span>{col.title}</span>
-                <span>{list.length}</span>
-              </div>
-              {list.length === 0 ? (
-                <div className="muted" style={{ fontSize: 12, padding: "8px 2px" }}>
-                  {t(language, "board.empty")}
-                </div>
-              ) : (
-                list.map((item) => {
-                  const meta = STAGE_META[item.stage];
-                  const detail = progressDetail(item, language);
-                  return (
-                    <div
-                      key={item.id}
-                      className="board-card"
-                      data-action="open-req"
-                      data-id={item.id}
-                      data-testid={`req-card-${item.id}`}
-                      tabIndex={0}
-                      onClick={() => void openRequirement(item.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          void openRequirement(item.id);
-                        }
-                      }}
-                    >
-                      <div className="board-card-top">
-                        <span className="req-id">{item.id}</span>
-                        <span className={`badge ${meta.tone}`}>
-                          <Icon icon={STAGE_ICONS[item.stage]} size={14} /> {meta.labels[language]}
-                        </span>
-                      </div>
-                      <div style={{ fontWeight: 500, fontSize: 13.5, marginBottom: 6 }}>{item.title}</div>
-                      {detail && (
-                        <div className="muted" style={{ fontSize: 12 }}>
-                          {detail}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
 export function HomeView() {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const selectedId = useUiStore((s) => s.selectedId);
   const scope = useUiStore((s) => s.scope);
-  const layout = useUiStore((s) => s.layout);
   const query = useUiStore((s) => s.query);
-  const homeScrollY = useUiStore((s) => s.homeScrollY);
   const setScope = useUiStore((s) => s.setScope);
-  const setLayout = useUiStore((s) => s.setLayout);
   const setQuery = useUiStore((s) => s.setQuery);
   const setModal = useUiStore((s) => s.setModal);
 
   const busy = useUiStore((s) => s.busy);
   const activeRuns = useStreamStore((s) => s.activeRuns);
+  const [sandboxesExpanded, setSandboxesExpanded] = useState<boolean | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollTopRef = useRef(0);
+  const prevProjectRef = useRef(activeProjectId);
 
   const { data: project } = useProjectQuery(activeProjectId);
-  const { data: reqList } = useRequirementsQuery(activeProjectId, scope, Boolean(project?.initialized));
+  const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", Boolean(project?.initialized));
   const { data: sandboxesData } = useProjectSandboxesQuery(activeProjectId, Boolean(project?.initialized));
-  const rawItems = reqList?.items ?? [];
+
+  const allBaseItems = allReqList?.items ?? [];
+  const activeBaseItems = filterRequirementsByScope(allBaseItems, "active");
   const mergeOrder = sandboxesData?.mergeOrder ?? null;
   const activeSandboxes = sandboxesData?.sandboxes ?? [];
-
-  useLayoutEffect(() => {
-    if (homeScrollY > 0) {
-      window.scrollTo(0, homeScrollY);
-    }
-  }, [homeScrollY]);
+  const isSandboxesExpanded = sandboxesExpanded ?? (mergeOrder ? mergeOrder.ordered.length <= 4 : false);
 
   const activeRunList = Object.values(activeRuns);
-  const pendingDecisions = partitionPendingDecisions(rawItems, activeRunList, activeProjectId).humanPending.sort(
+  const pendingDecisions = partitionPendingDecisions(activeBaseItems, activeRunList, activeProjectId).humanPending.sort(
     (a, b) => {
-      const aBlock = isBlockingDecision(a) ? 0 : 1;
-      const bBlock = isBlockingDecision(b) ? 0 : 1;
+      const aBlock = isBlockingDecisionRequirement(a) ? 0 : 1;
+      const bBlock = isBlockingDecisionRequirement(b) ? 0 : 1;
       if (aBlock !== bBlock) return aBlock - bBlock;
       return a.updatedAt - b.updatedAt;
     },
   );
 
-  const activeCnt = rawItems.filter((i) => i.stage !== "done" && i.stage !== "cancelled").length;
+  const activeCnt = activeBaseItems.length;
   const decisionCnt = pendingDecisions.length;
-  const doneCnt = rawItems.filter((i) => i.stage === "done").length;
+  const doneCnt = filterRequirementsByScope(allBaseItems, "done").length;
 
-  const visible = filteredItems(rawItems, query, language);
+  const listSource = scope === "decisions" ? pendingDecisions : filterRequirementsByScope(allBaseItems, scope);
+  const visible = filteredItems(listSource, query, language);
+
+  useLayoutEffect(() => {
+    if (prevProjectRef.current !== activeProjectId) {
+      prevProjectRef.current = activeProjectId;
+      scrollTopRef.current = 0;
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      return;
+    }
+    if (scrollRef.current && scrollTopRef.current > 0 && Math.abs(scrollRef.current.scrollTop - scrollTopRef.current) > 2) {
+      scrollRef.current.scrollTop = scrollTopRef.current;
+    }
+  }, [activeProjectId, listSource.length, scope]);
 
   return (
-    <div data-testid="home-view">
-      <div className="mission-stats">
-        <div className="stat-pill">
-          <span className="muted xs">{t(language, "home.active")}</span>
-          <strong>{activeCnt}</strong>
+    <div className="sb-req-panel" data-testid="home-view">
+      <div className="sb-req-top">
+        <div className="sb-head" style={{ padding: "0 2px" }}>
+          <span>{t(language, "sidebar.requirementsTitle")}</span>
+          <button
+            className="btn primary xs"
+            type="button"
+            data-action="open-new-req"
+            data-testid="new-req-btn"
+            onClick={() => setModal({ kind: "new_req", goal: "" })}
+          >
+            <Icon icon={Plus} size={14} /> {t(language, "home.newRequirement")}
+          </button>
         </div>
-        <div className={`stat-pill ${decisionCnt > 0 ? "warn" : ""}`}>
-          <span className="muted xs">{t(language, "home.decisions")}</span>
-          <strong>{decisionCnt}</strong>
-        </div>
-        <div className="stat-pill">
-          <span className="muted xs">{t(language, "home.done")}</span>
-          <strong>{doneCnt}</strong>
-        </div>
-      </div>
 
-      <div className="toolbar">
+        <div className="mission-stats">
+          <div className="stat-pill">
+            <span className="muted xs">{t(language, "home.active")}</span>
+            <strong>{activeCnt}</strong>
+          </div>
+          <div className={`stat-pill ${decisionCnt > 0 ? "warn" : ""}`}>
+            <span className="muted xs">{t(language, "home.decisions")}</span>
+            <strong>{decisionCnt}</strong>
+          </div>
+          <div className="stat-pill">
+            <span className="muted xs">{t(language, "home.done")}</span>
+            <strong>{doneCnt}</strong>
+          </div>
+        </div>
+
         <div className="search-wrap">
           <Icon icon={Search} size={14} />
           <input
@@ -372,11 +330,14 @@ export function HomeView() {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <div className="segmented" role="tablist" data-testid="scope-tabs">
-          {(["active", "done", "all"] as const).map((sc) => (
+
+        <div className="segmented sb-scope-tabs" role="tablist" data-testid="scope-tabs">
+          {(["active", "decisions", "done", "all"] as const).map((sc) => (
             <button
               key={sc}
               type="button"
+              role="tab"
+              aria-selected={scope === sc}
               className={scope === sc ? "active" : ""}
               data-action="set-scope"
               data-value={sc}
@@ -384,57 +345,54 @@ export function HomeView() {
             >
               {sc === "active"
                 ? t(language, "home.scope.active")
-                : sc === "done"
-                  ? t(language, "home.scope.done")
-                  : t(language, "home.scope.all")}
+                : sc === "decisions"
+                  ? `${t(language, "home.scope.decisions")}${decisionCnt > 0 ? ` (${decisionCnt})` : ""}`
+                  : sc === "done"
+                    ? t(language, "home.scope.done")
+                    : t(language, "home.scope.all")}
             </button>
           ))}
         </div>
-        <div className="segmented" data-testid="layout-toggle">
-          <button
-            type="button"
-            className={layout === "list" ? "active" : ""}
-            data-action="set-layout"
-            data-value="list"
-            onClick={() => setLayout("list")}
-          >
-            <Icon icon={List} size={14} /> {t(language, "home.layout.list")}
-          </button>
-          <button
-            type="button"
-            className={layout === "board" ? "active" : ""}
-            data-action="set-layout"
-            data-value="board"
-            onClick={() => setLayout("board")}
-          >
-            <Icon icon={Columns3} size={14} /> {t(language, "home.layout.board")}
-          </button>
-        </div>
-        <button
-          className="btn primary"
-          type="button"
-          data-action="open-new-req"
-          data-testid="new-req-btn"
-          onClick={() => setModal({ kind: "new_req", goal: "" })}
-        >
-          <Icon icon={Plus} size={14} /> {t(language, "home.newRequirement")}
-        </button>
       </div>
 
-      <div id="home-content">
-        {pendingDecisions.length > 0 && !query.trim() && (
-          <section className="decision-box" data-testid="decision-box">
+      <div
+        id="home-content"
+        ref={scrollRef}
+        className="sb-req-scroll"
+        onScroll={(e) => {
+          scrollTopRef.current = e.currentTarget.scrollTop;
+        }}
+      >
+        {pendingDecisions.length > 0 && !query.trim() && scope !== "done" && scope !== "decisions" && (
+          <section className="decision-box sb-decision-box" data-testid="decision-box">
             <h2>
               <Icon icon={AlertTriangle} size={14} />
               <span>{t(language, "home.decisionBox", { count: pendingDecisions.length })}</span>
             </h2>
             {pendingDecisions.map((item) => (
-              <div key={item.id} className="decision-row">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                  <span className="req-id">{item.id}</span>
+              <div
+                key={item.id}
+                className="decision-row"
+                onClick={() => void openRequirement(item.id)}
+                style={{ cursor: "pointer" }}
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <span className="req-id">{item.id}</span>
+                    <span className={`badge ${isBlockingDecisionRequirement(item) ? "danger" : "warning"}`}>
+                      <Icon icon={isBlockingDecisionRequirement(item) ? CircleAlert : Clock} size={14} />{" "}
+                      {translateRef(
+                        language,
+                        item.decisionReasonKey,
+                        item.decisionReason ?? t(language, "home.decisionFallback"),
+                        item.decisionReasonParams,
+                      )}
+                    </span>
+                  </div>
                   <span
                     style={{
                       fontWeight: 500,
+                      fontSize: 12.5,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -442,20 +400,15 @@ export function HomeView() {
                   >
                     {item.title}
                   </span>
-                  <span className={`badge ${isBlockingDecision(item) ? "danger" : "warning"}`}>
-                    <Icon icon={isBlockingDecision(item) ? CircleAlert : Clock} size={14} />{" "}
-                    {translateRef(
-                      language,
-                      item.decisionReasonKey,
-                      item.decisionReason ?? t(language, "home.decisionFallback"),
-                      item.decisionReasonParams,
-                    )}
-                  </span>
-                  <span className="muted xs" style={{ flexShrink: 0 }}>
-                    {relativeTime(item.updatedAt, language)}
-                  </span>
                 </div>
-                <button className="btn xs" type="button" onClick={() => void openRequirement(item.id)}>
+                <button
+                  className="btn xs"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void openRequirement(item.id);
+                  }}
+                >
                   {t(language, "home.goto")} <Icon icon={ArrowRight} size={14} />
                 </button>
               </div>
@@ -465,22 +418,30 @@ export function HomeView() {
 
         {activeSandboxes.length > 0 && mergeOrder && mergeOrder.ordered.length > 0 && !query.trim() && (
           <section
-            className="callout"
+            className="callout sb-sandbox-panel"
             data-testid="worktree-merge-order-panel"
-            style={{ marginBottom: 14 }}
           >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+              <button
+                type="button"
+                className="btn ghost xs"
+                data-testid="toggle-sandbox-order-btn"
+                aria-expanded={isSandboxesExpanded}
+                style={{ padding: "2px 4px", minWidth: 0, flex: 1, justifyContent: "flex-start" }}
+                onClick={() => setSandboxesExpanded(!isSandboxesExpanded)}
+              >
+                <Icon icon={isSandboxesExpanded ? ChevronDown : ChevronRight} size={14} />
                 <Icon icon={GitBranch} size={14} />
-                <strong style={{ fontSize: 13.5 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
                   {t(language, "home.sandboxesTitle", { count: mergeOrder.ordered.length })}
-                </strong>
-              </div>
+                </span>
+              </button>
               <button
                 className="btn ghost xs"
                 type="button"
                 data-testid="refresh-sandboxes-remote-btn"
                 disabled={busy}
+                title={t(language, "home.sandboxesRefresh")}
                 onClick={async () => {
                   const fresh = await runBusy(() => api.getProjectSandboxes(true));
                   if (fresh) {
@@ -492,112 +453,118 @@ export function HomeView() {
                   }
                 }}
               >
-                <Icon icon={RefreshCw} size={14} /> {t(language, "home.sandboxesRefresh")}
+                <Icon icon={RefreshCw} size={14} />
               </button>
             </div>
-            <div className="xs muted" style={{ marginBottom: 8 }}>
-              {t(language, "home.mergeOrderHint")}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {mergeOrder.ordered.map((entry, idx) => {
-                const sbItem = activeSandboxes.find((s) => s.requirementId === entry.requirementId);
-                const canAutoSync = Boolean(sbItem?.drift?.canAutoSync);
-                const reasonKey = `home.orderReason.${entry.reason}` as const;
-                const reasonTone =
-                  entry.reason === "main_conflict"
-                    ? "danger"
-                    : entry.reason === "sibling_conflict"
-                      ? "warning"
-                      : entry.reason === "auto_mergeable"
-                        ? "info"
-                        : "success";
-                return (
-                  <div
-                    key={entry.requirementId}
-                    data-testid={`merge-order-row-${entry.requirementId}`}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                      flexWrap: "wrap",
-                      padding: "6px 8px",
-                      borderRadius: 6,
-                      border: "1px solid var(--border)",
-                      background: "var(--surface)",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
-                      <span className="badge neutral">#{idx + 1}</span>
-                      <span className="req-id">{entry.requirementId}</span>
-                      <span style={{ fontWeight: 500, fontSize: 13 }}>{entry.title}</span>
-                      <code className="xs muted">{entry.branch}</code>
-                      <span className={`badge ${STAGE_META[entry.stage].tone}`}>
-                        <Icon icon={STAGE_ICONS[entry.stage]} size={14} />
-                        {STAGE_META[entry.stage].labels[language]}
-                      </span>
-                      <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
-                      {entry.behindCount > 0 && (
-                        <span className={`badge ${entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
-                          -{entry.behindCount}
+            {isSandboxesExpanded && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 6 }}>
+                {mergeOrder.ordered.map((entry, idx) => {
+                  const sbItem = activeSandboxes.find((s) => s.requirementId === entry.requirementId);
+                  const canAutoSync = Boolean(sbItem?.drift?.canAutoSync);
+                  const reasonKey = `home.orderReason.${entry.reason}` as const;
+                  const reasonTone =
+                    entry.reason === "main_conflict"
+                      ? "danger"
+                      : entry.reason === "sibling_conflict"
+                        ? "warning"
+                        : entry.reason === "auto_mergeable"
+                          ? "info"
+                          : "success";
+                  return (
+                    <div
+                      key={entry.requirementId}
+                      data-testid={`merge-order-row-${entry.requirementId}`}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                        padding: "5px 7px",
+                        borderRadius: 6,
+                        border: "1px solid var(--border)",
+                        background: "var(--surface)",
+                        cursor: "pointer",
+                      }}
+                      onClick={() => void openRequirement(entry.requirementId)}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                        <span className="badge neutral">#{idx + 1}</span>
+                        <span className="req-id">{entry.requirementId}</span>
+                        <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
+                        {entry.behindCount > 0 && (
+                          <span className={`badge ${entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                            -{entry.behindCount}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                        <span className="xs" style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {entry.title}
                         </span>
-                      )}
-                      {entry.conflictsWithSiblings.length > 0 && (
-                        <span className="xs muted">
-                          ↔ {entry.conflictsWithSiblings.join(", ")}
-                        </span>
-                      )}
+                        <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                          {canAutoSync && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              disabled={busy}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void syncSandboxBaseAction(entry.requirementId);
+                              }}
+                            >
+                              <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      {canAutoSync && (
-                        <button
-                          className="btn xs"
-                          type="button"
-                          disabled={busy}
-                          onClick={() => void syncSandboxBaseAction(entry.requirementId)}
-                        >
-                          <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
-                        </button>
-                      )}
-                      <button
-                        className="btn xs"
-                        type="button"
-                        onClick={() => void openRequirement(entry.requirementId)}
-                      >
-                        {t(language, "home.goto")} <Icon icon={ArrowRight} size={14} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
 
         <div id="home-body">
-          {rawItems.length === 0 ? (
-            <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
-              <p style={{ margin: "0 0 8px", fontWeight: 500 }}>{t(language, "home.emptyTitle")}</p>
-              <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}>
-                {t(language, "home.emptyDesc")}
+          {listSource.length === 0 ? (
+            <div className="empty-card sb-empty-box" data-testid="sb-empty-state" style={{ textAlign: "center", margin: 0, padding: 14 }}>
+              <p className="muted xs" style={{ margin: "0 0 10px" }}>
+                {allBaseItems.length === 0
+                  ? t(language, "home.emptyTitle")
+                  : scope === "decisions"
+                    ? t(language, "home.emptyDecisions")
+                    : scope === "done"
+                      ? t(language, "home.emptyDone")
+                      : t(language, "home.emptyActive")}
               </p>
-              <button
-                className="btn primary"
-                type="button"
-                data-action="open-new-req"
-                data-testid="empty-new-req-btn"
-                onClick={() => setModal({ kind: "new_req", goal: "" })}
-              >
-                <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
-              </button>
+              {allBaseItems.length === 0 ? (
+                <button
+                  className="btn primary xs"
+                  type="button"
+                  data-action="open-new-req"
+                  onClick={() => setModal({ kind: "new_req", goal: "" })}
+                >
+                  <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
+                </button>
+              ) : (
+                scope !== "all" && (
+                  <button
+                    className="btn xs"
+                    type="button"
+                    data-testid="empty-scope-all-btn"
+                    onClick={() => setScope("all")}
+                  >
+                    {t(language, "home.viewAll")}
+                  </button>
+                )
+              )}
             </div>
           ) : visible.length === 0 ? (
-            <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
-              <p className="muted" style={{ margin: "0 0 12px" }}>
+            <div className="empty-card sb-empty-box" data-testid="sb-empty-search" style={{ textAlign: "center", margin: 0, padding: 14 }}>
+              <p className="muted xs" style={{ margin: "0 0 10px" }}>
                 {t(language, "home.noMatch", { query })}
               </p>
               <button
-                className="btn"
+                className="btn xs"
                 type="button"
                 data-action="clear-search"
                 onClick={() => setQuery("")}
@@ -605,19 +572,21 @@ export function HomeView() {
                 <Icon icon={X} size={14} /> {t(language, "home.clearSearch")}
               </button>
             </div>
-          ) : layout === "list" ? (
+          ) : (
             <div className="req-list" data-testid="req-list">
               {visible.map((item) => {
                 const meta = STAGE_META[item.stage];
                 const detail = progressDetail(item, language);
                 const activeReqRun = findActiveRequirementRun(activeRunList, item.id, activeProjectId);
+                const isSelected = selectedId === item.id;
                 return (
                   <div
                     key={item.id}
-                    className="req-row"
+                    className={`req-row ${isSelected ? "active" : ""}`}
                     data-action="open-req"
                     data-id={item.id}
                     data-testid={`req-row-${item.id}`}
+                    aria-current={isSelected ? "true" : undefined}
                     tabIndex={0}
                     onClick={() => void openRequirement(item.id)}
                     onKeyDown={(e) => {
@@ -627,8 +596,11 @@ export function HomeView() {
                       }
                     }}
                   >
-                    <span className="req-id">{item.id}</span>
-                    <div data-testid={`req-card-${item.id}`}>
+                    <div data-testid={`req-card-${item.id}`} className="sb-req-item-body">
+                      <div className="sb-req-item-head">
+                        <span className="req-id">{item.id}</span>
+                        <span className="req-time">{relativeTime(item.updatedAt, language)}</span>
+                      </div>
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
                         <span className={`badge ${meta.tone}`}>
@@ -656,13 +628,10 @@ export function HomeView() {
                         {detail && <span>{detail}</span>}
                       </div>
                     </div>
-                    <span className="req-time">{relativeTime(item.updatedAt, language)}</span>
                   </div>
                 );
               })}
             </div>
-          ) : (
-            <RequirementBoard items={visible} />
           )}
         </div>
       </div>
