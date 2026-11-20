@@ -18,6 +18,7 @@ import {
   initialTheme,
   type DiffViewMode,
   type DrawerTab,
+  type MainView,
   type ModalState,
   type ProjectGroupMode,
   type ProjectSortMode,
@@ -95,7 +96,9 @@ export interface UiStoreState {
   pendingWebReload: boolean;
 
   selectedId: string | null;
+  mainView: MainView;
   workspaceTab: WorkspaceTab;
+  inspectedRunId: string | null;
   selectedDiffFile: string | null;
   diffViewMode: DiffViewMode;
   diffExpandedHeight: boolean;
@@ -130,7 +133,9 @@ export interface UiStoreState {
   setHomeScrollY: (y: number) => void;
   setPendingWebReload: (pending: boolean) => void;
   setSelectedId: (id: string | null) => void;
+  setMainView: (view: MainView) => void;
   setWorkspaceTab: (tab: WorkspaceTab) => void;
+  setInspectedRunId: (runId: string | null) => void;
   setSelectedDiffFile: (file: string | null) => void;
   setDiffViewMode: (mode: DiffViewMode) => void;
   setDiffExpandedHeight: (expanded: boolean) => void;
@@ -172,7 +177,9 @@ export const useUiStore = create<UiStoreState>((set) => ({
   pendingWebReload: false,
 
   selectedId: null,
+  mainView: "workspace",
   workspaceTab: "spec",
+  inspectedRunId: null,
   selectedDiffFile: null,
   diffViewMode: "split",
   diffExpandedHeight: false,
@@ -234,8 +241,10 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setQuery: (query) => set({ query }),
   setHomeScrollY: (homeScrollY) => set({ homeScrollY }),
   setPendingWebReload: (pendingWebReload) => set({ pendingWebReload }),
-  setSelectedId: (selectedId) => set({ selectedId, diffFileQuery: "" }),
+  setSelectedId: (selectedId) => set({ selectedId, inspectedRunId: null, diffFileQuery: "" }),
+  setMainView: (mainView) => set({ mainView }),
   setWorkspaceTab: (workspaceTab) => set({ workspaceTab }),
+  setInspectedRunId: (inspectedRunId) => set({ inspectedRunId }),
   setSelectedDiffFile: (selectedDiffFile) => set({ selectedDiffFile }),
   setDiffViewMode: (diffViewMode) => set({ diffViewMode }),
   setDiffExpandedHeight: (diffExpandedHeight) => set({ diffExpandedHeight }),

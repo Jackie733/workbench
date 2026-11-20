@@ -19,6 +19,8 @@ import {
   MAX_EVIDENCE_BYTES,
   MAX_HANDOFF_BYTES,
   MAX_ACCEPTANCE_SNAPSHOT_BYTES,
+  MAX_RUN_LOG_BYTES,
+  MAX_RUN_TRACE_BYTES,
   MAX_SCREENSHOT_BATCHES,
   MAX_SCREENSHOT_BYTES,
   MAX_SPEC_BYTES,
@@ -33,6 +35,8 @@ import {
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementState,
+  type RunContextSnapshot,
+  type RunTraceEvent,
   type ScreenshotBatch,
   type ScreenshotShot,
   type UiMessageParams,
@@ -371,6 +375,14 @@ export function readRequirementScreenshot(
   throw new WorkbenchError("not_found", `未找到截图 ${shotId}`);
 }
 
+const RUN_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function assertValidRunId(runId: string): void {
+  if (!RUN_TOKEN_RE.test(runId)) {
+    throw new WorkbenchError("invalid_input", `无效的运行记录 ID: ${runId}`);
+  }
+}
+
 export function readAgentRun(
   root: string,
   id: string,
@@ -378,14 +390,167 @@ export function readAgentRun(
 ): { record: AgentRunRecord; log: string } {
   const base = canonicalRoot(root);
   assertRequirementId(id);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId)) {
-    throw new WorkbenchError("invalid_input", `无效的运行记录 ID: ${runId}`);
-  }
+  assertValidRunId(runId);
   const jsonPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.json`);
   const logPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.log`);
-  const record = validateAgentRunRecord(readJsonStrict<unknown>(jsonPath, 128 * 1024));
-  const log = fs.existsSync(logPath) ? readBoundedText(logPath, MAX_EVIDENCE_BYTES) : "";
+  const record = validateAgentRunRecord(readJsonStrict<unknown>(jsonPath, 256 * 1024));
+  const log = fs.existsSync(logPath) ? readBoundedText(logPath, MAX_RUN_LOG_BYTES + 512 * 1024) : "";
   return { record, log };
+}
+
+export function listAgentRuns(root: string, id: string): AgentRunRecord[] {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  const bundle = readRequirementBundle(base, id);
+  const byId = new Map<string, AgentRunRecord>();
+  for (const r of bundle.state.agentRuns ?? []) {
+    byId.set(r.id, r);
+  }
+  const runsDir = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs`);
+  for (const entry of listDirSafe(runsDir)) {
+    if (!entry.isFile() || !entry.name.startsWith("run-") || !entry.name.endsWith(".json")) continue;
+    try {
+      const filePath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/${entry.name}`);
+      const rec = validateAgentRunRecord(readJsonStrict<unknown>(filePath, 256 * 1024));
+      const prev = byId.get(rec.id);
+      if (!prev || (prev.status === "running" && rec.status !== "running") || rec.endedAt !== null) {
+        byId.set(rec.id, rec);
+      }
+    } catch {
+      // Skip unreadable or partial run metadata files safely.
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+}
+
+export function readAgentRunTrace(
+  root: string,
+  id: string,
+  runId: string,
+  opts: { afterSeq?: number; limit?: number } = {},
+): {
+  record: AgentRunRecord;
+  events: RunTraceEvent[];
+  nextSeq: number;
+  totalEvents: number;
+  hasMore: boolean;
+  traceAvailable: boolean;
+} {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  assertValidRunId(runId);
+  const jsonPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.json`);
+  const tracePath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.events.jsonl`);
+  const record = validateAgentRunRecord(readJsonStrict<unknown>(jsonPath, 256 * 1024));
+  const afterSeq = typeof opts.afterSeq === "number" && Number.isFinite(opts.afterSeq) ? Math.max(0, Math.floor(opts.afterSeq)) : 0;
+  const limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.min(5000, Math.floor(opts.limit)) : 2000;
+
+  if (!fs.existsSync(tracePath)) {
+    return { record, events: [], nextSeq: 0, totalEvents: 0, hasMore: false, traceAvailable: false };
+  }
+
+  const raw = readBoundedText(tracePath, MAX_RUN_TRACE_BYTES + 1024 * 1024);
+  const parsed: RunTraceEvent[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed) as RunTraceEvent;
+      if (obj && typeof obj === "object" && typeof obj.seq === "number" && typeof obj.type === "string") {
+        parsed.push(obj);
+      }
+    } catch {
+      // Ignore partial trailing line while an active process is writing.
+    }
+  }
+
+  const totalEvents = parsed.length;
+  const filtered = parsed.filter((ev) => ev.seq > afterSeq);
+  const hasMore = filtered.length > limit;
+  const events = hasMore ? filtered.slice(0, limit) : filtered;
+  const lastAllSeq = parsed.length > 0 ? parsed[parsed.length - 1]!.seq : afterSeq;
+  const nextSeq = events.length > 0 ? events[events.length - 1]!.seq : Math.max(afterSeq, lastAllSeq);
+  return { record, events, nextSeq, totalEvents, hasMore, traceAvailable: true };
+}
+
+export function writeAgentRunContext(
+  root: string,
+  id: string,
+  runId: string,
+  snapshot: RunContextSnapshot,
+): string {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  assertValidRunId(runId);
+  const relPath = `runs/run-${runId}.context.json`;
+  const target = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/${relPath}`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  atomicWriteJson(target, snapshot);
+  return relPath;
+}
+
+export function readAgentRunContext(
+  root: string,
+  id: string,
+  runId: string,
+): RunContextSnapshot | null {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  assertValidRunId(runId);
+  const target = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${runId}.context.json`);
+  if (!fs.existsSync(target)) return null;
+  return readJsonStrict<RunContextSnapshot>(target, 2 * 1024 * 1024);
+}
+
+export function pruneProjectRunTraces(
+  root: string,
+  olderThanDays: number,
+  activeRunIds: Set<string> = new Set(),
+  now = Date.now(),
+): { deletedFiles: number; freedBytes: number; scannedRuns: number } {
+  const base = canonicalRoot(root);
+  const safeDays = Math.max(1, Math.min(3650, Math.floor(olderThanDays)));
+  const cutoffMs = now - safeDays * 86_400_000;
+  let deletedFiles = 0;
+  let freedBytes = 0;
+  let scannedRuns = 0;
+
+  let reqIds: string[] = [];
+  try {
+    reqIds = listRequirementIds(base);
+  } catch {
+    return { deletedFiles: 0, freedBytes: 0, scannedRuns: 0 };
+  }
+
+  for (const id of reqIds) {
+    const runsRel = `${WORKBENCH_DIR}/items/${id}/runs`;
+    const runsDir = resolveSafePath(base, runsRel);
+    for (const entry of listDirSafe(runsDir)) {
+      if (!entry.isFile() || !entry.name.startsWith("run-") || !entry.name.endsWith(".json")) continue;
+      scannedRuns++;
+      try {
+        const jsonPath = resolveSafePath(base, `${runsRel}/${entry.name}`);
+        const rec = validateAgentRunRecord(readJsonStrict<unknown>(jsonPath, 256 * 1024));
+        if (rec.status === "running" || activeRunIds.has(rec.id)) continue;
+        const finishTs = rec.endedAt ?? rec.startedAt;
+        if (finishTs >= cutoffMs) continue;
+        for (const ext of [".events.jsonl", ".log", ".context.json"]) {
+          const heavyRel = `${runsRel}/run-${rec.id}${ext}`;
+          const heavyPath = resolveSafePath(base, heavyRel);
+          if (!fs.existsSync(heavyPath)) continue;
+          const st = fs.lstatSync(heavyPath);
+          if (st.isSymbolicLink() || !st.isFile()) continue;
+          fs.rmSync(heavyPath, { force: true });
+          deletedFiles++;
+          freedBytes += st.size;
+        }
+      } catch {
+        // Skip corrupt/unreadable run entries safely.
+      }
+    }
+  }
+
+  return { deletedFiles, freedBytes, scannedRuns };
 }
 
 export async function createRequirementFiles(

@@ -12,10 +12,11 @@ import {
   markDesigning,
   recordReviewReport,
   resolveDiscussions,
+  saveAgentRunContext,
   startAgentRun,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText } from "../core/fs.ts";
+import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
 import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
 import {
   buildOutputLanguageDirective,
@@ -24,7 +25,7 @@ import {
 } from "../core/language.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
-  MAX_EVIDENCE_BYTES,
+  MAX_RUN_LOG_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
   type AgentRunRecord,
@@ -32,8 +33,13 @@ import {
   type RequirementDetail,
   type ReviewFinding,
   type ReviewVerdict,
+  type RunBillingMode,
+  type RunContextSnapshot,
+  type RunDispatchReason,
+  type RunHandoffMode,
+  type RunTraceEvent,
 } from "../core/types.ts";
-import { sanitizeOutput } from "../core/validate.ts";
+import { clipHeadTailUtf8, sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
@@ -46,10 +52,14 @@ import {
   type PainPointReportInput,
 } from "./evolution.ts";
 import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
+import { appendRunLedger, type RunLedgerEntry } from "./ledger.ts";
+import { estimateTokens, resolveModelSpec, resolveQuotaPool } from "./pricing.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
+import { createHarnessStreamAdapter, isUnsupportedJsonFlagError, stripCliNoise } from "./stream_adapters.ts";
 import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
-import type { HarnessId, HarnessInfo, ModelTarget, RoutingConfig } from "./types.ts";
+import { RunTraceCollector } from "./trace_collector.ts";
+import type { HarnessId, HarnessInfo, HubObservabilityConfig, ModelTarget, RoutingConfig } from "./types.ts";
 
 export interface BuiltCommand {
   command: string;
@@ -58,7 +68,14 @@ export interface BuiltCommand {
 }
 
 export interface RunExecutorEvent {
-  type: "agent.run.started" | "agent.run.output" | "agent.run.finished" | "workbench.updated" | "hub.updated";
+  type:
+    | "agent.run.started"
+    | "agent.run.output"
+    | "agent.run.event"
+    | "agent.run.metrics"
+    | "agent.run.finished"
+    | "workbench.updated"
+    | "hub.updated";
   root: string;
   requirementId: string;
   runId: string;
@@ -69,6 +86,8 @@ export interface RunExecutorEvent {
   effectiveModel?: string;
   modelFallback?: boolean;
   chunk?: string;
+  event?: RunTraceEvent;
+  metrics?: Partial<AgentRunRecord>;
   status?: AgentRunRecord["status"];
   rateLimited?: boolean;
   errorSummary?: string;
@@ -90,6 +109,7 @@ export interface StartRunInput {
   mode?: "ask" | "refine";
   useFallback?: boolean;
   autoFallbackAttempt?: number;
+  forcePlainText?: boolean;
   isAutoReview?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
@@ -106,6 +126,14 @@ interface ActiveJob {
   target: ModelTarget;
   effectiveModel?: string;
   modelFallback?: boolean;
+  quotaPool: string;
+  billingMode: RunBillingMode;
+  dispatchReason: RunDispatchReason;
+  handoffMode: RunHandoffMode;
+  parentRunId?: string;
+  contextWindow: number;
+  tracePath: string;
+  contextPath: string;
   child: ChildProcess;
   startedAt: number;
   cancelled: boolean;
@@ -151,6 +179,7 @@ export type CustomCommandBuilder = (
     prompt: string;
     nativeSessionId?: string;
     harnesses: HarnessInfo[];
+    structuredJson?: boolean;
   },
 ) => BuiltCommand;
 
@@ -176,12 +205,14 @@ export function buildHarnessCommand(
     prompt: string;
     nativeSessionId?: string;
     harnesses: HarnessInfo[];
+    structuredJson?: boolean;
   },
 ): BuiltCommand {
   const info = ctx.harnesses.find((h) => h.id === target.harness);
   const exe = info?.executable;
   const model = target.model;
   const effort = target.reasoningEffort;
+  const structuredJson = ctx.structuredJson !== false;
 
   switch (target.harness) {
     case "codex": {
@@ -199,6 +230,7 @@ export function buildHarnessCommand(
         const args = [
           "exec",
           "resume",
+          ...(structuredJson ? ["--json"] : []),
           "--skip-git-repo-check",
           ...modelFlags,
           ...effortFlags,
@@ -209,12 +241,13 @@ export function buildHarnessCommand(
         return {
           command: bin,
           args,
-          displayCommand: `${bin} exec resume ${ctx.nativeSessionId} ${summarySelection}`,
+          displayCommand: `${bin} exec resume ${structuredJson ? "--json " : ""}${ctx.nativeSessionId} ${summarySelection}`,
         };
       }
       const safetyFlags = isReadOnly ? ["-s", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"];
       const args = [
         "exec",
+        ...(structuredJson ? ["--json"] : []),
         "-C",
         ctx.root,
         "--skip-git-repo-check",
@@ -223,7 +256,11 @@ export function buildHarnessCommand(
         ...safetyFlags,
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} exec -C ${ctx.root} ${safetyFlags.join(" ")} ${summarySelection}` };
+      return {
+        command: bin,
+        args,
+        displayCommand: `${bin} exec ${structuredJson ? "--json " : ""}-C ${ctx.root} ${safetyFlags.join(" ")} ${summarySelection}`,
+      };
     }
 
     case "qodercn": {
@@ -240,8 +277,7 @@ export function buildHarnessCommand(
       const args = [
         "-w",
         ctx.root,
-        "-o",
-        "stream-json",
+        ...(structuredJson ? ["-o", "stream-json"] : []),
         ...permissionFlags,
         "--append-system-prompt",
         QODER_PRINT_MODE_GUARD,
@@ -254,7 +290,7 @@ export function buildHarnessCommand(
       return {
         command: bin,
         args,
-        displayCommand: `${bin} -p -o stream-json ${permissionFlags.join(" ")} -m ${model}${ctx.nativeSessionId && ctx.action !== "review" ? ` -r ${ctx.nativeSessionId}` : ""}`,
+        displayCommand: `${bin} -p${structuredJson ? " -o stream-json" : ""} ${permissionFlags.join(" ")} -m ${model}${ctx.nativeSessionId && ctx.action !== "review" ? ` -r ${ctx.nativeSessionId}` : ""}`,
       };
     }
 
@@ -262,6 +298,7 @@ export function buildHarnessCommand(
       const bin = exe || "opencode";
       const args = [
         "run",
+        ...(structuredJson ? ["--format", "json"] : []),
         "--standalone",
         "--auto",
         ...(model && model !== "default" ? ["--model", model] : []),
@@ -269,7 +306,11 @@ export function buildHarnessCommand(
         ...(ctx.nativeSessionId ? ["--session", ctx.nativeSessionId] : []),
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} run --standalone --model ${model}` };
+      return {
+        command: bin,
+        args,
+        displayCommand: `${bin} run${structuredJson ? " --format json" : ""} --standalone --model ${model}`,
+      };
     }
 
     case "agy": {
@@ -315,6 +356,7 @@ export function buildHarnessCommand(
       const args = [
         "-p",
         ctx.prompt,
+        ...(structuredJson ? ["--output-format", "stream-json"] : []),
         "--mode",
         mode,
         ...(mode === "auto" ? ["--dangerously-skip-permissions"] : []),
@@ -322,20 +364,29 @@ export function buildHarnessCommand(
         ...(resolvedEffort ? ["--effort", resolvedEffort] : []),
         ...(ctx.nativeSessionId ? ["--conversation", ctx.nativeSessionId] : []),
       ];
-      return { command: bin, args, displayCommand: `${bin} -p --mode ${mode} (model=${resolvedModel})` };
+      return {
+        command: bin,
+        args,
+        displayCommand: `${bin} -p${structuredJson ? " --output-format stream-json" : ""} --mode ${mode} (model=${resolvedModel})`,
+      };
     }
 
     case "omp": {
       const bin = exe || "omp";
       const args = [
         "-p",
+        ...(structuredJson ? ["--mode=json"] : []),
         `--cwd=${ctx.root}`,
         ...(model && model !== "default" ? [`--model=${model}`] : []),
         ...(effort ? [`--thinking=${effort}`] : []),
         ...(ctx.nativeSessionId ? [`--resume=${ctx.nativeSessionId}`] : []),
         ctx.prompt,
       ];
-      return { command: bin, args, displayCommand: `${bin} -p --model=${model}` };
+      return {
+        command: bin,
+        args,
+        displayCommand: `${bin} -p${structuredJson ? " --mode=json" : ""} --model=${model}`,
+      };
     }
   }
 }
@@ -600,137 +651,6 @@ function parseReviewOutput(
   return null;
 }
 
-const CLI_NOISE_RE = /^Model ".*" is not available right now; using ".*" instead\.?(?: Use \/model to choose another model\.?)?$/i;
-
-function stripCliNoise(text: string): string {
-  return text
-    .split(/\r?\n/)
-    .filter((line) => !CLI_NOISE_RE.test(line.trim()))
-    .join("\n");
-}
-
-function summarizeToolInput(inp: unknown): string {
-  if (!inp || typeof inp !== "object") return "";
-  const rec = inp as Record<string, unknown>;
-  const raw =
-    typeof rec.command === "string"
-      ? rec.command
-      : typeof rec.file_path === "string"
-        ? rec.file_path
-        : typeof rec.path === "string"
-          ? rec.path
-          : typeof rec.pattern === "string"
-            ? rec.pattern
-            : "";
-  return raw.replace(/\s+/g, " ").trim().slice(0, 90);
-}
-
-interface ParsedStreamLine {
-  displayText: string;
-  replyText: string | null;
-  sessionId?: string;
-  effectiveModel?: string;
-  modelFallback?: boolean;
-}
-
-function parseQoderStreamLine(rawLine: string, fallbackModel: string, hasPriorReply: boolean): ParsedStreamLine {
-  const trimmed = rawLine.trim();
-  if (!trimmed || CLI_NOISE_RE.test(trimmed)) {
-    return { displayText: "", replyText: null };
-  }
-  if (trimmed.startsWith("{")) {
-    try {
-      const evt = JSON.parse(trimmed) as {
-        type?: string;
-        subtype?: string;
-        model?: string;
-        session_id?: string;
-        result?: string;
-        is_error?: boolean;
-        duration_ms?: number;
-        message?: {
-          content?: Array<{
-            type?: string;
-            thinking?: string;
-            text?: string;
-            name?: string;
-            input?: unknown;
-          }>;
-        };
-      };
-      const isQoderEnvelope =
-        typeof evt.session_id === "string" &&
-        (evt.type === "system" || evt.type === "assistant" || evt.type === "user" || evt.type === "result");
-      if (!isQoderEnvelope) {
-        return { displayText: `${trimmed}\n`, replyText: null };
-      }
-      const sessionId = evt.session_id;
-      if (evt.type === "system") {
-        if (evt.subtype === "init") {
-          const requested = fallbackModel && fallbackModel !== "default" ? fallbackModel : "";
-          const reported = typeof evt.model === "string" ? evt.model.trim() : "";
-          const actual = reported || fallbackModel;
-          const modelFallback = Boolean(
-            requested && requested.toLowerCase() !== "auto" && actual.toLowerCase() === "auto",
-          );
-          const fallbackNote = modelFallback
-            ? ` ⚠️ 请求模型 ${requested} 不可用，已自动回退为 auto`
-            : "";
-          return {
-            displayText: `⚡ Qoder 引擎已就绪 (model: ${actual}${fallbackNote})\n`,
-            replyText: null,
-            sessionId,
-            ...(reported ? { effectiveModel: actual } : {}),
-            ...(modelFallback ? { modelFallback: true } : {}),
-          };
-        }
-        return { displayText: "", replyText: null, sessionId };
-      }
-      if (evt.type === "assistant" && Array.isArray(evt.message?.content)) {
-        const displayParts: string[] = [];
-        const replyParts: string[] = [];
-        for (const block of evt.message.content) {
-          if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
-            displayParts.push(`💭 ${block.thinking.trim()}`);
-          } else if (block.type === "tool_use" && typeof block.name === "string") {
-            const summary = summarizeToolInput(block.input);
-            displayParts.push(`🔧 调用工具: ${block.name}${summary ? ` (${summary})` : ""}`);
-          } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-            const text = block.text.trim();
-            displayParts.push(text);
-            replyParts.push(text);
-          }
-        }
-        return {
-          displayText: displayParts.length > 0 ? `${displayParts.join("\n")}\n` : "",
-          replyText: replyParts.length > 0 ? replyParts.join("\n\n") : null,
-          sessionId,
-        };
-      }
-      if (evt.type === "result") {
-        const resultText = typeof evt.result === "string" && evt.result.trim() ? evt.result.trim() : null;
-        const sec = ((Number(evt.duration_ms) || 0) / 1000).toFixed(1);
-        if (evt.is_error) {
-          return {
-            displayText: resultText ? `❌ ${resultText}\n` : `❌ 执行异常结束 (${sec}s)\n`,
-            replyText: null,
-            sessionId,
-          };
-        }
-        return {
-          displayText: `\n✓ 执行完成 (耗时 ${sec}s)\n`,
-          replyText: !hasPriorReply ? resultText : null,
-          sessionId,
-        };
-      }
-      return { displayText: "", replyText: null, sessionId };
-    } catch {
-      // Fall through and treat as plain stdout text if line is not valid JSON.
-    }
-  }
-  return { displayText: `${trimmed}\n`, replyText: null };
-}
-
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
 const globalActiveRunIds = new Set<string>();
 
@@ -739,12 +659,19 @@ export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
 export class HubExecutor {
   private readonly activeJobs = new Map<string, ActiveJob>();
   private readonly runLogs = new Map<string, string>();
+  private readonly traceCollectors = new Map<string, RunTraceCollector>();
+  private readonly plainTextFallbackHarnesses = new Set<HarnessId>();
   private readonly listeners = new Set<(ev: RunExecutorEvent) => void>();
   private readonly cliEntryPath: string;
   private readonly commandBuilder?: CustomCommandBuilder;
-  private readonly getHubPreferences?: () => { routing?: RoutingConfig; outputLanguage?: OutputLanguage };
+  private readonly getHubPreferences?: () => {
+    routing?: RoutingConfig;
+    outputLanguage?: OutputLanguage;
+    observability?: HubObservabilityConfig;
+  };
   private readonly onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
   private readonly onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
+  private readonly onLedgerEntry?: (entry: RunLedgerEntry) => void;
   private readonly nodeId?: string;
   private readonly hasCustomInitialHarnesses: boolean;
   private cachedHarnesses: HarnessInfo[] | null = null;
@@ -756,9 +683,14 @@ export class HubExecutor {
     cliEntryPath?: string;
     commandBuilder?: CustomCommandBuilder;
     initialHarnesses?: HarnessInfo[];
-    getHubPreferences?: () => { routing?: RoutingConfig; outputLanguage?: OutputLanguage };
+    getHubPreferences?: () => {
+      routing?: RoutingConfig;
+      outputLanguage?: OutputLanguage;
+      observability?: HubObservabilityConfig;
+    };
     onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
     onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
+    onLedgerEntry?: (entry: RunLedgerEntry) => void;
     nodeId?: string;
   } = {}) {
     this.cliEntryPath = options.cliEntryPath ?? path.resolve(import.meta.dir, "../cli/index.ts");
@@ -766,6 +698,7 @@ export class HubExecutor {
     this.getHubPreferences = options.getHubPreferences;
     this.onTelemetryOutcome = options.onTelemetryOutcome;
     this.onPainPoint = options.onPainPoint;
+    this.onLedgerEntry = options.onLedgerEntry;
     this.nodeId = options.nodeId;
     this.hasCustomInitialHarnesses = Boolean(options.initialHarnesses);
     if (options.initialHarnesses) {
@@ -850,6 +783,7 @@ export class HubExecutor {
     const out: Array<AgentRunRecord & { requirementId: string; root?: string }> = [];
     for (const job of this.activeJobs.values()) {
       if (root && job.root !== root) continue;
+      const liveMetrics = this.traceCollectors.get(job.runId)?.snapshotMetrics();
       out.push({
         id: job.runId,
         requirementId: job.requirementId,
@@ -860,6 +794,15 @@ export class HubExecutor {
         ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
         ...(job.modelFallback ? { modelFallback: true } : {}),
         ...(job.target.reasoningEffort ? { reasoningEffort: job.target.reasoningEffort } : {}),
+        quotaPool: job.quotaPool,
+        billingMode: job.billingMode,
+        dispatchReason: job.dispatchReason,
+        handoffMode: job.handoffMode,
+        ...(job.parentRunId ? { parentRunId: job.parentRunId } : {}),
+        contextWindow: job.contextWindow,
+        tracePath: job.tracePath,
+        contextPath: job.contextPath,
+        ...(liveMetrics ?? {}),
         status: "running",
         startedAt: job.startedAt,
         endedAt: null,
@@ -873,6 +816,16 @@ export class HubExecutor {
 
   getLiveLog(runId: string): string | null {
     return this.runLogs.get(runId) ?? null;
+  }
+
+  getLiveTrace(
+    runId: string,
+    afterSeq = 0,
+    limit = 2000,
+  ): { events: RunTraceEvent[]; nextSeq: number; totalEvents: number; hasMore: boolean } | null {
+    const collector = this.traceCollectors.get(runId);
+    if (!collector) return null;
+    return collector.getEvents(afterSeq, limit);
   }
 
   async startRun(input: StartRunInput): Promise<{ run: AgentRunRecord; detail: RequirementDetail; target: ModelTarget }> {
@@ -889,6 +842,14 @@ export class HubExecutor {
     const cfg = prefs?.routing ? null : readHubConfig();
     const activeRouting = prefs?.routing ?? cfg!.routing;
     const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
+    let observability = prefs?.observability ?? cfg?.observability;
+    if (!observability && prefs?.routing) {
+      try {
+        observability = readHubConfig().observability;
+      } catch {
+        observability = undefined;
+      }
+    }
     const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
     let currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
@@ -914,6 +875,7 @@ export class HubExecutor {
     const runsList = currentDetail.state.agentRuns ?? [];
     const prevRun = runsList.slice(-1)[0] ?? null;
 
+    let sessionAffinityApplied = false;
     let override: Partial<ModelTarget> | null =
       input.harness && input.model
         ? { harness: input.harness as ModelTarget["harness"], model: input.model, reasoningEffort: input.reasoningEffort }
@@ -931,6 +893,7 @@ export class HubExecutor {
         lastImplRun &&
         (harnesses.some((h) => h.id === lastImplRun.harness && h.installed) || Boolean(this.commandBuilder));
       if (lastImplRun && isRunnable && !isModelCoolingDown(lastImplRun.harness, lastImplRun.model)) {
+        sessionAffinityApplied = true;
         override = {
           harness: lastImplRun.harness as HarnessId,
           model: lastImplRun.model,
@@ -950,10 +913,11 @@ export class HubExecutor {
       if (next) target = next;
     }
 
-    // Persist human discussion/annotation if supplied before execution (skip on automatic fallback retry)
+    // Persist human discussion/annotation if supplied before execution (skip on automatic retries)
     if (
       input.message?.trim() &&
       !(input.autoFallbackAttempt && input.autoFallbackAttempt > 0) &&
+      !input.forcePlainText &&
       (input.action === "ask" || input.mode === "refine" || input.action === "design")
     ) {
       await addDiscussion(base, id, {
@@ -1023,6 +987,7 @@ export class HubExecutor {
       markdown: handoffMd,
       detail: postHandoffDetail,
       outputLanguage,
+      composition,
     } = await synthesizeHandoffPacket(base, id, {
       action: input.action,
       humanInstruction: input.message,
@@ -1046,6 +1011,32 @@ export class HubExecutor {
       !prevWriteRun.rateLimited &&
       input.action !== "review";
 
+    const handoffMode: RunHandoffMode = canResumeSameHarness
+      ? "native_resume"
+      : runsList.length > 0
+        ? "fresh_handoff"
+        : "first_run";
+    const parentRunId = canResumeSameHarness ? prevWriteRun!.id : prevRun?.id;
+    const dispatchReason: RunDispatchReason = input.resolveConflict
+      ? "conflict_resolve"
+      : input.isAutoReview
+        ? "auto_review"
+        : input.useFallback
+          ? "auto_fallback"
+          : input.action === "ask"
+            ? "ask"
+            : input.mode === "refine"
+              ? "refine"
+              : input.harness && input.model
+                ? prevRun &&
+                  prevRun.status === "failed" &&
+                  `${prevRun.harness}::${prevRun.model}` !== `${input.harness}::${input.model}`
+                  ? "manual_fallback"
+                  : "user"
+                : sessionAffinityApplied
+                  ? "session_affinity"
+                  : "route_primary";
+
     const projectMeta = getProjectStatus(base).project;
     const projectContext = discoverProjectContext(codeRoot, projectMeta);
     const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
@@ -1054,6 +1045,8 @@ export class HubExecutor {
       fastCommand: projectContext.fastCommand,
       fullCommand: projectContext.fullCommand,
     });
+    const structuredJsonEnabled =
+      !input.forcePlainText && !this.plainTextFallbackHarnesses.has(target.harness);
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
           root: codeRoot,
@@ -1062,6 +1055,7 @@ export class HubExecutor {
           prompt,
           nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
           harnesses,
+          structuredJson: structuredJsonEnabled,
         })
       : buildHarnessCommand(target, {
           root: codeRoot,
@@ -1069,16 +1063,72 @@ export class HubExecutor {
           prompt,
           nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
           harnesses,
+          structuredJson: structuredJsonEnabled,
         });
+
+    const targetHarnessInfo = harnesses.find((h) => h.id === target.harness);
+    const targetModelInfo =
+      targetHarnessInfo?.models.find((m) => m.id === target.model) ??
+      targetHarnessInfo?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(target.model));
+    const poolInfo = resolveQuotaPool(target.harness, target.model, {
+      billingOverrides: observability?.billingOverrides,
+      isFreeHint: targetModelInfo?.isFree,
+    });
+    const modelSpec = resolveModelSpec(target.harness, target.model, harnesses, observability);
 
     const startedAt = Date.now();
     const runId = `RUN-${startedAt}-${randomUUID().slice(0, 6)}`;
+    const snapshotBefore = await observeGitSnapshot(codeRoot);
+    const specHashBefore = postHandoffDetail.state.specHash;
+    const traceRelPath = `runs/run-${runId}.events.jsonl`;
+    const contextSnapshot: RunContextSnapshot = {
+      schemaVersion: 1,
+      runId,
+      requirementId: id,
+      action: input.action,
+      capturedAt: startedAt,
+      handoffMode,
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(canResumeSameHarness && prevWriteRun?.nativeSessionId ? { resumedSessionId: prevWriteRun.nativeSessionId } : {}),
+      dispatchReason,
+      selectedTarget: {
+        harness: target.harness,
+        model: target.model,
+        ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+      },
+      routeCandidates: candidates.map((c) => ({
+        harness: c.harness,
+        model: c.model,
+        ...(c.reasoningEffort ? { reasoningEffort: c.reasoningEffort } : {}),
+        ...(`${c.harness}::${c.model}` !== `${target.harness}::${target.model}` ? { skippedReason: "backup" } : {}),
+      })),
+      specHashBefore,
+      codeSnapshotHashBefore: snapshotBefore?.fingerprint ?? null,
+      handoffTotalBytes: composition.totalBytes,
+      handoffBudgetBytes: composition.budgetBytes,
+      handoffEstTokens: composition.estTokens,
+      promptBytes: Buffer.byteLength(prompt, "utf8"),
+      promptEstTokens: estimateTokens(prompt),
+      sections: composition.sections,
+      truncatedSections: composition.truncatedSections,
+      ...(postHandoffDetail.state.handoffNote !== undefined ? { handoffNoteSnapshot: postHandoffDetail.state.handoffNote } : {}),
+      handoffMarkdown: handoffMd,
+      promptText: prompt,
+    };
+    const contextRelPath = saveAgentRunContext(base, id, runId, contextSnapshot);
+
     const record: AgentRunRecord = {
       id: runId,
       action: input.action,
       harness: target.harness,
       model: target.model,
       ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+      quotaPool: poolInfo.quotaPool,
+      billingMode: poolInfo.billingMode,
+      dispatchReason,
+      handoffMode,
+      ...(parentRunId ? { parentRunId } : {}),
+      contextWindow: modelSpec.contextWindow,
       hubPid: process.pid,
       status: "running",
       startedAt,
@@ -1086,13 +1136,71 @@ export class HubExecutor {
       exitCode: null,
       durationMs: 0,
       logPath: `runs/run-${runId}.log`,
+      tracePath: traceRelPath,
+      contextPath: contextRelPath,
     };
 
-    const snapshotBefore = await observeGitSnapshot(codeRoot);
     const detail = await startAgentRun(base, id, record, snapshotBefore?.fingerprint ?? null);
     if (codeRoot !== base) {
       syncRequirementMirrorToSandbox(base, id, codeRoot);
     }
+
+    const traceDiskPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/${traceRelPath}`);
+    const collector = new RunTraceCollector({
+      runId,
+      traceFilePath: traceDiskPath,
+      startedAt,
+      billingMode: poolInfo.billingMode,
+      quotaPool: poolInfo.quotaPool,
+      modelSpec,
+      onEvent: (ev) => {
+        this.emit({
+          type: "agent.run.event",
+          root: base,
+          requirementId: id,
+          runId,
+          event: ev,
+          at: ev.ts,
+        });
+      },
+      onMetrics: (metrics) => {
+        this.emit({
+          type: "agent.run.metrics",
+          root: base,
+          requirementId: id,
+          runId,
+          metrics,
+          at: Date.now(),
+        });
+      },
+    });
+    this.traceCollectors.set(runId, collector);
+    collector.append({
+      type: "run.init",
+      action: input.action,
+      harness: target.harness,
+      model: target.model,
+      ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+      quotaPool: poolInfo.quotaPool,
+      billingMode: poolInfo.billingMode,
+      dispatchReason,
+      handoffMode,
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(canResumeSameHarness && prevWriteRun?.nativeSessionId ? { resumedSessionId: prevWriteRun.nativeSessionId } : {}),
+      structuredJson: structuredJsonEnabled,
+    });
+    collector.append({
+      type: "handoff.snapshot",
+      handoffMode,
+      contextPath: contextRelPath,
+      handoffTotalBytes: composition.totalBytes,
+      handoffBudgetBytes: composition.budgetBytes,
+      handoffEstTokens: composition.estTokens,
+      promptBytes: contextSnapshot.promptBytes,
+      promptEstTokens: contextSnapshot.promptEstTokens,
+      sections: composition.sections,
+      truncatedSections: composition.truncatedSections,
+    });
 
     const shimBin = ensureWbShim(this.cliEntryPath);
     const childEnv: NodeJS.ProcessEnv = {
@@ -1133,6 +1241,14 @@ export class HubExecutor {
       requirementId: id,
       action: input.action,
       target,
+      quotaPool: poolInfo.quotaPool,
+      billingMode: poolInfo.billingMode,
+      dispatchReason,
+      handoffMode,
+      ...(parentRunId ? { parentRunId } : {}),
+      contextWindow: modelSpec.contextWindow,
+      tracePath: traceRelPath,
+      contextPath: contextRelPath,
       child,
       startedAt,
       cancelled: false,
@@ -1215,10 +1331,13 @@ export class HubExecutor {
     };
 
     const emitCleanChunk = (rawChunk: string) => {
-      const text = sanitizeOutput(rawChunk, 32 * 1024).text;
+      const text = sanitizeOutput(rawChunk, 64 * 1024).text;
       if (!text) return;
       const cur = (this.runLogs.get(runId) ?? "") + text;
-      const bounded = cur.length > MAX_EVIDENCE_BYTES ? cur.slice(cur.length - MAX_EVIDENCE_BYTES) : cur;
+      const bounded =
+        Buffer.byteLength(cur, "utf8") > MAX_RUN_LOG_BYTES
+          ? clipHeadTailUtf8(cur, 1_500_000, 2_500_000).text
+          : cur;
       this.runLogs.set(runId, bounded);
       appendDiskLog(text);
       this.emit({
@@ -1231,38 +1350,67 @@ export class HubExecutor {
       });
     };
 
-    const handleQoderLine = (line: string) => {
-      const parsed = parseQoderStreamLine(line, target.model, cleanReplyParts.length > 0);
+    const streamAdapter = createHarnessStreamAdapter(
+      target.harness,
+      target.model,
+      structuredJsonEnabled,
+    );
+
+    const handleAdapterResult = (
+      parsed: ReturnType<typeof streamAdapter.feedLine>,
+      hadTrailingNewline = true,
+    ) => {
       if (parsed.sessionId) capturedSessionId = parsed.sessionId;
       if (parsed.effectiveModel) job.effectiveModel = parsed.effectiveModel;
       if (parsed.modelFallback) job.modelFallback = true;
-      if (parsed.replyText) cleanReplyParts.push(parsed.replyText);
-      if (parsed.displayText) emitCleanChunk(parsed.displayText);
+      if (
+        parsed.authoritativeUsage ||
+        parsed.authoritativeCostUsd !== undefined ||
+        parsed.authoritativeTurnsCount !== undefined
+      ) {
+        collector.setAuthoritativeTotals({
+          usage: parsed.authoritativeUsage,
+          costUsd: parsed.authoritativeCostUsd,
+          turnsCount: parsed.authoritativeTurnsCount,
+        });
+      }
+      for (const ev of parsed.events) {
+        collector.append(ev);
+      }
+      if (parsed.replyText) {
+        cleanReplyParts.push(parsed.replyText);
+      }
+      if (parsed.displayText) {
+        const allRawLine = parsed.events.length > 0 && parsed.events.every((e) => e.type === "raw.line");
+        const displayOut = !hadTrailingNewline && allRawLine ? parsed.displayText.replace(/\n$/, "") : parsed.displayText;
+        emitCleanChunk(displayOut);
+        if (allRawLine) {
+          appendStdoutReply(displayOut);
+        }
+      }
     };
 
     const onStdoutChunk = (buf: Buffer) => {
       if (buf.length > 0) resetIdleTimer();
-      const chunk = buf.toString("utf8");
-      if (target.harness !== "qodercn") {
-        const cleaned = stripCliNoise(chunk);
-        if (cleaned) {
-          appendStdoutReply(cleaned);
-          emitCleanChunk(cleaned);
-        }
-        return;
-      }
-      stdoutLineBuf += chunk;
+      stdoutLineBuf += buf.toString("utf8");
       const lines = stdoutLineBuf.split(/\r?\n/);
       stdoutLineBuf = lines.pop() ?? "";
       for (const line of lines) {
-        handleQoderLine(line);
+        handleAdapterResult(streamAdapter.feedLine(line), true);
       }
     };
 
     const onStderrChunk = (buf: Buffer) => {
       if (buf.length > 0) resetIdleTimer();
       const cleaned = stripCliNoise(buf.toString("utf8"));
-      if (cleaned.trim()) emitCleanChunk(cleaned);
+      if (cleaned.trim()) {
+        collector.append({
+          type: "raw.line",
+          stream: "stderr",
+          text: sanitizeOutput(cleaned, 8192).text,
+        });
+        emitCleanChunk(cleaned);
+      }
     };
 
     child.stdout?.on("data", onStdoutChunk);
@@ -1278,16 +1426,37 @@ export class HubExecutor {
       this.activeJobs.delete(runId);
       globalActiveRunIds.delete(runId);
 
-      if (target.harness === "qodercn" && stdoutLineBuf.trim()) {
-        handleQoderLine(stdoutLineBuf);
+      if (stdoutLineBuf.trim()) {
+        handleAdapterResult(streamAdapter.feedLine(stdoutLineBuf), false);
         stdoutLineBuf = "";
       }
+      const flushed = streamAdapter.flush();
+      if (flushed) handleAdapterResult(flushed);
 
       const endedAt = Date.now();
       const durationMs = Math.max(0, endedAt - startedAt);
-      const rawLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
+      const assembledLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
+      const rawLog =
+        Buffer.byteLength(assembledLog, "utf8") > MAX_RUN_LOG_BYTES
+          ? clipHeadTailUtf8(assembledLog, 1_500_000, 2_500_000).text
+          : assembledLog;
+      this.runLogs.set(runId, rawLog);
+
       const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
       const modelUnavailable = !job.cancelled && !job.timedOut && detectModelUnavailableError(rawLog, exitCode);
+      const shouldRetryPlainText =
+        structuredJsonEnabled &&
+        !input.forcePlainText &&
+        !job.cancelled &&
+        !job.timedOut &&
+        !spawnErr &&
+        exitCode !== 0 &&
+        durationMs < 5000 &&
+        isUnsupportedJsonFlagError(rawLog);
+      if (shouldRetryPlainText) {
+        this.plainTextFallbackHarnesses.add(target.harness);
+      }
+
       let status: AgentRunRecord["status"] = job.cancelled
         ? "cancelled"
         : exitCode === 0 && !spawnErr && !job.timedOut
@@ -1328,49 +1497,75 @@ export class HubExecutor {
       const nativeSessionId = capturedSessionId ?? matchedSessionId;
       const errorSummary =
         status === "failed"
-          ? reviewParseFailed
-            ? "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
-            : job.timedOut
-              ? job.timeoutReason === "max_duration"
-                ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
-                : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-              : modelUnavailable
-                ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
-                : rateLimited
-                  ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-                  : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+          ? shouldRetryPlainText
+            ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
+            : reviewParseFailed
+              ? "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
+              : job.timedOut
+                ? job.timeoutReason === "max_duration"
+                  ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+                  : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
+                : modelUnavailable
+                  ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
+                  : rateLimited
+                    ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                    : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
 
-      try {
-        const outcome: TelemetryOutcomeInput = {
-          harness: target.harness,
-          model: target.model,
-          action: input.action,
-          status,
-          durationMs,
-          rateLimited,
-          timedOut: job.timedOut,
-          modelFallback: job.modelFallback === true,
-          modelUnavailable,
-          now: endedAt,
-        };
-        if (this.onTelemetryOutcome) {
-          this.onTelemetryOutcome(outcome);
-        } else {
-          recordModelRunOutcome(outcome);
-        }
-      } catch {
-        // Telemetry write failure must not abort run finalization.
-      }
-
-      let postRunDetail: RequirementDetail | null = null;
+      let snap: Awaited<ReturnType<typeof observeGitSnapshot>> = null;
+      let latestReq: RequirementDetail | null = null;
       try {
         if (codeRoot !== base) {
           await reconcileRsiSandboxBaseline(base, id).catch(() => null);
         }
-        const snap = await observeGitSnapshot(codeRoot);
-        const latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+        snap = await observeGitSnapshot(codeRoot);
+        latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+      } catch {
+        // Ignore git/requirement read errors during finalize pre-observation; handled below.
+      }
+      const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
+      const codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
 
+      const traceSummary = collector.finalizeRun({
+        status,
+        exitCode,
+        durationMs,
+        specChanged,
+        codeChanged,
+        errorSummary,
+      });
+
+      if (!shouldRetryPlainText) {
+        try {
+          const outcome: TelemetryOutcomeInput = {
+            harness: target.harness,
+            model: target.model,
+            action: input.action,
+            status,
+            durationMs,
+            rateLimited,
+            timedOut: job.timedOut,
+            modelFallback: job.modelFallback === true,
+            modelUnavailable,
+            now: endedAt,
+            ...(traceSummary.usage?.totalTokens ? { tokens: traceSummary.usage.totalTokens } : {}),
+            ...(traceSummary.usage?.cacheReadTokens ? { cacheReadTokens: traceSummary.usage.cacheReadTokens } : {}),
+            apiCostUsd: traceSummary.cost.apiCostUsd,
+            equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
+            toolCalls: traceSummary.toolCallsCount,
+          };
+          if (this.onTelemetryOutcome) {
+            this.onTelemetryOutcome(outcome);
+          } else {
+            recordModelRunOutcome(outcome);
+          }
+        } catch {
+          // Telemetry write failure must not abort run finalization.
+        }
+      }
+
+      let postRunDetail: RequirementDetail | null = null;
+      try {
         // Post-run side effects by action
         if (status === "succeeded" && input.action === "ask") {
           const cleanAnswer =
@@ -1388,7 +1583,7 @@ export class HubExecutor {
               message: answerText,
             });
           }
-        } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview) {
+        } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview && latestReq) {
           await recordReviewReport(base, id, {
             reviewerHarness: target.harness,
             reviewerModel: target.model,
@@ -1419,6 +1614,24 @@ export class HubExecutor {
             ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
             ...(job.modelFallback ? { modelFallback: true } : {}),
             errorSummary,
+            quotaPool: poolInfo.quotaPool,
+            billingMode: poolInfo.billingMode,
+            ...(traceSummary.usage ? { usage: traceSummary.usage } : {}),
+            cost: traceSummary.cost,
+            turnsCount: traceSummary.turnsCount,
+            toolCallsCount: traceSummary.toolCallsCount,
+            toolErrorCount: traceSummary.toolErrorCount,
+            compactionCount: traceSummary.compactionCount,
+            ...(traceSummary.peakContextTokens !== undefined ? { peakContextTokens: traceSummary.peakContextTokens } : {}),
+            contextWindow: traceSummary.contextWindow,
+            llmDurationMs: traceSummary.llmDurationMs,
+            toolDurationMs: traceSummary.toolDurationMs,
+            ...(traceSummary.ttftMs !== undefined ? { ttftMs: traceSummary.ttftMs } : {}),
+            specChanged,
+            codeChanged,
+            tracePath: traceRelPath,
+            contextPath: contextRelPath,
+            ...(traceSummary.traceTruncated ? { traceTruncated: true } : {}),
           },
           rawLog,
           snap?.fingerprint ?? null,
@@ -1455,6 +1668,60 @@ export class HubExecutor {
         );
       }
 
+      if (!shouldRetryPlainText) {
+        try {
+          const ledgerEntry: RunLedgerEntry = {
+            schemaVersion: 1,
+            runId,
+            projectRoot: base,
+            nodeId: this.nodeId ?? "local",
+            requirementId: id,
+            requirementTitle: (postRunDetail ?? latestReq ?? currentDetail).state.title,
+            action: input.action,
+            harness: target.harness,
+            model: target.model,
+            ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
+            ...(job.modelFallback ? { modelFallback: true } : {}),
+            ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+            quotaPool: poolInfo.quotaPool,
+            billingMode: poolInfo.billingMode,
+            status,
+            dispatchReason,
+            handoffMode,
+            startedAt,
+            endedAt,
+            durationMs,
+            llmDurationMs: traceSummary.llmDurationMs,
+            toolDurationMs: traceSummary.toolDurationMs,
+            ...(traceSummary.ttftMs !== undefined ? { ttftMs: traceSummary.ttftMs } : {}),
+            ...(traceSummary.usage ? { usage: traceSummary.usage } : {}),
+            apiCostUsd: traceSummary.cost.apiCostUsd,
+            equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
+            costSource: traceSummary.cost.costSource,
+            turnsCount: traceSummary.turnsCount,
+            toolCallsCount: traceSummary.toolCallsCount,
+            toolErrorCount: traceSummary.toolErrorCount,
+            compactionCount: traceSummary.compactionCount,
+            ...(traceSummary.peakContextTokens !== undefined ? { peakContextTokens: traceSummary.peakContextTokens } : {}),
+            contextWindow: traceSummary.contextWindow,
+            ...(composition.truncatedSections.length > 0 ? { handoffTruncated: true } : {}),
+            ...(rateLimited ? { rateLimited: true } : {}),
+            ...(job.timedOut ? { timedOut: true } : {}),
+            specChanged,
+            codeChanged,
+          };
+          if (this.onLedgerEntry) {
+            this.onLedgerEntry(ledgerEntry);
+          } else if (!this.nodeId) {
+            appendRunLedger(ledgerEntry);
+          }
+        } catch {
+          // Ledger recording must never break run finalization.
+        }
+      }
+
+      this.traceCollectors.delete(runId);
+
       this.emit({
         type: "agent.run.finished",
         root: base,
@@ -1470,6 +1737,13 @@ export class HubExecutor {
         errorSummary,
         exitCode,
         durationMs,
+        metrics: {
+          ...traceSummary,
+          quotaPool: poolInfo.quotaPool,
+          billingMode: poolInfo.billingMode,
+          specChanged,
+          codeChanged,
+        },
         at: endedAt,
       });
       this.emit({
@@ -1479,6 +1753,24 @@ export class HubExecutor {
         runId,
         at: endedAt,
       });
+
+      if (shouldRetryPlainText) {
+        const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
+        if (!alreadyRunning) {
+          void this.startRun({
+            ...input,
+            harness: target.harness,
+            model: target.model,
+            reasoningEffort: target.reasoningEffort,
+            forcePlainText: true,
+          }).catch((err) => {
+            console.error(
+              `[workbench] plain-text fallback retry failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        }
+        return;
+      }
 
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
@@ -1655,7 +1947,7 @@ export class HubExecutor {
           let existingLog = "";
           try {
             if (fs.existsSync(logFile)) {
-              existingLog = readBoundedText(logFile, MAX_EVIDENCE_BYTES);
+              existingLog = readBoundedText(logFile, MAX_RUN_LOG_BYTES);
             }
           } catch {
             existingLog = "";

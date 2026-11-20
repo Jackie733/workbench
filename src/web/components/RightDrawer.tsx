@@ -1,19 +1,29 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AlertTriangle, Check, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
 import { api } from "../api.ts";
 import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
   adoptDiscussion,
   cancelRun,
+  hydrateRunLog,
+  hydrateRunTrace,
   openHandoff,
+  openRunAudit,
   openRunConsole,
   runAskFromDrawer,
   runRefineFromDrawer,
   triggerActiveRun,
   useRequirementQuery,
 } from "../queries.ts";
-import { AGENT_RUN_TONE, formatDateTime } from "../state.ts";
+import {
+  AGENT_RUN_TONE,
+  formatDateTime,
+  formatDurationHuman,
+  formatPercent,
+  formatTokenCount,
+  formatUsd,
+} from "../state.ts";
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/uiStore.ts";
@@ -54,7 +64,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const clearPendingAnnotations = useDraftStore((s) => s.clearPendingAnnotations);
 
   const activeRuns = useStreamStore((s) => s.activeRuns);
-  const selectedRunId = useStreamStore((s) => s.selectedRunId);
+  const selectedRunByReq = useStreamStore((s) => s.selectedRunByReq);
+  const logHydratedMap = useStreamStore((s) => s.logHydrated);
+  const runTraces = useStreamStore((s) => s.runTraces);
+  const liveRunMetrics = useStreamStore((s) => s.liveRunMetrics);
 
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const d = reqData?.detail ?? null;
@@ -195,16 +208,25 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
       ) ?? null
     : null;
   const runs = d ? [...(d.state.agentRuns ?? [])].reverse() : [];
-  const currentRunId = activeRun?.id ?? selectedRunId ?? runs[0]?.id ?? null;
-  const currentRun =
+  const explicitSelectedId = reqId ? (selectedRunByReq[reqId] ?? null) : null;
+  const validSelectedId =
+    explicitSelectedId &&
+    (runs.some((r) => r.id === explicitSelectedId) || (activeRun && activeRun.id === explicitSelectedId))
+      ? explicitSelectedId
+      : null;
+  const currentRunId = validSelectedId ?? activeRun?.id ?? runs[0]?.id ?? null;
+  const baseRun =
     currentRunId
       ? activeRun?.id === currentRunId
         ? activeRun
         : runs.find((r) => r.id === currentRunId) ?? null
       : null;
+  const currentLiveMetrics = currentRunId ? liveRunMetrics[currentRunId] : undefined;
+  const currentRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
 
   const liveText = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] ?? "" : ""));
-  const hasCachedLog = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] !== undefined : false));
+  const isLogHydrated = useStreamStore((s) => (currentRun ? Boolean(s.logHydrated[currentRun.id]) : false));
+  const traceState = currentRun ? runTraces[currentRun.id] : undefined;
   const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
 
   useEffect(() => {
@@ -215,26 +237,13 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
   useEffect(() => {
     if (!drawerOpen || drawerTab !== "console" || !reqId || !currentRun) return;
-    if (hasCachedLog) return;
-    let cancelled = false;
-    void api
-      .getAgentRunLog(reqId, currentRun.id)
-      .then((res) => {
-        if (cancelled) return;
-        const existing = useStreamStore.getState().liveRunLogs[currentRun.id];
-        if (existing === undefined || res.log.length > existing.length) {
-          useStreamStore.getState().setRunLogFull(currentRun.id, res.log);
-        }
-      })
-      .catch(() => {
-        if (!cancelled && useStreamStore.getState().liveRunLogs[currentRun.id] === undefined) {
-          useStreamStore.getState().setRunLogFull(currentRun.id, "");
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [drawerOpen, drawerTab, reqId, currentRun?.id, hasCachedLog]);
+    if (!isLogHydrated || !logHydratedMap[currentRun.id]) {
+      void hydrateRunLog(reqId, currentRun.id, false);
+    }
+    if (!traceState?.hydrated) {
+      void hydrateRunTrace(reqId, currentRun.id, false);
+    }
+  }, [drawerOpen, drawerTab, reqId, currentRun?.id, isLogHydrated, traceState?.hydrated]);
 
   const effectiveWidth = clampDrawerWidth(drawerWidth, maxWidth);
   const discussions = d?.state.discussions ?? [];
@@ -511,6 +520,19 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
                   {currentRun ? (
                     <>
+                      {activeRun && currentRun.id !== activeRun.id && (
+                        <div className="callout warning xs console-historical-banner" data-testid="historical-run-banner">
+                          <span>{t(language, "drawer.viewingHistorical", { runId: currentRun.id })}</span>
+                          <button
+                            className="btn ghost xs"
+                            type="button"
+                            data-testid="jump-to-live-run-btn"
+                            onClick={() => void openRunConsole(d.state.id, activeRun.id)}
+                          >
+                            {t(language, "drawer.jumpToLive")}
+                          </button>
+                        </div>
+                      )}
                       <div className="console-status-bar">
                         <div>
                           <span className={`badge ${AGENT_RUN_TONE[currentRun.status]}`}>
@@ -536,7 +558,15 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             </span>
                           )}
                         </div>
-                        <div style={{ display: "flex", gap: 6 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button
+                            className="btn ghost xs"
+                            type="button"
+                            data-testid="open-run-audit-btn"
+                            onClick={() => void openRunAudit(d.state.id, currentRun.id)}
+                          >
+                            <Icon icon={ExternalLink} size={14} /> {t(language, "drawer.deepAudit")}
+                          </button>
                           {currentRun.status === "running" ? (
                             <button
                               className="btn danger xs"
@@ -559,6 +589,44 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           ) : null}
                         </div>
                       </div>
+                      {(currentRun.usage || currentRun.cost || currentRun.turnsCount !== undefined || currentRun.toolCallsCount !== undefined) && (
+                        <div className="console-telemetry-strip" data-testid="console-telemetry-strip">
+                          <span className="console-tel-chip">
+                            <span className="muted">{t(language, "audit.tokens")}:</span>{" "}
+                            <strong>{formatTokenCount(currentRun.usage?.totalTokens ?? 0)}</strong>
+                            {currentRun.usage && currentRun.usage.inputTokens > 0 && (
+                              <span className="muted">
+                                {" "}({t(language, "audit.cacheShort")} {formatPercent(currentRun.usage.cacheReadTokens / currentRun.usage.inputTokens)})
+                              </span>
+                            )}
+                          </span>
+                          {currentRun.cost && (
+                            <span className="console-tel-chip">
+                              <span className="muted">{currentRun.billingMode === "api" ? "API" : t(language, "audit.equivShort")}:</span>{" "}
+                              <strong>{formatUsd(currentRun.billingMode === "api" ? currentRun.cost.apiCostUsd : currentRun.cost.equivalentCostUsd)}</strong>
+                              {currentRun.quotaPool && <span className="muted"> · {currentRun.quotaPool}</span>}
+                            </span>
+                          )}
+                          <span className="console-tel-chip">
+                            <span className="muted">{t(language, "audit.turnsTools")}:</span>{" "}
+                            <strong>{currentRun.turnsCount ?? 0} / {currentRun.toolCallsCount ?? 0}</strong>
+                          </span>
+                          <span className="console-tel-chip">
+                            <span className="muted">{t(language, "audit.elapsed")}:</span>{" "}
+                            <strong>
+                              {currentRun.status === "running"
+                                ? <LiveTimer startedAt={currentRun.startedAt} />
+                                : formatDurationHuman(currentRun.durationMs)}
+                            </strong>
+                          </span>
+                          {currentRun.peakContextTokens && currentRun.contextWindow ? (
+                            <span className="console-tel-chip">
+                              <span className="muted">{t(language, "audit.ctxShort")}:</span>{" "}
+                              <strong>{formatPercent(currentRun.peakContextTokens / currentRun.contextWindow)}</strong>
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
                       {currentRun.errorSummary && (
                         <div className="callout danger xs" style={{ marginBottom: 8 }}>
                           <Icon icon={AlertTriangle} size={14} /> {currentRun.errorSummary}
@@ -567,6 +635,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       <ConsoleOutput
                         runId={currentRun.id}
                         rawLog={liveText}
+                        traceEvents={traceState?.events}
+                        hasTrace={traceState ? traceState.hasTrace : undefined}
+                        traceHydrated={Boolean(traceState?.hydrated)}
                         isRunning={currentRun.status === "running"}
                         emptyText={t(language, "drawer.waiting")}
                       />

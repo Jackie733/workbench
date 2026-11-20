@@ -1126,10 +1126,10 @@ printf 'done\\n'
       target: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" },
       action: "implement",
       expectedArgs: [
-        "exec", "-C", "/repo", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "exec", "--json", "-C", "/repo", "--skip-git-repo-check", "-m", SELECTED_MODEL,
         "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox", PROMPT,
       ],
-      expectedSummary: `codex exec -C /repo --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`,
+      expectedSummary: `codex exec --json -C /repo --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`,
     },
     {
       name: "resume-with-selection",
@@ -1137,10 +1137,10 @@ printf 'done\\n'
       action: "implement",
       sessionId: "sess-codex-1",
       expectedArgs: [
-        "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "exec", "resume", "--json", "--skip-git-repo-check", "-m", SELECTED_MODEL,
         "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox", "sess-codex-1", PROMPT,
       ],
-      expectedSummary: `codex exec resume sess-codex-1 (model=${SELECTED_MODEL}, effort=medium)`,
+      expectedSummary: `codex exec resume --json sess-codex-1 (model=${SELECTED_MODEL}, effort=medium)`,
     },
     {
       name: "resume-read-only-ask",
@@ -1148,10 +1148,10 @@ printf 'done\\n'
       action: "ask",
       sessionId: "sess-codex-1",
       expectedArgs: [
-        "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+        "exec", "resume", "--json", "--skip-git-repo-check", "-m", SELECTED_MODEL,
         "-c", 'model_reasoning_effort="high"', "-c", 'sandbox_mode="read-only"', "sess-codex-1", PROMPT,
       ],
-      expectedSummary: `codex exec resume sess-codex-1 (model=${SELECTED_MODEL}, effort=high)`,
+      expectedSummary: `codex exec resume --json sess-codex-1 (model=${SELECTED_MODEL}, effort=high)`,
     },
     {
       name: "resume-default-model-without-effort",
@@ -1159,9 +1159,9 @@ printf 'done\\n'
       action: "implement",
       sessionId: "sess-codex-1",
       expectedArgs: [
-        "exec", "resume", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "sess-codex-1", PROMPT,
+        "exec", "resume", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "sess-codex-1", PROMPT,
       ],
-      expectedSummary: "codex exec resume sess-codex-1 (model=default)",
+      expectedSummary: "codex exec resume --json sess-codex-1 (model=default)",
     },
     {
       name: "review-never-resumes",
@@ -1169,9 +1169,9 @@ printf 'done\\n'
       action: "review",
       sessionId: "sess-codex-1",
       expectedArgs: [
-        "exec", "-C", "/repo", "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only", PROMPT,
+        "exec", "--json", "-C", "/repo", "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only", PROMPT,
       ],
-      expectedSummary: "codex exec -C /repo -s read-only (model=codex-auto-review)",
+      expectedSummary: "codex exec --json -C /repo -s read-only (model=codex-auto-review)",
     },
   ];
 
@@ -1231,10 +1231,10 @@ printf 'done\\n'
     await waitFinished(run1.run.id);
     const argv1 = readCapturedArgv(fixtureDir, 1);
     expect(argv1.slice(0, -1)).toEqual([
-      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "exec", "--json", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
       "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox",
     ]);
-    expect(argv1).toHaveLength(10);
+    expect(argv1).toHaveLength(11);
     expect(argv1.at(-1)).toContain("REQ-001");
     expect(run1.target).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" });
     expect(startedEvents[0]).toEqual({ runId: run1.run.id, harness: "codex", model: SELECTED_MODEL });
@@ -1248,7 +1248,7 @@ printf 'done\\n'
       nativeSessionId: FAKE_SESSION_ID,
     });
     const log1 = executor.getLiveLog(run1.run.id) ?? "";
-    expect(log1.split("\n")[0]).toBe(`$ ${fake} exec -C ${codeRoot} --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`);
+    expect(log1.split("\n")[0]).toBe(`$ ${fake} exec --json -C ${codeRoot} --dangerously-bypass-approvals-and-sandbox (model=${SELECTED_MODEL}, effort=medium)`);
     expect(log1).toContain(`model: ${SELECTED_MODEL}`);
     expect(log1).toContain("reasoning effort: medium");
     expect(log1).toContain(`warning: switching away from the recorded model ${CLI_DEFAULT_MODEL}`);
@@ -1267,12 +1267,12 @@ printf 'done\\n'
     await waitFinished(run2.run.id);
     const argv2 = readCapturedArgv(fixtureDir, 2);
     expect(argv2.slice(0, -2)).toEqual([
-      "exec", "resume", "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "exec", "resume", "--json", "--skip-git-repo-check", "-m", SELECTED_MODEL,
       "-c", 'model_reasoning_effort="medium"', "--dangerously-bypass-approvals-and-sandbox",
     ]);
-    expect(argv2).toHaveLength(10);
-    expect(argv2[8]).toBe(FAKE_SESSION_ID);
-    const prompt2 = argv2[9]!;
+    expect(argv2).toHaveLength(11);
+    expect(argv2[9]).toBe(FAKE_SESSION_ID);
+    const prompt2 = argv2[10]!;
     expect(prompt2).toContain(OPTION_LIKE_SENTINEL);
     expect(argv2.filter((a) => a.includes(OPTION_LIKE_SENTINEL))).toEqual([prompt2]);
     const after2 = getRequirement(repo, "REQ-001");
@@ -1284,7 +1284,7 @@ printf 'done\\n'
       nativeSessionId: FAKE_SESSION_ID,
     });
     const log2 = executor.getLiveLog(run2.run.id) ?? "";
-    expect(log2.split("\n")[0]).toBe(`$ ${fake} exec resume ${FAKE_SESSION_ID} (model=${SELECTED_MODEL}, effort=medium)`);
+    expect(log2.split("\n")[0]).toBe(`$ ${fake} exec resume --json ${FAKE_SESSION_ID} (model=${SELECTED_MODEL}, effort=medium)`);
     expect(log2).not.toContain(OPTION_LIKE_SENTINEL);
     expect(log2).toContain("mode: exec resume");
     expect(log2).toContain(`model: ${SELECTED_MODEL}`);
@@ -1300,10 +1300,10 @@ printf 'done\\n'
     await waitFinished(run3.run.id);
     const argv3 = readCapturedArgv(fixtureDir, 3);
     expect(argv3.slice(0, -2)).toEqual([
-      "exec", "resume", "--skip-git-repo-check", "-m", "gpt-6-luna", "--dangerously-bypass-approvals-and-sandbox",
+      "exec", "resume", "--json", "--skip-git-repo-check", "-m", "gpt-6-luna", "--dangerously-bypass-approvals-and-sandbox",
     ]);
-    expect(argv3[6]).toBe(FAKE_SESSION_ID);
-    expect(argv3).toHaveLength(8);
+    expect(argv3[7]).toBe(FAKE_SESSION_ID);
+    expect(argv3).toHaveLength(9);
     expect(argv3.filter((a) => a.startsWith("model_reasoning_effort="))).toEqual([]);
     expect(run3.target).toEqual({ harness: "codex", model: "gpt-6-luna" });
     expect(executor.getLiveLog(run3.run.id)).toContain("model: gpt-6-luna");
@@ -1319,12 +1319,12 @@ printf 'done\\n'
     await waitFinished(run4.run.id);
     const argv4 = readCapturedArgv(fixtureDir, 4);
     expect(argv4.slice(0, -1)).toEqual([
-      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only",
+      "exec", "--json", "-C", codeRoot, "--skip-git-repo-check", "-m", "codex-auto-review", "-s", "read-only",
     ]);
     expect(argv4).not.toContain(FAKE_SESSION_ID);
     expect(argv4).not.toContain("resume");
     expect(executor.getLiveLog(run4.run.id)?.split("\n")[0]).toBe(
-      `$ ${fake} exec -C ${codeRoot} -s read-only (model=codex-auto-review)`,
+      `$ ${fake} exec --json -C ${codeRoot} -s read-only (model=codex-auto-review)`,
     );
     expect(startedEvents.map((e) => e.model)).toEqual([SELECTED_MODEL, SELECTED_MODEL, "gpt-6-luna", "codex-auto-review"]);
   }, { timeout: 25000 });
@@ -1361,7 +1361,7 @@ printf 'done\\n'
     const argv = readCapturedArgv(fixtureDir, 2);
     expect(fallback.target).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" });
     expect(argv.slice(0, -1)).toEqual([
-      "exec", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
+      "exec", "--json", "-C", codeRoot, "--skip-git-repo-check", "-m", SELECTED_MODEL,
       "-c", 'model_reasoning_effort="high"', "--dangerously-bypass-approvals-and-sandbox",
     ]);
     expect(argv).not.toContain("resume");

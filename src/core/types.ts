@@ -17,7 +17,12 @@ export const MAX_CRITERIA = 32;
 export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
 export const MAX_DISCUSSIONS = 200;
-export const MAX_AGENT_RUNS = 30;
+export const MAX_AGENT_RUNS = 100;
+export const MAX_RUN_LOG_BYTES = 4 * 1024 * 1024;
+export const MAX_RUN_TRACE_BYTES = 8 * 1024 * 1024;
+export const MAX_TOOL_INPUT_BYTES = 16 * 1024;
+export const MAX_TOOL_OUTPUT_BYTES = 32 * 1024;
+export const MAX_TRACE_TEXT_BYTES = 64 * 1024;
 export const MAX_SCREENSHOT_BATCHES = 5;
 export const MAX_SCREENSHOTS_PER_BATCH = 12;
 export const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
@@ -443,7 +448,10 @@ export type TimelineEventKind =
   | "github_pr_created"
   | "github_pr_synced"
   | "sandbox_synced"
-  | "sub_requirements_spawned";
+  | "sub_requirements_spawned"
+  | "agent_run_started"
+  | "agent_run_finished"
+  | "agent_handoff";
 
 export interface RequirementGitHubIssueLink {
   /** GitHub uses positive integer numbers (e.g. 42); Gitee uses alphanumeric ident (e.g. "I8ABCD"). */
@@ -495,6 +503,238 @@ export interface DiscussionEntry {
   resolved?: boolean;
 }
 
+export type RunBillingMode = "subscription" | "api" | "free";
+export type RunCostSource = "reported" | "estimated" | "free" | "unknown";
+export type RunHandoffMode = "first_run" | "native_resume" | "fresh_handoff";
+export type RunDispatchReason =
+  | "user"
+  | "route_primary"
+  | "session_affinity"
+  | "manual_fallback"
+  | "auto_fallback"
+  | "auto_review"
+  | "conflict_resolve"
+  | "refine"
+  | "ask";
+export type RunToolCategory =
+  | "read"
+  | "write"
+  | "bash"
+  | "search"
+  | "mcp"
+  | "wb_cli"
+  | "subagent"
+  | "web"
+  | "other";
+
+export interface RunTokenUsage {
+  inputTokens: number;
+  uncachedInputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+}
+
+export interface RunCostSummary {
+  apiCostUsd: number;
+  equivalentCostUsd: number;
+  billingMode: RunBillingMode;
+  costSource: RunCostSource;
+  quotaPool: string;
+  currency: "USD";
+}
+
+export interface HandoffSectionMetric {
+  key: string;
+  label: string;
+  priority: number;
+  rawBytes: number;
+  finalBytes: number;
+  estTokens: number;
+  truncated: boolean;
+}
+
+export interface RunContextSnapshot {
+  schemaVersion: 1;
+  runId: string;
+  requirementId: string;
+  action: AgentAction;
+  capturedAt: number;
+  handoffMode: RunHandoffMode;
+  parentRunId?: string;
+  resumedSessionId?: string;
+  dispatchReason: RunDispatchReason;
+  selectedTarget: { harness: string; model: string; reasoningEffort?: string };
+  routeCandidates: Array<{ harness: string; model: string; reasoningEffort?: string; skippedReason?: string }>;
+  specHashBefore: string;
+  codeSnapshotHashBefore: string | null;
+  handoffTotalBytes: number;
+  handoffBudgetBytes: number;
+  handoffEstTokens: number;
+  promptBytes: number;
+  promptEstTokens: number;
+  sections: HandoffSectionMetric[];
+  truncatedSections: string[];
+  handoffNoteSnapshot?: HandoffNote | null;
+  handoffMarkdown: string;
+  promptText: string;
+}
+
+export type RunTraceEvent =
+  | {
+      seq: number;
+      ts: number;
+      type: "run.init";
+      action: AgentAction;
+      harness: string;
+      model: string;
+      effectiveModel?: string;
+      modelFallback?: boolean;
+      reasoningEffort?: string;
+      quotaPool: string;
+      billingMode: RunBillingMode;
+      dispatchReason: RunDispatchReason;
+      handoffMode: RunHandoffMode;
+      parentRunId?: string;
+      resumedSessionId?: string;
+      structuredJson: boolean;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "handoff.snapshot";
+      handoffMode: RunHandoffMode;
+      contextPath: string;
+      handoffTotalBytes: number;
+      handoffBudgetBytes: number;
+      handoffEstTokens: number;
+      promptBytes: number;
+      promptEstTokens: number;
+      sections: HandoffSectionMetric[];
+      truncatedSections: string[];
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "turn.start";
+      turnIndex: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "turn.end";
+      turnIndex: number;
+      durationMs?: number;
+      contextTokens?: number;
+      usage?: RunTokenUsage;
+      costUsd?: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "thinking";
+      turnIndex: number;
+      text: string;
+      truncated?: boolean;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "tool.start";
+      turnIndex: number;
+      callId: string;
+      parentCallId?: string;
+      toolName: string;
+      category: RunToolCategory;
+      summary: string;
+      inputText?: string;
+      inputTruncated?: boolean;
+      filesTouched?: string[];
+      wbCommand?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "tool.end";
+      turnIndex: number;
+      callId: string;
+      parentCallId?: string;
+      toolName: string;
+      category: RunToolCategory;
+      summary: string;
+      output?: string;
+      outputBytes?: number;
+      outputTruncated?: boolean;
+      isError?: boolean;
+      exitCode?: number | null;
+      durationMs?: number;
+      filesTouched?: string[];
+      wbCommand?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "context.compaction";
+      turnIndex: number;
+      mode: "explicit" | "inferred";
+      beforeTokens?: number;
+      afterTokens?: number;
+      reclaimedTokens?: number;
+      summary?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "assistant.message";
+      turnIndex: number;
+      text: string;
+      truncated?: boolean;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "raw.line";
+      stream: "stdout" | "stderr" | "system";
+      text: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "run.error";
+      message: string;
+      code?: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "trace.truncated";
+      maxBytes: number;
+    }
+  | {
+      seq: number;
+      ts: number;
+      type: "run.end";
+      status: "succeeded" | "failed" | "cancelled";
+      exitCode: number | null;
+      durationMs: number;
+      llmDurationMs?: number;
+      toolDurationMs?: number;
+      ttftMs?: number;
+      turnsCount: number;
+      toolCallsCount: number;
+      toolErrorCount: number;
+      compactionCount: number;
+      peakContextTokens?: number;
+      contextWindow?: number;
+      usage?: RunTokenUsage;
+      cost?: RunCostSummary;
+      specChanged?: boolean;
+      codeChanged?: boolean;
+      errorSummary?: string;
+    };
+
 export interface AgentRunRecord {
   id: string;
   action: AgentAction;
@@ -515,6 +755,27 @@ export interface AgentRunRecord {
   rateLimited?: boolean;
   errorSummary?: string;
   logPath: string;
+  quotaPool?: string;
+  billingMode?: RunBillingMode;
+  dispatchReason?: RunDispatchReason;
+  handoffMode?: RunHandoffMode;
+  parentRunId?: string;
+  usage?: RunTokenUsage;
+  cost?: RunCostSummary;
+  turnsCount?: number;
+  toolCallsCount?: number;
+  toolErrorCount?: number;
+  compactionCount?: number;
+  peakContextTokens?: number;
+  contextWindow?: number;
+  llmDurationMs?: number;
+  toolDurationMs?: number;
+  ttftMs?: number;
+  specChanged?: boolean;
+  codeChanged?: boolean;
+  tracePath?: string;
+  contextPath?: string;
+  traceTruncated?: boolean;
 }
 
 export const REVIEW_FINDING_SEVERITIES = ["high", "medium", "low"] as const;
@@ -599,6 +860,7 @@ export interface TimelineEvent {
   actor: "human" | "agent" | "system";
   summary: string;
   detail?: string;
+  runId?: string;
 }
 
 export interface RequirementState {

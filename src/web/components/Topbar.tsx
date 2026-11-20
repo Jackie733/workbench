@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
+  BarChart3,
   Laptop,
   LogOut,
   PanelLeftClose,
@@ -25,6 +26,8 @@ import { UiLanguageSelect } from "./Primitives.tsx";
 export function Topbar() {
   const theme = useUiStore((s) => s.theme);
   const language = useUiStore((s) => s.language);
+  const mainView = useUiStore((s) => s.mainView);
+  const setMainView = useUiStore((s) => s.setMainView);
   const selectedId = useUiStore((s) => s.selectedId);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -157,6 +160,21 @@ export function Topbar() {
 
       <div className="topbar-right">
         <UiLanguageSelect className="topbar-language" />
+
+        <button
+          className={`btn xs ${mainView === "insights" ? "primary" : "ghost"}`}
+          type="button"
+          data-testid="topbar-insights-btn"
+          title={t(language, "insights.title")}
+          aria-label={t(language, "insights.navLabel")}
+          onClick={() => {
+            setSidebarOpen(false);
+            setMainView(mainView === "insights" ? "workspace" : "insights");
+          }}
+        >
+          <Icon icon={BarChart3} size={14} />
+          <span className="header-btn-label">{t(language, "insights.navLabel")}</span>
+        </button>
 
         {isHub && (
           <button

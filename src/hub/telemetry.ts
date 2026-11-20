@@ -21,6 +21,11 @@ export interface ModelStageStats {
   avgDurationMs: number;
   lastRunAt: number;
   lastRateLimitedAt?: number;
+  totalTokens?: number;
+  totalCacheReadTokens?: number;
+  totalApiCostUsd?: number;
+  totalEquivalentCostUsd?: number;
+  totalToolCalls?: number;
 }
 
 export interface ModelTelemetrySnapshot {
@@ -104,6 +109,11 @@ export function recordModelRunOutcome(input: {
   modelUnavailable?: boolean;
   cooldownMs?: number;
   now?: number;
+  tokens?: number;
+  cacheReadTokens?: number;
+  apiCostUsd?: number;
+  equivalentCostUsd?: number;
+  toolCalls?: number;
 }): ModelTelemetrySnapshot {
   return withFileLockSync(telemetryLockPath(), () => {
     const now = input.now ?? Date.now();
@@ -134,6 +144,11 @@ export function recordModelRunOutcome(input: {
     const degradedRuns = (prev.degradedRuns ?? 0) + (input.modelFallback ? 1 : 0);
     const totalDurationMs = prev.totalDurationMs + Math.max(0, Math.round(input.durationMs));
     const avgDurationMs = Math.round(totalDurationMs / totalRuns);
+    const totalTokens = (prev.totalTokens ?? 0) + (typeof input.tokens === "number" && Number.isFinite(input.tokens) ? Math.max(0, Math.round(input.tokens)) : 0);
+    const totalCacheReadTokens = (prev.totalCacheReadTokens ?? 0) + (typeof input.cacheReadTokens === "number" && Number.isFinite(input.cacheReadTokens) ? Math.max(0, Math.round(input.cacheReadTokens)) : 0);
+    const totalApiCostUsd = Number(((prev.totalApiCostUsd ?? 0) + (typeof input.apiCostUsd === "number" && Number.isFinite(input.apiCostUsd) ? Math.max(0, input.apiCostUsd) : 0)).toFixed(6));
+    const totalEquivalentCostUsd = Number(((prev.totalEquivalentCostUsd ?? 0) + (typeof input.equivalentCostUsd === "number" && Number.isFinite(input.equivalentCostUsd) ? Math.max(0, input.equivalentCostUsd) : 0)).toFixed(6));
+    const totalToolCalls = (prev.totalToolCalls ?? 0) + (typeof input.toolCalls === "number" && Number.isFinite(input.toolCalls) ? Math.max(0, Math.round(input.toolCalls)) : 0);
 
     snap.entries[entryKey] = {
       ...prev,
@@ -146,6 +161,11 @@ export function recordModelRunOutcome(input: {
       totalDurationMs,
       avgDurationMs,
       lastRunAt: now,
+      ...(totalTokens > 0 || prev.totalTokens !== undefined ? { totalTokens } : {}),
+      ...(totalCacheReadTokens > 0 || prev.totalCacheReadTokens !== undefined ? { totalCacheReadTokens } : {}),
+      ...(totalApiCostUsd > 0 || prev.totalApiCostUsd !== undefined ? { totalApiCostUsd } : {}),
+      ...(totalEquivalentCostUsd > 0 || prev.totalEquivalentCostUsd !== undefined ? { totalEquivalentCostUsd } : {}),
+      ...(totalToolCalls > 0 || prev.totalToolCalls !== undefined ? { totalToolCalls } : {}),
       ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
     };
 

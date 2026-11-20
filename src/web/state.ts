@@ -36,6 +36,7 @@ import {
 } from "./i18n.ts";
 
 export type Scope = "active" | "decisions" | "sandboxes" | "done" | "cancelled" | "all";
+export type MainView = "workspace" | "insights";
 export type WorkspaceTab = "spec" | "diff" | "changes" | "timeline";
 export type DrawerTab = "discuss" | "console" | "diff";
 export type ProjectSortMode = "attention" | "recent" | "name" | "added";
@@ -155,6 +156,7 @@ export type ModalState =
       mode: "create" | "link";
       issueRef: string;
     }
+  | { kind: "observability_pricing" }
   | { kind: "debug_info"; text: string };
 
 export interface StatusMeta {
@@ -1007,4 +1009,42 @@ export function bridgeStatusLabel(bridge: BridgeStatus | undefined, language: Ui
   if (!bridge || !bridge.connected) return t(language, "bridge.mcp");
   if (bridge.state === "idle") return t(language, "bridge.idle");
   return bridge.state === "waiting_user" ? t(language, "bridge.waiting") : t(language, "bridge.running");
+}
+
+export function formatDurationHuman(ms: number | undefined | null): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "0ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = ms / 1000;
+  if (totalSec < 60) return `${totalSec.toFixed(1)}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = Math.floor(totalSec % 60);
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h ${remM}m`;
+}
+
+export function formatTokenCount(n: number | undefined | null): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+export function formatUsd(n: number | undefined | null): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "$0.00";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+export function formatPercent(ratio: number | undefined | null): string {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio) || ratio <= 0) return "0%";
+  return `${Math.round(Math.min(1, ratio) * 100)}%`;
+}
+
+export function formatBytes(bytes: number | undefined | null): string {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }

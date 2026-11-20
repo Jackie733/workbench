@@ -20,6 +20,8 @@ import type {
   RequirementGitHubLink,
   RequirementGitHubPrLink,
   RequirementSummary,
+  RunContextSnapshot,
+  RunTraceEvent,
   SandboxDriftInfo,
   ScreenshotCaptureResult,
   Stage,
@@ -38,10 +40,12 @@ import type {
   PainPointContext,
   PainPointSource,
 } from "../hub/evolution.ts";
+import type { InsightsQueryFilter, InsightsResponse } from "../hub/ledger.ts";
 import type { ModelStageStats } from "../hub/telemetry.ts";
 import type {
   BrowseEntry,
   HarnessInfo,
+  HubObservabilityConfig,
   HubProjectEntry,
   ModelTarget,
   NodeUpdateStatus,
@@ -51,6 +55,38 @@ import type {
 } from "../hub/types.ts";
 import type { BridgeStatus, DispatchOutcome } from "../server/index.ts";
 import type { DispatchAction } from "../server/prompts.ts";
+
+export type { InsightsDiagnostic, InsightsQueryFilter, InsightsResponse, RunLedgerEntry } from "../hub/ledger.ts";
+
+export interface RunTraceResponse {
+  runId: string;
+  live: boolean;
+  hasTrace: boolean;
+  record: AgentRunRecord;
+  events: RunTraceEvent[];
+  nextSeq: number;
+  totalEvents: number;
+  hasMore: boolean;
+}
+
+export interface RunContextResponse {
+  runId: string;
+  hasContext: boolean;
+  context: RunContextSnapshot | null;
+}
+
+export interface HubPricingResponse {
+  observability: HubObservabilityConfig;
+  quotaPoolLabels: Record<string, string>;
+}
+
+export interface PruneTracesResult {
+  deletedFiles: number;
+  freedBytes: number;
+  scannedRuns: number;
+  projectsPruned?: number;
+  retentionDays?: number;
+}
 
 export interface GiteeIssueListItem extends GiteeIssueItem {
   importedRequirementId: string | null;
@@ -338,6 +374,30 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ harness, model }),
     }),
+  getHubInsights: (filter: InsightsQueryFilter = {}) => {
+    const qs = new URLSearchParams();
+    if (filter.days !== undefined) qs.set("days", String(filter.days));
+    if (filter.projectId) qs.set("projectId", filter.projectId);
+    if (filter.nodeId) qs.set("nodeId", filter.nodeId);
+    if (filter.quotaPool) qs.set("quotaPool", filter.quotaPool);
+    if (filter.harness) qs.set("harness", filter.harness);
+    if (filter.action) qs.set("action", filter.action);
+    if (filter.billingMode) qs.set("billingMode", filter.billingMode);
+    if (filter.status) qs.set("status", filter.status);
+    const query = qs.toString();
+    return requestJson<InsightsResponse>(query ? `/api/hub/insights?${query}` : "/api/hub/insights");
+  },
+  getHubPricing: () => requestJson<HubPricingResponse>("/api/hub/insights/pricing"),
+  updateHubPricing: (patch: HubObservabilityConfig) =>
+    requestJson<{ observability: HubObservabilityConfig }>("/api/hub/insights/pricing", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  pruneHubRunTraces: (retentionDays?: number) =>
+    requestJson<PruneTracesResult>("/api/hub/insights/prune", {
+      method: "POST",
+      body: JSON.stringify({ ...(retentionDays !== undefined ? { retentionDays } : {}) }),
+    }),
   reloadWebBundle: () => requestJson<{ ok: boolean; reloaded: boolean }>("/api/hub/reload-web", { method: "POST" }),
   getPlaybook: () => requestJson<PlaybookResponse>(withProjectParam("/api/project/playbook")),
   savePlaybook: (markdown: string) =>
@@ -588,6 +648,23 @@ export const api = {
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/cancel`),
       { method: "POST" },
     ),
+  listRequirementRuns: (id: string) =>
+    requestJson<{ runs: AgentRunRecord[] }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs`)),
+  getAgentRunTrace: (id: string, runId: string, afterSeq = 0, limit = 2000) =>
+    requestJson<RunTraceResponse>(
+      withProjectParam(
+        `/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/trace?afterSeq=${afterSeq}&limit=${limit}`,
+      ),
+    ),
+  getAgentRunContext: (id: string, runId: string) =>
+    requestJson<RunContextResponse>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/context`),
+    ),
+  pruneProjectRunTraces: (retentionDays?: number) =>
+    requestJson<{ result: PruneTracesResult }>(withProjectParam("/api/project/runs/prune"), {
+      method: "POST",
+      body: JSON.stringify({ ...(retentionDays !== undefined ? { retentionDays } : {}) }),
+    }),
   getAgentRunLog: (id: string, runId: string) =>
     requestJson<{ record: AgentRunRecord; log: string }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`),
@@ -710,8 +787,12 @@ export const api = {
     ),
 };
 
-export function connectUiWebSocket(onEvent: (event: Record<string, unknown>) => void): () => void {
+export function connectUiWebSocket(
+  onEvent: (event: Record<string, unknown>) => void,
+  options?: { onReconnect?: () => void },
+): () => void {
   let closed = false;
+  let hasOpenedOnce = false;
   let ws: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -719,6 +800,12 @@ export function connectUiWebSocket(onEvent: (event: Record<string, unknown>) => 
     if (closed) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/ws?role=ui`);
+    ws.addEventListener("open", () => {
+      if (hasOpenedOnce) {
+        options?.onReconnect?.();
+      }
+      hasOpenedOnce = true;
+    });
     ws.addEventListener("message", (ev) => {
       try {
         onEvent(JSON.parse(String(ev.data)) as Record<string, unknown>);

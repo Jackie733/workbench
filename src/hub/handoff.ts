@@ -6,12 +6,28 @@ import { observeGitChanges } from "../core/git.ts";
 import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type RequirementDetail } from "../core/types.ts";
+import {
+  WORKBENCH_DIR,
+  type AgentAction,
+  type AgentRunRecord,
+  type HandoffSectionMetric,
+  type OutputLanguage,
+  type RequirementDetail,
+} from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
+import { estimateTokens } from "./pricing.ts";
 import { readHubConfig } from "./registry.ts";
 
 const HANDOFF_MAX_BYTES = 24 * 1024;
 const PLAYBOOK_SECTION_MAX_BYTES = 1200;
+
+export interface HandoffComposition {
+  totalBytes: number;
+  budgetBytes: number;
+  estTokens: number;
+  sections: HandoffSectionMetric[];
+  truncatedSections: string[];
+}
 
 export interface ConflictHandoffContext {
   branch: string;
@@ -37,11 +53,23 @@ export interface HandoffSynthesisOptions {
 
 interface BudgetedSection {
   key: string;
+  label?: string;
   /** Lower number = higher priority (trimmed last). */
   priority: number;
   text: string;
   minText?: string;
+  inlineTruncated?: boolean;
 }
+
+const SECTION_LABELS: Record<string, string> = {
+  header: "Header & Metadata",
+  playbook: "Playbook",
+  steering: "Review & Feedback",
+  failures: "Failure Evidence",
+  progress: "Tasks & HandoffNote",
+  contract: "Spec, Design & Criteria",
+  git: "Git Snapshot",
+};
 
 function clipTextByBytes(text: string, maxBytes: number, suffix = ""): string {
   const clean = sanitizeOutput(text, maxBytes).text;
@@ -55,36 +83,84 @@ function clipTextByBytes(text: string, maxBytes: number, suffix = ""): string {
   return `${sanitizeOutput(text, maxBytes - suffixBytes).text.trimEnd()}${suffix}`;
 }
 
-function assembleBudgetedPacket(headerText: string, sections: BudgetedSection[], maxBytes: number): string {
+function assembleBudgetedPacket(
+  headerText: string,
+  sections: BudgetedSection[],
+  maxBytes: number,
+): { markdown: string; composition: HandoffComposition } {
+  const rawSizes = new Map<string, number>();
+  for (const sec of sections) {
+    rawSizes.set(sec.key, Buffer.byteLength(sec.text, "utf8"));
+  }
+  const trimmedKeys = new Set<string>();
+
   const joinAll = () =>
     [headerText, ...sections.map((s) => s.text).filter((t) => t.trim().length > 0)].join("\n");
 
   let assembled = joinAll();
-  if (Buffer.byteLength(assembled, "utf8") <= maxBytes) {
-    return assembled;
-  }
+  if (Buffer.byteLength(assembled, "utf8") > maxBytes) {
+    // Trim lowest-priority sections first so review findings, human feedback, and failures survive.
+    const byTrimOrder = [...sections].sort((a, b) => b.priority - a.priority);
+    for (const sec of byTrimOrder) {
+      const currentBytes = Buffer.byteLength(assembled, "utf8");
+      if (currentBytes <= maxBytes) break;
+      const secBytes = Buffer.byteLength(sec.text, "utf8");
+      const minBytes = sec.minText ? Buffer.byteLength(sec.minText, "utf8") : 0;
+      const reducible = Math.max(0, secBytes - minBytes);
+      if (reducible === 0) continue;
 
-  // Trim lowest-priority sections first so review findings, human feedback, and failures survive.
-  const byTrimOrder = [...sections].sort((a, b) => b.priority - a.priority);
-  for (const sec of byTrimOrder) {
-    const currentBytes = Buffer.byteLength(assembled, "utf8");
-    if (currentBytes <= maxBytes) break;
-    const secBytes = Buffer.byteLength(sec.text, "utf8");
-    const minBytes = sec.minText ? Buffer.byteLength(sec.minText, "utf8") : 0;
-    const reducible = Math.max(0, secBytes - minBytes);
-    if (reducible === 0) continue;
-
-    const excess = currentBytes - maxBytes;
-    const targetSecBytes = Math.max(minBytes, secBytes - excess);
-    if (targetSecBytes <= minBytes && sec.minText !== undefined) {
-      sec.text = sec.minText;
-    } else {
-      sec.text = clipTextByBytes(sec.text, targetSecBytes, "\n> …（因总简报预算限制已精简此节）");
+      const excess = currentBytes - maxBytes;
+      const targetSecBytes = Math.max(minBytes, secBytes - excess);
+      if (targetSecBytes <= minBytes && sec.minText !== undefined) {
+        sec.text = sec.minText;
+      } else {
+        sec.text = clipTextByBytes(sec.text, targetSecBytes, "\n> …（因总简报预算限制已精简此节）");
+      }
+      trimmedKeys.add(sec.key);
+      assembled = joinAll();
     }
-    assembled = joinAll();
   }
 
-  return sanitizeOutput(assembled, maxBytes).text;
+  const markdown = sanitizeOutput(assembled, maxBytes).text;
+  const headerBytes = Buffer.byteLength(headerText, "utf8");
+  const metrics: HandoffSectionMetric[] = [
+    {
+      key: "header",
+      label: SECTION_LABELS.header!,
+      priority: 0,
+      rawBytes: headerBytes,
+      finalBytes: headerBytes,
+      estTokens: estimateTokens(headerText),
+      truncated: false,
+    },
+  ];
+  for (const sec of sections) {
+    if (sec.key === "steering_placeholder") continue;
+    const rawBytes = rawSizes.get(sec.key) ?? 0;
+    const finalBytes = Buffer.byteLength(sec.text, "utf8");
+    const truncated = Boolean(sec.inlineTruncated) || trimmedKeys.has(sec.key) || finalBytes < rawBytes;
+    if (rawBytes === 0 && finalBytes === 0) continue;
+    metrics.push({
+      key: sec.key,
+      label: sec.label ?? SECTION_LABELS[sec.key] ?? sec.key,
+      priority: sec.priority,
+      rawBytes,
+      finalBytes,
+      estTokens: estimateTokens(sec.text),
+      truncated,
+    });
+  }
+
+  return {
+    markdown,
+    composition: {
+      totalBytes: Buffer.byteLength(markdown, "utf8"),
+      budgetBytes: maxBytes,
+      estTokens: estimateTokens(markdown),
+      sections: metrics,
+      truncatedSections: metrics.filter((m) => m.truncated).map((m) => m.key),
+    },
+  };
 }
 
 /**
@@ -95,7 +171,12 @@ export async function synthesizeHandoffPacket(
   root: string,
   id: string,
   options: HandoffSynthesisOptions,
-): Promise<{ markdown: string; detail: RequirementDetail; outputLanguage: ResolvedOutputLanguage }> {
+): Promise<{
+  markdown: string;
+  detail: RequirementDetail;
+  outputLanguage: ResolvedOutputLanguage;
+  composition: HandoffComposition;
+}> {
   const codeRoot = resolveCodeRoot(root, id);
   const gitChanges = await observeGitChanges(codeRoot, { maxDiffBytes: 4096 });
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
@@ -442,6 +523,9 @@ export async function synthesizeHandoffPacket(
     priority: 4,
     text: contractLines.join("\n"),
     minText: `${hasSteering ? "## 4." : "## 1."} 权威目标与方案见 \`${itemDirHint}/spec.md\` 与 \`${itemDirHint}/design.md\`\n`,
+    inlineTruncated:
+      Buffer.byteLength(specMarkdown.trim(), "utf8") > 1400 ||
+      Buffer.byteLength(designMarkdown.trim(), "utf8") > 1800,
   });
 
   // 5. Objective Git Ground Truth
@@ -470,9 +554,10 @@ export async function synthesizeHandoffPacket(
     minText: gitChanges.isGitRepo
       ? `## 5. 当前客观 Git 代码现场\n- HEAD: \`${gitChanges.head || "(unborn)"}\` | 脏文件数: ${gitChanges.files.length}\n`
       : "",
+    inlineTruncated: Boolean(gitChanges.diffTruncated) || Buffer.byteLength(gitChanges.diff, "utf8") > 2800,
   });
 
-  const markdown = assembleBudgetedPacket(headerText, sections, HANDOFF_MAX_BYTES);
+  const { markdown, composition } = assembleBudgetedPacket(headerText, sections, HANDOFF_MAX_BYTES);
   const saved = await saveHandoffMarkdown(root, id, markdown, gitChanges.fingerprint ?? null);
-  return { markdown, detail: saved, outputLanguage };
+  return { markdown, detail: saved, outputLanguage, composition };
 }

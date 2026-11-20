@@ -1928,78 +1928,8 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
   );
 }
 
-export function TimelineRunsTab({ d }: { d: RequirementDetail }) {
-  const language = useUiStore((s) => s.language);
-  const events = [...d.state.timeline].reverse();
-  const runs = [...(d.state.agentRuns ?? [])].reverse();
-
-  return (
-    <>
-      {runs.length > 0 && (
-        <div className="card">
-          <div className="card-head">
-            <h3>{t(language, "timeline.runs")}</h3>
-            <button className="btn xs" type="button" onClick={() => void openHandoff(d.state.id)}>
-              <Icon icon={FileText} size={14} /> {t(language, "timeline.viewHandoff")}
-            </button>
-          </div>
-          {runs.map((r) => (
-            <div
-              key={r.id}
-              className="timeline-item"
-              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
-            >
-              <div>
-                <span className={`badge ${AGENT_RUN_TONE[r.status]}`}>
-                  <Icon
-                    icon={r.status === "succeeded" ? Check : r.status === "cancelled" ? CircleOff : X}
-                    size={14}
-                  />{" "}
-                  {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
-                </span>
-                <strong style={{ fontSize: 13, marginLeft: 6 }}>
-                  {r.harness} / {r.model}
-                </strong>
-                {r.modelFallback && r.effectiveModel && (
-                  <span className="badge warning xs" style={{ marginLeft: 6 }}>
-                    {t(language, "timeline.actual", { model: r.effectiveModel })}
-                  </span>
-                )}
-                <span className="muted xs" style={{ marginLeft: 6 }}>
-                  {r.durationMs}ms
-                </span>
-              </div>
-              <button className="btn ghost xs" type="button" onClick={() => void openRunConsole(d.state.id, r.id)}>
-                <Icon icon={Terminal} size={14} /> {t(language, "timeline.viewOutput")}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="card">
-        <div className="card-head">
-          <h3>{t(language, "timeline.title")}</h3>
-        </div>
-        {events.map((ev, i) => (
-          <div key={`${ev.at}-${i}`} className="timeline-item">
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-              <strong style={{ fontSize: 13.5 }}>{ev.summary}</strong>
-              <span className="muted" style={{ fontSize: 12 }}>
-                {formatDateTime(ev.at, language)}
-              </span>
-            </div>
-            {ev.detail && (
-              <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-                {ev.detail}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </>
-  );
-}
+import { TimelineRunsTab } from "./ExecutionAuditTab.tsx";
+export { TimelineRunsTab };
 
 export function WorkspaceView() {
   const language = useUiStore((s) => s.language);

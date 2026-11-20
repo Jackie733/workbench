@@ -23,10 +23,11 @@ import {
 } from "../server/project_api.ts";
 import type { PainPointReportInput } from "./evolution.ts";
 import { HubExecutor, type CustomCommandBuilder, type TelemetryOutcomeInput } from "./executor.ts";
+import type { RunLedgerEntry } from "./ledger.ts";
 import { browseDirectory } from "./registry.ts";
 import { buildPresetRouting } from "./routing.ts";
 import type { NodeUpdateReport } from "../cli/node_update.ts";
-import type { HarnessInfo, RemoteNodeInfo, RoutingConfig } from "./types.ts";
+import type { HarnessInfo, HubObservabilityConfig, RemoteNodeInfo, RoutingConfig } from "./types.ts";
 
 export interface NodeRpcRequest {
   type: "node.rpc.request";
@@ -48,6 +49,7 @@ export interface NodeRpcRequest {
   routing?: RoutingConfig;
   outputLanguage?: OutputLanguage;
   giteeAccessToken?: string | null;
+  observability?: HubObservabilityConfig;
 }
 
 export interface NodeRpcResponse {
@@ -74,6 +76,7 @@ interface ConnectedNode {
 export interface RemoteNodeCallbacks {
   onPainPoint: (nodeId: string, input: PainPointReportInput) => void;
   onTelemetry: (nodeId: string, outcome: TelemetryOutcomeInput) => void;
+  onLedgerEntry?: (nodeId: string, nodeName: string, entry: RunLedgerEntry) => void;
   onEvent: (nodeId: string, event: Record<string, unknown>) => void;
   onStatusChanged: () => void;
 }
@@ -111,6 +114,7 @@ export class RemoteNodeRegistry {
       routing: RoutingConfig;
       outputLanguage: OutputLanguage;
       giteeAccessToken?: string | null;
+      observability?: HubObservabilityConfig;
     },
   ): void {
     const prev = this.nodes.get(meta.nodeId);
@@ -148,6 +152,7 @@ export class RemoteNodeRegistry {
           routing: meta.routing,
           outputLanguage: meta.outputLanguage,
           giteeAccessToken: meta.giteeAccessToken ?? null,
+          ...(meta.observability ? { observability: meta.observability } : {}),
         }),
       );
     } catch {
@@ -228,6 +233,10 @@ export class RemoteNodeRegistry {
     if (parsed.type === "node.telemetry" && isRecord(parsed.outcome)) {
       cb.onTelemetry(nodeId, parsed.outcome as unknown as TelemetryOutcomeInput);
     }
+
+    if (parsed.type === "node.run_ledger" && isRecord(parsed.entry)) {
+      cb.onLedgerEntry?.(nodeId, entry.info.name, parsed.entry as unknown as RunLedgerEntry);
+    }
   }
 
   handleClose(ws: ServerWebSocket<any>, nodeId: string, cb: Pick<RemoteNodeCallbacks, "onStatusChanged">): void {
@@ -242,12 +251,14 @@ export class RemoteNodeRegistry {
     routing: RoutingConfig,
     outputLanguage: OutputLanguage,
     giteeAccessToken?: string | null,
+    observability?: HubObservabilityConfig,
   ): void {
     const payload = JSON.stringify({
       type: "node.config.sync",
       routing,
       outputLanguage,
       ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
+      ...(observability !== undefined ? { observability } : {}),
     });
     for (const entry of this.nodes.values()) {
       try {
@@ -324,6 +335,7 @@ export class RemoteNodeRegistry {
     routing: RoutingConfig,
     outputLanguage: OutputLanguage,
     giteeAccessToken?: string | null,
+    observability?: HubObservabilityConfig,
   ): Promise<Response> {
     const method = req.method.toUpperCase();
     const pathname = url.pathname;
@@ -347,6 +359,7 @@ export class RemoteNodeRegistry {
         routing,
         outputLanguage,
         ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
+        ...(observability !== undefined ? { observability } : {}),
       },
       timeoutMs,
     );
@@ -476,10 +489,16 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
   const revision = readSourceRevision();
   const wsUrl = buildNodeWebSocketUrl(options.hubUrl, { nodeId, nodeName, hostname, platform, version });
 
-  let syncedPrefs: { routing: RoutingConfig; outputLanguage: OutputLanguage; giteeAccessToken: string | null } = {
+  let syncedPrefs: {
+    routing: RoutingConfig;
+    outputLanguage: OutputLanguage;
+    giteeAccessToken: string | null;
+    observability?: HubObservabilityConfig;
+  } = {
     routing: buildPresetRouting("balanced"),
     outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
     giteeAccessToken: null,
+    observability: undefined,
   };
 
   let ws: WebSocket | null = null;
@@ -511,6 +530,9 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       onPainPoint: (input) => {
         sendEnvelope({ type: "node.pain_point", input });
         return null;
+      },
+      onLedgerEntry: (entry) => {
+        sendEnvelope({ type: "node.run_ledger", entry });
       },
     });
 
@@ -688,6 +710,7 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
             outputLanguage: req.outputLanguage ?? syncedPrefs.outputLanguage,
             giteeAccessToken:
               req.giteeAccessToken !== undefined ? req.giteeAccessToken : syncedPrefs.giteeAccessToken,
+            observability: req.observability !== undefined ? req.observability : syncedPrefs.observability,
           };
         }
         const base = canonicalRoot(req.projectRoot ?? "");
@@ -822,7 +845,11 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       }
 
       if (parsed.type === "node.welcome" || parsed.type === "node.config.sync") {
-        if ((parsed.routing && isRecord(parsed.routing)) || parsed.giteeAccessToken !== undefined) {
+        if (
+          (parsed.routing && isRecord(parsed.routing)) ||
+          parsed.giteeAccessToken !== undefined ||
+          (parsed.observability && isRecord(parsed.observability))
+        ) {
           syncedPrefs = {
             routing:
               parsed.routing && isRecord(parsed.routing)
@@ -837,6 +864,10 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
                   ? parsed.giteeAccessToken.trim()
                   : null
                 : syncedPrefs.giteeAccessToken,
+            observability:
+              parsed.observability && isRecord(parsed.observability)
+                ? (parsed.observability as unknown as HubObservabilityConfig)
+                : syncedPrefs.observability,
           };
         }
         return;

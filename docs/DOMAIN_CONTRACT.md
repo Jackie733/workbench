@@ -25,7 +25,7 @@
         ├── attachments/          # （v5.2 新增）附件二进制文件（<attId>.<ext>，元数据只存 state.json）
         ├── history/              # 历史批准过的 spec/design 快照 (如 design.v1.md)，用于版本对比
         ├── evidence/             # 真实运行的验证输出日志与元数据 (如 verify-<id>.json / .log)
-        └── runs/                 # （v5 新增）主动调度的 Harness 执行日志与完整审查文本 (run-<id>.json / .log)
+        └── runs/                 # （v5 新增）主动调度的 Harness 执行记录：元数据 run-<id>.json（MAX_AGENT_RUNS=100）、头尾裁剪原始日志 run-<id>.log（上限 4MB）、结构化过程轨迹 run-<id>.events.jsonl（软上限 8MB，单工具输入<=16KB / 输出<=32KB）、以及交接上下文快照 run-<id>.context.json（重型 trace/context/log 默认保留 30 天，元数据永久留存）
 ```
 
 - **隐私与 Git 策略**：首次在项目初始化 `.workbench/` 时，由用户选择：
@@ -120,7 +120,7 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 - **沙箱隔离与合并/PR 门禁**：针对 Workbench 自身的痛点转化需求可在 `~/.workbench-hub/evolution/worktrees/<REQ-ID>` 创建独立 Git Worktree 沙箱执行编码与验证；列表/详情/验证必须绑定沙箱工作树快照以防误报过期。**只有完成人类最终验收（`stage === "done"` 且 `acceptance` 快照仍匹配）后**，方可执行人工触发的标准化 GitHub PR 交付（在沙箱分支 `rsi/<REQ-ID>` 仅提交选中非 `.workbench/` 文件 → `git push` → `gh pr create`，PR 合并后再执行主干快进并清理沙箱），或作为离线降级执行 `applySandboxToMain` 将改动原子同步回主工作树（且在冲突时拒绝盲覆写，严禁路径穿越与符号链接越界）。
 - **单层递归熔断（`WORKBENCH_RSI_DEPTH=1`）**：在 RSI 沙箱内运行 Subprocess 时强制注入 `WORKBENCH_RSI_DEPTH=1`，且 Hub 后置嗅探器对沙箱需求自动关闭运行异常转工单，杜绝无限自指递归。
 - **输出语言与 GitHub 安全边界**：所有调度 Prompt 与 `handoff.md` 按 `project.outputLanguage -> hub.outputLanguage -> "zh-CN"` 解析并强制注入输出语言指令；GitHub 集成完全复用本机已登录的 `gh` CLI 会话（不持久化 PAT），Issue 导入/同步与 PR 推送均在人工操作入口下执行且经过参数白名单与 `sanitizeOutput` 凭据脱敏。
-- **日志脱敏与有界落盘**：Playbook 经验规则（`deadEnds`、人类 `refine`/已解决批注、打回意见，上限 16KB）及 `inbox.jsonl`（SHA-256 `(category, title, component)` 去重，2MB 上限）均须执行 ANSI 剥离、凭据脱敏与跨进程文件锁原子更新；CLI `wb issue` 与 `wb service` 同样遵循无旁路契约。
+- **日志脱敏与有界落盘**：Playbook 经验规则（`deadEnds`、人类 `refine`/已解决批注、打回意见，上限 16KB）及 `inbox.jsonl`（SHA-256 `(category, title, component)` 去重，2MB 上限）、全局执行台账 `~/.workbench-hub/telemetry/runs-ledger.jsonl`（单文件上限 16MB，按需保留最近 20,000 条）与各运行 `run-<id>.events.jsonl`（单次上限 8MB，单工具输入 `<=16KB`、输出头尾保留 `<=32KB`，`rawLog` 头尾保留 `<=4MB`）均须执行 ANSI 剥离、凭据脱敏与跨进程文件锁原子更新；CLI `wb issue` 与 `wb service` 同样遵循无旁路契约。`omp` 聚合调度始终穿透归属底层供应商额度池（如 `openai-codex`、`qoder-cn`、`google-antigravity`、`opencode-go`），`opencode-go` 默认按订阅制归因并记录双轨（实付 vs 订阅等价）成本。
 
 ---
 

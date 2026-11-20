@@ -12,6 +12,7 @@ import { Modals } from "./components/Modals.tsx";
 import { RightDrawer } from "./components/RightDrawer.tsx";
 import { Topbar } from "./components/Topbar.tsx";
 import { WorkspaceView } from "./components/WorkspaceView.tsx";
+import { InsightsView } from "./components/InsightsView.tsx";
 import {
   queryClient,
   queryKeys,
@@ -187,6 +188,7 @@ function WorkbenchShell() {
   const theme = useUiStore((s) => s.theme);
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const mainView = useUiStore((s) => s.mainView);
   const selectedId = useUiStore((s) => s.selectedId);
   const scope = useUiStore((s) => s.scope);
   const drawerOpen = useUiStore((s) => s.drawerOpen);
@@ -202,7 +204,11 @@ function WorkbenchShell() {
     const params = new URLSearchParams(window.location.search);
     const reqParam = params.get("req")?.trim();
     const tabParam = params.get("tab")?.trim() as WorkspaceTab | null;
+    const viewParam = params.get("view")?.trim();
     const ui = useUiStore.getState();
+    if (viewParam === "insights") {
+      ui.setMainView("insights");
+    }
     if (reqParam && /^REQ-\d+$/i.test(reqParam)) {
       ui.setSelectedId(reqParam.toUpperCase());
     }
@@ -210,6 +216,19 @@ function WorkbenchShell() {
       ui.setWorkspaceTab(tabParam);
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (mainView === "insights") {
+      url.searchParams.set("view", "insights");
+    } else {
+      url.searchParams.delete("view");
+    }
+    if (url.toString() !== window.location.href) {
+      window.history.replaceState(null, "", url.toString());
+    }
+  }, [mainView]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -343,7 +362,9 @@ function WorkbenchShell() {
           <div className="hub-workspace" ref={workspaceRef}>
             <div className="main-stage">
               <div className="shell">
-                {(hubLoading && !hub) || (!noHubProject && !remoteOffline && projectLoading && !project) ? (
+                {mainView === "insights" ? (
+                  <InsightsView />
+                ) : (hubLoading && !hub) || (!noHubProject && !remoteOffline && projectLoading && !project) ? (
                   <p className="muted">{t(language, "app.loading")}</p>
                 ) : noHubProject ? (
                   <EmptyHubCard />
@@ -358,7 +379,7 @@ function WorkbenchShell() {
                 )}
               </div>
             </div>
-            {selectedId && !remoteOffline && <RightDrawer workspaceRef={workspaceRef} />}
+            {selectedId && !remoteOffline && mainView !== "insights" && <RightDrawer workspaceRef={workspaceRef} />}
           </div>
         </div>
       </div>

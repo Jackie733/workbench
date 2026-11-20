@@ -11,7 +11,7 @@ import {
   readAttachmentForServe,
   stageUpload,
 } from "../core/attachments.ts";
-import { getProjectStatus, getRequirement, initProject } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, initProject, pruneProjectTraces } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import type { GiteeApiDeps } from "../core/gitee.ts";
@@ -21,11 +21,14 @@ import { hubBindUrl } from "../core/net.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { readSandboxes } from "../core/sandbox.ts";
 import {
+  AGENT_ACTIONS,
   MAX_ATTACHMENT_TOTAL_BYTES,
   WORKBENCH_DIR,
+  type AgentAction,
   type AgentRunRecord,
   type PrivacyMode,
   type RequirementDetail,
+  type RunBillingMode,
   type Stage,
 } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
@@ -47,8 +50,10 @@ import {
   type SandboxDriftInfo,
 } from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
+import { appendRunLedger, queryHubInsights, type InsightsQueryFilter, type RunLedgerEntry } from "../hub/ledger.ts";
 import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
 import { NodeUpdates } from "../hub/node_updates.ts";
+import { QUOTA_POOL_LABELS } from "../hub/pricing.ts";
 import {
   applyHubRoutingPreset,
   browseDirectory,
@@ -64,17 +69,20 @@ import {
   resolveEffectiveGiteeToken,
   resolveHubDir,
   setActiveHubProject,
+  updateHubObservability,
   updateHubPreferences,
   updateHubProjectMeta,
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
 import { readSourceRevision } from "../core/revision.ts";
-import { clearModelCooldown, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
+import { clearModelCooldown, readModelTelemetry, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
   ROUTING_PRESETS,
   type HarnessInfo,
   type HubConfig,
+  type HubObservabilityConfig,
+  type ModelPriceOverride,
   type RemoteNodeInfo,
   type RoutingConfig,
   type RoutingPreset,
@@ -204,8 +212,47 @@ export async function startWorkbenchServer(options: {
     }
     cachedWeb = await initial;
   }
-  const executor = options.executor ?? new HubExecutor();
   const nodeRegistry = new RemoteNodeRegistry();
+  const enrichLedgerEntry = (
+    entry: RunLedgerEntry,
+    nid: string,
+    nodeNameHint?: string,
+  ): RunLedgerEntry => {
+    try {
+      const cfg = readHubConfig();
+      const targetNode = isLocalNodeId(nid) ? LOCAL_NODE_ID : nid;
+      const proj = cfg.projects.find(
+        (p) => (p.nodeId ?? LOCAL_NODE_ID) === targetNode && p.root === entry.projectRoot,
+      );
+      return {
+        ...entry,
+        nodeId: targetNode,
+        nodeName:
+          nodeNameHint ??
+          (isLocalNodeId(targetNode)
+            ? os.hostname()
+            : nodeRegistry.getNode(targetNode)?.name ?? proj?.nodeName ?? targetNode),
+        ...(proj ? { projectId: proj.id, projectName: proj.name } : {}),
+      };
+    } catch {
+      return entry;
+    }
+  };
+  const executor =
+    options.executor ??
+    new HubExecutor({
+      getHubPreferences: () => {
+        const cfg = readHubConfig();
+        return {
+          routing: cfg.routing,
+          outputLanguage: cfg.outputLanguage,
+          observability: cfg.observability,
+        };
+      },
+      onLedgerEntry: (entry) => {
+        appendRunLedger(enrichLedgerEntry(entry, LOCAL_NODE_ID, os.hostname()));
+      },
+    });
   const serverStartedAt = Date.now();
   const revision = readSourceRevision();
 
@@ -633,7 +680,7 @@ export async function startWorkbenchServer(options: {
             : undefined;
       const cfg = updateHubPreferences({ outputLanguage, giteeAccessToken });
       const effectiveToken = resolveEffectiveGiteeToken(cfg);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken, cfg.observability);
       broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
       return jsonResponse({
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
@@ -765,7 +812,7 @@ export async function startWorkbenchServer(options: {
     if (method === "PUT" && pathname === "/api/hub/routing") {
       const body = await readBody(req);
       const cfg = updateHubRouting(body as unknown as RoutingConfig);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
       broadcastUi({ type: "hub.updated", reason: "routing.updated", at: Date.now() });
       return jsonResponse({ routing: cfg.routing });
     }
@@ -778,7 +825,7 @@ export async function startWorkbenchServer(options: {
       }
       const harnesses = await executor.getHarnesses(false);
       const cfg = applyHubRoutingPreset(preset as RoutingPreset, harnesses);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE);
+      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
       broadcastUi({ type: "hub.updated", reason: "routing.preset", preset, at: Date.now() });
       return jsonResponse({ routing: cfg.routing });
     }
@@ -947,6 +994,112 @@ export async function startWorkbenchServer(options: {
       return jsonResponse({ telemetry: summarizeTelemetry() });
     }
 
+    if (method === "GET" && pathname === "/api/hub/insights") {
+      const daysRaw = url.searchParams.get("days");
+      const parsedDays = daysRaw !== null ? Number(daysRaw) : 7;
+      const days = parsedDays === 0 ? 0 : parsedDays === 30 ? 30 : 7;
+      const projectIdParam = url.searchParams.get("projectId")?.trim() || undefined;
+      const nodeIdParam = url.searchParams.get("nodeId")?.trim() || undefined;
+      const quotaPoolParam = url.searchParams.get("quotaPool")?.trim() || undefined;
+      const harnessParam = url.searchParams.get("harness")?.trim() || undefined;
+      const actionRaw = url.searchParams.get("action")?.trim() || undefined;
+      const actionParam =
+        actionRaw && (AGENT_ACTIONS as readonly string[]).includes(actionRaw)
+          ? (actionRaw as AgentAction)
+          : undefined;
+      const billingRaw = url.searchParams.get("billingMode")?.trim() || undefined;
+      const billingModeParam =
+        billingRaw === "subscription" || billingRaw === "api" || billingRaw === "free"
+          ? (billingRaw as RunBillingMode)
+          : undefined;
+      const statusRaw = url.searchParams.get("status")?.trim() || undefined;
+      const statusParam =
+        statusRaw === "running" || statusRaw === "succeeded" || statusRaw === "failed" || statusRaw === "cancelled"
+          ? (statusRaw as AgentRunRecord["status"])
+          : undefined;
+
+      const filter: InsightsQueryFilter = {
+        days,
+        ...(projectIdParam ? { projectId: projectIdParam } : {}),
+        ...(nodeIdParam ? { nodeId: nodeIdParam } : {}),
+        ...(quotaPoolParam ? { quotaPool: quotaPoolParam } : {}),
+        ...(harnessParam ? { harness: harnessParam } : {}),
+        ...(actionParam ? { action: actionParam } : {}),
+        ...(billingModeParam ? { billingMode: billingModeParam } : {}),
+        ...(statusParam ? { status: statusParam } : {}),
+      };
+      const cfg = readHubConfig();
+      const telemetry = readModelTelemetry();
+      return jsonResponse(
+        queryHubInsights(filter, {
+          cooldowns: telemetry.cooldowns,
+          projects: cfg.projects,
+        }),
+      );
+    }
+
+    if (method === "GET" && pathname === "/api/hub/insights/pricing") {
+      const cfg = readHubConfig();
+      return jsonResponse({
+        observability: cfg.observability ?? {},
+        quotaPoolLabels: QUOTA_POOL_LABELS,
+      });
+    }
+
+    if (method === "PUT" && pathname === "/api/hub/insights/pricing") {
+      const body = await readBody(req);
+      const patch: HubObservabilityConfig = {};
+      if (typeof body.traceRetentionDays === "number" && Number.isFinite(body.traceRetentionDays)) {
+        patch.traceRetentionDays = body.traceRetentionDays;
+      }
+      if (body.billingOverrides && isRecord(body.billingOverrides)) {
+        patch.billingOverrides = body.billingOverrides as Record<string, RunBillingMode>;
+      }
+      if (body.pricingOverrides && isRecord(body.pricingOverrides)) {
+        patch.pricingOverrides = body.pricingOverrides as Record<string, ModelPriceOverride>;
+      }
+      const cfg = updateHubObservability(patch);
+      nodeRegistry.broadcastConfigSync(
+        cfg.routing,
+        cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+        resolveEffectiveGiteeToken(cfg),
+        cfg.observability,
+      );
+      broadcastUi({ type: "hub.updated", reason: "observability.updated", at: Date.now() });
+      return jsonResponse({ observability: cfg.observability ?? {} });
+    }
+
+    if (method === "POST" && pathname === "/api/hub/insights/prune") {
+      const body = await readBody(req);
+      const cfg = readHubConfig();
+      const retentionDays =
+        typeof body.retentionDays === "number" && Number.isFinite(body.retentionDays)
+          ? Math.max(0, Math.floor(body.retentionDays))
+          : (cfg.observability?.traceRetentionDays ?? 30);
+      const roots = new Set<string>();
+      for (const p of cfg.projects) {
+        if (isLocalNodeId(p.nodeId)) roots.add(p.root);
+      }
+      if (!hubMode && fs.existsSync(path.join(defaultRoot, WORKBENCH_DIR))) {
+        roots.add(defaultRoot);
+      }
+      let deletedFiles = 0;
+      let freedBytes = 0;
+      let scannedRuns = 0;
+      let projectsPruned = 0;
+      for (const r of roots) {
+        if (!fs.existsSync(path.join(r, WORKBENCH_DIR))) continue;
+        const activeRunIds = new Set(executor.getActiveRuns(r).map((run) => run.id));
+        const res = pruneProjectTraces(r, retentionDays, activeRunIds);
+        deletedFiles += res.deletedFiles;
+        freedBytes += res.freedBytes;
+        scannedRuns += res.scannedRuns;
+        projectsPruned += 1;
+      }
+      broadcastUi({ type: "hub.updated", reason: "observability.pruned", at: Date.now() });
+      return jsonResponse({ deletedFiles, freedBytes, scannedRuns, projectsPruned, retentionDays });
+    }
+
     if (method === "POST" && pathname === "/api/hub/reload-web") {
       const res = await reloadWebBundle({ manual: true });
       return jsonResponse({ ok: true, ...res });
@@ -964,6 +1117,7 @@ export async function startWorkbenchServer(options: {
         cfg.routing,
         cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
         resolveEffectiveGiteeToken(cfg),
+        cfg.observability,
       );
     }
 
@@ -1160,6 +1314,7 @@ export async function startWorkbenchServer(options: {
             routing: cfg.routing,
             outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
             giteeAccessToken: resolveEffectiveGiteeToken(cfg),
+            observability: cfg.observability,
           });
           broadcastUi({ type: "hub.updated", reason: "node.connected", nodeId: ws.data.nodeId, at: Date.now() });
         } else {
@@ -1186,6 +1341,9 @@ export async function startWorkbenchServer(options: {
             onTelemetry: (_nid, outcome) => {
               recordModelRunOutcome(outcome);
               broadcastUi({ type: "hub.updated", reason: "telemetry.updated", at: Date.now() });
+            },
+            onLedgerEntry: (nid, nodeName, entry) => {
+              appendRunLedger(enrichLedgerEntry(entry, nid, nodeName));
             },
             onEvent: (nid, evt) => {
               const cfg = readHubConfig();

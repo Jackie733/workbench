@@ -1,4 +1,4 @@
-import type { AgentRunRecord, OutputLanguage } from "../core/types.ts";
+import type { AgentRunRecord, OutputLanguage, RunBillingMode } from "../core/types.ts";
 
 export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
 export type HarnessId = (typeof HARNESS_IDS)[number];
@@ -40,7 +40,8 @@ export interface DiscoveredModel {
   defaultEffort?: ReasoningEffort;
   /** Optional capability metadata enriched from local caches (models.db / models_cache.json) */
   intelligence?: number;
-  cost?: { input: number; output: number };
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  contextWindow?: number;
   isFree?: boolean;
   isLegacy?: boolean;
   priority?: number;
@@ -101,6 +102,20 @@ export interface RemoteNodeInfo {
   update?: NodeUpdateStatus;
 }
 
+export interface ModelPriceOverride {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  contextWindow?: number;
+}
+
+export interface HubObservabilityConfig {
+  traceRetentionDays?: number;
+  billingOverrides?: Record<string, RunBillingMode>;
+  pricingOverrides?: Record<string, ModelPriceOverride>;
+}
+
 export interface HubConfig {
   schemaVersion: 1;
   activeProjectId: string | null;
@@ -108,6 +123,7 @@ export interface HubConfig {
   routing: RoutingConfig;
   outputLanguage?: OutputLanguage;
   giteeAccessToken?: string;
+  observability?: HubObservabilityConfig;
 }
 
 export interface DaemonInfo {

@@ -63,6 +63,12 @@ import {
   type ReviewFindingSeverity,
   type ReviewReport,
   type ReviewVerdict,
+  type RunBillingMode,
+  type RunCostSource,
+  type RunCostSummary,
+  type RunDispatchReason,
+  type RunHandoffMode,
+  type RunTokenUsage,
   type ScreenshotBatch,
   type ScreenshotBatchStatus,
   type ScreenshotShot,
@@ -912,6 +918,74 @@ function validateDiscussionEntry(raw: unknown): DiscussionEntry {
   return raw as unknown as DiscussionEntry;
 }
 
+const RUN_BILLING_MODES: readonly RunBillingMode[] = ["subscription", "api", "free"];
+const RUN_COST_SOURCES: readonly RunCostSource[] = ["reported", "estimated", "free", "unknown"];
+const RUN_HANDOFF_MODES: readonly RunHandoffMode[] = ["first_run", "native_resume", "fresh_handoff"];
+const RUN_DISPATCH_REASONS: readonly RunDispatchReason[] = [
+  "user",
+  "route_primary",
+  "session_affinity",
+  "manual_fallback",
+  "auto_fallback",
+  "auto_review",
+  "conflict_resolve",
+  "refine",
+  "ask",
+];
+
+function isFiniteNonNeg(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
+function validateRunTokenUsage(raw: unknown): RunTokenUsage {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun.usage 必须是对象");
+  assertAllowedKeys(
+    raw,
+    [
+      "inputTokens",
+      "uncachedInputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "outputTokens",
+      "reasoningTokens",
+      "totalTokens",
+    ],
+    "agentRun.usage",
+  );
+  if (
+    !isSafeInt(raw.inputTokens, 0) ||
+    !isSafeInt(raw.uncachedInputTokens, 0) ||
+    !isSafeInt(raw.cacheReadTokens, 0) ||
+    !isSafeInt(raw.cacheWriteTokens, 0) ||
+    !isSafeInt(raw.outputTokens, 0) ||
+    !isSafeInt(raw.reasoningTokens, 0) ||
+    !isSafeInt(raw.totalTokens, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "agentRun.usage 数值损坏");
+  }
+  return raw as unknown as RunTokenUsage;
+}
+
+function validateRunCostSummary(raw: unknown): RunCostSummary {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun.cost 必须是对象");
+  assertAllowedKeys(
+    raw,
+    ["apiCostUsd", "equivalentCostUsd", "billingMode", "costSource", "quotaPool", "currency"],
+    "agentRun.cost",
+  );
+  if (
+    !isFiniteNonNeg(raw.apiCostUsd) ||
+    !isFiniteNonNeg(raw.equivalentCostUsd) ||
+    !RUN_BILLING_MODES.includes(raw.billingMode as RunBillingMode) ||
+    !RUN_COST_SOURCES.includes(raw.costSource as RunCostSource) ||
+    !isSafeText(raw.quotaPool, 128) ||
+    raw.currency !== "USD"
+  ) {
+    throw new WorkbenchError("corrupt_record", "agentRun.cost 数值或枚举损坏");
+  }
+  return raw as unknown as RunCostSummary;
+}
+
 export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun 记录必须是对象");
   assertAllowedKeys(
@@ -934,6 +1008,27 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
       "rateLimited",
       "errorSummary",
       "logPath",
+      "quotaPool",
+      "billingMode",
+      "dispatchReason",
+      "handoffMode",
+      "parentRunId",
+      "usage",
+      "cost",
+      "turnsCount",
+      "toolCallsCount",
+      "toolErrorCount",
+      "compactionCount",
+      "peakContextTokens",
+      "contextWindow",
+      "llmDurationMs",
+      "toolDurationMs",
+      "ttftMs",
+      "specChanged",
+      "codeChanged",
+      "tracePath",
+      "contextPath",
+      "traceTruncated",
     ],
     "agentRun",
   );
@@ -951,10 +1046,31 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     (raw.endedAt !== null && !isSafeInt(raw.endedAt, 0)) ||
     (raw.exitCode !== null && !Number.isSafeInteger(raw.exitCode)) ||
     !isSafeInt(raw.durationMs, 0) ||
-    typeof raw.logPath !== "string"
+    typeof raw.logPath !== "string" ||
+    (raw.quotaPool !== undefined && !isSafeText(raw.quotaPool, 128)) ||
+    (raw.billingMode !== undefined && !RUN_BILLING_MODES.includes(raw.billingMode as RunBillingMode)) ||
+    (raw.dispatchReason !== undefined && !RUN_DISPATCH_REASONS.includes(raw.dispatchReason as RunDispatchReason)) ||
+    (raw.handoffMode !== undefined && !RUN_HANDOFF_MODES.includes(raw.handoffMode as RunHandoffMode)) ||
+    (raw.parentRunId !== undefined && (typeof raw.parentRunId !== "string" || !TOKEN_ID_RE.test(raw.parentRunId))) ||
+    (raw.turnsCount !== undefined && !isSafeInt(raw.turnsCount, 0)) ||
+    (raw.toolCallsCount !== undefined && !isSafeInt(raw.toolCallsCount, 0)) ||
+    (raw.toolErrorCount !== undefined && !isSafeInt(raw.toolErrorCount, 0)) ||
+    (raw.compactionCount !== undefined && !isSafeInt(raw.compactionCount, 0)) ||
+    (raw.peakContextTokens !== undefined && !isSafeInt(raw.peakContextTokens, 0)) ||
+    (raw.contextWindow !== undefined && !isSafeInt(raw.contextWindow, 0)) ||
+    (raw.llmDurationMs !== undefined && !isSafeInt(raw.llmDurationMs, 0)) ||
+    (raw.toolDurationMs !== undefined && !isSafeInt(raw.toolDurationMs, 0)) ||
+    (raw.ttftMs !== undefined && !isSafeInt(raw.ttftMs, 0)) ||
+    (raw.specChanged !== undefined && typeof raw.specChanged !== "boolean") ||
+    (raw.codeChanged !== undefined && typeof raw.codeChanged !== "boolean") ||
+    (raw.tracePath !== undefined && !isSafeText(raw.tracePath, 260, true)) ||
+    (raw.contextPath !== undefined && !isSafeText(raw.contextPath, 260, true)) ||
+    (raw.traceTruncated !== undefined && typeof raw.traceTruncated !== "boolean")
   ) {
     throw new WorkbenchError("corrupt_record", "agentRun 记录损坏");
   }
+  if (raw.usage !== undefined) validateRunTokenUsage(raw.usage);
+  if (raw.cost !== undefined) validateRunCostSummary(raw.cost);
   return raw as unknown as AgentRunRecord;
 }
 
@@ -1167,7 +1283,13 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   }
   for (const v of raw.verifications) validateVerificationRecord(v);
   for (const ev of raw.timeline as TimelineEvent[]) {
-    if (!isRecord(ev) || typeof ev.id !== "string" || !isSafeInt(ev.at, 0) || typeof ev.summary !== "string") {
+    if (
+      !isRecord(ev) ||
+      typeof ev.id !== "string" ||
+      !isSafeInt(ev.at, 0) ||
+      typeof ev.summary !== "string" ||
+      (ev.runId !== undefined && (typeof ev.runId !== "string" || !TOKEN_ID_RE.test(ev.runId)))
+    ) {
       throw new WorkbenchError("corrupt_record", "timeline 记录损坏");
     }
   }
@@ -1212,4 +1334,49 @@ export function sanitizeOutput(raw: string, maxBytes: number): { text: string; t
     end--;
   }
   return { text: bytes.subarray(0, end).toString("utf8"), truncated: true };
+}
+
+function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
+  if (buf.length <= maxBytes) return buf.toString("utf8");
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) {
+    end--;
+  }
+  return buf.subarray(0, end).toString("utf8");
+}
+
+function sliceUtf8Tail(buf: Buffer, maxBytes: number): string {
+  if (buf.length <= maxBytes) return buf.toString("utf8");
+  let start = Math.max(0, buf.length - maxBytes);
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) {
+    start++;
+  }
+  return buf.subarray(start).toString("utf8");
+}
+
+/**
+ * Redacts ANSI/credentials and clips oversized text using head + tail preservation
+ * so both error headers and trailing summaries survive truncation.
+ */
+export function clipHeadTailUtf8(
+  raw: string,
+  headBytes: number,
+  tailBytes: number,
+): { text: string; bytes: number; truncated: boolean } {
+  const cleaned = sanitizeOutput(raw, Number.MAX_SAFE_INTEGER).text;
+  const buf = Buffer.from(cleaned, "utf8");
+  const totalBytes = buf.length;
+  const maxBytes = headBytes + tailBytes;
+  if (totalBytes <= maxBytes) {
+    return { text: cleaned, bytes: totalBytes, truncated: false };
+  }
+  const omitted = Math.max(0, totalBytes - maxBytes);
+  const head = sliceUtf8Head(buf, headBytes).trimEnd();
+  const tail = sliceUtf8Tail(buf, tailBytes).trimStart();
+  const sep = `\n\n… [已截断中间 ${omitted} 字节，保留头 ${headBytes}B + 尾 ${tailBytes}B] …\n\n`;
+  return {
+    text: `${head}${sep}${tail}`,
+    bytes: totalBytes,
+    truncated: true,
+  };
 }

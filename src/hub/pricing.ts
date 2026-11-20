@@ -1,0 +1,309 @@
+import type { RunBillingMode, RunCostSummary, RunTokenUsage } from "../core/types.ts";
+import type { HarnessInfo, HubObservabilityConfig, ModelPriceOverride } from "./types.ts";
+
+export interface QuotaPoolResolution {
+  quotaPool: string;
+  billingMode: RunBillingMode;
+  label: string;
+}
+
+export interface ResolvedModelPriceSpec {
+  input: number;       // USD per 1M input tokens
+  output: number;      // USD per 1M output/reasoning tokens
+  cacheRead: number;   // USD per 1M cached input read tokens
+  cacheWrite: number;  // USD per 1M cache creation/write tokens
+  contextWindow: number;
+  source: "override" | "catalog" | "builtin" | "fallback";
+}
+
+export const QUOTA_POOL_LABELS: Record<string, string> = {
+  "openai-codex": "ChatGPT Plus (Codex)",
+  "qoder-cn": "QoderCN 订阅",
+  "google-antigravity": "Antigravity 订阅",
+  "opencode-go": "OpenCode Go 订阅",
+  "opencode-free": "OpenCode Free",
+  deepseek: "DeepSeek API",
+  openai: "OpenAI API",
+  anthropic: "Anthropic API",
+  moonshot: "Moonshot API",
+  zai: "Z.ai / GLM API",
+  minimax: "MiniMax API",
+  "minimax-cn": "MiniMax CN API",
+};
+
+interface BuiltinModelPriceRule {
+  match: RegExp;
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  contextWindow: number;
+}
+
+const BUILTIN_MODEL_PRICING: BuiltinModelPriceRule[] = [
+  { match: /gpt-6\.2-astra|gpt-6-astra/i, input: 2.5, output: 15.0, cacheRead: 0.25, contextWindow: 400_000 },
+  { match: /gpt-6\.2-sol|gpt-6\.1-sol|gpt-6-sol/i, input: 1.75, output: 14.0, cacheRead: 0.175, contextWindow: 400_000 },
+  { match: /gpt-6\.1-terra|gpt-6-luna|gpt-5\.6/i, input: 0.5, output: 3.0, cacheRead: 0.05, contextWindow: 256_000 },
+  { match: /codex-auto-review/i, input: 1.75, output: 14.0, cacheRead: 0.175, contextWindow: 400_000 },
+  { match: /claude-opus/i, input: 15.0, output: 75.0, cacheRead: 1.5, cacheWrite: 18.75, contextWindow: 200_000 },
+  { match: /claude-sonnet/i, input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75, contextWindow: 200_000 },
+  { match: /claude-haiku/i, input: 0.8, output: 4.0, cacheRead: 0.08, cacheWrite: 1.0, contextWindow: 200_000 },
+  { match: /gemini-4-hydrogen|gemini-pro-orchestrator/i, input: 2.0, output: 12.0, cacheRead: 0.2, contextWindow: 1_000_000 },
+  { match: /gemini-4-argon/i, input: 1.25, output: 10.0, cacheRead: 0.125, contextWindow: 1_000_000 },
+  { match: /gemini-3\.8-flash|gemini-.*flash/i, input: 0.15, output: 0.6, cacheRead: 0.015, contextWindow: 1_000_000 },
+  { match: /deepseek-v4-pro|deepseek-r/i, input: 0.55, output: 2.19, cacheRead: 0.055, contextWindow: 128_000 },
+  { match: /deepseek-v4|deepseek-flash|deepseek-chat/i, input: 0.27, output: 1.1, cacheRead: 0.027, contextWindow: 128_000 },
+  { match: /qwen4-max|qwen3\.8-max/i, input: 1.2, output: 4.8, cacheRead: 0.12, contextWindow: 256_000 },
+  { match: /qwen3\.8-flash|qwen.*flash/i, input: 0.15, output: 0.6, cacheRead: 0.015, contextWindow: 256_000 },
+  { match: /kimi-k3|kimi-k2/i, input: 0.6, output: 2.5, cacheRead: 0.06, contextWindow: 256_000 },
+  { match: /glm-5\.3-flash/i, input: 0.12, output: 0.5, cacheRead: 0.012, contextWindow: 200_000 },
+  { match: /glm-5/i, input: 0.5, output: 2.0, cacheRead: 0.05, contextWindow: 200_000 },
+  { match: /minimax/i, input: 0.2, output: 0.8, cacheRead: 0.02, contextWindow: 200_000 },
+  { match: /step-5/i, input: 0.8, output: 3.2, cacheRead: 0.08, contextWindow: 200_000 },
+];
+
+export function formatQuotaPoolLabel(quotaPool: string): string {
+  return QUOTA_POOL_LABELS[quotaPool] ?? `${quotaPool}`;
+}
+
+function normalizeProviderPool(rawProvider: string): string {
+  const lower = rawProvider.trim().toLowerCase();
+  if (lower === "codex" || lower === "openai-codex") return "openai-codex";
+  if (lower === "qoder-cn" || lower === "qodercn" || lower === "qoder") return "qoder-cn";
+  if (lower === "google-antigravity" || lower === "antigravity" || lower === "agy") return "google-antigravity";
+  if (lower === "opencode-go") return "opencode-go";
+  return lower || "unknown";
+}
+
+function defaultBillingForPool(pool: string, model: string, isFreeHint?: boolean): RunBillingMode {
+  if (pool === "opencode-free" || isFreeHint || /-free(?::|$)/i.test(model.trim())) {
+    return "free";
+  }
+  if (
+    pool === "openai-codex" ||
+    pool === "qoder-cn" ||
+    pool === "google-antigravity" ||
+    pool === "opencode-go"
+  ) {
+    return "subscription";
+  }
+  return "api";
+}
+
+/**
+ * Resolves the underlying provider quota pool and billing mode for a run.
+ * - `opencode-go/*` resolves to subscription pool `opencode-go`.
+ * - `omp` never acts as a provider pool; it always delegates to the underlying `<provider>` prefix.
+ */
+export function resolveQuotaPool(
+  harness: string,
+  model: string,
+  options: {
+    billingOverrides?: Record<string, RunBillingMode>;
+    isFreeHint?: boolean;
+  } = {},
+): QuotaPoolResolution {
+  const h = harness.trim().toLowerCase();
+  const m = model.trim();
+  const slashIdx = m.indexOf("/");
+  const prefix = slashIdx > 0 ? m.slice(0, slashIdx) : "";
+  const isFreeModel = Boolean(options.isFreeHint) || /-free(?::|$)/i.test(m) || m === "opencode/big-pickle";
+
+  let quotaPool: string;
+  if (h === "codex") {
+    quotaPool = "openai-codex";
+  } else if (h === "qodercn") {
+    quotaPool = "qoder-cn";
+  } else if (h === "agy") {
+    quotaPool = "google-antigravity";
+  } else if (h === "opencode") {
+    const prov = normalizeProviderPool(prefix);
+    if (prov === "opencode-go") {
+      quotaPool = "opencode-go";
+    } else if (isFreeModel || prov === "opencode" || !prefix) {
+      quotaPool = isFreeModel ? "opencode-free" : prov || "opencode";
+    } else {
+      quotaPool = prov;
+    }
+  } else if (h === "omp") {
+    if (prefix) {
+      const prov = normalizeProviderPool(prefix);
+      quotaPool = prov === "opencode" && isFreeModel ? "opencode-free" : prov;
+    } else if (/^gpt-|^codex/i.test(m)) {
+      quotaPool = "openai-codex";
+    } else if (/^gemini-|^claude-.*-5-5/i.test(m)) {
+      quotaPool = "google-antigravity";
+    } else if (isFreeModel) {
+      quotaPool = "opencode-free";
+    } else {
+      quotaPool = "omp-external";
+    }
+  } else {
+    quotaPool = prefix ? normalizeProviderPool(prefix) : h || "unknown";
+  }
+
+  const override = options.billingOverrides?.[quotaPool] ?? options.billingOverrides?.[h];
+  const billingMode = override ?? defaultBillingForPool(quotaPool, m, isFreeModel);
+
+  return {
+    quotaPool,
+    billingMode,
+    label: formatQuotaPoolLabel(quotaPool),
+  };
+}
+
+function findPricingOverride(
+  harness: string,
+  model: string,
+  quotaPool: string,
+  overrides?: Record<string, ModelPriceOverride>,
+): ModelPriceOverride | undefined {
+  if (!overrides) return undefined;
+  const slashIdx = model.indexOf("/");
+  const shortModel = slashIdx > 0 ? model.slice(slashIdx + 1) : model;
+  return (
+    overrides[`${quotaPool}::${model}`] ??
+    overrides[`${quotaPool}::${shortModel}`] ??
+    overrides[`${harness}::${model}`] ??
+    overrides[model] ??
+    overrides[shortModel] ??
+    overrides[quotaPool]
+  );
+}
+
+export function resolveModelSpec(
+  harness: string,
+  model: string,
+  harnessesCatalog: HarnessInfo[] = [],
+  observability?: HubObservabilityConfig,
+): ResolvedModelPriceSpec {
+  const { quotaPool, billingMode } = resolveQuotaPool(harness, model, {
+    billingOverrides: observability?.billingOverrides,
+  });
+  const override = findPricingOverride(harness, model, quotaPool, observability?.pricingOverrides);
+  if (override) {
+    return {
+      input: override.input,
+      output: override.output,
+      cacheRead: override.cacheRead ?? Number((override.input * 0.1).toFixed(4)),
+      cacheWrite: override.cacheWrite ?? Number((override.input * 1.25).toFixed(4)),
+      contextWindow: override.contextWindow ?? 200_000,
+      source: "override",
+    };
+  }
+
+  const hInfo = harnessesCatalog.find((h) => h.id === harness);
+  const mInfo =
+    hInfo?.models.find((m) => m.id === model) ??
+    hInfo?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(model));
+
+  const builtin = BUILTIN_MODEL_PRICING.find((r) => r.match.test(model));
+
+  if (mInfo?.cost && (mInfo.cost.input > 0 || mInfo.cost.output > 0)) {
+    return {
+      input: mInfo.cost.input,
+      output: mInfo.cost.output,
+      cacheRead: mInfo.cost.cacheRead ?? Number((mInfo.cost.input * 0.1).toFixed(4)),
+      cacheWrite: mInfo.cost.cacheWrite ?? Number((mInfo.cost.input * 1.25).toFixed(4)),
+      contextWindow: mInfo.contextWindow ?? builtin?.contextWindow ?? 200_000,
+      source: "catalog",
+    };
+  }
+
+  if (billingMode === "free") {
+    return {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      contextWindow: mInfo?.contextWindow ?? builtin?.contextWindow ?? 128_000,
+      source: "builtin",
+    };
+  }
+
+  if (builtin) {
+    return {
+      input: builtin.input,
+      output: builtin.output,
+      cacheRead: builtin.cacheRead ?? Number((builtin.input * 0.1).toFixed(4)),
+      cacheWrite: builtin.cacheWrite ?? Number((builtin.input * 1.25).toFixed(4)),
+      contextWindow: mInfo?.contextWindow ?? builtin.contextWindow,
+      source: "builtin",
+    };
+  }
+
+  return {
+    input: 0.5,
+    output: 2.0,
+    cacheRead: 0.05,
+    cacheWrite: 0.625,
+    contextWindow: mInfo?.contextWindow ?? 200_000,
+    source: "fallback",
+  };
+}
+
+export function computeRunCost(
+  usage: RunTokenUsage | undefined,
+  spec: ResolvedModelPriceSpec,
+  billingMode: RunBillingMode,
+  quotaPool: string,
+  reportedCostUsd?: number,
+): RunCostSummary {
+  if (billingMode === "free") {
+    return {
+      apiCostUsd: 0,
+      equivalentCostUsd: 0,
+      billingMode,
+      costSource: "free",
+      quotaPool,
+      currency: "USD",
+    };
+  }
+
+  const hasReported = typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd > 0;
+  let rawCost = hasReported ? reportedCostUsd! : 0;
+  let costSource: RunCostSummary["costSource"] = hasReported ? "reported" : "unknown";
+
+  if (!hasReported && usage && usage.totalTokens > 0) {
+    const uncachedIn = Math.max(0, usage.uncachedInputTokens);
+    const cacheRead = Math.max(0, usage.cacheReadTokens);
+    const cacheWrite = Math.max(0, usage.cacheWriteTokens);
+    const outAll = Math.max(0, usage.outputTokens + usage.reasoningTokens);
+    rawCost =
+      (uncachedIn * spec.input +
+        cacheRead * spec.cacheRead +
+        cacheWrite * spec.cacheWrite +
+        outAll * spec.output) /
+      1_000_000;
+    costSource = spec.source === "fallback" && usage.totalTokens === 0 ? "unknown" : "estimated";
+  }
+
+  const rounded = Math.round(rawCost * 1_000_000) / 1_000_000;
+  return {
+    apiCostUsd: billingMode === "api" ? rounded : 0,
+    equivalentCostUsd: rounded,
+    billingMode,
+    costSource,
+    quotaPool,
+    currency: "USD",
+  };
+}
+
+/** Fast CJK-aware token count estimator for handoff budgets and tool payload inflation analysis. */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0x3040 && code <= 0x30ff) ||
+      (code >= 0xac00 && code <= 0xd7af)
+    ) {
+      cjk++;
+    }
+  }
+  const nonCjk = text.length - cjk;
+  return Math.max(1, Math.ceil(cjk * 0.72 + nonCjk * 0.26));
+}

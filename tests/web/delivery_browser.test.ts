@@ -28,6 +28,10 @@ interface BrowserPage {
   goto(url: string, opts?: { waitUntil?: string }): Promise<unknown>;
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(fn: string | ((...args: unknown[]) => boolean), opts?: { timeout?: number }, ...args: unknown[]): Promise<unknown>;
+  waitForResponse(
+    predicate: (res: { url(): string; status(): number; request(): { method(): string } }) => boolean | Promise<boolean>,
+    opts?: { timeout?: number },
+  ): Promise<unknown>;
   click(sel: string): Promise<void>;
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
@@ -537,20 +541,20 @@ describe("post-acceptance delivery wrap-up UI", () => {
 
       // 1. Acceptance gate blocker error from UI Accept click localizes blockers in English & re-renders in Chinese.
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      const reqLoaded = page.waitForResponse(
+        (res) =>
+          res.request().method() === "GET" &&
+          new URL(res.url()).pathname.endsWith("/api/requirements/REQ-001") &&
+          res.status() === 200,
+        { timeout: 10_000 },
+      );
       await page.click('[data-testid="req-row-REQ-001"]');
+      await reqLoaded;
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(undefined))));
       // Dirty tracked file right before Accept so server observes stale verification against current snapshot.
       fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 99;\n");
-      try {
-        await page.click('[data-testid="action-accept"]');
-      } catch (err) {
-        if (err instanceof Error && err.message.includes("detached")) {
-          await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
-          await page.click('[data-testid="action-accept"]');
-        } else {
-          throw err;
-        }
-      }
+      await page.click('[data-testid="action-accept"]');
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll("[data-sonner-toast]")).some(

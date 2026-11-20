@@ -43,14 +43,19 @@ import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
   createRequirementFiles,
   isProjectInitialized,
+  listAgentRuns,
   listRequirementIds,
   mutateRequirement,
+  pruneProjectRunTraces,
   readAgentRun,
+  readAgentRunContext,
+  readAgentRunTrace,
   readDesignHistory,
   readProject,
   readRequirementBundle,
   readVerificationEvidence,
   initProject as storeInitProject,
+  writeAgentRunContext,
   type RequirementBundle,
 } from "./store.ts";
 import {
@@ -94,6 +99,11 @@ import {
   type ReviewFinding,
   type ReviewReport,
   type ReviewVerdict,
+  type RunBillingMode,
+  type RunContextSnapshot,
+  type RunCostSummary,
+  type RunTokenUsage,
+  type RunTraceEvent,
   type ScreenshotBatch,
   type ScreenshotCaptureResult,
   type Stage,
@@ -137,6 +147,7 @@ function makeEvent(
   actor: TimelineEvent["actor"],
   summary: string,
   detail?: string,
+  runId?: string,
 ): TimelineEvent {
   return {
     id: randomUUID(),
@@ -145,6 +156,7 @@ function makeEvent(
     actor,
     summary,
     ...(detail ? { detail } : {}),
+    ...(runId ? { runId } : {}),
   };
 }
 
@@ -465,6 +477,47 @@ export function getAgentRunDetail(
   runId: string,
 ): { record: AgentRunRecord; log: string } {
   return readAgentRun(root, id, runId);
+}
+
+export function listRequirementAgentRuns(root: string, id: string): AgentRunRecord[] {
+  return listAgentRuns(root, id);
+}
+
+export function getAgentRunTrace(
+  root: string,
+  id: string,
+  runId: string,
+  opts?: { afterSeq?: number; limit?: number },
+): {
+  record: AgentRunRecord;
+  events: RunTraceEvent[];
+  nextSeq: number;
+  totalEvents: number;
+  hasMore: boolean;
+  traceAvailable: boolean;
+} {
+  return readAgentRunTrace(root, id, runId, opts);
+}
+
+export function getAgentRunContext(root: string, id: string, runId: string): RunContextSnapshot | null {
+  return readAgentRunContext(root, id, runId);
+}
+
+export function saveAgentRunContext(
+  root: string,
+  id: string,
+  runId: string,
+  snapshot: RunContextSnapshot,
+): string {
+  return writeAgentRunContext(root, id, runId, snapshot);
+}
+
+export function pruneProjectTraces(
+  root: string,
+  olderThanDays: number,
+  activeRunIds?: Set<string>,
+): { deletedFiles: number; freedBytes: number; scannedRuns: number } {
+  return pruneProjectRunTraces(root, olderThanDays, activeRunIds);
 }
 
 function normalizeHandoffNoteInput(
@@ -2666,15 +2719,31 @@ export async function startAgentRun(
   currentCodeSnapshotHash?: string | null,
 ): Promise<RequirementDetail> {
   const record = validateAgentRunRecord(recordInput);
-  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
     const prev = state.agentRuns ?? [];
     const next = [...prev.filter((r) => r.id !== record.id), record].slice(-MAX_AGENT_RUNS);
+    const isHandoff = record.handoffMode === "fresh_handoff" || record.handoffMode === "native_resume";
+    const handoffHint =
+      record.handoffMode === "native_resume"
+        ? "同构续接会话"
+        : record.handoffMode === "fresh_handoff"
+          ? "跨模型交接启动"
+          : "首次调度";
+    const event = makeEvent(
+      now,
+      isHandoff ? "agent_handoff" : "agent_run_started",
+      "system",
+      `${handoffHint} [${record.action}]：${record.harness}/${record.model}`,
+      record.dispatchReason ? `调度原因：${record.dispatchReason}` : undefined,
+      record.id,
+    );
     return {
       runWrite: { record, rawLog: "" },
       state: {
         ...state,
         agentRuns: next,
+        timeline: appendTimeline(state.timeline, event),
       },
     };
   });
@@ -2695,11 +2764,29 @@ export async function finishAgentRun(
     effectiveModel?: string;
     modelFallback?: boolean;
     errorSummary?: string;
+    quotaPool?: string;
+    billingMode?: RunBillingMode;
+    usage?: RunTokenUsage;
+    cost?: RunCostSummary;
+    turnsCount?: number;
+    toolCallsCount?: number;
+    toolErrorCount?: number;
+    compactionCount?: number;
+    peakContextTokens?: number;
+    contextWindow?: number;
+    llmDurationMs?: number;
+    toolDurationMs?: number;
+    ttftMs?: number;
+    specChanged?: boolean;
+    codeChanged?: boolean;
+    tracePath?: string;
+    contextPath?: string;
+    traceTruncated?: boolean;
   },
   rawLog: string,
   currentCodeSnapshotHash?: string | null,
 ): Promise<RequirementDetail> {
-  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
     const prevRuns = state.agentRuns ?? [];
     const existing = prevRuns.find((r) => r.id === runId);
@@ -2717,13 +2804,44 @@ export async function finishAgentRun(
       ...(patch.effectiveModel ? { effectiveModel: patch.effectiveModel } : {}),
       ...(patch.modelFallback !== undefined ? { modelFallback: patch.modelFallback } : {}),
       ...(patch.errorSummary ? { errorSummary: patch.errorSummary.slice(0, 600) } : {}),
+      ...(patch.quotaPool ? { quotaPool: patch.quotaPool } : {}),
+      ...(patch.billingMode ? { billingMode: patch.billingMode } : {}),
+      ...(patch.usage ? { usage: patch.usage } : {}),
+      ...(patch.cost ? { cost: patch.cost } : {}),
+      ...(patch.turnsCount !== undefined ? { turnsCount: patch.turnsCount } : {}),
+      ...(patch.toolCallsCount !== undefined ? { toolCallsCount: patch.toolCallsCount } : {}),
+      ...(patch.toolErrorCount !== undefined ? { toolErrorCount: patch.toolErrorCount } : {}),
+      ...(patch.compactionCount !== undefined ? { compactionCount: patch.compactionCount } : {}),
+      ...(patch.peakContextTokens !== undefined ? { peakContextTokens: patch.peakContextTokens } : {}),
+      ...(patch.contextWindow !== undefined ? { contextWindow: patch.contextWindow } : {}),
+      ...(patch.llmDurationMs !== undefined ? { llmDurationMs: patch.llmDurationMs } : {}),
+      ...(patch.toolDurationMs !== undefined ? { toolDurationMs: patch.toolDurationMs } : {}),
+      ...(patch.ttftMs !== undefined ? { ttftMs: patch.ttftMs } : {}),
+      ...(patch.specChanged !== undefined ? { specChanged: patch.specChanged } : {}),
+      ...(patch.codeChanged !== undefined ? { codeChanged: patch.codeChanged } : {}),
+      ...(patch.tracePath ? { tracePath: patch.tracePath } : {}),
+      ...(patch.contextPath ? { contextPath: patch.contextPath } : {}),
+      ...(patch.traceTruncated !== undefined ? { traceTruncated: patch.traceTruncated } : {}),
     });
     const nextRuns = prevRuns.map((r) => (r.id === runId ? updated : r)).slice(-MAX_AGENT_RUNS);
+    const statusText = patch.status === "succeeded" ? "完成" : patch.status === "cancelled" ? "已终止" : "失败";
+    const secText = `${(patch.durationMs / 1000).toFixed(1)}s`;
+    const tokText = patch.usage?.totalTokens ? ` · ${patch.usage.totalTokens.toLocaleString()} tokens` : "";
+    const toolText = patch.toolCallsCount ? ` · ${patch.toolCallsCount} 次工具` : "";
+    const finishEvent = makeEvent(
+      now,
+      "agent_run_finished",
+      "agent",
+      `Agent 运行${statusText} [${updated.action}]：${updated.harness}/${updated.effectiveModel ?? updated.model}（${secText}${tokText}${toolText}）`,
+      patch.errorSummary,
+      runId,
+    );
     return {
       runWrite: { record: updated, rawLog },
       state: {
         ...state,
         agentRuns: nextRuns,
+        timeline: appendTimeline(state.timeline, finishEvent),
       },
     };
   });

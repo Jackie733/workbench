@@ -63,7 +63,8 @@ const SOTA_TOKEN_RE = /(?:^|[-_/])(sol|astra|hydrogen|opus|ultra|pro|max|orchest
 
 export interface ModelCapabilityMeta {
   intelligence?: number;
-  cost?: { input: number; output: number };
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  contextWindow?: number;
   isFree?: boolean;
   isLegacy?: boolean;
   priority?: number;
@@ -94,7 +95,8 @@ interface RawModelSpec {
   supportedEfforts?: ReasoningEffort[];
   defaultEffort?: ReasoningEffort;
   intelligence?: number;
-  cost?: { input: number; output: number };
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  contextWindow?: number;
   isFree?: boolean;
   isLegacy?: boolean;
   priority?: number;
@@ -174,6 +176,7 @@ function mergeCapability(
         : undefined;
   const isFree = spec.isFree ?? (freeById || (exactProvider ? meta.isFree : undefined));
   const cost = spec.cost ?? (exactProvider ? meta.cost : undefined);
+  const contextWindow = spec.contextWindow ?? (exactProvider ? meta.contextWindow : meta.contextWindow);
 
   return {
     ...spec,
@@ -185,6 +188,7 @@ function mergeCapability(
       ? { intelligence: spec.intelligence ?? meta.intelligence }
       : {}),
     ...(cost ? { cost } : {}),
+    ...(typeof contextWindow === "number" && contextWindow > 0 ? { contextWindow } : {}),
     ...(isFree ? { isFree: true } : {}),
     ...(spec.isLegacy ?? meta.isLegacy ? { isLegacy: spec.isLegacy ?? meta.isLegacy } : {}),
     ...(spec.priority ?? (exactProvider ? meta.priority : undefined) !== undefined
@@ -229,6 +233,7 @@ function mergeModels(
       ...(spec.defaultEffort ? { defaultEffort: spec.defaultEffort } : {}),
       ...(typeof spec.intelligence === "number" ? { intelligence: spec.intelligence } : {}),
       ...(spec.cost ? { cost: spec.cost } : {}),
+      ...(typeof spec.contextWindow === "number" ? { contextWindow: spec.contextWindow } : {}),
       ...(spec.isFree ? { isFree: true } : {}),
       ...(spec.isLegacy ? { isLegacy: true } : {}),
       ...(typeof spec.priority === "number" ? { priority: spec.priority } : {}),
@@ -311,6 +316,7 @@ function parseCodexModels(homeDir: string): { models: RawModelSpec[]; defaultMod
           description?: string;
           priority?: number;
           visibility?: string;
+          context_window?: number;
           default_reasoning_level?: string;
           supported_reasoning_levels?: Array<{ effort?: string }>;
         }>;
@@ -331,6 +337,9 @@ function parseCodexModels(homeDir: string): { models: RawModelSpec[]; defaultMod
           id: slug,
           provider: "openai-codex",
           ...(item.display_name ? { label: item.display_name } : {}),
+          ...(typeof item.context_window === "number" && item.context_window > 0
+            ? { contextWindow: item.context_window }
+            : {}),
           ...(efforts && efforts.length > 0 ? { supportedEfforts: efforts } : {}),
           ...(defEffort ? { defaultEffort: defEffort } : {}),
           ...(typeof item.priority === "number" ? { priority: item.priority } : {}),
@@ -390,7 +399,9 @@ interface RawModelsDbItem {
   reasoning?: boolean;
   int?: number;
   priority?: number;
-  cost?: { input?: number; output?: number };
+  contextWindow?: number;
+  context_window?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cache_read?: number; cache_write?: number };
   thinking?: { efforts?: unknown[] };
 }
 
@@ -427,6 +438,7 @@ function upsertCapability(
     return {
       intelligence: prev.intelligence ?? next.intelligence,
       cost: prev.cost ?? next.cost,
+      contextWindow: prev.contextWindow ?? next.contextWindow,
       isFree: prev.isFree ?? next.isFree,
       isLegacy: prev.isLegacy ?? next.isLegacy,
       priority: prev.priority ?? next.priority,
@@ -444,9 +456,10 @@ function upsertCapability(
   const prevCanon = index.byCanonicalId.get(canonical);
   const canonMeta: ModelCapabilityMeta = {
     ...(meta.intelligence !== undefined ? { intelligence: meta.intelligence } : {}),
+    ...(meta.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
     ...(meta.isLegacy ? { isLegacy: true } : {}),
   };
-  if (canonMeta.intelligence === undefined && !canonMeta.isLegacy) return;
+  if (canonMeta.intelligence === undefined && canonMeta.contextWindow === undefined && !canonMeta.isLegacy) return;
 
   if (!prevCanon) {
     index.byCanonicalId.set(canonical, canonMeta);
@@ -455,11 +468,13 @@ function upsertCapability(
     index.byCanonicalId.set(canonical, {
       ...prevCanon,
       intelligence: canonMeta.intelligence,
+      ...(canonMeta.contextWindow !== undefined ? { contextWindow: canonMeta.contextWindow } : {}),
       ...(canonMeta.isLegacy ? { isLegacy: true } : {}),
     });
   } else {
     index.byCanonicalId.set(canonical, {
       intelligence: prevCanon.intelligence ?? canonMeta.intelligence,
+      contextWindow: prevCanon.contextWindow ?? canonMeta.contextWindow,
       isLegacy: prevCanon.isLegacy ?? canonMeta.isLegacy,
     });
   }
@@ -558,7 +573,18 @@ function readOmpSqliteCatalog(homeDir: string): OmpSqliteCatalog {
             : undefined;
           const hasCost =
             m.cost && typeof m.cost.input === "number" && typeof m.cost.output === "number";
-          const cost = hasCost ? { input: m.cost!.input!, output: m.cost!.output! } : undefined;
+          const cacheReadRaw = m.cost?.cacheRead ?? m.cost?.cache_read;
+          const cacheWriteRaw = m.cost?.cacheWrite ?? m.cost?.cache_write;
+          const cost = hasCost
+            ? {
+                input: m.cost!.input!,
+                output: m.cost!.output!,
+                ...(typeof cacheReadRaw === "number" ? { cacheRead: cacheReadRaw } : {}),
+                ...(typeof cacheWriteRaw === "number" ? { cacheWrite: cacheWriteRaw } : {}),
+              }
+            : undefined;
+          const rawCtx = m.contextWindow ?? m.context_window;
+          const contextWindow = typeof rawCtx === "number" && rawCtx > 0 ? Math.floor(rawCtx) : undefined;
           // google-antigravity entries use 0/0 cost as placeholder for subscription-bundled models.
           const isFree =
             /-free$/i.test(m.id) ||
@@ -567,6 +593,7 @@ function readOmpSqliteCatalog(homeDir: string): OmpSqliteCatalog {
           const meta: ModelCapabilityMeta = {
             ...(typeof m.int === "number" && Number.isFinite(m.int) ? { intelligence: m.int } : {}),
             ...(cost ? { cost } : {}),
+            ...(contextWindow ? { contextWindow } : {}),
             ...(isFree ? { isFree: true } : {}),
             ...(typeof m.priority === "number" ? { priority: m.priority } : {}),
             ...(typeof m.reasoning === "boolean" ? { reasoning: m.reasoning } : {}),
@@ -713,6 +740,7 @@ function enrichCodexIndex(index: CapabilityIndex, codexModels: RawModelSpec[]): 
   for (const m of codexModels) {
     upsertCapability(index, "openai-codex", m.id, {
       ...(m.priority !== undefined ? { priority: m.priority } : {}),
+      ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
       ...(m.isLegacy ? { isLegacy: true } : {}),
       ...(m.supportedEfforts ? { supportedEfforts: m.supportedEfforts } : {}),
       ...(m.defaultEffort ? { defaultEffort: m.defaultEffort } : {}),

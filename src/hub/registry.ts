@@ -5,14 +5,16 @@ import * as path from "node:path";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteJson, canonicalRoot, readJsonStrict } from "../core/fs.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
-import { WORKBENCH_DIR, type OutputLanguage } from "../core/types.ts";
+import { WORKBENCH_DIR, type OutputLanguage, type RunBillingMode } from "../core/types.ts";
 import { buildPresetRouting, normalizeRoutingConfig } from "./routing.ts";
 import {
   type BrowseEntry,
   type DaemonInfo,
   type HarnessInfo,
   type HubConfig,
+  type HubObservabilityConfig,
   type HubProjectEntry,
+  type ModelPriceOverride,
   type RoutingConfig,
   type RoutingPreset,
 } from "./types.ts";
@@ -125,6 +127,7 @@ export function readHubConfig(): HubConfig {
     const outputLanguage = normalizeOutputLanguage(raw.outputLanguage) ?? DEFAULT_OUTPUT_LANGUAGE;
     const giteeAccessToken =
       typeof raw.giteeAccessToken === "string" && raw.giteeAccessToken.trim() ? raw.giteeAccessToken.trim() : undefined;
+    const observability = normalizeObservabilityConfig(raw.observability);
 
     return {
       schemaVersion: 1,
@@ -133,6 +136,7 @@ export function readHubConfig(): HubConfig {
       routing: normalizeRoutingConfig(raw.routing),
       outputLanguage,
       ...(giteeAccessToken ? { giteeAccessToken } : {}),
+      ...(observability ? { observability } : {}),
     };
   } catch {
     return defaultHubConfig();
@@ -280,6 +284,75 @@ export function updateHubPreferences(patch: {
       }
       config.giteeAccessToken = clean;
     }
+  }
+  return writeHubConfig(config);
+}
+
+function normalizeObservabilityConfig(raw: unknown): HubObservabilityConfig | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  const out: HubObservabilityConfig = {};
+  if (typeof obj.traceRetentionDays === "number" && Number.isFinite(obj.traceRetentionDays) && obj.traceRetentionDays >= 1) {
+    out.traceRetentionDays = Math.min(3650, Math.floor(obj.traceRetentionDays));
+  }
+  if (obj.billingOverrides && typeof obj.billingOverrides === "object" && !Array.isArray(obj.billingOverrides)) {
+    const cleanBilling: Record<string, RunBillingMode> = {};
+    for (const [k, v] of Object.entries(obj.billingOverrides as Record<string, unknown>)) {
+      const key = k.trim();
+      if (!key) continue;
+      if (v === "subscription" || v === "api" || v === "free") {
+        cleanBilling[key] = v;
+      }
+    }
+    if (Object.keys(cleanBilling).length > 0) out.billingOverrides = cleanBilling;
+  }
+  if (obj.pricingOverrides && typeof obj.pricingOverrides === "object" && !Array.isArray(obj.pricingOverrides)) {
+    const cleanPricing: Record<string, ModelPriceOverride> = {};
+    for (const [k, v] of Object.entries(obj.pricingOverrides as Record<string, unknown>)) {
+      const key = k.trim();
+      if (!key || !v || typeof v !== "object" || Array.isArray(v)) continue;
+      const pv = v as Record<string, unknown>;
+      if (
+        typeof pv.input === "number" &&
+        Number.isFinite(pv.input) &&
+        pv.input >= 0 &&
+        typeof pv.output === "number" &&
+        Number.isFinite(pv.output) &&
+        pv.output >= 0
+      ) {
+        cleanPricing[key] = {
+          input: pv.input,
+          output: pv.output,
+          ...(typeof pv.cacheRead === "number" && Number.isFinite(pv.cacheRead) && pv.cacheRead >= 0
+            ? { cacheRead: pv.cacheRead }
+            : {}),
+          ...(typeof pv.cacheWrite === "number" && Number.isFinite(pv.cacheWrite) && pv.cacheWrite >= 0
+            ? { cacheWrite: pv.cacheWrite }
+            : {}),
+          ...(typeof pv.contextWindow === "number" && Number.isFinite(pv.contextWindow) && pv.contextWindow > 0
+            ? { contextWindow: Math.floor(pv.contextWindow) }
+            : {}),
+        };
+      }
+    }
+    if (Object.keys(cleanPricing).length > 0) out.pricingOverrides = cleanPricing;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function updateHubObservability(patch: HubObservabilityConfig): HubConfig {
+  const config = readHubConfig();
+  const prev = config.observability ?? {};
+  const merged: HubObservabilityConfig = {
+    traceRetentionDays: patch.traceRetentionDays !== undefined ? patch.traceRetentionDays : prev.traceRetentionDays,
+    billingOverrides: patch.billingOverrides !== undefined ? patch.billingOverrides : prev.billingOverrides,
+    pricingOverrides: patch.pricingOverrides !== undefined ? patch.pricingOverrides : prev.pricingOverrides,
+  };
+  const normalized = normalizeObservabilityConfig(merged);
+  if (normalized) {
+    config.observability = normalized;
+  } else {
+    delete config.observability;
   }
   return writeHubConfig(config);
 }

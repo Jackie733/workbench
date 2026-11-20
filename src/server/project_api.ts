@@ -10,7 +10,9 @@ import {
   cancelRequirement,
   createRequirement,
   deliverRequirement,
+  getAgentRunContext,
   getAgentRunDetail,
+  getAgentRunTrace,
   getDesignHistoryVersion,
   getProjectStatus,
   getRequirement,
@@ -19,8 +21,10 @@ import {
   getVerificationEvidence,
   initProject,
   linkRequirementGitHubIssue,
+  listRequirementAgentRuns,
   listRequirements,
   markDesigning,
+  pruneProjectTraces,
   recordRequirementGitHubSync,
   removeRequirementAttachment,
   reopenRequirement,
@@ -487,6 +491,21 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         }),
       );
       return jsonResponse({ sandboxes, mergeOrder });
+    }
+
+    if (method === "POST" && pathname === "/api/project/runs/prune") {
+      if (!isProjectInitialized(base)) {
+        return jsonResponse({ result: { deletedFiles: 0, freedBytes: 0, scannedRuns: 0 } });
+      }
+      const body = await readBody(req);
+      const retentionDays =
+        typeof body.retentionDays === "number" && Number.isFinite(body.retentionDays)
+          ? Math.max(0, Math.floor(body.retentionDays))
+          : 30;
+      const activeRunIds = new Set(deps.executor.getActiveRuns(base).map((r) => r.id));
+      const result = pruneProjectTraces(base, retentionDays, activeRunIds);
+      deps.broadcastUi({ type: "workbench.updated", reason: "runs.pruned", root: base, at: Date.now() });
+      return jsonResponse({ result });
     }
 
     if (method === "GET" && pathname === "/api/github/status") {
@@ -1232,11 +1251,67 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         return jsonResponse({ detail, dispatch });
       }
 
+      if (method === "GET" && sub === "runs") {
+        const diskRuns = listRequirementAgentRuns(base, id);
+        const activeMap = new Map(
+          deps.executor
+            .getActiveRuns(base)
+            .filter((r) => r.requirementId === id)
+            .map((r) => [r.id, r]),
+        );
+        const merged = diskRuns.map((r) => activeMap.get(r.id) ?? r);
+        for (const active of activeMap.values()) {
+          if (!merged.some((r) => r.id === active.id)) merged.push(active);
+        }
+        merged.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
+        return jsonResponse({ runs: merged });
+      }
+
       const runCancelMatch = /^runs\/([^/]+)\/cancel$/.exec(sub);
       if (method === "POST" && runCancelMatch) {
         const runId = decodeURIComponent(runCancelMatch[1]!);
         const cancelled = deps.executor.cancelRun(runId);
         return jsonResponse({ cancelled, runId });
+      }
+
+      const runTraceMatch = /^runs\/([^/]+)\/trace$/.exec(sub);
+      if (method === "GET" && runTraceMatch) {
+        const runId = decodeURIComponent(runTraceMatch[1]!);
+        const afterSeqRaw = Number(url.searchParams.get("afterSeq") ?? "0");
+        const limitRaw = Number(url.searchParams.get("limit") ?? "2000");
+        const afterSeq = Number.isFinite(afterSeqRaw) ? Math.max(0, Math.floor(afterSeqRaw)) : 0;
+        const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(5000, Math.floor(limitRaw)) : 2000;
+        const liveTrace = deps.executor.getLiveTrace(runId, afterSeq, limit);
+        if (liveTrace) {
+          const active = deps.executor.getActiveRuns(base).find((r) => r.id === runId);
+          if (active) {
+            return jsonResponse({
+              runId,
+              live: true,
+              hasTrace: true,
+              record: active,
+              ...liveTrace,
+            });
+          }
+        }
+        const diskTrace = getAgentRunTrace(base, id, runId, { afterSeq, limit });
+        return jsonResponse({
+          runId,
+          live: false,
+          hasTrace: diskTrace.traceAvailable,
+          record: diskTrace.record,
+          events: diskTrace.events,
+          nextSeq: diskTrace.nextSeq,
+          totalEvents: diskTrace.totalEvents,
+          hasMore: diskTrace.hasMore,
+        });
+      }
+
+      const runContextMatch = /^runs\/([^/]+)\/context$/.exec(sub);
+      if (method === "GET" && runContextMatch) {
+        const runId = decodeURIComponent(runContextMatch[1]!);
+        const context = getAgentRunContext(base, id, runId);
+        return jsonResponse({ runId, hasContext: Boolean(context), context });
       }
 
       const runDetailMatch = /^runs\/([^/]+)$/.exec(sub);

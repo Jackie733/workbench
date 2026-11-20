@@ -1,10 +1,11 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
   ArrowUp,
   Ban,
+  BarChart3,
   BookOpen,
   Bug,
   Check,
@@ -50,11 +51,12 @@ import {
   Zap,
 } from "lucide-react";
 import type { StructuredMessageRef } from "../../core/errors.ts";
-import type { GitRemoteProvider, OutputLanguage, PrivacyMode, Track } from "../../core/types.ts";
+import type { GitRemoteProvider, OutputLanguage, PrivacyMode, RunBillingMode, Track } from "../../core/types.ts";
 import type { PainPointCategory } from "../../hub/evolution.ts";
 import {
   ROUTING_STAGES,
   type HarnessId,
+  type ModelPriceOverride,
   type ReasoningEffort,
   type RoutingPreset,
   type RoutingStage,
@@ -81,6 +83,7 @@ import {
   useGiteeIssuesQuery,
   useGiteeStatusQuery,
   useGitHubStatusQuery,
+  useHubPricingQuery,
   useHubStateQuery,
   usePlaybookQuery,
   useProjectQuery,
@@ -101,7 +104,14 @@ import {
   translateRef,
   type MessageKey,
 } from "../i18n.ts";
-import { effortLabel, formatDateTime, formatReviewFixFeedback, getModelEffortCapability, parseRunnerKey } from "../state.ts";
+import {
+  effortLabel,
+  formatBytes,
+  formatDateTime,
+  formatReviewFixFeedback,
+  getModelEffortCapability,
+  parseRunnerKey,
+} from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -122,6 +132,240 @@ const PRESET_KEYS: Array<{ id: RoutingPreset; nameKey: MessageKey; descKey: Mess
   { id: "quota_saver", nameKey: "preset.quota_saver.name", descKey: "preset.quota_saver.desc" },
 ];
 
+const STANDARD_QUOTA_POOLS = [
+  "opencode-go",
+  "openai-codex",
+  "qoder-cn",
+  "google-antigravity",
+  "opencode-free",
+  "anthropic",
+  "openai",
+];
+
+function ObservabilityPricingModal({ onClose }: { onClose: () => void }) {
+  const language = useUiStore((s) => s.language);
+  const busy = useUiStore((s) => s.busy);
+  const showToastKey = useUiStore((s) => s.showToastKey);
+  const { data } = useHubPricingQuery(true);
+
+  const [retentionDays, setRetentionDays] = useState<number>(30);
+  const [billingMap, setBillingMap] = useState<Record<string, RunBillingMode>>({});
+  const [priceRows, setPriceRows] = useState<Array<{ key: string; spec: ModelPriceOverride }>>([]);
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    if (!data || initialized) return;
+    const obs = data.observability ?? {};
+    setRetentionDays(obs.traceRetentionDays ?? 30);
+    setBillingMap(obs.billingOverrides ? { ...obs.billingOverrides } : {});
+    setPriceRows(
+      obs.pricingOverrides
+        ? Object.entries(obs.pricingOverrides).map(([key, spec]) => ({ key, spec: { ...spec } }))
+        : [],
+    );
+    setInitialized(true);
+  }, [data, initialized]);
+
+  const pools = Array.from(new Set([...STANDARD_QUOTA_POOLS, ...Object.keys(billingMap)]));
+
+  const handleSave = async () => {
+    const pricingOverrides: Record<string, ModelPriceOverride> = {};
+    for (const row of priceRows) {
+      const k = row.key.trim();
+      if (!k) continue;
+      pricingOverrides[k] = row.spec;
+    }
+    const ok = await runBusy(() =>
+      api.updateHubPricing({
+        traceRetentionDays: Math.max(1, Math.floor(retentionDays || 30)),
+        billingOverrides: billingMap,
+        pricingOverrides,
+      }),
+    );
+    if (ok) {
+      await invalidateAllWorkbenchQueries();
+      showToastKey("pricing.saved");
+      onClose();
+    }
+  };
+
+  const handlePrune = async () => {
+    const out = await runBusy(() => api.pruneHubRunTraces(Math.max(0, Math.floor(retentionDays || 30))));
+    if (out) {
+      await invalidateAllWorkbenchQueries();
+      showToastKey("pricing.prunedSummary", {
+        deleted: out.deletedFiles,
+        freed: formatBytes(out.freedBytes),
+        projects: out.projectsPruned ?? 1,
+      });
+    }
+  };
+
+  return (
+    <ModalShell onClose={onClose} wide>
+      <h3 className="icon-heading">
+        <Icon icon={Settings} size={20} />
+        <span>{t(language, "pricing.title")}</span>
+      </h3>
+      <p className="muted xs" style={{ marginTop: 4 }}>{t(language, "pricing.hint")}</p>
+
+      <div className="field" style={{ marginTop: 12 }}>
+        <label className="field-label" htmlFor="obs-retention-days">
+          {t(language, "pricing.retentionDays")}
+        </label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            id="obs-retention-days"
+            type="number"
+            min={1}
+            max={3650}
+            className="input xs"
+            style={{ width: 110 }}
+            value={retentionDays}
+            onChange={(e) => setRetentionDays(Number(e.target.value) || 30)}
+          />
+          <button
+            type="button"
+            className="btn xs"
+            data-testid="prune-traces-now-btn"
+            disabled={busy}
+            onClick={() => void handlePrune()}
+          >
+            <Icon icon={Trash2} size={14} /> {t(language, "pricing.pruneNow")}
+          </button>
+        </div>
+      </div>
+
+      <div className="field" style={{ marginTop: 12 }}>
+        <div className="field-label">{t(language, "pricing.billingOverrides")}</div>
+        <div className="pricing-grid">
+          {pools.map((pool) => {
+            const label = data?.quotaPoolLabels?.[pool] ?? pool;
+            const currentVal = billingMap[pool] ?? "";
+            return (
+              <div key={pool} className="pricing-row">
+                <span className="xs">
+                  <strong>{label}</strong> <code className="muted">{pool}</code>
+                </span>
+                <select
+                  className="select xs"
+                  value={currentVal}
+                  onChange={(e) => {
+                    const val = e.target.value as RunBillingMode | "";
+                    setBillingMap((prev) => {
+                      const next = { ...prev };
+                      if (!val) delete next[pool];
+                      else next[pool] = val;
+                      return next;
+                    });
+                  }}
+                >
+                  <option value="">Default</option>
+                  <option value="subscription">{t(language, "insights.billing.subscription")}</option>
+                  <option value="api">{t(language, "insights.billing.api")}</option>
+                  <option value="free">{t(language, "insights.billing.free")}</option>
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="field" style={{ marginTop: 12 }}>
+        <div className="card-head" style={{ marginBottom: 6 }}>
+          <span className="field-label" style={{ margin: 0 }}>{t(language, "pricing.pricingOverrides")}</span>
+          <button
+            type="button"
+            className="btn ghost xs"
+            onClick={() =>
+              setPriceRows((prev) => [
+                ...prev,
+                { key: "", spec: { input: 2.0, output: 8.0, cacheRead: 0.2, contextWindow: 200_000 } },
+              ])
+            }
+          >
+            <Icon icon={Plus} size={14} /> {t(language, "pricing.addModelOverride")}
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {priceRows.map((row, idx) => (
+            <div key={idx} className="pricing-override-row">
+              <input
+                type="text"
+                className="input xs"
+                placeholder={t(language, "pricing.modelKeyPlaceholder")}
+                value={row.key}
+                onChange={(e) =>
+                  setPriceRows((prev) => prev.map((r, i) => (i === idx ? { ...r, key: e.target.value } : r)))
+                }
+              />
+              <input
+                type="number"
+                step="0.01"
+                className="input xs"
+                title="Input $/1M"
+                value={row.spec.input}
+                onChange={(e) =>
+                  setPriceRows((prev) =>
+                    prev.map((r, i) => (i === idx ? { ...r, spec: { ...r.spec, input: Number(e.target.value) || 0 } } : r)),
+                  )
+                }
+              />
+              <input
+                type="number"
+                step="0.01"
+                className="input xs"
+                title="Output $/1M"
+                value={row.spec.output}
+                onChange={(e) =>
+                  setPriceRows((prev) =>
+                    prev.map((r, i) => (i === idx ? { ...r, spec: { ...r.spec, output: Number(e.target.value) || 0 } } : r)),
+                  )
+                }
+              />
+              <input
+                type="number"
+                className="input xs"
+                title="Context Window"
+                value={row.spec.contextWindow ?? 200_000}
+                onChange={(e) =>
+                  setPriceRows((prev) =>
+                    prev.map((r, i) =>
+                      i === idx ? { ...r, spec: { ...r.spec, contextWindow: Number(e.target.value) || 200_000 } } : r,
+                    ),
+                  )
+                }
+              />
+              <button
+                type="button"
+                className="btn ghost xs"
+                onClick={() => setPriceRows((prev) => prev.filter((_, i) => i !== idx))}
+              >
+                <Icon icon={Trash2} size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="modal-actions">
+        <button className="btn" type="button" onClick={onClose}>
+          <Icon icon={X} size={14} /> {t(language, "common.cancel")}
+        </button>
+        <button
+          className="btn primary"
+          type="button"
+          data-testid="save-pricing-btn"
+          disabled={busy}
+          onClick={() => void handleSave()}
+        >
+          <Icon icon={Save} size={14} /> {t(language, "pricing.save")}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
 export function Modals() {
   const language = useUiStore((s) => s.language);
   const m = useUiStore((s) => s.modal);
@@ -129,6 +373,7 @@ export function Modals() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const setModal = useUiStore((s) => s.setModal);
+  const setMainView = useUiStore((s) => s.setMainView);
   const showToast = useUiStore((s) => s.showToast);
   const showToastKey = useUiStore((s) => s.showToastKey);
   const setActiveProjectId = useUiStore((s) => s.setActiveProjectId);
@@ -2600,7 +2845,26 @@ export function Modals() {
               <span className="xs muted">
                 {t(language, "evo.telemetryHint")}
               </span>
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="evo-open-insights-btn"
+                  onClick={() => {
+                    close();
+                    setMainView("insights");
+                  }}
+                >
+                  <Icon icon={BarChart3} size={14} /> {t(language, "evo.openInsights")}
+                </button>
+                <button
+                  className="btn xs"
+                  type="button"
+                  data-testid="evo-open-pricing-btn"
+                  onClick={() => setModal({ kind: "observability_pricing" })}
+                >
+                  <Icon icon={Settings} size={14} /> {t(language, "evo.openPricingConfig")}
+                </button>
                 {telemetry.activeCooldowns.length > 0 && (
                   <button
                     className="btn xs"
@@ -3334,6 +3598,10 @@ export function Modals() {
         </div>
       </ModalShell>
     );
+  }
+
+  if (m.kind === "observability_pricing") {
+    return <ObservabilityPricingModal onClose={close} />;
   }
 
   return (

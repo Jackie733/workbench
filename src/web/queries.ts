@@ -1,9 +1,24 @@
 import { useEffect } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { GiteeIssueItem } from "../core/gitee.ts";
-import type { AgentAction, AgentRunRecord, CascadeSyncItemResult, RequirementDetail, SandboxDriftInfo, Stage } from "../core/types.ts";
+import type {
+  AgentAction,
+  AgentRunRecord,
+  CascadeSyncItemResult,
+  RequirementDetail,
+  RunTraceEvent,
+  SandboxDriftInfo,
+  Stage,
+} from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
-import { api, ApiClientError, connectUiWebSocket, setApiProjectScope, type HubStateResponse } from "./api.ts";
+import {
+  api,
+  ApiClientError,
+  connectUiWebSocket,
+  setApiProjectScope,
+  type HubStateResponse,
+  type InsightsQueryFilter,
+} from "./api.ts";
 import { resolveWarningParam, type MessageKey } from "./i18n.ts";
 import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
@@ -33,6 +48,11 @@ export const queryKeys = {
     ["gitee", "issues", projectId, filter, state, q] as const,
   requirements: (projectId: string | null, scope: Scope) => ["requirements", projectId, scope] as const,
   requirement: (projectId: string | null, id: string | null) => ["requirement", projectId, id] as const,
+  requirementRuns: (projectId: string | null, id: string | null) => ["requirement", "runs", projectId, id] as const,
+  runContext: (projectId: string | null, id: string | null, runId: string | null) =>
+    ["requirement", "runContext", projectId, id, runId] as const,
+  hubInsights: (filter: InsightsQueryFilter) => ["hub", "insights", filter] as const,
+  hubPricing: ["hub", "insights", "pricing"] as const,
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
   delivery: (projectId: string | null, id: string | null) => ["delivery", projectId, id] as const,
 };
@@ -83,6 +103,106 @@ export function useEvolutionQuery(enabled: boolean) {
     queryFn: () => api.getEvolution(),
     enabled,
   });
+}
+
+export function useRequirementRunsQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.requirementRuns(activeProjectId, id),
+    queryFn: async () => {
+      if (!id) return [];
+      const res = await api.listRequirementRuns(id);
+      return res.runs;
+    },
+    enabled: Boolean(id) && enabled,
+  });
+}
+
+export function useRunContextQuery(
+  activeProjectId: string | null,
+  id: string | null,
+  runId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: queryKeys.runContext(activeProjectId, id, runId),
+    queryFn: () => (id && runId ? api.getAgentRunContext(id, runId) : Promise.resolve({ runId: "", hasContext: false, context: null })),
+    enabled: Boolean(id && runId) && enabled,
+    staleTime: 15_000,
+  });
+}
+
+export function useHubInsightsQuery(filter: InsightsQueryFilter, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.hubInsights(filter),
+    queryFn: () => api.getHubInsights(filter),
+    enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useHubPricingQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.hubPricing,
+    queryFn: () => api.getHubPricing(),
+    enabled,
+    staleTime: 15_000,
+  });
+}
+
+const traceHydrationInFlight = new Map<string, Promise<void>>();
+const logHydrationInFlight = new Map<string, Promise<void>>();
+
+export async function hydrateRunLog(reqId: string, runId: string, force = false): Promise<void> {
+  if (!reqId || !runId) return;
+  const stream = useStreamStore.getState();
+  if (!force && stream.logHydrated[runId]) return;
+  const existing = logHydrationInFlight.get(runId);
+  if (existing) return existing;
+  const task = (async () => {
+    try {
+      const res = await api.getAgentRunLog(reqId, runId);
+      useStreamStore.getState().setRunLogFull(runId, res.log, true);
+    } catch {
+      // Mark hydrated when missing on disk so UI does not spin forever.
+      const prev = useStreamStore.getState().liveRunLogs[runId] ?? "";
+      useStreamStore.getState().setRunLogFull(runId, prev, true);
+    } finally {
+      logHydrationInFlight.delete(runId);
+    }
+  })();
+  logHydrationInFlight.set(runId, task);
+  return task;
+}
+
+export async function hydrateRunTrace(reqId: string, runId: string, incremental = false): Promise<void> {
+  if (!reqId || !runId) return;
+  const inflightKey = `${runId}:${incremental ? "inc" : "full"}`;
+  const existing = traceHydrationInFlight.get(inflightKey);
+  if (existing) return existing;
+  const task = (async () => {
+    try {
+      const stream = useStreamStore.getState();
+      const prev = stream.runTraces[runId];
+      let afterSeq = incremental && prev ? prev.lastSeq : 0;
+      let append = incremental && Boolean(prev);
+      for (let page = 0; page < 8; page += 1) {
+        const res = await api.getAgentRunTrace(reqId, runId, afterSeq, 2000);
+        useStreamStore.getState().applyTraceSnapshot(runId, res, append);
+        if (!res.hasMore || res.events.length === 0) break;
+        afterSeq = res.nextSeq;
+        append = true;
+      }
+    } catch {
+      const prev = useStreamStore.getState().runTraces[runId];
+      if (!prev) {
+        useStreamStore.getState().applyTraceSnapshot(runId, { events: [], nextSeq: 0, hasTrace: false }, false);
+      }
+    } finally {
+      traceHydrationInFlight.delete(inflightKey);
+    }
+  })();
+  traceHydrationInFlight.set(inflightKey, task);
+  return task;
 }
 
 export function usePlaybookQuery(activeProjectId: string | null, enabled: boolean) {
@@ -264,89 +384,130 @@ export function useWorkbenchWsSync(enabled = true): void {
     const onFocusOut = () => drainPendingReload();
     if (typeof document !== "undefined") document.addEventListener("focusout", onFocusOut);
 
-    const disconnect = connectUiWebSocket((ev) => {
-      const type = ev.type;
-      if (type === "agent.run.started") {
-        const runId = typeof ev.runId === "string" ? ev.runId : "";
-        const reqId = typeof ev.requirementId === "string" ? ev.requirementId : "";
-        if (!runId) return;
-        const rec: AgentRunRecord & { requirementId: string; root?: string; projectId?: string } = {
-          id: runId,
-          requirementId: reqId,
-          ...(typeof ev.root === "string" ? { root: ev.root } : {}),
-          ...(typeof ev.projectId === "string" ? { projectId: ev.projectId } : {}),
-          action: (ev.action as AgentAction) ?? "design",
-          harness: String(ev.harness ?? ""),
-          model: String(ev.model ?? ""),
-          status: "running",
-          startedAt: typeof ev.at === "number" ? ev.at : Date.now(),
-          endedAt: null,
-          exitCode: null,
-          durationMs: 0,
-          logPath: "",
-        };
-        useStreamStore.getState().setRunStarted(rec);
-        void queryClient.invalidateQueries({ queryKey: ["requirement"] });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
-        return;
-      }
-
-      if (type === "agent.run.output") {
-        const runId = typeof ev.runId === "string" ? ev.runId : "";
-        const chunk = typeof ev.chunk === "string" ? ev.chunk : "";
-        if (!runId || !chunk) return;
-        useStreamStore.getState().appendRunLog(runId, chunk);
-        return;
-      }
-
-      if (type === "agent.run.finished") {
-        const runId = typeof ev.runId === "string" ? ev.runId : "";
-        if (!runId) return;
-        useStreamStore.getState().markRunFinished(runId);
-        if (!finishedSeen.has(runId)) {
-          finishedSeen.add(runId);
-          const status = ev.status as AgentRunRecord["status"] | undefined;
+    const disconnect = connectUiWebSocket(
+      (ev) => {
+        const type = ev.type;
+        if (type === "agent.run.started") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
           const reqId = typeof ev.requirementId === "string" ? ev.requirementId : "";
-          const model = typeof ev.model === "string" ? ev.model : "";
-          const ui = useUiStore.getState();
-          if (status === "succeeded") {
-            if (ev.modelFallback === true) {
-              ui.showToastKey("toast.runSucceededFallback", {
-                id: reqId,
-                model,
-                effective: String(ev.effectiveModel ?? "auto"),
-              });
-            } else {
-              ui.showToastKey("toast.runSucceeded", { id: reqId, model });
-            }
-          } else if (status === "cancelled") {
-            ui.showToastKey("toast.runCancelled", { id: reqId });
-          } else if (ev.rateLimited) {
-            ui.showToastKey("toast.runRateLimited", { id: reqId }, true);
-          } else {
-            ui.showToastKey(
-              "toast.runFailed",
-              { id: reqId, error: String(ev.errorSummary ?? "unknown") },
-              true,
-            );
-          }
+          if (!runId) return;
+          const rec: AgentRunRecord & { requirementId: string; root?: string; projectId?: string } = {
+            id: runId,
+            requirementId: reqId,
+            ...(typeof ev.root === "string" ? { root: ev.root } : {}),
+            ...(typeof ev.projectId === "string" ? { projectId: ev.projectId } : {}),
+            action: (ev.action as AgentAction) ?? "design",
+            harness: String(ev.harness ?? ""),
+            model: String(ev.model ?? ""),
+            status: "running",
+            startedAt: typeof ev.at === "number" ? ev.at : Date.now(),
+            endedAt: null,
+            exitCode: null,
+            durationMs: 0,
+            logPath: "",
+          };
+          useStreamStore.getState().setRunStarted(rec);
+          void queryClient.invalidateQueries({ queryKey: ["requirement"] });
+          void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+          return;
         }
-        void queryClient.invalidateQueries({ queryKey: ["requirement"] });
-        void queryClient.invalidateQueries({ queryKey: ["requirements"] });
-        void queryClient.invalidateQueries({ queryKey: ["diff"] });
-        void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
-        return;
-      }
 
-      if (type === "workbench.reload_ui") {
-        requestReload(ev.manual === true);
-        return;
-      }
+        if (type === "agent.run.output") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
+          const chunk = typeof ev.chunk === "string" ? ev.chunk : "";
+          if (!runId || !chunk) return;
+          useStreamStore.getState().appendRunLog(runId, chunk);
+          return;
+        }
 
-      if (type === "workbench.updated" || type === "hub.updated") {
-        void queryClient.invalidateQueries();
-      }
-    });
+        if (type === "agent.run.event") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
+          const evtObj = ev.event;
+          if (!runId || !evtObj || typeof evtObj !== "object") return;
+          useStreamStore.getState().pushTraceEvent(runId, evtObj as RunTraceEvent);
+          return;
+        }
+
+        if (type === "agent.run.metrics") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
+          const metricsObj = ev.metrics;
+          if (!runId || !metricsObj || typeof metricsObj !== "object") return;
+          useStreamStore.getState().updateLiveMetrics(runId, metricsObj as Partial<AgentRunRecord>);
+          return;
+        }
+
+        if (type === "agent.run.finished") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
+          if (!runId) return;
+          useStreamStore.getState().markRunFinished(runId);
+          const reqId = typeof ev.requirementId === "string" ? ev.requirementId : "";
+          if (reqId) {
+            void hydrateRunTrace(reqId, runId, true);
+            void hydrateRunLog(reqId, runId, true);
+          }
+          if (!finishedSeen.has(runId)) {
+            finishedSeen.add(runId);
+            const status = ev.status as AgentRunRecord["status"] | undefined;
+            const model = typeof ev.model === "string" ? ev.model : "";
+            const ui = useUiStore.getState();
+            if (status === "succeeded") {
+              if (ev.modelFallback === true) {
+                ui.showToastKey("toast.runSucceededFallback", {
+                  id: reqId,
+                  model,
+                  effective: String(ev.effectiveModel ?? "auto"),
+                });
+              } else {
+                ui.showToastKey("toast.runSucceeded", { id: reqId, model });
+              }
+            } else if (status === "cancelled") {
+              ui.showToastKey("toast.runCancelled", { id: reqId });
+            } else if (ev.rateLimited) {
+              ui.showToastKey("toast.runRateLimited", { id: reqId }, true);
+            } else {
+              ui.showToastKey(
+                "toast.runFailed",
+                { id: reqId, error: String(ev.errorSummary ?? "unknown") },
+                true,
+              );
+            }
+          }
+          void queryClient.invalidateQueries({ queryKey: ["requirement"] });
+          void queryClient.invalidateQueries({ queryKey: ["requirements"] });
+          void queryClient.invalidateQueries({ queryKey: ["diff"] });
+          void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+          void queryClient.invalidateQueries({ queryKey: ["hub", "insights"] });
+          return;
+        }
+
+        if (type === "workbench.reload_ui") {
+          requestReload(ev.manual === true);
+          return;
+        }
+
+        if (type === "workbench.updated" || type === "hub.updated") {
+          void queryClient.invalidateQueries();
+        }
+      },
+      {
+        onReconnect: () => {
+          void queryClient.invalidateQueries();
+          const ui = useUiStore.getState();
+          const stream = useStreamStore.getState();
+          const reqId = ui.selectedId;
+          if (reqId) {
+            const runId =
+              stream.selectedRunByReq[reqId] ??
+              Object.values(stream.activeRuns).find((r) => r.requirementId === reqId)?.id ??
+              ui.inspectedRunId;
+            if (runId) {
+              void hydrateRunTrace(reqId, runId, true);
+              void hydrateRunLog(reqId, runId, true);
+            }
+          }
+        },
+      },
+    );
     return () => {
       clearTimeout(reloadTimer);
       unsubscribeReloadDrain();
@@ -415,7 +576,9 @@ export async function openRequirement(id: string): Promise<void> {
   if (scrollEl) {
     ui.setHomeScrollY(scrollEl.scrollTop);
   }
+  ui.setMainView("workspace");
   ui.setSelectedId(id);
+  ui.setInspectedRunId(null);
   ui.setSidebarOpen(false);
   ui.setWorkspaceTab("spec");
   ui.setSelectedDiffFile(null);
@@ -449,11 +612,13 @@ export function backHome(): void {
 export async function switchProject(pid: string): Promise<void> {
   const ui = useUiStore.getState();
   ui.setSidebarOpen(false);
+  ui.setMainView("workspace");
   const ok = await runBusy(async () => {
     await api.activateHubProject(pid);
     setApiProjectScope(pid);
     ui.setActiveProjectId(pid);
     ui.setSelectedId(null);
+    ui.setInspectedRunId(null);
     ui.setSelectedDiffFile(null);
     ui.setQuery("");
     ui.setHomeScrollY(0);
@@ -915,17 +1080,39 @@ export async function toggleVerificationLog(reqId: string, vid: string): Promise
 export async function openRunConsole(reqId: string, runId: string): Promise<void> {
   const ui = useUiStore.getState();
   const stream = useStreamStore.getState();
-  stream.setSelectedRunId(runId);
+  stream.setSelectedRunForReq(reqId, runId);
   ui.setDrawerOpen(true);
   ui.setDrawerTab("console");
-  if (stream.liveRunLogs[runId] === undefined) {
-    try {
-      const res = await api.getAgentRunLog(reqId, runId);
-      stream.setRunLogFull(runId, res.log);
-    } catch {
-      // ignore missing log
+  await Promise.all([
+    hydrateRunTrace(reqId, runId, false),
+    hydrateRunLog(reqId, runId, false),
+  ]);
+}
+
+export async function openRunAudit(reqId: string, runId: string): Promise<void> {
+  const ui = useUiStore.getState();
+  if (ui.selectedId !== reqId) {
+    await openRequirement(reqId);
+  }
+  const latestUi = useUiStore.getState();
+  latestUi.setMainView("workspace");
+  latestUi.setWorkspaceTab("timeline");
+  latestUi.setInspectedRunId(runId);
+  void hydrateRunTrace(reqId, runId, false);
+  void hydrateRunLog(reqId, runId, false);
+}
+
+export async function jumpToRequirementFromInsights(projectId: string | undefined, reqId: string): Promise<void> {
+  const ui = useUiStore.getState();
+  if (projectId) {
+    const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+    const matched = hub?.projects.find((p) => p.id === projectId || p.root === projectId);
+    const targetProjectId = matched?.id ?? (!projectId.startsWith("/") ? projectId : undefined);
+    if (targetProjectId && targetProjectId !== ui.activeProjectId) {
+      await switchProject(targetProjectId);
     }
   }
+  await openRequirement(reqId);
 }
 
 export async function cancelRun(reqId: string, runId: string): Promise<void> {
