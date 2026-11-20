@@ -640,7 +640,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .stat-pill.warn { border-color: var(--warning); background: var(--warning-soft); }
 
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.search-box { flex: 1; min-width: 180px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; }
+.search-wrap { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0 11px; color: var(--muted); }
+.search-wrap:focus-within { border-color: var(--accent); }
+.search-box { flex: 1; min-width: 0; background: transparent; border: 0; border-radius: 0; padding: 7px 0; color: var(--text); outline: none; }
 .select { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 13px; max-width: 100%; }
 .select.xs { padding: 4px 6px; font-size: 12px; border-radius: 6px; }
 .segmented { display: inline-flex; background: var(--surface-2); border-radius: 8px; padding: 2px; gap: 2px; }
@@ -648,7 +650,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .segmented button.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
 
 .decision-box { background: var(--surface); border: 1px solid var(--warning); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
-.decision-box h2 { font-size: 13px; margin: 0 0 8px; color: var(--warning); }
+.decision-box h2 { font-size: 13px; margin: 0 0 8px; color: var(--warning); display: flex; align-items: center; gap: 6px; }
 .decision-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--border); }
 .decision-row:first-of-type { border-top: 0; }
 
@@ -768,7 +770,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-dot, .sb-dot.running, .step-item.step-running .step-dot, .live-shimmer-bar, .live-agent-banner, .discuss-msg.discuss-streaming {
+  .pulse-dot, .sb-dot.running, .step-item.step-running .step-dot, .live-shimmer-bar, .live-agent-banner, .discuss-msg.discuss-streaming, .ui-icon.spin {
     animation: none !important;
   }
   .sidebar, .sidebar-inner, .drawer, .drawer-inner, .drawer-backdrop, .drawer-resizer::before, .drawer-resizer::after {
@@ -795,7 +797,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
  * Keep the bar at its natural height and let the tab panel below take the scroll.
  */
 .tabs { display: flex; flex: 0 0 auto; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
-.tab { flex: 0 0 auto; border: 0; background: transparent; padding: 9px 14px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+.tab { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; padding: 9px 14px; cursor: pointer; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
@@ -896,7 +898,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 /* REQ-005: percentage-width items inside the Radix portal wrapper form a circular max-content
  * dependency that stretches the menu to the viewport width; column flex sizes to content instead. */
 .more-menu { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; min-width: 170px; box-shadow: 0 10px 25px rgba(0,0,0,0.16); padding: 4px; z-index: 38; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: wb-menu-in 120ms ease-out; }
-.more-menu button { width: auto; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.more-menu button { width: auto; display: flex; align-items: center; gap: 8px; text-align: left; border: 0; background: transparent; padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .more-menu button:hover, .more-menu button[data-highlighted] { background: var(--surface-2); outline: none; }
 @keyframes wb-menu-in { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
 
@@ -904,6 +906,11 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .callout { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 13px; background: var(--surface-2); }
 .callout.warning { border-color: var(--warning); background: var(--warning-soft); }
 .callout.danger { border-color: var(--danger); background: var(--danger-soft); }
+.icon-heading { display: flex; align-items: center; gap: 8px; }
+.icon-heading > span { min-width: 0; }
+.callout-lead { display: inline-flex; align-items: center; gap: 6px; }
+.ui-icon.spin { animation: wb-spin 0.9s linear infinite; }
+@keyframes wb-spin { to { transform: rotate(360deg); } }
 /* Sonner 提示：窄屏下容器不超出视口（颜色变量由 Toaster 内联样式接入主题）。
    Radix 弹窗打开时会给 body 设 pointer-events:none，门户中的提示需显式恢复可交互。 */
 [data-sonner-toaster] { font-family: var(--sans); pointer-events: none; }
@@ -1046,6 +1053,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .drawer.collapsed {
     width: min(100vw, 420px);
   }
+  /* REQ-010: 窄屏下三个带图标的标签需完整落在视口内。 */
+  .tab { padding: 8px 8px; gap: 4px; font-size: 12.5px; }
 }
 
 /* ---------- 附件上传与展示 ---------- */

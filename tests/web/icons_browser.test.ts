@@ -550,3 +550,233 @@ describe("REQ-001 real browser icon behavior", () => {
     }
   }, 60_000);
 });
+
+describe("REQ-010 icon coverage across home and workspace", () => {
+  const CONTRACT = () => {
+    const svgs = Array.from(document.querySelectorAll("svg.ui-icon")) as SVGElement[];
+    return {
+      total: svgs.length,
+      badHidden: svgs.filter(
+        (svg) => svg.getAttribute("aria-hidden") !== "true" || svg.getAttribute("focusable") !== "false",
+      ).length,
+    };
+  };
+
+  test("home toolbar, search, stage badges, and workspace controls render aligned icons", async () => {
+    const { page } = await setup();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+    try {
+      // setup() finishes in the workspace; return home before asserting toolbar icons.
+      await page.evaluate(() => {
+        const back = document.querySelector('[data-testid="back-home-btn"]') as HTMLButtonElement | null;
+        back?.click();
+      });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+
+      // Home: layout toggle and search affordance.
+      const layoutIcons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="layout-toggle"] button')).map(
+          (button) => button.querySelectorAll("svg.ui-icon").length,
+        ),
+      );
+      expect(layoutIcons).toEqual([1, 1]);
+      expect(
+        await page.evaluate(() => document.querySelectorAll(".search-wrap svg.ui-icon").length),
+      ).toBe(1);
+      expect(await page.evaluate(() => Boolean(document.querySelector(".search-wrap #search-input")))).toBe(true);
+
+      // Home: requirement row stage badge carries exactly one icon; optional Issue/PR badges must too.
+      const rowIcons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="req-row-REQ-001"] .badge')).map((badge) => ({
+          text: (badge.textContent ?? "").trim(),
+          icons: badge.querySelectorAll("svg.ui-icon").length,
+        })),
+      );
+      expect(rowIcons.length).toBeGreaterThan(0);
+      expect(rowIcons.every((badge) => badge.icons === 1)).toBe(true);
+      const decisionBadge = await page.evaluate(() => {
+        const box = document.querySelector('[data-testid="decision-box"]');
+        if (!box) return null;
+        return {
+          headingIcons: box.querySelectorAll("h2 svg.ui-icon").length,
+          badgeIcons: Array.from(box.querySelectorAll(".decision-row .badge")).map(
+            (badge) => badge.querySelectorAll("svg.ui-icon").length,
+          ),
+        };
+      });
+      if (decisionBadge) {
+        expect(decisionBadge.headingIcons).toBe(1);
+        expect(decisionBadge.badgeIcons.every((count) => count === 1)).toBe(true);
+      }
+
+      expect(await page.evaluate(CONTRACT)).toMatchObject({ badHidden: 0 });
+      expect((await page.evaluate(CONTRACT)).total).toBeGreaterThan(10);
+
+      // Workspace: stage badge, sandbox area, and the three tabs.
+      await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 10_000 });
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-testid="ws-stage-badge"] svg.ui-icon').length),
+      ).toBe(1);
+      const tabIcons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="workspace-tabs"] .tab')).map(
+          (tab) => tab.querySelectorAll("svg.ui-icon").length,
+        ),
+      );
+      expect(tabIcons).toEqual([1, 1, 1]);
+
+      // Spec tab: edit affordances carry icons.
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-action="start-edit-spec"] svg.ui-icon').length),
+      ).toBeGreaterThan(0);
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-testid="start-edit-design-btn"] svg.ui-icon').length),
+      ).toBe(1);
+
+      // More menu: every item has a 14px icon, stays content-sized, and keeps single-line alignment.
+      await page.click('[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+      const menuReport = await page.evaluate(() => {
+        const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
+        const buttons = Array.from(menu.querySelectorAll("button")).map((button) => {
+          const rect = button.getBoundingClientRect();
+          const icon = button.querySelector("svg.ui-icon") as SVGElement | null;
+          return {
+            text: (button.textContent ?? "").trim(),
+            icons: button.querySelectorAll("svg.ui-icon").length,
+            height: rect.height,
+            singleLine: rect.height <= 44 && (icon?.getBoundingClientRect().height ?? 0) > 0,
+            display: getComputedStyle(button).display,
+            width: rect.width,
+          };
+        });
+        const rect = menu.getBoundingClientRect();
+        return {
+          width: rect.width,
+          left: rect.left,
+          right: rect.right,
+          viewport: window.innerWidth,
+          buttons,
+        };
+      });
+
+      expect(menuReport.buttons.length).toBeGreaterThan(4);
+      for (const button of menuReport.buttons) {
+        expect(button.text, "menu item keeps its visible text").not.toBe("");
+        expect(button.icons, `menu item ${button.text} must carry one icon`).toBe(1);
+        expect(button.display).toBe("flex");
+        expect(button.singleLine, `menu item ${button.text} must keep its icon inline`).toBe(true);
+      }
+      // Content-sized menu: not stretched to the viewport and fully inside it.
+      expect(menuReport.width).toBeLessThan(menuReport.viewport * 0.5);
+      expect(menuReport.left).toBeGreaterThanOrEqual(-1);
+      expect(menuReport.right).toBeLessThanOrEqual(menuReport.viewport + 1);
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+
+      // Changes tab: run-all/rerun/evidence badges are iconified without changing their text.
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="manual-verify-btn"]', { timeout: 5000 });
+      expect(
+        await page.evaluate(() => {
+          const button = Array.from(document.querySelectorAll("button")).find(
+            (candidate) => candidate.textContent?.trim() === "运行全部验证",
+          );
+          return button?.querySelectorAll("svg.ui-icon").length ?? 0;
+        }),
+      ).toBe(1);
+      expect(
+        await page.evaluate(() => document.querySelectorAll('[data-testid="manual-verify-btn"] svg.ui-icon').length),
+      ).toBe(1);
+      const evidenceBadgeIcons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="ev-"] .badge')).map(
+          (badge) => badge.querySelectorAll("svg.ui-icon").length,
+        ),
+      );
+      expect(evidenceBadgeIcons.length).toBeGreaterThan(0);
+      expect(evidenceBadgeIcons.every((count) => count === 1)).toBe(true);
+
+      // Timeline tab remains iconified and free of page errors.
+      await page.click('[data-testid="tab-timeline"]');
+      await page.waitForSelector('[data-testid="workspace-tab-scroll"]', { timeout: 5000 });
+      expect(await page.evaluate(CONTRACT)).toMatchObject({ badHidden: 0 });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
+  test("desktop/mobile and light/dark themes keep icons aligned without overflow or clipping", async () => {
+    const { page } = await setup();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+    try {
+      for (const [width, height] of [
+        [1360, 860],
+        [390, 844],
+      ] as const) {
+        await page.setViewport({ width, height });
+        for (const theme of ["light", "dark"] as const) {
+          const current = await page.evaluate(() => document.documentElement.getAttribute("data-theme"));
+          if (current !== theme) {
+            await page.click('[data-action="toggle-theme"]');
+            await page.waitForFunction(
+              (next: string) => document.documentElement.getAttribute("data-theme") === next,
+              { timeout: 5000 },
+              theme,
+            );
+          }
+
+          for (const surface of ["home", "workspace"] as const) {
+            if (surface === "home") {
+              await page.evaluate(() => {
+                const back = document.querySelector('[data-testid="back-home-btn"]') as HTMLButtonElement | null;
+                back?.click();
+              });
+              await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+            } else {
+              await page.click('[data-testid="req-row-REQ-001"]');
+              await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
+            }
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await new Promise((r) => setTimeout(r, 80));
+            const report = await page.evaluate(() => {
+              const svgs = Array.from(document.querySelectorAll("svg.ui-icon")) as SVGElement[];
+              const badHidden = svgs.filter(
+                (svg) => svg.getAttribute("aria-hidden") !== "true" || svg.getAttribute("focusable") !== "false",
+              ).length;
+              const clipped = svgs.filter((svg) => {
+                const rect = svg.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return false;
+                return rect.left < -1 || rect.right > window.innerWidth + 1;
+              }).length;
+              return {
+                count: svgs.length,
+                badHidden,
+                clipped,
+                overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+              };
+            });
+            expect(report.count, `${surface} should render icons at ${width}x${height} ${theme}`).toBeGreaterThan(0);
+            expect(report.badHidden, `${surface} icons must stay decorative`).toBe(0);
+            expect(report.clipped, `${surface} icons must not clip horizontally`).toBe(0);
+            expect(report.overflow, `horizontal overflow on ${surface} at ${width}x${height} ${theme}`).toBe(false);
+          }
+
+          await page.screenshot({
+            path: path.join(SCREENSHOT_DIR, `req-010-workspace-${width}x${height}-${theme}.png`),
+          });
+        }
+      }
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+});

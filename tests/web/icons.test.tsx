@@ -4,7 +4,16 @@ import * as path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Check } from "lucide-react";
 import { BrandMark } from "../../src/web/components/BrandMark.tsx";
-import { COVERAGE_ICONS, Icon, TASK_ICONS } from "../../src/web/components/Icon.tsx";
+import {
+  BANNER_ACTION_ICONS,
+  CALLOUT_TONE_ICONS,
+  COVERAGE_ICONS,
+  EVIDENCE_ICONS,
+  Icon,
+  STAGE_ICONS,
+  TASK_ICONS,
+  VERDICT_ICONS,
+} from "../../src/web/components/Icon.tsx";
 import { renderMarkdown } from "../../src/web/render.ts";
 
 const ROOT = path.resolve(import.meta.dir, "../..");
@@ -20,6 +29,16 @@ const COMPONENT_FILES = [
   "Modals.tsx",
   "Primitives.tsx",
   "Icon.tsx",
+  "LoginView.tsx",
+  "AttachmentGallery.tsx",
+  "AttachmentPicker.tsx",
+  "BrandMark.tsx",
+] as const;
+
+const UI_COMPONENT_FILES = [
+  "ui/ModelPickerMenu.tsx",
+  "ui/ModelRunnerBar.tsx",
+  "ui/RoutingModelPicker.tsx",
 ] as const;
 
 // Glyphs the application used to render as ad-hoc status / action icons.
@@ -46,9 +65,81 @@ const EXPECTED_LUCIDE = {
     "Zap",
   ],
   "HubSidebar.tsx": ["Plus", "Settings", "X"],
-  "HomeView.tsx": ["ArrowRight", "Plus"],
-  "WorkspaceView.tsx": ["Ellipsis", "MessageSquare", "Plus", "Search", "Zap"],
-  "RightDrawer.tsx": ["FileText", "Lightbulb", "MessageSquare", "Pencil", "Terminal", "X", "Zap"],
+  "HomeView.tsx": [
+    "AlertTriangle",
+    "ArrowRight",
+    "Check",
+    "CircleAlert",
+    "Clock",
+    "Columns3",
+    "FolderGit2",
+    "FolderPlus",
+    "GitPullRequest",
+    "Info",
+    "Link2",
+    "List",
+    "Plus",
+    "RefreshCw",
+    "Search",
+    "WifiOff",
+    "X",
+  ],
+  "WorkspaceView.tsx": [
+    "AlertTriangle",
+    "Ban",
+    "Bug",
+    "Check",
+    "CheckCircle2",
+    "ChevronLeft",
+    "ChevronRight",
+    "CircleOff",
+    "Ellipsis",
+    "Eye",
+    "EyeOff",
+    "FileDiff",
+    "FileEdit",
+    "FileText",
+    "GitBranch",
+    "GitCommit",
+    "GitMerge",
+    "GitPullRequest",
+    "History",
+    "Link2",
+    "Loader2",
+    "Lock",
+    "MessageSquare",
+    "Pencil",
+    "Play",
+    "Plus",
+    "RefreshCw",
+    "RotateCcw",
+    "Save",
+    "Search",
+    "ShieldCheck",
+    "Square",
+    "Terminal",
+    "Trash2",
+    "Undo2",
+    "Wrench",
+    "X",
+    "XCircle",
+    "Zap",
+  ],
+  "RightDrawer.tsx": [
+    "AlertTriangle",
+    "Check",
+    "FileText",
+    "Lightbulb",
+    "Loader2",
+    "MessageSquare",
+    "Pencil",
+    "RotateCcw",
+    "Square",
+    "Terminal",
+    "Trash2",
+    "X",
+    "Zap",
+  ],
   "ConsoleOutput.tsx": [
     "AlertTriangle",
     "ArrowDown",
@@ -64,8 +155,57 @@ const EXPECTED_LUCIDE = {
     "Wrench",
     "Zap",
   ],
-  "Modals.tsx": ["ArrowUp", "Folder", "Lightbulb", "Pencil", "RefreshCw"],
+  "Modals.tsx": [
+    "Activity",
+    "ArrowLeft",
+    "ArrowUp",
+    "Ban",
+    "BookOpen",
+    "Bug",
+    "Check",
+    "CircleAlert",
+    "CircleHelp",
+    "CircleOff",
+    "ClipboardCheck",
+    "Copy",
+    "Download",
+    "ExternalLink",
+    "FileText",
+    "Folder",
+    "FolderOpen",
+    "FolderPlus",
+    "GitBranch",
+    "GitCommit",
+    "GitPullRequest",
+    "Inbox",
+    "Info",
+    "Link2",
+    "ListChecks",
+    "MessageSquare",
+    "Pencil",
+    "Plus",
+    "RefreshCw",
+    "RotateCcw",
+    "Save",
+    "Send",
+    "Settings",
+    "Sparkles",
+    "Terminal",
+    "Trash2",
+    "X",
+    "XCircle",
+    "Zap",
+  ],
   "Primitives.tsx": ["MessageSquare"],
+  "LoginView.tsx": ["AlertTriangle", "KeyRound", "Lock"],
+} as const;
+
+const EXPECTED_LUCIDE_APP = ["Crosshair", "X"] as const;
+
+const EXPECTED_LUCIDE_UI = {
+  "ui/ModelPickerMenu.tsx": ["Check", "Search", "Star"],
+  "ui/ModelRunnerBar.tsx": ["ChevronsUpDown", "Cpu", "Gauge"],
+  "ui/RoutingModelPicker.tsx": ["ChevronsUpDown"],
 } as const;
 
 function read(rel: string): string {
@@ -103,6 +243,27 @@ describe("shared icon wrapper", () => {
     expect(css).toMatch(/\.ui-icon\s*\{[^}]*vertical-align:/);
     expect(css).toMatch(/\.md-annot-icon\s*\{[^}]*display:\s*inline-flex/);
   });
+
+  test("iconified controls keep their alignment and width contracts", () => {
+    const css = read("src/web/styles.css");
+    // Workspace tabs and search box must stay vertically centered after adding 14px glyphs.
+    expect(css).toMatch(/\.tab\s*\{[^}]*display:\s*inline-flex/);
+    expect(css).toMatch(/\.tab\s*\{[^}]*align-items:\s*center/);
+    expect(css).toMatch(/\.tab\s*\{[^}]*gap:\s*6px/);
+    expect(css).toContain(".search-wrap");
+    expect(css).toMatch(/\.decision-box h2\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.icon-heading\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.callout-lead\s*\{[^}]*display:\s*inline-flex/);
+    // REQ-005: keep menu items content-sized; never stretch or blockify them.
+    expect(css).toMatch(/\.more-menu button\s*\{[^}]*width:\s*auto/);
+    expect(css).toMatch(/\.more-menu button\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.more-menu button\s*\{[^}]*gap:\s*8px/);
+    expect(css).not.toMatch(/\.more-menu button\s*\{[^}]*display:\s*block/);
+    expect(css).not.toMatch(/\.more-menu button\s*\{[^}]*width:\s*100%/);
+    // Spinner utility used by running badges.
+    expect(css).toMatch(/\.ui-icon\.spin\s*\{[^}]*animation:/);
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.ui-icon\.spin/);
+  });
 });
 
 describe("exhaustive status icon maps", () => {
@@ -121,6 +282,76 @@ describe("exhaustive status icon maps", () => {
       const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
       expect(html).toContain("<svg");
       expect(html, `coverage ${state} must stay decorative`).toContain('aria-hidden="true"');
+    }
+  });
+
+  test("covers every stage with a decorative Lucide glyph", () => {
+    expect([...Object.keys(STAGE_ICONS)].sort()).toEqual([
+      "awaiting_acceptance",
+      "awaiting_approval",
+      "blocked",
+      "cancelled",
+      "designing",
+      "done",
+      "draft",
+      "implementing",
+    ]);
+    for (const [stage, glyph] of Object.entries(STAGE_ICONS)) {
+      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
+      expect(html).toContain("<svg");
+      expect(html, `stage ${stage} must stay decorative`).toContain('aria-hidden="true"');
+      expect(html, `stage ${stage} must stay non-focusable`).toContain('focusable="false"');
+    }
+  });
+
+  test("covers every evidence state with a decorative Lucide glyph", () => {
+    expect([...Object.keys(EVIDENCE_ICONS)].sort()).toEqual(["failed", "passed", "stale", "unknown"]);
+    for (const [state, glyph] of Object.entries(EVIDENCE_ICONS)) {
+      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
+      expect(html).toContain("<svg");
+      expect(html, `evidence ${state} must stay decorative`).toContain('aria-hidden="true"');
+    }
+  });
+
+  test("covers every review verdict with a decorative Lucide glyph", () => {
+    expect([...Object.keys(VERDICT_ICONS)].sort()).toEqual(["block", "concern", "pass"]);
+    for (const [verdict, glyph] of Object.entries(VERDICT_ICONS)) {
+      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
+      expect(html).toContain("<svg");
+      expect(html, `verdict ${verdict} must stay decorative`).toContain('aria-hidden="true"');
+    }
+  });
+
+  test("covers every banner action with a decorative Lucide glyph", () => {
+    expect([...Object.keys(BANNER_ACTION_ICONS)].sort()).toEqual([
+      "accept",
+      "approve_and_implement",
+      "approve_only",
+      "authorize_fast_track",
+      "dispatch_design",
+      "dispatch_fix",
+      "dispatch_fix_review",
+      "dispatch_implement",
+      "dispatch_review",
+      "reopen",
+      "request_changes",
+      "run_all_verifications",
+      "sync_base",
+      "unblock",
+    ]);
+    for (const [action, glyph] of Object.entries(BANNER_ACTION_ICONS)) {
+      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
+      expect(html).toContain("<svg");
+      expect(html, `banner action ${action} must stay decorative`).toContain('aria-hidden="true"');
+    }
+  });
+
+  test("covers every callout tone with a decorative Lucide glyph", () => {
+    expect([...Object.keys(CALLOUT_TONE_ICONS)].sort()).toEqual(["danger", "info", "success", "warning"]);
+    for (const [tone, glyph] of Object.entries(CALLOUT_TONE_ICONS)) {
+      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
+      expect(html).toContain("<svg");
+      expect(html, `callout tone ${tone} must stay decorative`).toContain('aria-hidden="true"');
     }
   });
 
@@ -143,11 +374,30 @@ describe("application icon inventory", () => {
         expect(source, `${file} is missing ${icon}`).toContain(icon);
       }
     }
+    for (const [file, icons] of Object.entries(EXPECTED_LUCIDE_UI)) {
+      const source = read(`src/web/components/${file}`);
+      expect(source, `${file} must import from lucide-react`).toContain('from "lucide-react"');
+      expect(source, `${file} must not load the dynamic catalog`).not.toContain("lucide-react/dynamic");
+      for (const icon of icons) {
+        expect(source, `${file} is missing ${icon}`).toContain(icon);
+      }
+    }
+    const appSource = read("src/web/app.tsx");
+    expect(appSource, "app.tsx must import from lucide-react").toContain('from "lucide-react"');
+    for (const icon of EXPECTED_LUCIDE_APP) {
+      expect(appSource, `app.tsx is missing ${icon}`).toContain(icon);
+    }
+    expect(appSource).toContain('from "./components/Icon.tsx"');
   });
 
   test("lucide imports are static named imports, never namespace/dynamic imports", () => {
-    for (const file of [...COMPONENT_FILES, "../../render.ts"] as const) {
-      const rel = file.startsWith("..") ? `src/web/${file.replace("../../", "")}` : `src/web/components/${file}`;
+    const rels = [
+      ...COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      ...UI_COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      "src/web/app.tsx",
+      "src/web/render.ts",
+    ];
+    for (const rel of rels) {
       const source = read(rel);
       for (const match of source.matchAll(/import\s+(?!type\b)([\s\S]*?)\s+from\s+"lucide-react"/g)) {
         const clause = match[1]!.trim();
@@ -162,6 +412,8 @@ describe("application icon inventory", () => {
     const offenders: string[] = [];
     for (const rel of [
       ...COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      ...UI_COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      "src/web/app.tsx",
       "src/web/render.ts",
       "src/web/state.ts",
     ]) {
@@ -178,8 +430,11 @@ describe("application icon inventory", () => {
   });
 
   test("does not reintroduce ASCII substitutes as icon-only content", () => {
-    for (const file of COMPONENT_FILES) {
-      const source = read(`src/web/components/${file}`);
+    for (const file of [
+      ...COMPONENT_FILES.map((name) => `src/web/components/${name}`),
+      ...UI_COMPONENT_FILES.map((name) => `src/web/components/${name}`),
+    ]) {
+      const source = read(file);
       // A button whose entire content is +, x/X, or >_ is an ad-hoc icon.
       expect(source, `${file} contains an ASCII icon glyph`).not.toMatch(/<button[^>]*>\s*(?:\+|x|X|>_)\s*<\/button>/);
       expect(source, `${file} contains a terminal ASCII icon`).not.toContain(">_");
@@ -187,7 +442,11 @@ describe("application icon inventory", () => {
   });
 
   test("keeps all native option elements text-only", () => {
-    const optionFiles = COMPONENT_FILES.map((file) => `src/web/components/${file}`);
+    const optionFiles = [
+      ...COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      ...UI_COMPONENT_FILES.map((file) => `src/web/components/${file}`),
+      "src/web/app.tsx",
+    ];
     for (const rel of optionFiles) {
       const source = read(rel);
       for (const match of source.matchAll(/<option\b[\s\S]*?<\/option>/g)) {

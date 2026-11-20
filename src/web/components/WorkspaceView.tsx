@@ -8,16 +8,43 @@ import {
 } from "@radix-ui/react-dropdown-menu";
 import {
   AlertTriangle,
+  Ban,
+  Bug,
   Check,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  CircleOff,
   Ellipsis,
+  Eye,
+  EyeOff,
+  FileDiff,
+  FileEdit,
+  FileText,
   GitBranch,
+  GitCommit,
+  GitMerge,
   GitPullRequest,
+  History,
   Link2,
+  Loader2,
+  Lock,
   MessageSquare,
+  Pencil,
+  Play,
   Plus,
   RefreshCw,
+  RotateCcw,
+  Save,
   Search,
+  ShieldCheck,
+  Square,
+  Terminal,
+  Trash2,
+  Undo2,
   Wrench,
+  X,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type {
@@ -77,7 +104,16 @@ import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
-import { COVERAGE_ICONS, Icon, TASK_ICONS } from "./Icon.tsx";
+import {
+  BANNER_ACTION_ICONS,
+  CALLOUT_TONE_ICONS,
+  COVERAGE_ICONS,
+  EVIDENCE_ICONS,
+  Icon,
+  STAGE_ICONS,
+  TASK_ICONS,
+  VERDICT_ICONS,
+} from "./Icon.tsx";
 import { LiveTimer, MarkdownView, ModalShell, RunnerSelect } from "./Primitives.tsx";
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
@@ -179,14 +215,14 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
               setDrawerTab("console");
             }}
           >
-            {t(language, "live.viewTerminal")}
+            <Icon icon={Terminal} size={14} /> {t(language, "live.viewTerminal")}
           </button>
           <button
             className="btn danger xs"
             type="button"
             onClick={() => selectedId && void cancelRun(selectedId, run.id)}
           >
-            {t(language, "live.stop")}
+            <Icon icon={Square} size={14} /> {t(language, "live.stop")}
           </button>
         </div>
       </div>
@@ -351,6 +387,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <h3>{t(language, "review.title")}</h3>
               <span className={`badge ${VERDICT_META[review.verdict].tone}`}>
+                <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
                 {VERDICT_META[review.verdict].labels[language]}
               </span>
               <span className={`badge ${revValid.effectiveState === "current" ? "info" : "warning"}`}>
@@ -390,7 +427,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     disabled={busy}
                     onClick={() => void handleBannerAction(d, "request_changes", bridgeConnected)}
                   >
-                    {t(language, "core.action.sendBack")}
+                    <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
                   </button>
                   {isReviewCurrent && validity.acceptanceGate.ok && (
                     <button
@@ -489,7 +526,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 data-action="start-edit-spec"
                 onClick={() => cancelEditSpec()}
               >
-                {t(language, "common.cancel")}
+                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </button>
               <button
                 className="btn primary xs"
@@ -498,7 +535,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 disabled={busy}
                 onClick={() => void saveSpec()}
               >
-                {t(language, "spec.save")}
+                <Icon icon={Save} size={14} /> {t(language, "spec.save")}
               </button>
             </div>
           ) : (
@@ -523,7 +560,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   );
                 }}
               >
-                {t(language, "spec.edit")}
+                <Icon icon={Pencil} size={14} /> {t(language, "spec.edit")}
               </button>
             )
           )}
@@ -622,7 +659,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     type="button"
                     onClick={() => setSpecDraftCriteria((prev) => prev.filter((_, i) => i !== idx))}
                   >
-                    {t(language, "common.delete")}
+                    <Icon icon={Trash2} size={14} /> {t(language, "common.delete")}
                   </button>
                 </div>
               ))}
@@ -636,7 +673,11 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
       <div className="card" data-testid="requirement-attachments-card">
         <div className="card-head">
           <h3>{t(language, "spec.attachmentTitle", { count: attachments.length })}</h3>
-          {!canEditAttachments && <span className="badge neutral">{t(language, "spec.frozen")}</span>}
+          {!canEditAttachments && (
+            <span className="badge neutral">
+              <Icon icon={Lock} size={14} /> {t(language, "spec.frozen")}
+            </span>
+          )}
         </div>
         <AttachmentGallery
           attachments={attachments}
@@ -666,6 +707,10 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
               className={`badge ${validity.evidenceContext === "accepted" ? "success" : "warning"}`}
               data-testid="coverage-context-badge"
             >
+              <Icon
+                icon={validity.evidenceContext === "accepted" ? ShieldCheck : AlertTriangle}
+                size={14}
+              />{" "}
               {validity.evidenceContext === "accepted"
                 ? t(language, "spec.coverageAccepted")
                 : t(language, "spec.coverageLegacy")}
@@ -680,7 +725,10 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
               data-testid="evidence-provenance-banner"
               style={{ marginBottom: 10, fontSize: 12.5 }}
             >
-              <strong>{evInfo.title}</strong>
+              <strong className="callout-lead">
+                <Icon icon={CALLOUT_TONE_ICONS[evInfo.tone]} size={14} />
+                <span>{evInfo.title}</span>
+              </strong>
               {evInfo.acceptedAtText
                 ? t(language, "spec.evidenceAcceptedAt", { time: evInfo.acceptedAtText })
                 : ""}
@@ -757,7 +805,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                         })
                       }
                     >
-                      {t(language, "spec.run")}
+                      <Icon icon={Play} size={14} /> {t(language, "spec.run")}
                     </button>
                   )}
                 </div>
@@ -783,8 +831,8 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 onClick={() => void toggleDesignDiff()}
               >
                 {designComparePrev
-                  ? t(language, "spec.closeCompare")
-                  : t(language, "spec.compare", { prev: activeVer - 1, curr: activeVer })}
+                  ? <><Icon icon={X} size={14} /> {t(language, "spec.closeCompare")}</>
+                  : <><Icon icon={FileDiff} size={14} /> {t(language, "spec.compare", { prev: activeVer - 1, curr: activeVer })}</>}
               </button>
             )}
             {editingDesign ? (
@@ -795,7 +843,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   data-action="add-criterion"
                   onClick={() => cancelEditDesign()}
                 >
-                  {t(language, "common.cancel")}
+                  <Icon icon={X} size={14} /> {t(language, "common.cancel")}
                 </button>
                 <button
                   className="btn primary xs"
@@ -804,7 +852,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   disabled={busy}
                   onClick={() => void saveDesign()}
                 >
-                  {t(language, "spec.saveDesign")}
+                  <Icon icon={Save} size={14} /> {t(language, "spec.saveDesign")}
                 </button>
               </>
             ) : (
@@ -820,7 +868,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     startEditDesign(d.designMarkdown);
                   }}
                 >
-                  {t(language, "spec.editDesign")}
+                  <Icon icon={Pencil} size={14} /> {t(language, "spec.editDesign")}
                 </button>
               )
             )}
@@ -933,7 +981,11 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
       <div className="card-head">
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <h3>{t(language, "shot.title")}</h3>
-          {isDone && <span className="badge success">{t(language, "shot.frozen")}</span>}
+          {isDone && (
+            <span className="badge success">
+              <Icon icon={Lock} size={14} /> {t(language, "shot.frozen")}
+            </span>
+          )}
         </div>
         {canCapture && (
           <button
@@ -966,7 +1018,13 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
             <div key={batch.id} className="screenshot-batch" data-testid={`screenshot-batch-${batch.id}`}>
               <div className="screenshot-batch-head">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span className={`badge ${statusMeta.tone}`}>{statusMeta.label}</span>
+                  <span className={`badge ${statusMeta.tone}`}>
+                    <Icon
+                      icon={batch.status === "captured" ? CheckCircle2 : AlertTriangle}
+                      size={14}
+                    />{" "}
+                    {statusMeta.label}
+                  </span>
                   <span className="muted" style={{ fontSize: 12.5 }}>
                     {formatDateTime(batch.createdAt, language)} ·{" "}
                     {batch.trigger === "auto_submit"
@@ -975,6 +1033,7 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
                     · {pluralScreenshots(language, batch.shots.length)}
                   </span>
                   <span className={`badge ${fingerprintMatch ? "success" : "warning"}`} data-testid="screenshot-fingerprint-badge">
+                    <Icon icon={fingerprintMatch ? Check : RefreshCw} size={14} />{" "}
                     {fingerprintMatch ? t(language, "shot.match") : t(language, "shot.stale")}
                   </span>
                 </div>
@@ -985,7 +1044,7 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
 
               {batch.skipReason && (
                 <div className="callout warning" style={{ margin: "8px 0", fontSize: 12.5 }} data-testid="screenshot-skip-reason">
-                  {batch.skipReason}
+                  <Icon icon={AlertTriangle} size={14} /> {batch.skipReason}
                 </div>
               )}
 
@@ -1040,7 +1099,7 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
                 )
               }
             >
-              {t(language, "shot.prev")}
+              <Icon icon={ChevronLeft} size={14} /> {t(language, "shot.prev")}
             </button>
             <img
               className="screenshot-lightbox-image"
@@ -1058,12 +1117,12 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
                 )
               }
             >
-              {t(language, "shot.next")}
+              {t(language, "shot.next")} <Icon icon={ChevronRight} size={14} />
             </button>
           </div>
           <div className="modal-actions">
             <button className="btn" type="button" onClick={() => setLightbox(null)}>
-              {t(language, "common.closeEsc")}
+              <Icon icon={X} size={14} /> {t(language, "common.closeEsc")}
             </button>
           </div>
         </ModalShell>
@@ -1167,7 +1226,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               disabled={busy}
               onClick={() => setWorkspaceTab("spec")}
             >
-              {t(language, "review.viewFull")}
+              <Icon icon={FileText} size={14} /> {t(language, "review.viewFull")}
             </button>
           </div>
         </div>
@@ -1214,7 +1273,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               disabled={busy}
               onClick={() => void handleBannerAction(d, "run_all_verifications", bridgeConnected)}
             >
-              {t(language, "changes.runAll")}
+              <Icon icon={Play} size={14} /> {t(language, "changes.runAll")}
             </button>
           )}
         </div>
@@ -1231,7 +1290,10 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               <div key={latest.record.id} className="evidence-card" data-testid={`ev-${latest.record.id}`}>
                 <div className="evidence-head">
                   <div>
-                    <span className={`badge ${meta.tone}`}>{meta.labels[language]}</span>
+                    <span className={`badge ${meta.tone}`}>
+                      <Icon icon={EVIDENCE_ICONS[latest.effectiveState]} size={14} />{" "}
+                      {meta.labels[language]}
+                    </span>
                     <code style={{ marginLeft: 8, fontSize: 12.5 }}>{command}</code>
                     <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
                       {latest.record.durationMs}ms ·{" "}
@@ -1247,7 +1309,11 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                       data-action="toggle-log"
                       onClick={() => void toggleVerificationLog(s.id, latest.record.id)}
                     >
-                      {log !== undefined ? t(language, "changes.hideLog") : t(language, "changes.viewOutput")}
+                      {log !== undefined ? (
+                        <><Icon icon={EyeOff} size={14} /> {t(language, "changes.hideLog")}</>
+                      ) : (
+                        <><Icon icon={Eye} size={14} /> {t(language, "changes.viewOutput")}</>
+                      )}
                     </button>
                     {!isTerminal && (
                       <button
@@ -1266,7 +1332,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                           })
                         }
                       >
-                        {t(language, "changes.rerun")}
+                        <Icon icon={RefreshCw} size={14} /> {t(language, "changes.rerun")}
                       </button>
                     )}
                   </div>
@@ -1307,7 +1373,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               disabled={busy}
               onClick={() => void runManualVerify()}
             >
-              {t(language, "changes.runVerify")}
+              <Icon icon={Play} size={14} /> {t(language, "changes.runVerify")}
             </button>
           </div>
         )}
@@ -1324,6 +1390,10 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                 className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}
                 data-testid="diff-context-badge"
               >
+                <Icon
+                  icon={evidenceSummary.tone === "success" ? ShieldCheck : AlertTriangle}
+                  size={14}
+                />{" "}
                 {evidenceSummary.title}
               </span>
             )}
@@ -1336,7 +1406,11 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                 data-testid="toggle-live-diff-btn"
                 onClick={() => setShowLiveComparison((prev) => !prev)}
               >
-                {showLiveComparison ? t(language, "changes.hideCompare") : t(language, "changes.compareLive")}
+                {showLiveComparison ? (
+                  <><Icon icon={EyeOff} size={14} /> {t(language, "changes.hideCompare")}</>
+                ) : (
+                  <><Icon icon={FileDiff} size={14} /> {t(language, "changes.compareLive")}</>
+                )}
               </button>
             ) : (
               <button
@@ -1347,7 +1421,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                   showToastKey("changes.refreshedDiff");
                 }}
               >
-                {t(language, "changes.refreshDiff")}
+                <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshDiff")}
               </button>
             )}
           </div>
@@ -1363,6 +1437,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
         )}
         {evidenceSummary.truncationFlags.length > 0 && (
           <div className="callout warning" data-testid="diff-truncation-notice" style={{ marginBottom: 10, fontSize: 12.5 }}>
+            <Icon icon={AlertTriangle} size={14} />{" "}
             {evidenceSummary.truncationFlags.join(t(language, "changes.truncJoin"))}
           </div>
         )}
@@ -1372,6 +1447,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
           </p>
         ) : diffRes.status === "unavailable" || !diffObs ? (
           <div className="callout warning" data-testid="diff-unavailable-notice" style={{ fontSize: 13, margin: 0 }}>
+            <Icon icon={AlertTriangle} size={14} />{" "}
             <strong>{t(language, "changes.unavailable")}</strong>：
             {translateRef(
               language,
@@ -1432,7 +1508,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                 showToastKey("changes.refreshedCompare");
               }}
             >
-              {t(language, "changes.refreshCompare")}
+              <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshCompare")}
             </button>
           </div>
           {!liveDiffRes ? (
@@ -1488,7 +1564,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
           <div className="card-head">
             <h3>{t(language, "timeline.runs")}</h3>
             <button className="btn xs" type="button" onClick={() => void openHandoff(d.state.id)}>
-              {t(language, "timeline.viewHandoff")}
+              <Icon icon={FileText} size={14} /> {t(language, "timeline.viewHandoff")}
             </button>
           </div>
           {runs.map((r) => (
@@ -1503,6 +1579,10 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
                     r.status === "succeeded" ? "success" : r.status === "cancelled" ? "neutral" : "danger"
                   }`}
                 >
+                  <Icon
+                    icon={r.status === "succeeded" ? Check : r.status === "cancelled" ? CircleOff : X}
+                    size={14}
+                  />{" "}
                   {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
                 </span>
                 <strong style={{ fontSize: 13, marginLeft: 6 }}>
@@ -1518,7 +1598,7 @@ function TimelineRunsTab({ d }: { d: RequirementDetail }) {
                 </span>
               </div>
               <button className="btn ghost xs" type="button" onClick={() => void openRunConsole(d.state.id, r.id)}>
-                {t(language, "timeline.viewOutput")}
+                <Icon icon={Terminal} size={14} /> {t(language, "timeline.viewOutput")}
               </button>
             </div>
           ))}
@@ -1659,7 +1739,7 @@ export function WorkspaceView() {
             data-testid="sandbox-active-badge"
             title={t(language, "ws.sandboxTitle", { branch: reqData.sandbox.branch })}
           >
-            {t(language, "ws.sandboxActive")}
+            <Icon icon={GitBranch} size={14} /> {t(language, "ws.sandboxActive")}
           </span>
         )}
         {s.github?.issue && (
@@ -1687,6 +1767,7 @@ export function WorkspaceView() {
           </a>
         )}
         <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
+          <Icon icon={STAGE_ICONS[s.stage]} size={14} />
           {stageMeta.labels[language]}
         </span>
         <div className="more-wrap">
@@ -1714,17 +1795,17 @@ export function WorkspaceView() {
                       );
                     }}
                   >
-                    {t(language, "ws.menu.editReq")}
+                    <Icon icon={Pencil} size={14} /> {t(language, "ws.menu.editReq")}
                   </button>
                 </DropdownItem>
                 <DropdownItem asChild>
                   <button type="button" onClick={() => startEditDesign(d.designMarkdown)}>
-                    {t(language, "ws.menu.editDesign")}
+                    <Icon icon={FileEdit} size={14} /> {t(language, "ws.menu.editDesign")}
                   </button>
                 </DropdownItem>
                 <DropdownItem asChild>
                   <button type="button" onClick={() => void openHandoff(s.id)}>
-                    {t(language, "ws.menu.handoff")}
+                    <Icon icon={FileText} size={14} /> {t(language, "ws.menu.handoff")}
                   </button>
                 </DropdownItem>
                 {!s.github?.issue ? (
@@ -1742,7 +1823,7 @@ export function WorkspaceView() {
                         });
                       }}
                     >
-                      {t(language, isGiteeProject ? "ws.menu.linkGitee" : "ws.menu.linkIssue")}
+                      <Icon icon={Link2} size={14} /> {t(language, isGiteeProject ? "ws.menu.linkGitee" : "ws.menu.linkIssue")}
                     </button>
                   </DropdownItem>
                 ) : s.github.provider !== "gitee" ? (
@@ -1758,7 +1839,7 @@ export function WorkspaceView() {
                         }
                       }}
                     >
-                      {t(language, "ws.menu.syncIssue", { number: s.github.issue.number })}
+                      <Icon icon={RefreshCw} size={14} /> {t(language, "ws.menu.syncIssue", { number: s.github.issue.number })}
                     </button>
                   </DropdownItem>
                 ) : null}
@@ -1770,7 +1851,7 @@ export function WorkspaceView() {
                         void handleBannerAction(d, "fast_track", bridgeConnected);
                       }}
                     >
-                      {t(language, "ws.menu.fastTrack")}
+                      <Icon icon={Zap} size={14} /> {t(language, "ws.menu.fastTrack")}
                     </button>
                   </DropdownItem>
                 )}
@@ -1782,7 +1863,7 @@ export function WorkspaceView() {
                         setModal({ kind: "lifecycle", action: "block", reason: "" });
                       }}
                     >
-                      {t(language, "ws.menu.block")}
+                      <Icon icon={Ban} size={14} /> {t(language, "ws.menu.block")}
                     </button>
                   </DropdownItem>
                 )}
@@ -1794,7 +1875,7 @@ export function WorkspaceView() {
                         setModal({ kind: "lifecycle", action: "cancel", reason: "" });
                       }}
                     >
-                      {t(language, "ws.menu.cancel")}
+                      <Icon icon={XCircle} size={14} /> {t(language, "ws.menu.cancel")}
                     </button>
                   </DropdownItem>
                 )}
@@ -1806,7 +1887,7 @@ export function WorkspaceView() {
                         setModal({ kind: "lifecycle", action: "reopen", reason: "" });
                       }}
                     >
-                      {t(language, "ws.menu.reopen")}
+                      <Icon icon={RotateCcw} size={14} /> {t(language, "ws.menu.reopen")}
                     </button>
                   </DropdownItem>
                 )}
@@ -1833,7 +1914,7 @@ export function WorkspaceView() {
                       });
                     }}
                   >
-                    {t(language, "ws.menu.debug")}
+                    <Icon icon={Bug} size={14} /> {t(language, "ws.menu.debug")}
                   </button>
                 </DropdownItem>
               </DropdownContent>
@@ -1844,7 +1925,10 @@ export function WorkspaceView() {
 
       {s.lastFeedback && (
         <div className="callout warning" style={{ marginBottom: 14 }}>
-          <strong>{t(language, "ws.lastFeedback")}</strong>
+          <strong className="callout-lead">
+            <Icon icon={AlertTriangle} size={14} />
+            <span>{t(language, "ws.lastFeedback")}</span>
+          </strong>
           {s.lastFeedback}
         </div>
       )}
@@ -1974,7 +2058,7 @@ export function WorkspaceView() {
                 onClick={() => void triggerActiveRun(s.id, defaultAct)}
               >
                 {runningThis ? (
-                  t(language, "ws.running")
+                  <><Icon icon={Loader2} size={14} className="spin" /> {t(language, "ws.running")}</>
                 ) : (
                   <>
                     <Icon icon={Zap} size={14} /> {t(language, "ws.runBackground")}
@@ -2004,6 +2088,7 @@ export function WorkspaceView() {
               disabled={busy}
               onClick={() => void handleBannerAction(d, banner.primaryAction!.id, bridgeConnected)}
             >
+              <Icon icon={BANNER_ACTION_ICONS[banner.primaryAction.id]} size={14} />{" "}
               {translateRef(
                 language,
                 banner.primaryAction.labelKey,
@@ -2021,6 +2106,7 @@ export function WorkspaceView() {
               disabled={busy}
               onClick={() => void handleBannerAction(d, sec.id, bridgeConnected)}
             >
+              <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
               {translateRef(language, sec.labelKey, sec.label, sec.labelParams)}
             </button>
           ))}
@@ -2032,6 +2118,10 @@ export function WorkspaceView() {
               disabled={busy}
               onClick={() => openDeliverModal(Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr))}
             >
+              <Icon
+                icon={reqData?.sandbox && deliveryPreview?.canCreatePr ? GitPullRequest : GitCommit}
+                size={14}
+              />{" "}
               {reqData?.sandbox && deliveryPreview?.canCreatePr
                 ? s.github?.pr
                   ? t(language, "ws.deliverPrAppend")
@@ -2074,6 +2164,7 @@ export function WorkspaceView() {
                 }
               }}
             >
+              <Icon icon={GitMerge} size={14} />{" "}
               {deliveryPreview?.canCreatePr ? t(language, "ws.applySandboxLocal") : t(language, "ws.applySandbox")}
             </button>
           )}
@@ -2090,7 +2181,7 @@ export function WorkspaceView() {
           data-testid="tab-spec"
           onClick={() => setWorkspaceTab("spec")}
         >
-          {t(language, "ws.tab.spec")}
+          <Icon icon={FileText} size={14} /> {t(language, "ws.tab.spec")}
         </button>
         <button
           className={`tab ${workspaceTab === "changes" ? "active" : ""}`}
@@ -2098,7 +2189,7 @@ export function WorkspaceView() {
           data-testid="tab-changes"
           onClick={() => setWorkspaceTab("changes")}
         >
-          {t(language, "ws.tab.changes")}
+          <Icon icon={GitBranch} size={14} /> {t(language, "ws.tab.changes")}
         </button>
         <button
           className={`tab ${workspaceTab === "timeline" ? "active" : ""}`}
@@ -2106,7 +2197,7 @@ export function WorkspaceView() {
           data-testid="tab-timeline"
           onClick={() => setWorkspaceTab("timeline")}
         >
-          {t(language, "ws.tab.timeline")}
+          <Icon icon={History} size={14} /> {t(language, "ws.tab.timeline")}
         </button>
       </div>
 
