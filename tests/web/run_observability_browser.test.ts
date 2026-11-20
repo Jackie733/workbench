@@ -262,6 +262,7 @@ suite("Agent Observability E2E (Chromium)", () => {
 
     await page.setViewport({ width: 1360, height: 860 });
     await page.goto(`${server.url}?req=REQ-001`, { waitUntil: "networkidle0" });
+    await page.waitForFunction(() => window.innerWidth === 1360 && window.innerHeight === 860, { timeout: 5000 });
 
     // 1. Bug #1 fix: viewing Run 1 while Run 2 is active must show Run 1 output, NOT Run 2's active stream
     await clickReady(page, '[data-testid="tab-timeline"]');
@@ -281,6 +282,52 @@ suite("Agent Observability E2E (Chromium)", () => {
     expect(consoleTxtOnRun1).not.toContain("RUN2_LIVE_STREAM");
 
     // Switching back to live run shows Run 2 stream & hides historical banner
+    // Keep the head/base click path on the same fixed viewport and historical-run state.
+    await page.setViewport({ width: 1360, height: 860 });
+    await page.waitForFunction(() => window.innerWidth === 1360 && window.innerHeight === 860, { timeout: 5000 });
+    const jumpPreconditions = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      selectedRunId:
+        document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+      timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+    }));
+    expect(jumpPreconditions).toEqual({
+      width: 1360,
+      height: 860,
+      selectedRunId: run1Started.run.id,
+      timelineActive: true,
+    });
+    await page.waitForFunction(
+      () => {
+        if (window.innerWidth !== 1360 || window.innerHeight !== 860) return false;
+        const drawer = document.querySelector('[data-testid="right-drawer"]');
+        const backdrop = document.querySelector(".drawer-backdrop");
+        const button = document.querySelector<HTMLElement>(
+          '[data-testid="jump-to-live-run-btn"]:not([disabled])',
+        );
+        if (!drawer || !button || !button.isConnected) return false;
+        if (!drawer.classList.contains("open") || drawer.getAttribute("aria-hidden") !== "false") return false;
+        if (["entering", "opening", "closing"].some((phase) => drawer.classList.contains(phase))) return false;
+        const animations = [...drawer.getAnimations(), ...(backdrop?.getAnimations() ?? [])];
+        if (animations.some((animation) => animation.playState === "running")) return false;
+
+        const rect = button.getBoundingClientRect();
+        if (
+          rect.width <= 0 ||
+          rect.height <= 0 ||
+          rect.left < 0 ||
+          rect.top < 0 ||
+          rect.right > window.innerWidth ||
+          rect.bottom > window.innerHeight
+        ) {
+          return false;
+        }
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return Boolean(hit && (hit === button || button.contains(hit)) && hit.closest("button") === button);
+      },
+      { timeout: 5000 },
+    );
     await clickReady(page, '[data-testid="jump-to-live-run-btn"]');
     await page.waitForFunction(
       () =>
@@ -337,12 +384,15 @@ suite("Agent Observability E2E (Chromium)", () => {
       const auditLayout = await page.evaluate(() => ({
         overflow: document.documentElement.scrollWidth > window.innerWidth,
         mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
+        selectedRunId:
+          document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
         selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
         hasAuditSummary: Boolean(document.querySelector('[data-testid="req-audit-summary"]')),
         timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
       }));
       expect(auditLayout.overflow).toBe(false);
       expect(auditLayout.mainWidth).toBeGreaterThan(250);
+      expect(auditLayout.selectedRunId).toBe(run2Started.run.id);
       expect(auditLayout.selectedRequirement).toBe("REQ-001");
       expect(auditLayout.hasAuditSummary).toBe(true);
       expect(auditLayout.timelineActive).toBe(true);
@@ -382,6 +432,41 @@ suite("Agent Observability E2E (Chromium)", () => {
     await page.setViewport({ width: 1360, height: 820 });
     await clickReady(page, '[data-testid="insights-jump-req-REQ-001"]');
     await page.waitForSelector('[data-testid="tab-timeline"]', { timeout: 6000 });
+
+    const selectedRunAfterInsightsReturn = await page.evaluate(
+      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+    );
+    expect(selectedRunAfterInsightsReturn).toBe(run2Started.run.id);
+
+    await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+    await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+    const selectedRunWithDrawerOpen = await page.evaluate(
+      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+    );
+    expect(selectedRunWithDrawerOpen).toBe(run2Started.run.id);
+    await clickReady(page, '[data-testid="drawer-close-btn"]');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="right-drawer"].open'), { timeout: 5000 });
+    const selectedRunAfterDrawerClose = await page.evaluate(
+      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+    );
+    expect(selectedRunAfterDrawerClose).toBe(run2Started.run.id);
+
+    await page.setViewport({ width: 820, height: 820 });
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+    await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+    await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
+      { timeout: 5000 },
+    );
+    const mobilePanelState = await page.evaluate(() => ({
+      selectedRunId:
+        document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+      sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
+      drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
+    }));
+    expect(mobilePanelState).toEqual({ selectedRunId: run2Started.run.id, sidebarOpen: true, drawerOpen: false });
 
     expect(pageErrors).toEqual([]);
     expect(httpErrors).toEqual([]);

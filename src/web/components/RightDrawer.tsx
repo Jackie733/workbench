@@ -333,6 +333,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     className="drawer-close-btn"
                     type="button"
                     data-testid="drawer-close-btn"
+                    aria-label={t(language, "common.close")}
                     onClick={() => setDrawerOpen(false)}
                   >
                     <Icon icon={X} size={16} />

@@ -1117,12 +1117,20 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         );
         await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         const responsiveState = await page.evaluate(() => {
+          const workspace = document.querySelector<HTMLElement>(".hub-workspace");
           const stage = document.querySelector(".main-stage")?.getBoundingClientRect();
           const scroller = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          const drawerWidth = Number.parseFloat(
+            workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+          );
+          const inlineMainWidth = (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0);
+          const sidebar = document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]');
           return {
             overflow: document.documentElement.scrollWidth > window.innerWidth,
             layoutMode: document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") ?? "",
             mainWidth: stage?.width ?? 0,
+            inlineMainWidth,
+            sidebarPosition: sidebar ? getComputedStyle(sidebar).position : "missing",
             selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
             timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
             scrollTop: scroller?.scrollTop ?? -1,
@@ -1130,6 +1138,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         });
         expect(responsiveState.overflow).toBe(false);
         expect(responsiveState.mainWidth).toBeGreaterThan(250);
+        if (responsiveState.layoutMode === "column") {
+          expect(responsiveState.mainWidth).toBeGreaterThanOrEqual(520);
+        }
+        if (responsiveState.inlineMainWidth < 520) {
+          expect(responsiveState.layoutMode).toBe("overlay");
+        }
+        if (width === 821) expect(responsiveState.sidebarPosition).toBe("sticky");
+        if (width === 820) expect(responsiveState.sidebarPosition).toBe("fixed");
         expect(responsiveState.selectedRequirement).toBe("REQ-001");
         expect(responsiveState.timelineActive).toBe(true);
         expect(Math.abs(responsiveState.scrollTop - startingScrollTop)).toBeLessThan(20);
