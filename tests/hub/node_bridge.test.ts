@@ -8,7 +8,7 @@ import { createNodeServiceManager, defaultNodeIdentity, readNodeConfig, writeNod
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { startWorkbenchNodeClient, type NodeClientHandle } from "../../src/hub/node_bridge.ts";
 import { readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
-import type { HarnessInfo } from "../../src/hub/types.ts";
+import type { HarnessInfo, RemoteNodeInfo } from "../../src/hub/types.ts";
 import { resetAuthPassword } from "../../src/server/auth.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
@@ -58,6 +58,58 @@ afterEach(() => {
 });
 
 describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
+  test("reports startup revisions independently of package versions, including legacy hello", async () => {
+    const hubDir = makeTempDir("wb-revisions-");
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+    const repo = makeGitRepo();
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+    const client = startWorkbenchNodeClient({
+      hubUrl: server.url, token: resetAuthPassword(hubDir).password,
+      nodeId: "current", nodeName: "Current", initialHarnesses: mockHarnesses(),
+    });
+    nodeClients.push(client);
+    await client.waitUntilConnected(5_000);
+    const readNodes = async () => (await (await fetch(`${server.url}/api/hub/state`)).json() as { nodes: RemoteNodeInfo[] }).nodes;
+    const expected = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: path.resolve(import.meta.dir, "../.."), encoding: "utf8" }).trim();
+    const local = (await readNodes()).find((node) => node.isLocal)!;
+    expect(local.revision).toBe(expected);
+    let current: RemoteNodeInfo | undefined;
+    for (let i = 0; i < 100; i++) {
+      current = (await readNodes()).find((node) => node.nodeId === "current");
+      if (current?.revision !== undefined) break;
+      await delay(10);
+    }
+    expect(current?.revision).toBe(expected);
+
+    const password = resetAuthPassword(hubDir).password;
+    const url = new URL("/ws?role=node&nodeId=other", server.url.replace("http", "ws"));
+    const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${password}` } } as unknown as string[]);
+    try {
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      socket.addEventListener("open", () => resolve(), { once: true });
+      socket.addEventListener("error", () => reject(new Error("node WebSocket rejected")), { once: true });
+      await promise;
+      const different = (expected === "a".repeat(40) ? "b" : "a").repeat(40);
+      for (const [name, revision, reported] of [
+        ["different", different, different], ["invalid", "1234", undefined], ["legacy", undefined, undefined],
+      ]) {
+        socket.send(JSON.stringify({ type: "node.hello", name, workbenchVersion: local.workbenchVersion, revision }));
+        let node: RemoteNodeInfo | undefined;
+        for (let i = 0; i < 100; i++) {
+          node = (await readNodes()).find((entry) => entry.nodeId === "other" && entry.name === name);
+          if (node) break;
+          await delay(10);
+        }
+        expect(node?.connected).toBe(true);
+        expect(node?.workbenchVersion).toBe(local.workbenchVersion);
+        expect(node?.revision).toBe(reported);
+      }
+    } finally {
+      socket.close();
+    }
+  });
+
   test("manages remote project lifecycle, fs browse, attachments, streaming execution, and offline degradation", async () => {
     const hubDir = makeTempDir("wb-hub-node-");
     process.env.WORKBENCH_HUB_DIR = hubDir;

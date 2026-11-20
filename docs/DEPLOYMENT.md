@@ -10,7 +10,7 @@ macOS 已用 Bun 1.4.4 完成隔离部署验收：生产依赖冻结安装、完
 - 将源码放在该用户可读、长期保留的固定绝对路径；不要部署后移动或删除源码、依赖、Bun。服务启动仍会构建 Web 资源，不能只保留静态页面。
 - 在同一用户下安装并登录所需 Agent CLI，先在终端确认能使用。安装不会修改外部 CLI 登录状态。服务不继承交互 shell 的临时环境、API key 或 shell 初始化文件；持久环境只有 HOME、安装时的 PATH、WORKBENCH_HUB_DIR，以及在安装时捕获的标准代理变量（见下）。PATH 只保留绝对目录并包含 Bun 所在目录。
 - `wb service install` 会从执行安装的当前 shell 捕获 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及对应小写形式共 8 个标准代理变量，写入 systemd/launchd 服务定义，使 Hub 及其启动的 Agent CLI 子进程走系统代理。其余变量（包括 API key）仍绝不落盘。含代理变量的定义文件权限为 `0600`（代理 URL 可能内嵌凭据）；未设置任何代理变量时，服务定义与旧版本逐字节一致，不会触发无意义的重装。
-- 确认端口空闲；冲突会报错，不会自动换端口。若已有未托管 Hub，先用 `wb stop` 停止；不要自动终止仍在执行任务的进程。
+- 确认端口空闲；冲突会报错，不会自动换端口。部署已有 Hub 时，若改用新端口，会先检查新端口，再停止任何服务。若已有未托管 Hub，先用 `wb stop` 停止；不要自动终止仍在执行任务的进程。
 - 实测 Bun 1.4.4 通过 `bun install --production --frozen-lockfile` 及上述运行时检查；旧系统 Bun 1.0.0 的冻结安装失败。1.4.4 是本次测试版本，不是最低兼容版本声明，建议使用当前稳定版。实际部署和验收请记录所用版本；若 `--frozen-lockfile` 报锁文件格式不支持，升级 Bun，不要删除锁文件绕过检查。临时下载运行时仅用于此次隔离验证，不是部署脚本的行为。
 
 ### macOS
@@ -49,7 +49,9 @@ bun run deploy --port 4318
 wb service status
 ```
 
-部署依次执行依赖冻结安装、`bun link`、用户服务安装及启动；任一步失败立即停止。不会拉取源码、删除 lockfile、清理数据或变更认证。只安装服务也可用 `wb service install --port 4318`。默认端口为 4318；安装接受 `--port` 与 `--host`，`--host` 可用 `127.0.0.1`、`0.0.0.0`、局域网 IP 或主机名，默认绑定 `127.0.0.1`。
+首次部署依次执行冻结生产依赖安装、`bun link`、用户服务安装和健康检查。已有安装时，`deploy` 先停止托管 Hub，再刷新依赖并启动一次；未指定的 host/port 沿用安装记录，首次默认 `127.0.0.1:4318`。`--host` 可用回环、通配地址、局域网 IP 或本机主机名。只安装服务可用 `wb service install --port 4318`；同配置、已健康时它不重启。没有 §4 的联动配置时，`deploy` 只部署 Hub，源码可以是非 Git 快照。
+
+部署不会拉取源码、删除 lockfile、清理数据或重置密码。
 
 服务的工作目录及 Hub `--root` 固定为当前用户 HOME，不会把源码仓库自动当作业务项目，安装不透传 WORKBENCH_ROOT。先准备一个已有的、已初始化项目；新项目可以这样初始化：
 
@@ -105,6 +107,31 @@ wb node connect --hub http://192.168.1.10:4318 --token <访问密码>
 - 所有权独立：主控 `wb service stop/uninstall` 不停止也不卸载节点，反之 `wb node uninstall` 不影响主控 Hub；卸载保留项目与 Hub 数据。
 - 连接失败时依次检查主控服务状态、地址可达性、密码与防火墙，不要以绑定 `0.0.0.0` 作为排障手段。
 
+### 用一次 `bun run deploy` 发布 Hub 和 WSL 节点
+
+主控为 macOS/Linux，Windows 在另一台机器；WSL 节点应已按上文安装为 systemd 用户服务并配对。保留节点原有出站 WebSocket。Windows 上为普通账号启用 OpenSSH 公钥登录，核对服务器主机指纹，再在主控 `~/.ssh/config` 为该账号设置专用别名，例如：
+
+```sshconfig
+Host win-work
+    HostName 192.168.1.20
+    User windows-user
+    IdentityFile ~/.ssh/id_ed25519_workbench
+```
+
+在主控现有 Hub 数据目录（`$WORKBENCH_HUB_DIR`，默认 `~/.workbench-hub`）新建 `deploy-target.json`：
+
+```json
+{"sshHost":"win-work","distro":"Ubuntu","user":"alice","nodeId":"wsl-ubuntu"}
+```
+
+`user` 是 WSL Linux 用户，不是 Windows SSH 用户。可选 `nodeHubDir` 填原安装使用的绝对 Linux `WORKBENCH_HUB_DIR`；省略时用该用户的 `~/.workbench-hub`。不要填密码、源码路径或 Bun 路径。WSL 需有 Bash、Python 3、Git、原安装的 Bun 和可用的 systemd 用户总线；不需要给 WSL 开 SSH，也不创建 Windows 计划任务。主控必须保留节点可达的 LAN 监听；联动部署拒绝仅回环。
+
+两端使用各自原安装位置的干净 Git checkout。之后只需在主控固定源码目录提交变更，然后运行 **`bun run deploy`**；不必 push、登录 Windows 或手动重启节点。必要的已提交历史会发送到 Windows，不传未提交文件或依赖目录。只允许快进；脏工作树、分叉、无法证明祖先关系或将覆盖本地忽略文件时拒绝切换。不配置目标文件就是仅部署 Hub；配置无效或目标不可达会报错，不会降级为单 Hub 发布。
+
+预检通过后，依次停止并更新 WSL 节点、重启 Hub、启动原节点。维护窗口内不要提交新任务；已有活动任务会阻止切换，但预检不能排除之后提交的任务。成功以两端进程报告同一启动提交且 WSL 路径读取成功为准。账号、节点 ID、原端口和凭据不变；如显式改监听地址或端口，节点原有 Hub URL 仍须可达，不会被脚本改写。
+
+失败时按报出的阶段修复并从同一源码目录重跑，不自动回退。Hub 已停但 WSL 节点仍在运行时，先启动旧 Hub 并等节点连回。SSH 中断时远端状态未知；先核实远端操作已结束，重跑会重新探测。Windows 离线不能唤醒。若报残留 `deploy.lock`，先按路径和 PID 核实无部署进程再移除，不要抢锁。
+
 ## 5. 生命周期、日志与命名空间
 
 ```sh
@@ -143,17 +170,17 @@ bun run deploy:check --root /absolute/path/to/project
 
 ## 6. 更新、改配置与卸载
 
-更新前保存任务并停止服务，在同一个固定源码目录自行更新源码，再部署：
+仅部署 Hub 时，更新源码前先保存任务并停止服务，再在同一个固定源码目录更新：
 
 ```sh
 wb stop
 # 在固定源码目录审查并执行自己的源码更新操作
-bun run deploy --port 4318
+bun run deploy
 wb service status
 bun run deploy:check --root /absolute/path/to/project
 ```
 
-同配置重复安装在已健康时不重启，已停止时启动。端口、Bun 路径、源码路径、PATH 或代理变量改变会停止并重写托管配置再启动，可能中断任务。新增 CLI 路径、移动 Bun/源码、修改 PATH 或更换代理后，需在正确环境重新部署，不能指望服务读取新的 shell 环境。加载失败会保留可诊断的安装记录；先看状态和日志，不要手工删除记录再启动另一个 Hub。
+`wb service install` 在同配置、已健康时不重启，已停止时启动。`bun run deploy` 会重新启动 Hub，但沿用已安装的 Bun、PATH 和代理设置。需变更 Bun、源码路径、PATH 或代理时，在正确环境下显式运行 `wb service install` 并保留所需的 `--host`/`--port`。加载失败会保留可诊断的安装记录；先看状态和日志，不要手工删除记录再启动另一个 Hub。
 
 代理变量是安装时快照：先在安装 shell 中导出新的代理（大小写按所用 Agent CLI 的习惯），再重新运行安装：
 
@@ -250,3 +277,9 @@ Invoke-RestMethod http://localhost:4318/api/health
 6. uninstall 后确认管理器不再注册且端口关闭，项目和 Hub 数据仍在，再清理自己创建的临时资源。
 
 必须分别记录 macOS、真实 Linux systemd user 会话及真实 WSL2 的结果。无 systemd 容器或注入的管理器测试不能替代实机验收；不可达环境应标记“未验证”，不能宣称跨平台运行已证实。
+
+联动发布目前未在真实 Windows/WSL 上验证。实机验收使用专用 Windows SSH 别名、测试 WSL 用户/发行版、独立 Hub 数据目录和端口、两个干净 checkout：
+
+1. 两端从 A 开始，在主控提交有可观察变化但包版本不变的 B，运行 `bun run deploy`。核实 PID 均更换、两端 revision 均为 B、远程目录读取通过、节点 ID、凭据及 LAN 端口不变。再次发布 B，仍应通过。
+2. 保持 Windows 在线，停止专用 WSL 发行版后重复。若 WSL 用户总线未能启动，预检必须明确失败，不能标为可用。
+3. 分别用不可达 SSH、WSL 脏工作树和活动任务触发部署。核实均在停止任一服务前失败。

@@ -11,6 +11,7 @@ import {
   resolveHubDir,
 } from "../hub/registry.ts";
 import type { DaemonInfo } from "../hub/types.ts";
+import { getLocalHubJson } from "./hub_http.ts";
 
 const DEFAULT_HUB_PORT = 4318;
 const DEFAULT_HUB_HOST = "127.0.0.1";
@@ -26,32 +27,12 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-export async function isDaemonHealthy(info: DaemonInfo): Promise<boolean> {
+export async function isDaemonHealthy(info: DaemonInfo, hubDir = resolveHubDir()): Promise<boolean> {
   if (!isPidAlive(info.pid)) return false;
   try {
-    let probeBase = info.url;
-    try {
-      const parsed = new URL(info.url);
-      if (parsed.hostname === "0.0.0.0") {
-        parsed.hostname = "127.0.0.1";
-        probeBase = parsed.origin;
-      } else if (parsed.hostname === "::" || parsed.hostname === "[::]") {
-        parsed.hostname = "[::1]";
-        probeBase = parsed.origin;
-      }
-    } catch {
-      // Keep original URL.
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 800);
-    try {
-      const resp = await fetch(`${probeBase}/api/health`, { signal: controller.signal });
-      if (!resp.ok) return false;
-      const body = (await resp.json()) as { ok?: boolean; serverPid?: number };
-      return body.ok === true && (body.serverPid === undefined || body.serverPid === info.pid);
-    } finally {
-      clearTimeout(timer);
-    }
+    const host = info.hostname ?? new URL(info.url).hostname;
+    const body = await getLocalHubJson(host, info.port, "/api/health", hubDir, AbortSignal.timeout(800)) as { ok?: boolean; serverPid?: number };
+    return body.ok === true && (body.serverPid === undefined || body.serverPid === info.pid);
   } catch {
     return false;
   }

@@ -11,6 +11,7 @@ import { canonicalRoot } from "../core/fs.ts";
 import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE } from "../core/language.ts";
+import { isGitRevision, readSourceRevision } from "../core/revision.ts";
 import { WORKBENCH_DIR, type AgentAction, type AgentRunRecord, type OutputLanguage, type PrivacyMode } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
 import {
@@ -176,6 +177,8 @@ export class RemoteNodeRegistry {
       if (typeof parsed.hostname === "string" && parsed.hostname.trim()) entry.info.hostname = parsed.hostname.trim();
       if (typeof parsed.platform === "string" && parsed.platform.trim()) entry.info.platform = parsed.platform.trim();
       if (typeof parsed.workbenchVersion === "string") entry.info.workbenchVersion = parsed.workbenchVersion;
+      if (isGitRevision(parsed.revision)) entry.info.revision = parsed.revision.toLowerCase();
+      else delete entry.info.revision;
       if (Array.isArray(parsed.harnesses)) entry.info.harnesses = parsed.harnesses as HarnessInfo[];
       if (Array.isArray(parsed.activeRuns)) {
         entry.info.activeRuns = parsed.activeRuns as RemoteNodeInfo["activeRuns"];
@@ -461,6 +464,7 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
   const hostname = os.hostname();
   const platform = process.platform;
   const version = packageInfo.version;
+  const revision = readSourceRevision();
   const wsUrl = buildNodeWebSocketUrl(options.hubUrl, { nodeId, nodeName, hostname, platform, version });
 
   let syncedPrefs: { routing: RoutingConfig; outputLanguage: OutputLanguage; giteeAccessToken: string | null } = {
@@ -739,6 +743,7 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
           hostname,
           platform,
           workbenchVersion: version,
+          revision,
           harnesses: quick,
           activeRuns: executor.getActiveRuns(),
         });

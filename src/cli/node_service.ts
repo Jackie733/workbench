@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, atomicWriteJson, readJsonStrict } from "../core/fs.ts";
 import { buildNodeWebSocketUrl, startWorkbenchNodeClient } from "../hub/node_bridge.ts";
-import { isLocalNodeId, resolveHubDir } from "../hub/registry.ts";
+import { isLocalNodeId, isRemoteNodeId, resolveHubDir } from "../hub/registry.ts";
 
 type Manager = "launchd" | "systemd";
 type NodeServiceAction = "start" | "stop" | "restart" | "status" | "uninstall";
@@ -176,7 +176,7 @@ export function writeNodeConfig(cfg: NodeConfig, hubDir: string = resolveHubDir(
   if (cfg.token) validateText(cfg.token);
   validateText(cfg.nodeId);
   validateText(cfg.nodeName);
-  if (isLocalNodeId(cfg.nodeId) || !/^[A-Za-z0-9._-]{1,64}$/.test(cfg.nodeId)) {
+  if (!isRemoteNodeId(cfg.nodeId)) {
     throw new WorkbenchError("invalid_input", `无效节点 ID: ${cfg.nodeId}（允许字母/数字/._-，不能为 local）`);
   }
   buildNodeWebSocketUrl(cfg.hubUrl, {

@@ -18,6 +18,7 @@
 
 - 新增 macOS LaunchAgent、Linux/WSL2 systemd 用户服务与部署入口，既有 Hub 生命周期命令遵循托管所有权。
 - 新增独立 HTTP/WebSocket/stdio MCP 部署检查及 [部署指南](docs/DEPLOYMENT.md)，覆盖固定源码更新、数据保留卸载、Windows WSL MCP 参数数组与实机验收边界；不以健康探针或隔离测试宣称跨平台运行已验证。
+- `bun run deploy` 刷新现有 Hub 时沿用监听、PATH 和代理。配置 `deploy-target.json` 后可通过 Windows OpenSSH 快进并重启已配对的 WSL 节点；成功要求两端报告相同启动提交且远程目录读取通过。
 
 ## 未发布 — REQ-001 统一图标组件库
 

@@ -86,6 +86,7 @@ export interface RemoteNodeInfo {
   harnesses: HarnessInfo[];
   activeRuns: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>;
   workbenchVersion?: string;
+  revision?: string;
 }
 
 export interface HubConfig {

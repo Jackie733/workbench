@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, atomicWriteJson } from "../core/fs.ts";
+import { hubBindUrl } from "../core/net.ts";
 import { readDaemonInfo, resolveHubDir } from "../hub/registry.ts";
 import type { DaemonInfo } from "../hub/types.ts";
 import { ensureAuthCredentials, isLoopbackBind } from "../server/auth.ts";
@@ -81,6 +82,15 @@ function validHost(host: string): void {
     throw new WorkbenchError("invalid_input", `无效监听地址: ${host}（可用 127.0.0.1、0.0.0.0、局域网 IP 或主机名）`);
   }
 }
+
+export async function assertPortAvailable(port: number, host: string): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const server = net.createServer();
+  server.once("error", (error) => reject(new WorkbenchError("execution_failed", `端口 ${host}:${port} 不可用；不会自动换端口: ${error.message}`)));
+  server.listen({ host, port, exclusive: true }, () => server.close((error) => error ? reject(error) : resolve()));
+  await promise;
+}
+
 function xml(value: string): string {
   return validateText(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[ch]!);
 }
@@ -112,9 +122,9 @@ function definition(s: ServiceInstallation): string {
   }
   return `# ${MARKER}\n[Unit]\nDescription=Workbench user Hub\n\n[Service]\nType=simple\nExecStart=${serviceArgs(s).map((arg) => unit(arg, true)).join(" ")}\nWorkingDirectory=${validateText(s.workingDirectory)}\n${Object.entries(environment).map(([key, value]) => `Environment=${unit(`${key}=${value}`)}`).join("\n")}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=15\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
 }
-function execute(command: string, args: string[]): Promise<ServiceCommandResult> {
+function execute(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<ServiceCommandResult> {
   const { promise, resolve, reject } = Promise.withResolvers<ServiceCommandResult>();
-  execFile(command, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+  execFile(command, args, { env, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
     if (error && (typeof error.code !== "number" || error.killed)) {
       reject(new WorkbenchError("execution_failed", `${command} ${args.join(" ")}: ${error.message}${stderr ? `\n${stderr.trim()}` : ""}`));
     } else resolve({ exitCode: error ? Number(error.code) : 0, stdout, stderr });
@@ -132,7 +142,7 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
   const home = options.home ?? env.HOME ?? os.homedir();
   const hubDir = canonicalPath(options.hubDir ?? resolveHubDir());
   const configPath = path.join(hubDir, "service.json");
-  const run = options.runCommand ?? execute;
+  const run = options.runCommand ?? ((command: string, args: string[]) => execute(command, args, env));
   const uid = options.uid ?? process.getuid?.();
   const domain = `gui/${uid}`;
   function manager(): Manager {
@@ -228,9 +238,9 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
     const state = await nativeState(s);
     const info = daemonInfo();
     const host = s.host ?? "127.0.0.1";
-    const url = `http://${host}:${s.port}`;
+    const url = hubBindUrl(host, s.port);
     const lanUrl = lanUrlFor(host, s.port);
-    const healthy = Boolean(state.active && state.pid > 0 && info && info.pid === state.pid && info.port === s.port && info.url === url && await isDaemonHealthy(info));
+    const healthy = Boolean(state.active && state.pid > 0 && info && info.pid === state.pid && info.port === s.port && info.url === url && await isDaemonHealthy(info, hubDir));
     return { installed: true, manager: s.manager, id: s.id, active: state.active, healthy, url: healthy ? url : null, ...(lanUrl ? { lanUrl } : {}), definitionPath: s.definitionPath };
   }
   async function waitHealthy(s: ServiceInstallation): Promise<ServiceStatus> {
@@ -265,13 +275,6 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
       await delay(100);
     }
   }
-  async function assertPortAvailable(port: number, host = "127.0.0.1"): Promise<void> {
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    const server = net.createServer();
-    server.once("error", (error) => reject(new WorkbenchError("execution_failed", `端口 ${host}:${port} 不可用；不会自动换端口: ${error.message}`)));
-    server.listen({ host, port, exclusive: true }, () => server.close((error) => error ? reject(error) : resolve()));
-    await promise;
-  }
   async function installUserService(installOptions: { port?: number; host?: string } = {}): Promise<ServiceStatus> {
     const kind = manager();
     const port = installOptions.port ?? 4318;
@@ -304,13 +307,13 @@ export function createUserServiceManager(options: UserServiceOptions = {}): User
     if (!existing) {
       try { fs.lstatSync(id.definitionPath); fail(`拒绝覆盖未知服务定义: ${id.definitionPath}`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       const info = daemonInfo();
-      if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
+      if (info && await isDaemonHealthy(info, hubDir)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
       await assertPortAvailable(port, bindHost);
     } else if (JSON.stringify(existing) === JSON.stringify(next)) {
       const current = await status(existing);
       if (current.healthy) return current;
       const info = daemonInfo();
-      if (info && await isDaemonHealthy(info)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
+      if (info && await isDaemonHealthy(info, hubDir)) fail("发现未托管的健康 Hub；请先运行 wb stop，避免中断正在运行的任务，再安装用户服务。");
       await assertPortAvailable(port, bindHost);
       if (!isLoopbackBind(bindHost)) ensureAuthCredentials(hubDir);
       if (kind === "systemd") {

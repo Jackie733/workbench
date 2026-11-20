@@ -17,6 +17,7 @@ import { canonicalRoot } from "../core/fs.ts";
 import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
+import { hubBindUrl } from "../core/net.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { readSandboxes } from "../core/sandbox.ts";
 import {
@@ -52,6 +53,7 @@ import {
   browseDirectory,
   isAutoRegistrableProjectRoot,
   isLocalNodeId,
+  isRemoteNodeId,
   LOCAL_NODE_ID,
   maskAccessToken,
   readHubConfig,
@@ -65,6 +67,7 @@ import {
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
+import { readSourceRevision } from "../core/revision.ts";
 import { clearModelCooldown, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
   ROUTING_PRESETS,
@@ -202,6 +205,7 @@ export async function startWorkbenchServer(options: {
   const executor = options.executor ?? new HubExecutor();
   const nodeRegistry = new RemoteNodeRegistry();
   const serverStartedAt = Date.now();
+  const revision = readSourceRevision();
 
   if (hubMode && isAutoRegistrableProjectRoot(defaultRoot)) {
     registerHubProject(defaultRoot, { activate: false });
@@ -415,6 +419,7 @@ export async function startWorkbenchServer(options: {
       harnesses: localHarnesses,
       activeRuns: enrichRuns(executor.getActiveRuns(), LOCAL_NODE_ID),
       workbenchVersion: packageInfo.version,
+      revision,
     };
 
     const connected = nodeRegistry.listConnectedNodes().map((n) => ({
@@ -992,7 +997,7 @@ export async function startWorkbenchServer(options: {
         let nodeMeta: WsClientData["nodeMeta"];
         if (role === "node") {
           const rawNodeId = (url.searchParams.get("nodeId") ?? "").trim();
-          if (!rawNodeId || isLocalNodeId(rawNodeId) || !/^[A-Za-z0-9._-]{1,64}$/.test(rawNodeId)) {
+          if (!isRemoteNodeId(rawNodeId)) {
             return new Response("Invalid nodeId", { status: 400 });
           }
           nodeId = rawNodeId;
@@ -1215,7 +1220,7 @@ export async function startWorkbenchServer(options: {
   });
 
   const actualPort = server.port ?? 0;
-  const serverUrl = `http://${hostname}:${actualPort}`;
+  const serverUrl = hubBindUrl(hostname, actualPort);
   const info: ServerRuntimeInfo = {
     pid: process.pid,
     port: actualPort,

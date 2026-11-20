@@ -48,6 +48,10 @@ export function isLocalNodeId(nodeId?: string | null): boolean {
   return !trimmed || trimmed === LOCAL_NODE_ID;
 }
 
+export function isRemoteNodeId(nodeId: unknown): nodeId is string {
+  return typeof nodeId === "string" && !isLocalNodeId(nodeId) && /^[A-Za-z0-9._-]{1,64}$/.test(nodeId);
+}
+
 function normalizeRemoteRoot(root: string): string {
   const trimmed = root.trim();
   if (!trimmed || /[\0\r\n]/.test(trimmed)) {
