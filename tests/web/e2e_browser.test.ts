@@ -1105,6 +1105,133 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expect(responsiveState.selectedRequirement).toBe("REQ-001");
         expect(responsiveState.timelineActive).toBe(true);
         expect(Math.abs(responsiveState.scrollTop - startingScrollTop)).toBeLessThan(20);
+        if ([320, 375, 390].includes(width)) {
+          const narrowContentVisibility = await page.evaluate(() => {
+            const header = document.querySelector('[data-testid="app-header"]');
+            const headerRect = header?.getBoundingClientRect() ?? null;
+            const controls = Array.from(
+              header?.querySelectorAll<HTMLElement>(".topbar-left button, .topbar-right button, .topbar-right select") ?? [],
+            ).filter((control) => {
+              const rect = control.getBoundingClientRect();
+              const style = getComputedStyle(control);
+              return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+            });
+            const stepper = document.querySelector('[data-testid="stage-stepper"]');
+            const stepperRect = stepper?.getBoundingClientRect() ?? null;
+            const steps = Array.from(stepper?.querySelectorAll<HTMLElement>(".step-item") ?? []);
+            const rectWithin = (child: DOMRect | null, parent: DOMRect | null) =>
+              Boolean(
+                child &&
+                  parent &&
+                  child.left >= parent.left - 0.5 &&
+                  child.right <= parent.right + 0.5 &&
+                  child.top >= parent.top - 0.5 &&
+                  child.bottom <= parent.bottom + 0.5,
+              );
+            const components = steps.flatMap((step, index) => {
+              const dot = step.querySelector<HTMLElement>(".step-dot");
+              const label = dot?.nextElementSibling as HTMLElement | null;
+              return [
+                ...(dot ? [{ step, index, name: "dot", element: dot }] : []),
+                ...(label ? [{ step, index, name: "label", element: label }] : []),
+              ];
+            });
+            const visibleControls = controls.map((control) => {
+              const rect = control.getBoundingClientRect();
+              const x = (rect.left + rect.right) / 2;
+              const y = (rect.top + rect.bottom) / 2;
+              const hit = document.elementFromPoint(x, y);
+              const hitControl = hit?.closest("button, select") ?? null;
+              return {
+                id: control.dataset.testid ?? control.dataset.action ?? control.tagName.toLowerCase(),
+                withinHeader: Boolean(
+                  headerRect && rect.top >= headerRect.top - 0.5 && rect.bottom <= headerRect.bottom + 0.5,
+                ),
+                withinViewport: rect.left >= 0 && rect.right <= window.innerWidth,
+                centerHitsControl: hitControl === control,
+              };
+            });
+            const overlaps: Array<{ control: string; step: string; part: string; width: number; height: number }> = [];
+            for (const control of controls) {
+              const controlRect = control.getBoundingClientRect();
+              for (const component of components) {
+                const componentRect = component.element.getBoundingClientRect();
+                const overlapWidth = Math.min(controlRect.right, componentRect.right) - Math.max(controlRect.left, componentRect.left);
+                const overlapHeight = Math.min(controlRect.bottom, componentRect.bottom) - Math.max(controlRect.top, componentRect.top);
+                if (overlapWidth > 0.5 && overlapHeight > 0.5) {
+                  overlaps.push({
+                    control: control.dataset.testid ?? control.dataset.action ?? control.tagName.toLowerCase(),
+                    step: component.step.textContent?.trim() ?? `step-${component.index + 1}`,
+                    part: component.name,
+                    width: overlapWidth,
+                    height: overlapHeight,
+                  });
+                }
+              }
+            }
+            const hitTests: Array<{ step: string; part: string; withinStep: boolean; topbar: boolean }> = [];
+            for (const component of components) {
+              const rect = component.element.getBoundingClientRect();
+              const visibleLeft = Math.max(rect.left, stepperRect?.left ?? 0, 0);
+              const visibleRight = Math.min(rect.right, stepperRect?.right ?? window.innerWidth, window.innerWidth);
+              const visibleTop = Math.max(rect.top, stepperRect?.top ?? 0, 0);
+              const visibleBottom = Math.min(rect.bottom, stepperRect?.bottom ?? window.innerHeight, window.innerHeight);
+              if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) continue;
+              const fractions = component.name === "dot" ? [0.5] : [0.05, 0.25, 0.5, 0.75, 0.95];
+              for (const fraction of fractions) {
+                const x = visibleLeft + (visibleRight - visibleLeft) * fraction;
+                const y = (visibleTop + visibleBottom) / 2;
+                const hit = document.elementFromPoint(x, y);
+                hitTests.push({
+                  step: component.step.textContent?.trim() ?? `step-${component.index + 1}`,
+                  part: component.name,
+                  withinStep: hit?.closest(".step-item") === component.step,
+                  topbar: Boolean(hit?.closest('[data-testid="app-header"]')),
+                });
+              }
+            }
+            const firstStep = steps[0] ?? null;
+            const firstDot = firstStep?.querySelector<HTMLElement>(".step-dot") ?? null;
+            const firstLabel = firstDot?.nextElementSibling as HTMLElement | null;
+            const firstStepFullyVisible = Boolean(
+              firstDot &&
+                firstLabel &&
+                rectWithin(firstDot.getBoundingClientRect(), stepperRect) &&
+                rectWithin(firstLabel.getBoundingClientRect(), stepperRect) &&
+                firstLabel.getBoundingClientRect().left >= 0 &&
+                firstLabel.getBoundingClientRect().right <= window.innerWidth,
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              documentWidth: document.documentElement.scrollWidth,
+              firstStepLabel: firstLabel?.textContent?.trim() ?? "",
+              firstStepFullyVisible,
+              stepperStartsBelowHeader: Boolean(headerRect && stepperRect && stepperRect.top >= headerRect.bottom - 0.5),
+              controlHits: visibleControls,
+              overlaps,
+              hitTests,
+            };
+          });
+          expect(narrowContentVisibility.documentWidth).toBeLessThanOrEqual(narrowContentVisibility.viewportWidth);
+          expect(narrowContentVisibility.firstStepLabel).toBe("1. 需求草稿");
+          expect(narrowContentVisibility.firstStepFullyVisible).toBe(true);
+          expect(narrowContentVisibility.stepperStartsBelowHeader).toBe(true);
+          for (const requiredControl of [
+            "ui-language-select",
+            "topbar-insights-btn",
+            "open-evolution-btn",
+            "open-quick-report-btn",
+            "open-routing-btn",
+            "toggle-drawer-btn",
+          ]) {
+            expect(narrowContentVisibility.controlHits.map((control) => control.id)).toContain(requiredControl);
+          }
+          expect(narrowContentVisibility.controlHits.length).toBeGreaterThan(0);
+          expect(narrowContentVisibility.controlHits.every((control) => control.withinHeader && control.withinViewport && control.centerHitsControl)).toBe(true);
+          expect(narrowContentVisibility.overlaps).toEqual([]);
+          expect(narrowContentVisibility.hitTests.length).toBeGreaterThan(0);
+          expect(narrowContentVisibility.hitTests.every((hit) => hit.withinStep && !hit.topbar)).toBe(true);
+        }
         if (width === 1440) expect(responsiveState.layoutMode).toBe("column");
         if ([1360, 1280, 1024].includes(width)) {
           expect(responsiveState.layoutMode).toBe("overlay");
