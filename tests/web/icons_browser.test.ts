@@ -594,19 +594,13 @@ describe("REQ-010 icon coverage across home and workspace", () => {
       );
       expect(rowIcons.length).toBeGreaterThan(0);
       expect(rowIcons.every((badge) => badge.icons === 1)).toBe(true);
-      const decisionBadge = await page.evaluate(() => {
-        const box = document.querySelector('[data-testid="decision-box"]');
-        if (!box) return null;
-        return {
-          headingIcons: box.querySelectorAll("h2 svg.ui-icon").length,
-          badgeIcons: Array.from(box.querySelectorAll(".decision-row .badge")).map(
-            (badge) => badge.querySelectorAll("svg.ui-icon").length,
-          ),
-        };
-      });
-      if (decisionBadge) {
-        expect(decisionBadge.headingIcons).toBe(1);
-        expect(decisionBadge.badgeIcons.every((count) => count === 1)).toBe(true);
+      const inlineDecisionIcons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="req-decision-badge-"]')).map((badge) =>
+          badge.querySelectorAll("svg.ui-icon").length,
+        ),
+      );
+      if (inlineDecisionIcons.length > 0) {
+        expect(inlineDecisionIcons.every((count) => count === 1)).toBe(true);
       }
 
       expect(await page.evaluate(CONTRACT)).toMatchObject({ badHidden: 0 });

@@ -35,7 +35,7 @@ import {
   type UiLanguage,
 } from "./i18n.ts";
 
-export type Scope = "active" | "decisions" | "done" | "cancelled" | "all";
+export type Scope = "active" | "decisions" | "sandboxes" | "done" | "cancelled" | "all";
 export type WorkspaceTab = "spec" | "diff" | "changes" | "timeline";
 export type DrawerTab = "discuss" | "console" | "diff";
 export type ProjectSortMode = "attention" | "recent" | "name" | "added";
@@ -387,7 +387,7 @@ export function formatDateTime(ms: number, language: UiLanguage = "zh-CN"): stri
 
 export function filterRequirementsByScope(
   items: readonly RequirementSummary[],
-  scope: Exclude<Scope, "decisions">,
+  scope: Exclude<Scope, "decisions" | "sandboxes">,
 ): RequirementSummary[] {
   switch (scope) {
     case "all":
@@ -399,6 +399,74 @@ export function filterRequirementsByScope(
     case "cancelled":
       return items.filter((i) => i.stage === "cancelled");
   }
+}
+
+export interface UnifiedRequirementListOptions {
+  allItems: readonly RequirementSummary[];
+  scope: Scope;
+  runs: Iterable<RequirementRunLike>;
+  projectId: string | null;
+  mergeOrder?: { ordered: ReadonlyArray<{ requirementId: string }> } | null;
+  activeSandboxes?: ReadonlyArray<{ requirementId: string }>;
+}
+
+/**
+ * 统一单一需求队列：将待拍板置顶提示、并行沙箱合并顺序与常规列表合为一份去重队列。
+ */
+export function orderUnifiedRequirements(options: UnifiedRequirementListOptions): {
+  items: RequirementSummary[];
+  pendingDecisions: RequirementSummary[];
+  pendingIdSet: Set<string>;
+} {
+  const { allItems, scope, runs, projectId, mergeOrder, activeSandboxes = [] } = options;
+  const activeItems = filterRequirementsByScope(allItems, "active");
+  const pendingDecisions = partitionPendingDecisions(activeItems, runs, projectId).humanPending.sort((a, b) => {
+    const aBlock = isBlockingDecisionRequirement(a) ? 0 : 1;
+    const bBlock = isBlockingDecisionRequirement(b) ? 0 : 1;
+    if (aBlock !== bBlock) return aBlock - bBlock;
+    return a.updatedAt - b.updatedAt;
+  });
+  const pendingIdSet = new Set(pendingDecisions.map((item) => item.id));
+
+  if (scope === "decisions") {
+    return { items: pendingDecisions, pendingDecisions, pendingIdSet };
+  }
+
+  if (scope === "sandboxes") {
+    const rankMap = new Map<string, number>();
+    (mergeOrder?.ordered ?? []).forEach((entry, idx) => rankMap.set(entry.requirementId, idx));
+    const sandboxIds = new Set(activeSandboxes.map((s) => s.requirementId));
+    for (const id of rankMap.keys()) sandboxIds.add(id);
+    const items = allItems
+      .filter((item) => sandboxIds.has(item.id))
+      .sort((a, b) => {
+        const ra = rankMap.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+        const rb = rankMap.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+        if (ra !== rb) return ra - rb;
+        return b.updatedAt - a.updatedAt || b.id.localeCompare(a.id);
+      });
+    return { items, pendingDecisions, pendingIdSet };
+  }
+
+  if (scope === "active") {
+    const priority = (item: RequirementSummary): number => {
+      if (!pendingIdSet.has(item.id)) return 2;
+      return isBlockingDecisionRequirement(item) ? 0 : 1;
+    };
+    const items = [...activeItems].sort((a, b) => {
+      const pa = priority(a);
+      const pb = priority(b);
+      if (pa !== pb) return pa - pb;
+      return b.updatedAt - a.updatedAt || b.id.localeCompare(a.id);
+    });
+    return { items, pendingDecisions, pendingIdSet };
+  }
+
+  return {
+    items: filterRequirementsByScope(allItems, scope),
+    pendingDecisions,
+    pendingIdSet,
+  };
 }
 
 export function filteredItems(items: RequirementSummary[], query: string, language: UiLanguage = "zh-CN"): RequirementSummary[] {
@@ -504,7 +572,11 @@ export interface ProjectGroupSection<T extends SortableProjectLike> {
 export function sortHubProjects<T extends SortableProjectLike>(
   projects: readonly T[],
   sortMode: ProjectSortMode,
+  recentOrder?: ReadonlyMap<string, number>,
 ): T[] {
+  const stableTieBreak = (a: T, b: T) =>
+    a.name.localeCompare(b.name, "zh-CN") || a.addedAt - b.addedAt || a.id.localeCompare(b.id);
+
   return [...projects].sort((a, b) => {
     const aPin = a.pinned ? 1 : 0;
     const bPin = b.pinned ? 1 : 0;
@@ -514,14 +586,17 @@ export function sortHubProjects<T extends SortableProjectLike>(
         if (a.decisionCount !== b.decisionCount) return b.decisionCount - a.decisionCount;
         if (a.runningCount !== b.runningCount) return b.runningCount - a.runningCount;
         if (a.activeCount !== b.activeCount) return b.activeCount - a.activeCount;
-        return b.lastOpenedAt - a.lastOpenedAt || a.name.localeCompare(b.name, "zh-CN");
+        return stableTieBreak(a, b);
       }
-      case "recent":
-        return b.lastOpenedAt - a.lastOpenedAt || a.name.localeCompare(b.name, "zh-CN");
+      case "recent": {
+        const aTime = recentOrder?.get(a.id) ?? a.lastOpenedAt;
+        const bTime = recentOrder?.get(b.id) ?? b.lastOpenedAt;
+        return bTime - aTime || stableTieBreak(a, b);
+      }
       case "name":
-        return a.name.localeCompare(b.name, "zh-CN") || b.lastOpenedAt - a.lastOpenedAt;
+        return stableTieBreak(a, b);
       case "added":
-        return b.addedAt - a.addedAt || a.name.localeCompare(b.name, "zh-CN");
+        return b.addedAt - a.addedAt || stableTieBreak(a, b);
     }
   });
 }
@@ -531,8 +606,9 @@ export function groupHubProjects<T extends SortableProjectLike>(
   groupMode: ProjectGroupMode,
   sortMode: ProjectSortMode,
   language: UiLanguage = "zh-CN",
+  recentOrder?: ReadonlyMap<string, number>,
 ): ProjectGroupSection<T>[] {
-  const sorted = sortHubProjects(projects, sortMode);
+  const sorted = sortHubProjects(projects, sortMode, recentOrder);
   if (groupMode === "none" || sorted.length === 0) {
     return [{ key: "all", label: "", projects: sorted }];
   }

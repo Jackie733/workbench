@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Check, ChevronDown, ChevronRight, Folder, Plus, Settings, Star, X } from "lucide-react";
 import { api, type HubProjectSummary } from "../api.ts";
@@ -6,20 +6,31 @@ import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import { openAddProjectModal, queryClient, queryKeys, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { groupHubProjects, type ProjectGroupMode, type ProjectSortMode } from "../state.ts";
-import { useUiStore } from "../stores/uiStore.ts";
+import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
 import { HomeView } from "./HomeView.tsx";
 import { Icon } from "./Icon.tsx";
 
-export function HubSidebar() {
+function computeMaxSidebarWidth(layoutEl: HTMLElement | null): number {
+  const viewportW = layoutEl?.clientWidth || (typeof window !== "undefined" ? window.innerWidth : 1280);
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.floor(viewportW * 0.42)));
+}
+
+function clampSidebarWidth(width: number, maxWidth: number): number {
+  return Math.min(Math.max(Math.round(width), MIN_SIDEBAR_WIDTH), Math.max(MIN_SIDEBAR_WIDTH, maxWidth));
+}
+
+export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement | null> }) {
   const language = useUiStore((s) => s.language);
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
   const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
+  const sidebarWidth = useUiStore((s) => s.sidebarWidth);
   const projectSort = useUiStore((s) => s.projectSort);
   const projectGroup = useUiStore((s) => s.projectGroup);
   const projectsCollapsed = useUiStore((s) => s.projectsCollapsed);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
+  const setSidebarWidth = useUiStore((s) => s.setSidebarWidth);
   const setProjectSort = useUiStore((s) => s.setProjectSort);
   const setProjectGroup = useUiStore((s) => s.setProjectGroup);
   const setProjectsCollapsed = useUiStore((s) => s.setProjectsCollapsed);
@@ -27,6 +38,111 @@ export function HubSidebar() {
 
   const [editingCatId, setEditingCatId] = useState<string | null>(null);
   const [catDraft, setCatDraft] = useState("");
+  const resizerRef = useRef<HTMLDivElement | null>(null);
+  const [maxWidth, setMaxWidth] = useState<number>(MAX_SIDEBAR_WIDTH);
+  const recentSnapshotRef = useRef<Map<string, number>>(new Map());
+
+  const syncSidebarCssWidth = useCallback(
+    (preferredWidth: number) => {
+      const layoutEl = layoutRef?.current ?? null;
+      const nextMax = computeMaxSidebarWidth(layoutEl);
+      const effective = clampSidebarWidth(preferredWidth, nextMax);
+      setMaxWidth(nextMax);
+      if (layoutEl) {
+        layoutEl.style.setProperty("--sidebar-w", `${effective}px`);
+      }
+      return { nextMax, effective };
+    },
+    [layoutRef],
+  );
+
+  useLayoutEffect(() => {
+    syncSidebarCssWidth(sidebarWidth);
+  }, [sidebarWidth, syncSidebarCssWidth]);
+
+  useEffect(() => {
+    const layoutEl = layoutRef?.current ?? null;
+    if (!layoutEl || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      syncSidebarCssWidth(useUiStore.getState().sidebarWidth);
+    });
+    observer.observe(layoutEl);
+    return () => observer.disconnect();
+  }, [layoutRef, syncSidebarCssWidth]);
+
+  const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const layoutEl = layoutRef?.current ?? null;
+    const resizerEl = resizerRef.current;
+    if (!layoutEl || !resizerEl || !desktopSidebarOpen) return;
+    e.preventDefault();
+
+    const startX = e.clientX;
+    const startMax = computeMaxSidebarWidth(layoutEl);
+    const startWidth = clampSidebarWidth(useUiStore.getState().sidebarWidth, startMax);
+    let latestWidth = startWidth;
+    let rafId = 0;
+
+    resizerEl.setPointerCapture(e.pointerId);
+    layoutEl.setAttribute("data-resizing", "true");
+    resizerEl.setAttribute("data-dragging", "true");
+
+    const applyWidth = (w: number) => {
+      layoutEl.style.setProperty("--sidebar-w", `${w}px`);
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      const delta = ev.clientX - startX;
+      const currentMax = computeMaxSidebarWidth(layoutEl);
+      latestWidth = clampSidebarWidth(startWidth + delta, currentMax);
+      if (!rafId) {
+        rafId = requestAnimationFrame(() => {
+          rafId = 0;
+          applyWidth(latestWidth);
+        });
+      }
+    };
+
+    const finish = () => {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      resizerEl.removeEventListener("pointermove", onMove);
+      resizerEl.removeEventListener("pointerup", finish);
+      resizerEl.removeEventListener("pointercancel", finish);
+      layoutEl.removeAttribute("data-resizing");
+      resizerEl.removeAttribute("data-dragging");
+      applyWidth(latestWidth);
+      setSidebarWidth(latestWidth);
+    };
+
+    resizerEl.addEventListener("pointermove", onMove);
+    resizerEl.addEventListener("pointerup", finish);
+    resizerEl.addEventListener("pointercancel", finish);
+  };
+
+  const handleResizeDoubleClick = () => {
+    const layoutEl = layoutRef?.current ?? null;
+    const currentMax = computeMaxSidebarWidth(layoutEl);
+    setSidebarWidth(clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH, currentMax));
+  };
+
+  const handleResizeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const layoutEl = layoutRef?.current ?? null;
+    const currentMax = computeMaxSidebarWidth(layoutEl);
+    const effective = clampSidebarWidth(sidebarWidth, currentMax);
+    const step = e.shiftKey ? 48 : 16;
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setSidebarWidth(clampSidebarWidth(effective + step, currentMax));
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setSidebarWidth(clampSidebarWidth(effective - step, currentMax));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setSidebarWidth(clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH, currentMax));
+    }
+  };
 
   useEffect(() => {
     setEditingCatId(null);
@@ -86,7 +202,19 @@ export function HubSidebar() {
         ? t(language, "preset.quota_saver")
         : t(language, "preset.balanced");
 
-  const projectSections = groupHubProjects(projects, projectGroup, projectSort, language);
+  // 仅在首次见到项目时记录会话快照；点击切换项目不会重排项目队列。
+  for (const p of projects) {
+    if (!recentSnapshotRef.current.has(p.id)) {
+      recentSnapshotRef.current.set(p.id, p.lastOpenedAt);
+    }
+  }
+  const projectSections = groupHubProjects(
+    projects,
+    projectGroup,
+    projectSort,
+    language,
+    recentSnapshotRef.current,
+  );
 
   const openCategoryEditor = (p: HubProjectSummary) => {
     setEditingCatId((prev) => (prev === p.id ? null : p.id));
@@ -312,7 +440,15 @@ export function HubSidebar() {
                         data-testid="project-sort-select"
                         aria-label={t(language, "sidebar.sort.label")}
                         value={projectSort}
-                        onChange={(e) => setProjectSort(e.target.value as ProjectSortMode)}
+                        onChange={(e) => {
+                          const nextSort = e.target.value as ProjectSortMode;
+                          if (nextSort === "recent") {
+                            const refreshed = new Map<string, number>();
+                            for (const proj of projects) refreshed.set(proj.id, proj.lastOpenedAt);
+                            recentSnapshotRef.current = refreshed;
+                          }
+                          setProjectSort(nextSort);
+                        }}
                       >
                         <option value="attention">{t(language, "sidebar.sort.attention")}</option>
                         <option value="recent">{t(language, "sidebar.sort.recent")}</option>
@@ -441,6 +577,24 @@ export function HubSidebar() {
             </div>
           )}
         </div>
+        {desktopSidebarOpen && (
+          <div
+            ref={resizerRef}
+            className="sidebar-resizer"
+            data-testid="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t(language, "sidebar.resizeAria")}
+            aria-valuemin={MIN_SIDEBAR_WIDTH}
+            aria-valuemax={maxWidth}
+            aria-valuenow={clampSidebarWidth(sidebarWidth, maxWidth)}
+            title={t(language, "sidebar.resizeTitle")}
+            tabIndex={0}
+            onPointerDown={handleResizePointerDown}
+            onDoubleClick={handleResizeDoubleClick}
+            onKeyDown={handleResizeKeyDown}
+          />
+        )}
       </aside>
     </>
   );

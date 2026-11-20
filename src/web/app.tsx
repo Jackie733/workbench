@@ -192,6 +192,7 @@ function WorkbenchShell() {
   const drawerOpen = useUiStore((s) => s.drawerOpen);
   const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
   const activeRuns = useStreamStore((s) => s.activeRuns);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const urlInitializedRef = useRef(false);
 
@@ -316,7 +317,9 @@ function WorkbenchShell() {
     const scopedItems =
       scope === "decisions"
         ? partitionPendingDecisions(activeItems, runsList, activeProjectId).humanPending
-        : filterRequirementsByScope(allItems, scope);
+        : scope === "sandboxes"
+          ? activeItems
+          : filterRequirementsByScope(allItems, scope);
     const candidates = scopedItems.length > 0 ? scopedItems : allItems;
     const defaultId = pickDefaultRequirementId(candidates, runsList, activeProjectId);
     if (defaultId) {
@@ -333,9 +336,10 @@ function WorkbenchShell() {
       <div id="main-root" className={`app-shell ${projectReady ? "detail-mode" : ""}`}>
         <Topbar />
         <div
+          ref={layoutRef}
           className={`hub-layout ${showSidebar ? "with-sidebar" : ""} ${showSidebar && !desktopSidebarOpen ? "sidebar-collapsed" : ""} ${showDrawer ? "with-drawer" : ""}`}
         >
-          {showSidebar && <HubSidebar />}
+          {showSidebar && <HubSidebar layoutRef={layoutRef} />}
           <div className="hub-workspace" ref={workspaceRef}>
             <div className="main-stage">
               <div className="shell">

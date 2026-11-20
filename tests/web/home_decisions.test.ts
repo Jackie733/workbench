@@ -3,6 +3,7 @@ import type { RequirementSummary } from "../../src/core/types.ts";
 import {
   findActiveRequirementRun,
   groupHubProjects,
+  orderUnifiedRequirements,
   partitionPendingDecisions,
   pickDefaultRequirementId,
   sortHubProjects,
@@ -162,5 +163,58 @@ describe("IDE 默认需求选中、项目排序与分类", () => {
       "cat:核心",
       "cat:__none__",
     ]);
+  });
+
+  test("sortHubProjects 选中更新 lastOpenedAt 时队列顺序保持稳定", () => {
+    const a = proj("a", { name: "Alpha", addedAt: 10, lastOpenedAt: 100 });
+    const b = proj("b", { name: "Beta", addedAt: 20, lastOpenedAt: 300 });
+    const c = proj("c", { name: "Gamma", addedAt: 30, lastOpenedAt: 200 });
+    const recentSnapshot = new Map<string, number>([
+      ["a", 100],
+      ["b", 300],
+      ["c", 200],
+    ]);
+
+    const afterOpenA = [
+      { ...a, lastOpenedAt: 9999 },
+      b,
+      c,
+    ];
+    expect(sortHubProjects(afterOpenA, "attention").map((p) => p.id)).toEqual(["a", "b", "c"]);
+    expect(sortHubProjects(afterOpenA, "name").map((p) => p.id)).toEqual(["a", "b", "c"]);
+    expect(sortHubProjects(afterOpenA, "added").map((p) => p.id)).toEqual(["c", "b", "a"]);
+    expect(sortHubProjects(afterOpenA, "recent", recentSnapshot).map((p) => p.id)).toEqual(["b", "c", "a"]);
+  });
+
+  test("orderUnifiedRequirements 统一单列表：阻塞/待拍板置顶去重、支持 sandboxes 合并排序", () => {
+    const req1 = summary("REQ-001", { stage: "implementing", needsDecision: false, updatedAt: 500 });
+    const req2 = summary("REQ-002", { stage: "awaiting_approval", needsDecision: true, updatedAt: 200 });
+    const req3 = summary("REQ-003", {
+      stage: "blocked",
+      needsDecision: true,
+      decisionReasonKey: "core.decision.blocked",
+      updatedAt: 100,
+    });
+    const req4 = summary("REQ-004", { stage: "done", needsDecision: false, updatedAt: 600 });
+
+    const activeRes = orderUnifiedRequirements({
+      allItems: [req4, req1, req2, req3],
+      scope: "active",
+      runs: [],
+      projectId: "proj-a",
+    });
+    // 每条活跃需求只出现一次，顺序为 阻塞(REQ-003) -> 待拍板(REQ-002) -> 普通活跃(REQ-001)
+    expect(activeRes.items.map((i) => i.id)).toEqual(["REQ-003", "REQ-002", "REQ-001"]);
+    expect(Array.from(activeRes.pendingIdSet).sort()).toEqual(["REQ-002", "REQ-003"]);
+
+    const sandboxRes = orderUnifiedRequirements({
+      allItems: [req4, req1, req2, req3],
+      scope: "sandboxes",
+      runs: [],
+      projectId: "proj-a",
+      mergeOrder: { ordered: [{ requirementId: "REQ-001" }, { requirementId: "REQ-004" }] },
+      activeSandboxes: [{ requirementId: "REQ-001" }, { requirementId: "REQ-004" }],
+    });
+    expect(sandboxRes.items.map((i) => i.id)).toEqual(["REQ-001", "REQ-004"]);
   });
 });

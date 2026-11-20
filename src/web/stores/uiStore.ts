@@ -25,10 +25,21 @@ import {
   type WorkspaceTab,
 } from "../state.ts";
 
+export const DEFAULT_SIDEBAR_WIDTH = 360;
+export const MIN_SIDEBAR_WIDTH = 280;
+export const MAX_SIDEBAR_WIDTH = 520;
 export const DEFAULT_DRAWER_WIDTH = 720;
 export const MIN_DRAWER_WIDTH = 320;
 /** 暂缓热刷新提示的固定 id：重复事件只更新同一条提示，不堆叠。 */
 export const RELOAD_PENDING_TOAST_ID = "web-reload-pending";
+
+function initialSidebarWidth(): number {
+  const raw = Number(readStorageItem("wb-sidebar-width"));
+  if (Number.isFinite(raw) && raw >= MIN_SIDEBAR_WIDTH && raw <= MAX_SIDEBAR_WIDTH) {
+    return Math.round(raw);
+  }
+  return DEFAULT_SIDEBAR_WIDTH;
+}
 
 function initialDesktopSidebarOpen(): boolean {
   const saved = readStorageItem("wb-sidebar-open");
@@ -69,6 +80,7 @@ export interface UiStoreState {
   busy: boolean;
   sidebarOpen: boolean;
   desktopSidebarOpen: boolean;
+  sidebarWidth: number;
   projectSort: ProjectSortMode;
   projectGroup: ProjectGroupMode;
   projectsCollapsed: boolean;
@@ -105,6 +117,7 @@ export interface UiStoreState {
   setBusy: (busy: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setDesktopSidebarOpen: (open: boolean) => void;
+  setSidebarWidth: (width: number) => void;
   setProjectSort: (sort: ProjectSortMode) => void;
   setProjectGroup: (group: ProjectGroupMode) => void;
   setProjectsCollapsed: (collapsed: boolean) => void;
@@ -145,6 +158,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   busy: false,
   sidebarOpen: false,
   desktopSidebarOpen: initialDesktopSidebarOpen(),
+  sidebarWidth: initialSidebarWidth(),
   projectSort: initialProjectSort(),
   projectGroup: initialProjectGroup(),
   projectsCollapsed: initialProjectsCollapsed(),
@@ -194,6 +208,11 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setDesktopSidebarOpen: (desktopSidebarOpen) => {
     writeStorageItem("wb-sidebar-open", String(desktopSidebarOpen));
     set({ desktopSidebarOpen });
+  },
+  setSidebarWidth: (width) => {
+    const clamped = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
+    writeStorageItem("wb-sidebar-width", String(clamped));
+    set({ sidebarWidth: clamped });
   },
   setProjectSort: (projectSort) => {
     writeStorageItem("wb-project-sort", projectSort);

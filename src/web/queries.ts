@@ -145,7 +145,7 @@ export function useProjectSandboxesQuery(activeProjectId: string | null, enabled
 }
 
 export function useRequirementsQuery(activeProjectId: string | null, scope: Scope, enabled: boolean) {
-  const fetchScope = scope === "decisions" ? "active" : scope;
+  const fetchScope = scope === "decisions" || scope === "sandboxes" ? "all" : scope;
   return useQuery({
     queryKey: queryKeys.requirements(activeProjectId, fetchScope),
     queryFn: () => api.listRequirements(fetchScope),

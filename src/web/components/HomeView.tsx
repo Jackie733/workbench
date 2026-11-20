@@ -1,10 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import {
-  AlertTriangle,
-  ArrowRight,
   Check,
-  ChevronDown,
-  ChevronRight,
   CircleAlert,
   Clock,
   FolderGit2,
@@ -40,7 +36,7 @@ import {
   filterRequirementsByScope,
   findActiveRequirementRun,
   isBlockingDecisionRequirement,
-  partitionPendingDecisions,
+  orderUnifiedRequirements,
   progressDetail,
   relativeTime,
   STAGE_META,
@@ -243,7 +239,6 @@ export function HomeView() {
 
   const busy = useUiStore((s) => s.busy);
   const activeRuns = useStreamStore((s) => s.activeRuns);
-  const [sandboxesExpanded, setSandboxesExpanded] = useState<boolean | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollTopRef = useRef(0);
   const prevProjectRef = useRef(activeProjectId);
@@ -256,23 +251,30 @@ export function HomeView() {
   const activeBaseItems = filterRequirementsByScope(allBaseItems, "active");
   const mergeOrder = sandboxesData?.mergeOrder ?? null;
   const activeSandboxes = sandboxesData?.sandboxes ?? [];
-  const isSandboxesExpanded = sandboxesExpanded ?? (mergeOrder ? mergeOrder.ordered.length <= 4 : false);
-
   const activeRunList = Object.values(activeRuns);
-  const pendingDecisions = partitionPendingDecisions(activeBaseItems, activeRunList, activeProjectId).humanPending.sort(
-    (a, b) => {
-      const aBlock = isBlockingDecisionRequirement(a) ? 0 : 1;
-      const bBlock = isBlockingDecisionRequirement(b) ? 0 : 1;
-      if (aBlock !== bBlock) return aBlock - bBlock;
-      return a.updatedAt - b.updatedAt;
-    },
-  );
+
+  const { items: listSource, pendingDecisions, pendingIdSet } = orderUnifiedRequirements({
+    allItems: allBaseItems,
+    scope,
+    runs: activeRunList,
+    projectId: activeProjectId,
+    mergeOrder,
+    activeSandboxes,
+  });
 
   const activeCnt = activeBaseItems.length;
   const decisionCnt = pendingDecisions.length;
   const doneCnt = filterRequirementsByScope(allBaseItems, "done").length;
 
-  const listSource = scope === "decisions" ? pendingDecisions : filterRequirementsByScope(allBaseItems, scope);
+  const mergeEntryMap = new Map<string, { entry: NonNullable<typeof mergeOrder>["ordered"][number]; rank: number }>();
+  (mergeOrder?.ordered ?? []).forEach((entry, idx) => {
+    mergeEntryMap.set(entry.requirementId, { entry, rank: idx + 1 });
+  });
+  const sandboxMap = new Map(activeSandboxes.map((s) => [s.requirementId, s]));
+  const hasSandboxConflict = (mergeOrder?.ordered ?? []).some(
+    (entry) => entry.reason === "main_conflict" || entry.reason === "sibling_conflict",
+  );
+
   const visible = filteredItems(listSource, query, language);
 
   useLayoutEffect(() => {
@@ -304,18 +306,30 @@ export function HomeView() {
         </div>
 
         <div className="mission-stats">
-          <div className="stat-pill">
+          <button
+            type="button"
+            className={`stat-pill ${scope === "active" ? "active" : ""}`}
+            onClick={() => setScope("active")}
+          >
             <span className="muted xs">{t(language, "home.active")}</span>
             <strong>{activeCnt}</strong>
-          </div>
-          <div className={`stat-pill ${decisionCnt > 0 ? "warn" : ""}`}>
+          </button>
+          <button
+            type="button"
+            className={`stat-pill ${decisionCnt > 0 ? "warn" : ""} ${scope === "decisions" ? "active" : ""}`}
+            onClick={() => setScope("decisions")}
+          >
             <span className="muted xs">{t(language, "home.decisions")}</span>
             <strong>{decisionCnt}</strong>
-          </div>
-          <div className="stat-pill">
+          </button>
+          <button
+            type="button"
+            className={`stat-pill ${scope === "done" ? "active" : ""}`}
+            onClick={() => setScope("done")}
+          >
             <span className="muted xs">{t(language, "home.done")}</span>
             <strong>{doneCnt}</strong>
-          </div>
+          </button>
         </div>
 
         <div className="search-wrap">
@@ -353,6 +367,43 @@ export function HomeView() {
             </button>
           ))}
         </div>
+
+        {activeSandboxes.length > 0 && mergeOrder && mergeOrder.ordered.length > 0 && (
+          <div className="sb-sandbox-toolbar" data-testid="sandbox-toolbar">
+            <button
+              type="button"
+              className={`btn xs sb-sandbox-filter-btn ${scope === "sandboxes" ? "primary" : ""}`}
+              data-testid="scope-sandboxes-btn"
+              aria-pressed={scope === "sandboxes"}
+              title={t(language, "home.mergeOrderHint")}
+              onClick={() => setScope(scope === "sandboxes" ? "active" : "sandboxes")}
+            >
+              <Icon icon={GitBranch} size={14} />
+              <span>{t(language, "home.scope.sandboxes", { count: mergeOrder.ordered.length })}</span>
+              {hasSandboxConflict && <span className="sb-sandbox-alert-dot" aria-hidden="true" />}
+            </button>
+            <button
+              className="btn ghost xs"
+              type="button"
+              data-testid="refresh-sandboxes-remote-btn"
+              disabled={busy}
+              title={t(language, "home.sandboxesRefresh")}
+              aria-label={t(language, "home.sandboxesRefresh")}
+              onClick={async () => {
+                const fresh = await runBusy(() => api.getProjectSandboxes(true));
+                if (fresh) {
+                  queryClient.setQueryData<ProjectSandboxesResponse>(
+                    queryKeys.projectSandboxes(activeProjectId),
+                    fresh,
+                  );
+                  await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+                }
+              }}
+            >
+              <Icon icon={RefreshCw} size={14} />
+            </button>
+          </div>
+        )}
       </div>
 
       <div
@@ -363,167 +414,6 @@ export function HomeView() {
           scrollTopRef.current = e.currentTarget.scrollTop;
         }}
       >
-        {pendingDecisions.length > 0 && !query.trim() && scope !== "done" && scope !== "decisions" && (
-          <section className="decision-box sb-decision-box" data-testid="decision-box">
-            <h2>
-              <Icon icon={AlertTriangle} size={14} />
-              <span>{t(language, "home.decisionBox", { count: pendingDecisions.length })}</span>
-            </h2>
-            {pendingDecisions.map((item) => (
-              <div
-                key={item.id}
-                className="decision-row"
-                onClick={() => void openRequirement(item.id)}
-                style={{ cursor: "pointer" }}
-              >
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <span className="req-id">{item.id}</span>
-                    <span className={`badge ${isBlockingDecisionRequirement(item) ? "danger" : "warning"}`}>
-                      <Icon icon={isBlockingDecisionRequirement(item) ? CircleAlert : Clock} size={14} />{" "}
-                      {translateRef(
-                        language,
-                        item.decisionReasonKey,
-                        item.decisionReason ?? t(language, "home.decisionFallback"),
-                        item.decisionReasonParams,
-                      )}
-                    </span>
-                  </div>
-                  <span
-                    style={{
-                      fontWeight: 500,
-                      fontSize: 12.5,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {item.title}
-                  </span>
-                </div>
-                <button
-                  className="btn xs"
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void openRequirement(item.id);
-                  }}
-                >
-                  {t(language, "home.goto")} <Icon icon={ArrowRight} size={14} />
-                </button>
-              </div>
-            ))}
-          </section>
-        )}
-
-        {activeSandboxes.length > 0 && mergeOrder && mergeOrder.ordered.length > 0 && !query.trim() && (
-          <section
-            className="callout sb-sandbox-panel"
-            data-testid="worktree-merge-order-panel"
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-              <button
-                type="button"
-                className="btn ghost xs"
-                data-testid="toggle-sandbox-order-btn"
-                aria-expanded={isSandboxesExpanded}
-                style={{ padding: "2px 4px", minWidth: 0, flex: 1, justifyContent: "flex-start" }}
-                onClick={() => setSandboxesExpanded(!isSandboxesExpanded)}
-              >
-                <Icon icon={isSandboxesExpanded ? ChevronDown : ChevronRight} size={14} />
-                <Icon icon={GitBranch} size={14} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
-                  {t(language, "home.sandboxesTitle", { count: mergeOrder.ordered.length })}
-                </span>
-              </button>
-              <button
-                className="btn ghost xs"
-                type="button"
-                data-testid="refresh-sandboxes-remote-btn"
-                disabled={busy}
-                title={t(language, "home.sandboxesRefresh")}
-                onClick={async () => {
-                  const fresh = await runBusy(() => api.getProjectSandboxes(true));
-                  if (fresh) {
-                    queryClient.setQueryData<ProjectSandboxesResponse>(
-                      queryKeys.projectSandboxes(activeProjectId),
-                      fresh,
-                    );
-                    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
-                  }
-                }}
-              >
-                <Icon icon={RefreshCw} size={14} />
-              </button>
-            </div>
-            {isSandboxesExpanded && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 6 }}>
-                {mergeOrder.ordered.map((entry, idx) => {
-                  const sbItem = activeSandboxes.find((s) => s.requirementId === entry.requirementId);
-                  const canAutoSync = Boolean(sbItem?.drift?.canAutoSync);
-                  const reasonKey = `home.orderReason.${entry.reason}` as const;
-                  const reasonTone =
-                    entry.reason === "main_conflict"
-                      ? "danger"
-                      : entry.reason === "sibling_conflict"
-                        ? "warning"
-                        : entry.reason === "auto_mergeable"
-                          ? "info"
-                          : "success";
-                  return (
-                    <div
-                      key={entry.requirementId}
-                      data-testid={`merge-order-row-${entry.requirementId}`}
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 4,
-                        padding: "5px 7px",
-                        borderRadius: 6,
-                        border: "1px solid var(--border)",
-                        background: "var(--surface)",
-                        cursor: "pointer",
-                      }}
-                      onClick={() => void openRequirement(entry.requirementId)}
-                    >
-                      <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-                        <span className="badge neutral">#{idx + 1}</span>
-                        <span className="req-id">{entry.requirementId}</span>
-                        <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
-                        {entry.behindCount > 0 && (
-                          <span className={`badge ${entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
-                            -{entry.behindCount}
-                          </span>
-                        )}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                        <span className="xs" style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {entry.title}
-                        </span>
-                        <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                          {canAutoSync && (
-                            <button
-                              className="btn xs"
-                              type="button"
-                              disabled={busy}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void syncSandboxBaseAction(entry.requirementId);
-                              }}
-                            >
-                              <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
         <div id="home-body">
           {listSource.length === 0 ? (
             <div className="empty-card sb-empty-box" data-testid="sb-empty-state" style={{ textAlign: "center", margin: 0, padding: 14 }}>
@@ -532,9 +422,11 @@ export function HomeView() {
                   ? t(language, "home.emptyTitle")
                   : scope === "decisions"
                     ? t(language, "home.emptyDecisions")
-                    : scope === "done"
-                      ? t(language, "home.emptyDone")
-                      : t(language, "home.emptyActive")}
+                    : scope === "sandboxes"
+                      ? t(language, "home.emptySandboxes")
+                      : scope === "done"
+                        ? t(language, "home.emptyDone")
+                        : t(language, "home.emptyActive")}
               </p>
               {allBaseItems.length === 0 ? (
                 <button
@@ -579,13 +471,30 @@ export function HomeView() {
                 const detail = progressDetail(item, language);
                 const activeReqRun = findActiveRequirementRun(activeRunList, item.id, activeProjectId);
                 const isSelected = selectedId === item.id;
+                const isPendingDecision = pendingIdSet.has(item.id);
+                const isBlockingDecision = isPendingDecision && isBlockingDecisionRequirement(item);
+                const mergeInfo = mergeEntryMap.get(item.id);
+                const sbItem = sandboxMap.get(item.id);
+                const canAutoSync = Boolean(sbItem?.drift?.canAutoSync);
+                const reasonKey = mergeInfo ? (`home.orderReason.${mergeInfo.entry.reason}` as const) : null;
+                const reasonTone = mergeInfo
+                  ? mergeInfo.entry.reason === "main_conflict"
+                    ? "danger"
+                    : mergeInfo.entry.reason === "sibling_conflict"
+                      ? "warning"
+                      : mergeInfo.entry.reason === "auto_mergeable"
+                        ? "info"
+                        : "success"
+                  : null;
                 return (
                   <div
                     key={item.id}
-                    className={`req-row ${isSelected ? "active" : ""}`}
+                    className={`req-row ${isSelected ? "active" : ""} ${isBlockingDecision ? "is-blocking" : isPendingDecision ? "is-decision" : ""}`}
                     data-action="open-req"
                     data-id={item.id}
                     data-testid={`req-row-${item.id}`}
+                    data-pending-decision={isPendingDecision ? "true" : undefined}
+                    data-merge-rank={mergeInfo ? String(mergeInfo.rank) : undefined}
                     aria-current={isSelected ? "true" : undefined}
                     tabIndex={0}
                     onClick={() => void openRequirement(item.id)}
@@ -598,7 +507,23 @@ export function HomeView() {
                   >
                     <div data-testid={`req-card-${item.id}`} className="sb-req-item-body">
                       <div className="sb-req-item-head">
-                        <span className="req-id">{item.id}</span>
+                        <div className="sb-req-item-id-group">
+                          <span className="req-id">{item.id}</span>
+                          {isPendingDecision && (
+                            <span
+                              className={`badge ${isBlockingDecision ? "danger" : "warning"}`}
+                              data-testid={`req-decision-badge-${item.id}`}
+                            >
+                              <Icon icon={isBlockingDecision ? CircleAlert : Clock} size={14} />{" "}
+                              {translateRef(
+                                language,
+                                item.decisionReasonKey,
+                                item.decisionReason ?? t(language, "home.decisionFallback"),
+                                item.decisionReasonParams,
+                              )}
+                            </span>
+                          )}
+                        </div>
                         <span className="req-time">{relativeTime(item.updatedAt, language)}</span>
                       </div>
                       <div className="req-title">{item.title}</div>
@@ -627,6 +552,35 @@ export function HomeView() {
                         )}
                         {detail && <span>{detail}</span>}
                       </div>
+                      {mergeInfo && reasonKey && reasonTone && (
+                        <div className="req-sandbox-strip" data-testid={`req-sandbox-strip-${item.id}`}>
+                          <div className="req-sandbox-badges">
+                            <span className="badge neutral" data-testid={`merge-order-rank-${item.id}`}>
+                              #{mergeInfo.rank}
+                            </span>
+                            <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
+                            {mergeInfo.entry.behindCount > 0 && (
+                              <span className={`badge ${mergeInfo.entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                                -{mergeInfo.entry.behindCount}
+                              </span>
+                            )}
+                          </div>
+                          {canAutoSync && (
+                            <button
+                              className="btn xs"
+                              type="button"
+                              data-testid={`req-sync-sandbox-btn-${item.id}`}
+                              disabled={busy}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void syncSandboxBaseAction(item.id);
+                              }}
+                            >
+                              <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

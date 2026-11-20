@@ -499,6 +499,31 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="project-group-cat:核心"]', { timeout: 5000 });
       await page.select('[data-testid="project-group-select"]', "none");
 
+      // 1c. Switching between projects does not jump/reorder the sidebar project queue
+      const orderBeforeSwitch = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="hub-project-list"] [data-action="switch-project"]')).map((el) =>
+          el.getAttribute("data-id"),
+        ),
+      );
+      const otherId = orderBeforeSwitch.find((id) => id && id !== alphaId)!;
+      await page.select('[data-testid="project-sort-select"]', "recent");
+      const orderOnRecentBefore = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="hub-project-list"] [data-action="switch-project"]')).map((el) =>
+          el.getAttribute("data-id"),
+        ),
+      );
+      await clickReady(page, `[data-testid="hub-project-${otherId}"]`);
+      await page.waitForSelector('[data-testid="empty-state"]', { timeout: 5000 });
+      const orderAfterSwitch = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid="hub-project-list"] [data-action="switch-project"]')).map((el) =>
+          el.getAttribute("data-id"),
+        ),
+      );
+      expect(orderAfterSwitch).toEqual(orderOnRecentBefore);
+      await page.select('[data-testid="project-sort-select"]', "attention");
+      await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+
       // 2. Routing Center: switch preset + set effort + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
@@ -895,10 +920,36 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       });
       expect(headerBox.headerWidth).toBeGreaterThanOrEqual(1900);
       expect(headerBox.sidebarTop).toBeGreaterThanOrEqual(headerBox.headerBottom - 1);
-      expect(headerBox.sidebarWidth).toBe(310);
+      expect(headerBox.sidebarWidth).toBe(360);
       expect(headerBox.drawerBtnDisabled).toBe(false);
 
-      // 2. Desktop left sidebar collapses cleanly to 0px and expands back to 310px
+      // 1b. Drag left sidebar resizer to adjust width and double-click to reset to 360px
+      const sbResizer = await page.evaluate(() => {
+        const r = document.querySelector('[data-testid="sidebar-resizer"]')?.getBoundingClientRect();
+        return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+      });
+      expect(sbResizer).not.toBeNull();
+      await page.mouse.move(sbResizer!.x, sbResizer!.y);
+      await page.mouse.down();
+      await page.mouse.move(sbResizer!.x + 80, sbResizer!.y, { steps: 5 });
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 80));
+      const resizedSidebar = await page.evaluate(() => ({
+        width: Math.round(document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect().width ?? 0),
+        saved: localStorage.getItem("wb-sidebar-width"),
+      }));
+      expect(resizedSidebar.width).toBe(440);
+      expect(resizedSidebar.saved).toBe("440");
+
+      await page.evaluate(() => {
+        document.querySelector('[data-testid="sidebar-resizer"]')?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      });
+      await page.waitForFunction(
+        () => Math.round(document.querySelector('[data-testid="hub-sidebar"]')?.getBoundingClientRect().width ?? 0) === 360,
+        { timeout: 5000 },
+      );
+
+      // 2. Desktop left sidebar collapses cleanly to 0px and expands back to 360px
       await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
       await page.waitForFunction(
         () => Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("settled")),
@@ -946,7 +997,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(initialDrawer.width).toBe(720);
       expect(initialDrawer.hasHeadCloseX).toBe(false);
 
-      // 4. Drag resizer left to reach 50% equal width (805px on 1920px viewport with 310px sidebar)
+      // 4. Drag resizer left to reach 50% equal width (780px on 1920px viewport with 360px sidebar)
       const resizerRect = await page.evaluate(() => {
         const r = document.querySelector('[data-testid="drawer-resizer"]')?.getBoundingClientRect();
         return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
@@ -969,7 +1020,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           saved: localStorage.getItem("wb-drawer-width"),
         };
       });
-      // Clamped at 50% of hub-workspace (1610 * 0.5 = 805), matching main-stage width
+      // Clamped at 50% of hub-workspace (1560 * 0.5 = 780), matching main-stage width
       expect(resizedMetrics.drawerWidth).toBe(Math.floor(resizedMetrics.wsWidth * 0.5));
       expect(Math.abs(resizedMetrics.drawerWidth - resizedMetrics.mainWidth)).toBeLessThanOrEqual(2);
       expect(resizedMetrics.saved).toBe(String(resizedMetrics.drawerWidth));
@@ -2473,7 +2524,9 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(tabsFit?.containerOverflow).toBe(false);
       expect(tabsFit?.btns.every((b) => b.role === "tab" && !b.overflowX && !b.outside)).toBe(true);
 
-      // 2. "decisions" scope tab filters to only pending-decision REQ-001
+      // 2. "decisions" scope tab filters to only pending-decision REQ-001, and REQ-001 appears only once in unified list
+      expect(await page.evaluate(() => document.querySelectorAll('[data-testid="req-row-REQ-001"]').length)).toBe(1);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="req-decision-badge-REQ-001"]')))).toBe(true);
       await clickReady(page, '[data-action="set-scope"][data-value="decisions"]');
       await page.waitForFunction(() => document.querySelectorAll(".req-row").length === 1, { timeout: 5000 });
       expect(

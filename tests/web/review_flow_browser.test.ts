@@ -189,8 +189,10 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     try {
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
-      await page.waitForSelector('[data-testid="decision-box"]', { timeout: 5000 });
-      const decisionText = await page.evaluate(() => document.querySelector('[data-testid="decision-box"]')?.textContent ?? "");
+      await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 5000 });
+      const decisionText = await page.evaluate(
+        () => document.querySelector('[data-testid="req-decision-badge-REQ-001"]')?.textContent ?? "",
+      );
       expect(decisionText).toContain("审查建议阻塞");
 
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
@@ -339,7 +341,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     try {
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
-      await page.waitForSelector('[data-testid="decision-box"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 5000 });
       const initial = await page.evaluate(() => ({
         decisionPills: document.querySelectorAll(".stat-pill.warn").length,
         sidebarBadge: Boolean(document.querySelector(".sb-item .sb-badge.warn")),
@@ -352,7 +354,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
 
       await page.waitForFunction(
         () =>
-          !document.querySelector('[data-testid="decision-box"]') &&
+          !document.querySelector('[data-testid="req-decision-badge-REQ-001"]') &&
           !document.querySelector(".sb-item .sb-badge.warn") &&
           document.querySelectorAll(".stat-pill.warn").length === 0 &&
           (document.querySelector('[data-testid="req-row-REQ-001"] .req-sub')?.textContent ?? "").includes("执行中"),
@@ -361,7 +363,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
 
       expect(executor.cancelRun(runId)).toBe(true);
       runId = null;
-      await page.waitForSelector('[data-testid="decision-box"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 5000 });
       expect(pageErrors).toEqual([]);
     } finally {
       if (runId) executor.cancelRun(runId);

@@ -66,11 +66,7 @@ const EXPECTED_LUCIDE = {
   ],
   "HubSidebar.tsx": ["Check", "ChevronDown", "ChevronRight", "Folder", "Plus", "Settings", "Star", "X"],
   "HomeView.tsx": [
-    "AlertTriangle",
-    "ArrowRight",
     "Check",
-    "ChevronDown",
-    "ChevronRight",
     "CircleAlert",
     "Clock",
     "FolderGit2",
@@ -257,7 +253,7 @@ describe("shared icon wrapper", () => {
     expect(css).toMatch(/\.tab\s*\{[^}]*align-items:\s*center/);
     expect(css).toMatch(/\.tab\s*\{[^}]*gap:\s*6px/);
     expect(css).toContain(".search-wrap");
-    expect(css).toMatch(/\.decision-box h2\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.sb-req-item-id-group\s*\{[^}]*display:\s*flex/);
     expect(css).toMatch(/\.icon-heading\s*\{[^}]*display:\s*flex/);
     expect(css).toMatch(/\.callout-lead\s*\{[^}]*display:\s*inline-flex/);
     // REQ-005: keep menu items content-sized; never stretch or blockify them.
