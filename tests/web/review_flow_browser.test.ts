@@ -291,6 +291,84 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     }
   }, 30_000);
 
+  test("审查运行中首页决策盒与侧栏待拍板计数实时移除，运行结束后恢复", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "HomeRunningDecision", privacyMode: "local" });
+    registerHubProject(repo);
+    await createRequirement(repo, {
+      goal: "Agent 运行中不应显示待拍板",
+      criteria: [{ id: "AC-1", description: "echo ok 通过", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\n等待跨模型审查。", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "实现完成", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap.fingerprint,
+    });
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex",
+          subscription: "Plus",
+          installed: true,
+          executable: "codex",
+          models: [
+            { id: "codex-auto-review", tier: "review", source: "detected" },
+            { id: "gpt-6.2-sol", tier: "sota", source: "detected" },
+          ],
+          defaultModel: "gpt-6.2-sol",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => ({ command: "bash", args: ["-c", "sleep 30"], displayCommand: "mock-review-sleep" }),
+    });
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true, executor });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+    let runId: string | null = null;
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="decision-box"]', { timeout: 5000 });
+      const initial = await page.evaluate(() => ({
+        decisionPills: document.querySelectorAll(".stat-pill.warn").length,
+        sidebarBadge: Boolean(document.querySelector(".sb-item .sb-badge.warn")),
+      }));
+      expect(initial.decisionPills).toBe(1);
+      expect(initial.sidebarBadge).toBe(true);
+
+      const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "review" });
+      runId = started.run.id;
+
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('[data-testid="decision-box"]') &&
+          !document.querySelector(".sb-item .sb-badge.warn") &&
+          document.querySelectorAll(".stat-pill.warn").length === 0 &&
+          (document.querySelector('[data-testid="req-row-REQ-001"] .req-sub')?.textContent ?? "").includes("执行中"),
+        { timeout: 5000 },
+      );
+
+      expect(executor.cancelRun(runId)).toBe(true);
+      runId = null;
+      await page.waitForSelector('[data-testid="decision-box"]', { timeout: 5000 });
+      expect(pageErrors).toEqual([]);
+    } finally {
+      if (runId) executor.cancelRun(runId);
+      await page.close();
+    }
+  }, 30_000);
+
   test("drawer model selector applies to runRefineFromDrawer and unmerged done requirements surface actionable sandbox drift", async () => {
     makeTempHub();
     const repo = makeGitRepo();
