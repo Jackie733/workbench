@@ -1,7 +1,9 @@
+import { useMutation } from "@tanstack/react-query";
 import { Plus, Settings, X } from "lucide-react";
+import { api } from "../api.ts";
 import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
-import { openAddProjectModal, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
+import { openAddProjectModal, queryClient, queryKeys, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
@@ -23,6 +25,12 @@ export function HubSidebar() {
   const hasMultiNode = remoteNodes.length > 0 || projects.some((p) => p.nodeId && p.nodeId !== "local");
   const activeNodeId = hub?.activeNodeId ?? "local";
   const activeNode = nodes.find((n) => n.nodeId === activeNodeId);
+  const hubRevision = nodes.find((node) => node.isLocal)?.revision;
+  const updateNode = useMutation({
+    mutationFn: api.updateNode,
+    onError: (error) => useUiStore.getState().showToastError(error),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.hubState }),
+  });
   const harnesses = hub?.harnesses ?? [];
   const routing = hub?.routing ?? null;
   const desktopPhase = useCollapsePhase(desktopSidebarOpen, 245, 195);
@@ -158,17 +166,36 @@ export function HubSidebar() {
                 </span>
               </div>
               <div className="sb-harnesses" data-testid="hub-nodes-list">
-                {nodes.map((n) => (
-                  <div key={n.nodeId} className="sb-harness-row" title={`${n.hostname} (${n.platform})`}>
-                    <span className={`dot ${n.connected ? "online" : ""}`} />
-                    <span className="sb-harness-name" style={{ fontFamily: "var(--sans)" }}>
-                      {n.name}
-                    </span>
-                    <span className="muted xs">
-                      {n.connected ? t(language, "common.online") : t(language, "common.offline")}
-                    </span>
-                  </div>
-                ))}
+                {nodes.map((n) => {
+                  const running = n.update?.phase === "running";
+                  const canUpdate = !n.isLocal && n.connected && n.updateEnabled && n.revision && hubRevision && n.revision !== hubRevision;
+                  return (
+                    <div key={n.nodeId}>
+                      <div className="sb-harness-row" title={`${n.hostname} (${n.platform})`}>
+                        <span className={`dot ${n.connected ? "online" : ""}`} />
+                        <span className="sb-harness-name" style={{ fontFamily: "var(--sans)" }}>{n.name}</span>
+                        {n.revision && <code className="muted xs" title={n.revision}>{n.revision.slice(0, 7)}</code>}
+                        <span className="muted xs">{n.connected ? t(language, "common.online") : t(language, "common.offline")}</span>
+                      </div>
+                      {canUpdate && !running && (
+                        <button className="btn ghost xs" type="button" disabled={updateNode.isPending || n.activeRuns.length > 0}
+                          onClick={() => {
+                            if (window.confirm(t(language, "sidebar.nodeUpdateConfirm", { node: n.name, revision: hubRevision.slice(0, 7) }))) {
+                              updateNode.mutate({ nodeId: n.nodeId, revision: hubRevision });
+                            }
+                          }}>
+                          {t(language, "sidebar.nodeUpdateAction", { revision: hubRevision.slice(0, 7) })}
+                        </button>
+                      )}
+                      {n.update && (
+                        <div className="muted xs" role="status">
+                          {t(language, `sidebar.nodeUpdate.${n.update.phase}`, { revision: n.update.revision.slice(0, 7) })}
+                          {n.update.message && ` — ${n.update.message}`}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

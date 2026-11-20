@@ -44,6 +44,7 @@ import type {
   HarnessInfo,
   HubProjectEntry,
   ModelTarget,
+  NodeUpdateStatus,
   RemoteNodeInfo,
   RoutingConfig,
   RoutingPreset,
@@ -207,6 +208,8 @@ export const api = {
     requestJson<{ authenticated: boolean }>("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
   logout: () => requestJson<{ authenticated: boolean }>("/api/auth/logout", { method: "POST" }),
   getHubState: () => requestJson<HubStateResponse>("/api/hub/state"),
+  updateNode: ({ nodeId, revision }: { nodeId: string; revision: string }) =>
+    requestJson<NodeUpdateStatus>(`/api/hub/nodes/${encodeURIComponent(nodeId)}/update`, { method: "POST", body: JSON.stringify({ revision }) }),
   addHubProject: (input: { root: string; name?: string; initPrivacy?: PrivacyMode; activate?: boolean; nodeId?: string }) =>
     requestJson<{ project: HubProjectEntry; activeProjectId: string | null; projects: HubProjectSummary[] }>("/api/hub/projects", {
       method: "POST",

@@ -49,7 +49,7 @@ bun run deploy --port 4318
 wb service status
 ```
 
-首次部署依次执行冻结生产依赖安装、`bun link`、用户服务安装和健康检查。已有安装时，`deploy` 先停止托管 Hub，再刷新依赖并启动一次；未指定的 host/port 沿用安装记录，首次默认 `127.0.0.1:4318`。`--host` 可用回环、通配地址、局域网 IP 或本机主机名。只安装服务可用 `wb service install --port 4318`；同配置、已健康时它不重启。没有 §4 的联动配置时，`deploy` 只部署 Hub，源码可以是非 Git 快照。
+首次部署依次执行冻结生产依赖安装、`bun link`、用户服务安装和健康检查。已有安装时，`deploy` 先停止托管 Hub，再刷新依赖并启动一次；未指定的 host/port 沿用安装记录，首次默认 `127.0.0.1:4318`。`--host` 可用回环、通配地址、局域网 IP 或本机主机名。只安装服务可用 `wb service install --port 4318`；同配置、已健康时它不重启。`deploy` 只更新 Hub，源码可以是非 Git 快照。
 
 部署不会拉取源码、删除 lockfile、清理数据或重置密码。
 
@@ -107,30 +107,28 @@ wb node connect --hub http://192.168.1.10:4318 --token <访问密码>
 - 所有权独立：主控 `wb service stop/uninstall` 不停止也不卸载节点，反之 `wb node uninstall` 不影响主控 Hub；卸载保留项目与 Hub 数据。
 - 连接失败时依次检查主控服务状态、地址可达性、密码与防火墙，不要以绑定 `0.0.0.0` 作为排障手段。
 
-### 用一次 `bun run deploy` 发布 Hub 和 WSL 节点
+### 从 Web UI 按需更新 WSL 节点
 
-主控为 macOS/Linux，Windows 在另一台机器；WSL 节点应已按上文安装为 systemd 用户服务并配对。保留节点原有出站 WebSocket。Windows 上为普通账号启用 OpenSSH 公钥登录，核对服务器主机指纹，再在主控 `~/.ssh/config` 为该账号设置专用别名，例如：
+主控的 `bun run deploy` 不更新 WSL。只有需要升级节点时，在 Hub Web UI 的「设备节点」中点「更新到 <提交>」。无需 Windows OpenSSH、计划任务或入站 WSL 端口；更新指令走节点原有的出站 WebSocket。Windows/WSL 和节点必须已在线，Hub 不能唤醒离线机器。
 
-```sshconfig
-Host win-work
-    HostName 192.168.1.20
-    User windows-user
-    IdentityFile ~/.ssh/id_ed25519_workbench
+**一次性准备（在 WSL 原安装目录、用原安装账号执行）**：先手动更新到包含此功能的提交，安装锁定依赖。已有 `wb node install` 的托管节点不需要重装或重新配对。确认此 checkout 的 `origin` 是可信仓库，受保护的发布分支可由 systemd 用户会话非交互拉取；私有仓库使用节点自己的只读凭据。
+
+```sh
+# 在已安装节点的源码根，确认 origin 后，从可信发布分支更新。
+git fetch origin main
+git merge --ff-only --no-overwrite-ignore FETCH_HEAD
+bun install --production --frozen-lockfile
+# 自定义 WORKBENCH_HUB_DIR 时须与原节点安装一致。
+printf '%s\n' '{"branch":"main"}' > "${WORKBENCH_HUB_DIR:-$HOME/.workbench-hub}/node-update.json"
+wb node restart
+wb node status
 ```
 
-在主控现有 Hub 数据目录（`$WORKBENCH_HUB_DIR`，默认 `~/.workbench-hub`）新建 `deploy-target.json`：
+发布分支不是 `main` 时，修改以上分支名和配置。只有启用了 `node-update.json`、已连接且安装为 systemd 用户服务的节点可以使用此功能。要禁用，请移除节点本地的该文件并重启节点。
 
-```json
-{"sshHost":"win-work","distro":"Ubuntu","user":"alice","nodeId":"wsl-ubuntu"}
-```
+**以后发布**：先把提交推到 WSL 配置的可信发布分支，部署主控，再从同源、已登录的 Hub 页面选择节点更新。Hub 只发送自己正在运行的精确提交号；节点只接受本地 `origin` 指定分支上可达的提交，且只允许从干净工作树快进。有活动任务时拒绝更新；更新期间不接收新任务。独立的 systemd 用户更新程序安装冻结生产依赖，再重启同一个节点服务。只有新进程报告目标提交且 Hub 通过桥接读取节点源码目录后，UI 才显示成功。
 
-`user` 是 WSL Linux 用户，不是 Windows SSH 用户。可选 `nodeHubDir` 填原安装使用的绝对 Linux `WORKBENCH_HUB_DIR`；省略时用该用户的 `~/.workbench-hub`。不要填密码、源码路径或 Bun 路径。WSL 需有 Bash、Python 3、Git、原安装的 Bun 和可用的 systemd 用户总线；不需要给 WSL 开 SSH，也不创建 Windows 计划任务。主控必须保留节点可达的 LAN 监听；联动部署拒绝仅回环。
-
-两端使用各自原安装位置的干净 Git checkout。之后只需在主控固定源码目录提交变更，然后运行 **`bun run deploy`**；不必 push、登录 Windows 或手动重启节点。必要的已提交历史会发送到 Windows，不传未提交文件或依赖目录。只允许快进；脏工作树、分叉、无法证明祖先关系或将覆盖本地忽略文件时拒绝切换。不配置目标文件就是仅部署 Hub；配置无效或目标不可达会报错，不会降级为单 Hub 发布。
-
-预检通过后，依次停止并更新 WSL 节点、重启 Hub、启动原节点。维护窗口内不要提交新任务；已有活动任务会阻止切换，但预检不能排除之后提交的任务。成功以两端进程报告同一启动提交且 WSL 路径读取成功为准。账号、节点 ID、原端口和凭据不变；如显式改监听地址或端口，节点原有 Hub URL 仍须可达，不会被脚本改写。
-
-失败时按报出的阶段修复并从同一源码目录重跑，不自动回退。Hub 已停但 WSL 节点仍在运行时，先启动旧 Hub 并等节点连回。SSH 中断时远端状态未知；先核实远端操作已结束，重跑会重新探测。Windows 离线不能唤醒。若报残留 `deploy.lock`，先按路径和 PID 核实无部署进程再移除，不要抢锁。
+更新失败不自动回退。用 `wb node status` 获取服务 ID，将其末尾 `.service` 替换成 `-update.service`，用 `journalctl --user -u <更新服务ID>` 查看失败阶段。若已经快进但依赖安装失败，修复原因后对同一提交重试；不要手动启动不完整的 checkout。更新执行期间若主控重启，节点的本地更新仍继续，但前一 Hub 进程的进度和验收结果不保留。
 
 ## 5. 生命周期、日志与命名空间
 
@@ -278,8 +276,4 @@ Invoke-RestMethod http://localhost:4318/api/health
 
 必须分别记录 macOS、真实 Linux systemd user 会话及真实 WSL2 的结果。无 systemd 容器或注入的管理器测试不能替代实机验收；不可达环境应标记“未验证”，不能宣称跨平台运行已证实。
 
-联动发布目前未在真实 Windows/WSL 上验证。实机验收使用专用 Windows SSH 别名、测试 WSL 用户/发行版、独立 Hub 数据目录和端口、两个干净 checkout：
-
-1. 两端从 A 开始，在主控提交有可观察变化但包版本不变的 B，运行 `bun run deploy`。核实 PID 均更换、两端 revision 均为 B、远程目录读取通过、节点 ID、凭据及 LAN 端口不变。再次发布 B，仍应通过。
-2. 保持 Windows 在线，停止专用 WSL 发行版后重复。若 WSL 用户总线未能启动，预检必须明确失败，不能标为可用。
-3. 分别用不可达 SSH、WSL 脏工作树和活动任务触发部署。核实均在停止任一服务前失败。
+按需节点更新的浏览器与真实 Linux systemd 验收不替代 WSL2 实机验证。实机使用独立 Hub/节点命名空间及发布分支：让节点保留 A，主控运行已发布的 B；从 Web UI 点更新，确认节点 PID 更换、报告 B、远程读取通过且主控 PID 不变。再分别用未发布提交、脏 checkout、活动任务验证拒绝更新；关掉 WSL 后按钮应不可用。

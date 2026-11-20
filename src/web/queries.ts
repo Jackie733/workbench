@@ -112,6 +112,7 @@ export function useHubStateQuery(enabled = true) {
       }
       return hub;
     },
+    refetchInterval: (query) => query.state.data?.nodes?.some((node) => node.update?.phase === "running") ? 3_000 : false,
     enabled,
   });
 }

@@ -2,11 +2,9 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isDaemonHealthy } from "../src/cli/daemon.ts";
-import { isLoopbackAddress, resolveHubBindAddress } from "../src/cli/hub_http.ts";
+import { resolveHubBindAddress } from "../src/cli/hub_http.ts";
 import { assertPortAvailable, createUserServiceManager, readServiceInstallation } from "../src/cli/service.ts";
-import { readDaemonInfo, resolveHubDir } from "../src/hub/registry.ts";
-import { checkoutGit, createWslTransport, deployWsl, readDeploymentNodes, readDeployTarget, verifyWslRelease, withDeployLock } from "./deploy-wsl.ts";
+import { resolveHubDir } from "../src/hub/registry.ts";
 
 const SOURCE_ROOT = fs.realpathSync(path.resolve(import.meta.dir, ".."));
 
@@ -54,20 +52,50 @@ async function runBun(bunPath: string, args: string[], env: NodeJS.ProcessEnv, s
   if (code !== 0) throw new Error(`Bun ${args[0]} failed (exit ${code}); see original output above.`);
 }
 
-async function deployLocked(requested: { port?: number; host?: string }, hubDir: string, signal: AbortSignal): Promise<void> {
-  const target = readDeployTarget(hubDir);
+async function withDeployLock(hubDir: string, run: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  fs.mkdirSync(hubDir, { recursive: true, mode: 0o700 });
+  const lock = path.join(hubDir, "deploy.lock");
+  let fd: number;
+  try { fd = fs.openSync(lock, "wx", 0o600); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Do not follow links or block opening a non-regular file in a damaged namespace.
+    let pid = "unknown";
+    try {
+      const existing = fs.openSync(lock, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      try {
+        if (fs.fstatSync(existing).isFile()) {
+          const buf = Buffer.alloc(32);
+          const text = buf.subarray(0, fs.readSync(existing, buf)).toString().trim();
+          if (/^[1-9]\d*$/.test(text)) pid = text;
+        }
+      } finally { fs.closeSync(existing); }
+    } catch { /* A concurrent owner may just have removed it. */ }
+    throw new Error(`Deployment lock ${lock} exists (PID ${pid}). Verify the owner before removing a stale lock.`);
+  }
+  const owner = fs.fstatSync(fd);
+  const abort = new AbortController();
+  const interrupt = () => abort.abort(new Error("Deployment interrupted"));
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
+  try {
+    fs.writeFileSync(fd, `${process.pid}\n`);
+    return await run(abort.signal);
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+    try {
+      const current = fs.lstatSync(lock, { throwIfNoEntry: false });
+      if (current?.dev === owner.dev && current.ino === owner.ino) fs.unlinkSync(lock);
+    } finally { fs.closeSync(fd); }
+  }
+}
+
+async function deployLocked(requested: { port?: number; host?: string }, signal: AbortSignal): Promise<void> {
   const existing = readServiceInstallation();
   const port = requested.port ?? existing?.port ?? 4318;
   const host = requested.host ?? existing?.host;
   const bindHost = host ?? "127.0.0.1";
-  // Resolve before either side can stop, including host names or IPv6 forms of loopback.
-  const address = target || requested.host ? await resolveHubBindAddress(bindHost) : undefined;
-  if (target && address && isLoopbackAddress(address)) {
-    throw new Error("deploy-target.json requires a LAN-reachable Hub bind address; refusing loopback before stopping either service");
-  }
-  if (target && existing && fs.realpathSync(existing.cliPath) !== path.join(SOURCE_ROOT, "src/cli/index.ts")) {
-    throw new Error("Run deployment from the Hub service's installed source checkout");
-  }
+  if (requested.host) await resolveHubBindAddress(bindHost);
   const env = { ...process.env };
   if (existing) {
     for (const key of Object.keys(env)) {
@@ -81,7 +109,6 @@ async function deployLocked(requested: { port?: number; host?: string }, hubDir:
   console.log("No Git pull, system upgrades, CLI authentication changes, data deletion, sudo, or linger configuration.");
   console.log("Keep this source directory and Bun executable in place. Deployment stops an existing Hub before refreshing its dependencies.");
 
-  if (target) console.log(`WSL target: ${target.sshHost}/${target.distro}/${target.user} (${target.nodeId})`);
   if (typeof Bun === "undefined") throw new Error("Run this script with Bun (current stable recommended).");
   const bunPath = fs.realpathSync(existing?.bunPath ?? process.execPath);
   fs.accessSync(bunPath, fs.constants.R_OK | fs.constants.X_OK);
@@ -134,32 +161,12 @@ async function deployLocked(requested: { port?: number; host?: string }, hubDir:
     }
     console.log(`\nHub ready: ${status.url}`);
   };
-  if (target) {
-    const local = checkoutGit(SOURCE_ROOT, env);
-    const remote = createWslTransport(target, env);
-    await deployWsl({
-      local, remote, nodeId: target.nodeId, signal, stopHub, installHubDependencies, linkHub, startHub,
-      hubStatus: async () => {
-        const status = await service.controlUserService("status");
-        const daemon = !status.active ? readDaemonInfo() : null;
-        if (daemon && await isDaemonHealthy(daemon, hubDir)) throw new Error("Unmanaged Hub is running; stop it with wb stop before deploying");
-        return status;
-      },
-      readOldNodes: () => {
-        if (!existing) throw new Error("Healthy old Hub has no managed installation record");
-        return readDeploymentNodes({ host: existing.host ?? "127.0.0.1", port: existing.port, hubDir },
-          AbortSignal.any([signal, AbortSignal.timeout(15_000)]));
-      },
-      accept: (revision, remoteRoot) => verifyWslRelease({ host: address ?? bindHost, port, hubDir }, target.nodeId, revision, remoteRoot, signal),
-    });
-  } else {
-    signal.throwIfAborted();
-    await stopHub?.();
-    await installHubDependencies();
-    await linkHub();
-    await startHub();
-    console.log("Next: wb service status, then bun run deploy:check --root <initialized-project-absolute-path>.");
-  }
+  signal.throwIfAborted();
+  await stopHub?.();
+  await installHubDependencies();
+  await linkHub();
+  await startHub();
+  console.log("Next: wb service status, then bun run deploy:check --root <initialized-project-absolute-path>.");
 }
 
 export async function deploy(args: string[]): Promise<void> {
@@ -168,7 +175,7 @@ export async function deploy(args: string[]): Promise<void> {
   }
   const requested = parseArgs(args);
   const hubDir = resolveHubDir();
-  await withDeployLock(hubDir, (signal) => deployLocked(requested, hubDir, signal));
+  await withDeployLock(hubDir, (signal) => deployLocked(requested, signal));
 }
 
 if (import.meta.main) {

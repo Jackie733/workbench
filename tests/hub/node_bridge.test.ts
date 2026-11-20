@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
-  test("reports startup revisions independently of package versions, including legacy hello", async () => {
+  test("reports startup revisions and rejects unsafe browser update requests", async () => {
     const hubDir = makeTempDir("wb-revisions-");
     process.env.WORKBENCH_HUB_DIR = hubDir;
     const repo = makeGitRepo();
@@ -94,7 +94,8 @@ describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
       for (const [name, revision, reported] of [
         ["different", different, different], ["invalid", "1234", undefined], ["legacy", undefined, undefined],
       ]) {
-        socket.send(JSON.stringify({ type: "node.hello", name, workbenchVersion: local.workbenchVersion, revision }));
+        socket.send(JSON.stringify({ type: "node.hello", name, workbenchVersion: local.workbenchVersion, revision,
+          updateEnabled: name === "different", activeRuns: name === "different" ? [{ id: "active-run" }] : [] }));
         let node: RemoteNodeInfo | undefined;
         for (let i = 0; i < 100; i++) {
           node = (await readNodes()).find((entry) => entry.nodeId === "other" && entry.name === name);
@@ -104,6 +105,18 @@ describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
         expect(node?.connected).toBe(true);
         expect(node?.workbenchVersion).toBe(local.workbenchVersion);
         expect(node?.revision).toBe(reported);
+        if (name === "different") {
+          const start = (origin: string, target: string) => fetch(`${server.url}/api/hub/nodes/other/update`, {
+            method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ revision: target }),
+          });
+          expect((await start("http://foreign.invalid", expected)).status).toBe(403);
+          const stale = await start(server.url, different);
+          expect(stale.status).toBe(409);
+          expect(await stale.text()).toContain("Hub revision changed");
+          const busy = await start(server.url, expected);
+          expect(busy.status).toBe(409);
+          expect(await busy.text()).toContain("active task");
+        }
       }
     } finally {
       socket.close();

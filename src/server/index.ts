@@ -48,6 +48,7 @@ import {
 } from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
 import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
+import { NodeUpdates } from "../hub/node_updates.ts";
 import {
   applyHubRoutingPreset,
   browseDirectory,
@@ -244,6 +245,10 @@ export async function startWorkbenchServer(options: {
     }
   };
 
+  const nodeUpdates = new NodeUpdates(nodeRegistry, () => {
+    broadcastUi({ type: "hub.updated", reason: "node.update", at: Date.now() });
+  });
+
   const reloadWebBundle = async (opts?: { manual?: boolean }): Promise<{ reloaded: boolean }> => {
     const rebuilt = await buildWebBundle(webDir);
     if (!rebuilt) return { reloaded: false };
@@ -425,10 +430,16 @@ export async function startWorkbenchServer(options: {
     const connected = nodeRegistry.listConnectedNodes().map((n) => ({
       ...n,
       activeRuns: enrichRuns(n.activeRuns, n.nodeId),
+      update: nodeUpdates.get(n.nodeId),
     }));
     const seenIds = new Set<string>([LOCAL_NODE_ID, ...connected.map((n) => n.nodeId)]);
 
     const offlineNodes: RemoteNodeInfo[] = [];
+    for (const node of nodeUpdates.offlineNodes()) {
+      if (seenIds.has(node.nodeId)) continue;
+      seenIds.add(node.nodeId);
+      offlineNodes.push({ ...node, update: nodeUpdates.get(node.nodeId) });
+    }
     for (const proj of cfg.projects) {
       if (isLocalNodeId(proj.nodeId) || seenIds.has(proj.nodeId!)) continue;
       seenIds.add(proj.nodeId!);
@@ -555,6 +566,15 @@ export async function startWorkbenchServer(options: {
     }
 
     // --- Hub & Global Discovery/Routing Routes ---
+    const updateNode = pathname.match(/^\/api\/hub\/nodes\/([A-Za-z0-9._-]{1,64})\/update$/);
+    if (method === "POST" && updateNode) {
+      if (!hubMode || !revision || !isRemoteNodeId(updateNode[1])) {
+        throw new WorkbenchError("invalid_input", "Node update requires a Hub running a Git commit and a remote node");
+      }
+      const body = await readBody(req);
+      if (body.revision !== revision) throw new WorkbenchError("revision_conflict", "Hub revision changed; reload before updating the node");
+      return jsonResponse(await nodeUpdates.start(updateNode[1], revision), 202);
+    }
     if (method === "GET" && pathname === "/api/hub/state") {
       const [{ cfg, projects }, localHarnesses] = await Promise.all([
         buildHubProjectsSnapshot(),
@@ -989,6 +1009,14 @@ export async function startWorkbenchServer(options: {
         }
         // Static assets stay public so the login view itself can load.
       }
+      if (req.method === "POST" && /^\/api\/hub\/nodes\/[^/]+\/update$/.test(url.pathname)) {
+        const cookie = req.headers.get("cookie");
+        // A node bearer credential is not a browser session, and cross-origin forms cannot trigger updates.
+        if (req.headers.get("origin") !== url.origin ||
+            (!local && (!cookie || !isAuthenticated(new Request(url, { headers: { cookie } }))))) {
+          return jsonResponse({ error: { code: "unauthorized", message: "Node updates require a same-origin Hub browser session" } }, 403);
+        }
+      }
 
       if (url.pathname === "/ws") {
         const roleParam = url.searchParams.get("role");
@@ -1250,6 +1278,7 @@ export async function startWorkbenchServer(options: {
     stop() {
       unsubExecutor();
       executor.stopAllRuns();
+      nodeUpdates.stop();
       nodeRegistry.stopAll();
       for (const timer of watchDebounces.values()) clearTimeout(timer);
       watchDebounces.clear();

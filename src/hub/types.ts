@@ -74,6 +74,12 @@ export interface HubProjectEntry {
   lastOpenedAt: number;
 }
 
+export interface NodeUpdateStatus {
+  revision: string;
+  phase: "running" | "succeeded" | "failed";
+  message?: string;
+}
+
 export interface RemoteNodeInfo {
   nodeId: string;
   name: string;
@@ -87,6 +93,8 @@ export interface RemoteNodeInfo {
   activeRuns: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>;
   workbenchVersion?: string;
   revision?: string;
+  updateEnabled?: boolean;
+  update?: NodeUpdateStatus;
 }
 
 export interface HubConfig {

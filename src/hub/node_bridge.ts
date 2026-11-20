@@ -25,12 +25,15 @@ import type { PainPointReportInput } from "./evolution.ts";
 import { HubExecutor, type CustomCommandBuilder, type TelemetryOutcomeInput } from "./executor.ts";
 import { browseDirectory } from "./registry.ts";
 import { buildPresetRouting } from "./routing.ts";
+import type { NodeUpdateReport } from "../cli/node_update.ts";
 import type { HarnessInfo, RemoteNodeInfo, RoutingConfig } from "./types.ts";
 
 export interface NodeRpcRequest {
   type: "node.rpc.request";
   reqId: string;
-  kind: "browse" | "register_probe" | "projects_snapshot" | "refresh_harnesses" | "upload_stage" | "project_http";
+  kind: "browse" | "register_probe" | "projects_snapshot" | "refresh_harnesses" | "upload_stage" | "project_http" | "update_start" | "update_status";
+  updateId?: string;
+  revision?: string;
   path?: string;
   root?: string;
   name?: string;
@@ -179,6 +182,7 @@ export class RemoteNodeRegistry {
       if (typeof parsed.workbenchVersion === "string") entry.info.workbenchVersion = parsed.workbenchVersion;
       if (isGitRevision(parsed.revision)) entry.info.revision = parsed.revision.toLowerCase();
       else delete entry.info.revision;
+      entry.info.updateEnabled = parsed.updateEnabled === true;
       if (Array.isArray(parsed.harnesses)) entry.info.harnesses = parsed.harnesses as HarnessInfo[];
       if (Array.isArray(parsed.activeRuns)) {
         entry.info.activeRuns = parsed.activeRuns as RemoteNodeInfo["activeRuns"];
@@ -421,6 +425,11 @@ export interface NodeClientOptions {
   reconnectBaseMs?: number;
   onConnected?: () => void;
   onDisconnected?: (reason?: string) => void;
+  updates?: {
+    read(): NodeUpdateReport | undefined;
+    blocksWork(revision: string | undefined): boolean;
+    start(id: string, target: string, running: string): Promise<void>;
+  };
 }
 
 export interface NodeClientHandle {
@@ -567,8 +576,39 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
     giteeDeps: options.giteeDeps,
   });
 
-  const handleRpc = async (req: NodeRpcRequest): Promise<NodeRpcResponse> => {
+  let inFlight = 0;
+  let queued: { id: string; until: number } | undefined;
+
+  const handleRpc = async (req: NodeRpcRequest, work: boolean): Promise<NodeRpcResponse> => {
     try {
+      if (req.kind === "update_status" && options.updates) {
+        return { type: "node.rpc.response", reqId: req.reqId, status: 200, bodyJson: options.updates.read() ?? null };
+      }
+      if (req.kind === "update_start" && options.updates) {
+        if (!revision || !isGitRevision(req.revision) || !req.updateId || req.revision === revision) {
+          throw new WorkbenchError("invalid_input", "Invalid or already running node revision");
+        }
+        const report = options.updates.read();
+        const launching = queued && queued.until > Date.now() && queued.id !== report?.id;
+        const preparing = report?.phase === "preparing" && options.updates.blocksWork(revision);
+        if (launching || preparing || inFlight || executor.getActiveRuns().length) {
+          throw new WorkbenchError("revision_conflict", "The node is busy; wait for current requests, tasks or updates to finish");
+        }
+        queued = { id: req.updateId, until: Date.now() + 20_000 };
+        try {
+          await options.updates.start(req.updateId, req.revision, revision);
+        } catch (error) {
+          queued = undefined;
+          throw error;
+        }
+        return { type: "node.rpc.response", reqId: req.reqId, status: 202 };
+      }
+      if (work && options.updates) {
+        if (queued && (queued.until <= Date.now() || options.updates.read()?.id === queued.id)) queued = undefined;
+        if (queued || options.updates.blocksWork(revision)) {
+          throw new WorkbenchError("revision_conflict", "Node update in progress or requires repair; work is paused");
+        }
+      }
       if (req.kind === "browse") {
         const result = browseDirectory(req.path);
         return { type: "node.rpc.response", reqId: req.reqId, status: 200, bodyJson: result };
@@ -744,6 +784,7 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
           platform,
           workbenchVersion: version,
           revision,
+          updateEnabled: Boolean(options.updates && revision),
           harnesses: quick,
           activeRuns: executor.getActiveRuns(),
         });
@@ -802,11 +843,12 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       }
 
       if (parsed.type === "node.rpc.request" && typeof parsed.reqId === "string") {
-        void handleRpc(parsed as unknown as NodeRpcRequest).then((resp) => {
-          if (ws === socket && !stopped) {
-            sendEnvelope(resp as unknown as Record<string, unknown>);
-          }
-        });
+        const request = parsed as unknown as NodeRpcRequest;
+        const work = request.kind === "project_http" || request.kind === "register_probe" || request.kind === "upload_stage";
+        if (work) inFlight++;
+        void handleRpc(request, work).then((resp) => {
+          if (ws === socket && !stopped) sendEnvelope(resp as unknown as Record<string, unknown>);
+        }).finally(() => { if (work) inFlight--; });
       }
     });
 

@@ -8,6 +8,7 @@ import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, atomicWriteJson, readJsonStrict } from "../core/fs.ts";
 import { buildNodeWebSocketUrl, startWorkbenchNodeClient } from "../hub/node_bridge.ts";
 import { isLocalNodeId, isRemoteNodeId, resolveHubDir } from "../hub/registry.ts";
+import { nodeUpdateBlocksWork, queueNodeUpdate, readNodeUpdate, readUpdateBranch } from "./node_update.ts";
 
 type Manager = "launchd" | "systemd";
 type NodeServiceAction = "start" | "stop" | "restart" | "status" | "uninstall";
@@ -617,12 +618,31 @@ export async function runNodeForeground(cfg: NodeConfig, hubDir: string = resolv
   };
 
   updateRuntime(false);
+  const manager = createNodeServiceManager({ hubDir });
+  let updatesEnabled = false;
+  if (process.platform === "linux") {
+    try {
+      const installation = manager.readInstallation();
+      updatesEnabled = Boolean(installation && readUpdateBranch(hubDir) && (await manager.getStatus()).pid === process.pid);
+    } catch (error) {
+      console.error("Node update unavailable:", error);
+    }
+  }
 
   const client = startWorkbenchNodeClient({
     hubUrl: cfg.hubUrl,
     token: cfg.token,
     nodeId: cfg.nodeId,
     nodeName: cfg.nodeName,
+    updates: updatesEnabled ? {
+      read: () => readNodeUpdate(hubDir),
+      blocksWork: (revision) => nodeUpdateBlocksWork(readNodeUpdate(hubDir), revision),
+      start: async (id, revision, runningRevision) => {
+        const installation = manager.readInstallation();
+        if (!installation || (await manager.getStatus()).pid !== process.pid) throw new Error("Update requires the installed systemd node");
+        await queueNodeUpdate(installation, id, revision, runningRevision);
+      },
+    } : undefined,
     onConnected: () => {
       connectedAt = Date.now();
       lastError = null;
