@@ -13,7 +13,7 @@ import {
   triggerActiveRun,
   useRequirementQuery,
 } from "../queries.ts";
-import { formatDateTime } from "../state.ts";
+import { AGENT_RUN_TONE, formatDateTime } from "../state.ts";
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/uiStore.ts";
@@ -498,15 +498,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     <>
                       <div className="console-status-bar">
                         <div>
-                          <span
-                            className={`badge ${
-                              currentRun.status === "running"
-                                ? "info"
-                                : currentRun.status === "succeeded"
-                                  ? "success"
-                                  : "danger"
-                            }`}
-                          >
+                          <span className={`badge ${AGENT_RUN_TONE[currentRun.status]}`}>
                             <Icon
                               icon={
                                 currentRun.status === "running"
