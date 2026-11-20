@@ -1102,18 +1102,31 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       }
 
       const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
+      const expectedDrawerLayoutByWidth: Record<number, "column" | "overlay"> = {
+        1440: "column",
+        1360: "overlay",
+        1280: "overlay",
+        1024: "overlay",
+        821: "overlay",
+        820: "overlay",
+        768: "overlay",
+        390: "overlay",
+        375: "overlay",
+        320: "overlay",
+      };
       for (const width of responsiveWidths) {
+        const expectedLayoutMode = expectedDrawerLayoutByWidth[width];
         await page.setViewport({ width, height: 820 });
         await page.waitForFunction(
-          () => {
-            const workspace = document.querySelector(".hub-workspace");
-            const drawer = document.querySelector('[data-testid="right-drawer"]');
-            if (!workspace || !drawer) return false;
-            const drawerWidth = Number.parseFloat(getComputedStyle(workspace).getPropertyValue("--drawer-w"));
-            const mainWidth = workspace.clientWidth - (Number.isFinite(drawerWidth) ? drawerWidth : 0);
-            return drawer.getAttribute("data-layout-mode") === (mainWidth >= 520 ? "column" : "overlay");
-          },
+          (expectedWidth: unknown) => window.innerWidth === Number(expectedWidth) && window.innerHeight === 820,
           { timeout: 5000 },
+          width,
+        );
+        await page.waitForFunction(
+          (expectedMode: unknown) =>
+            document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") === String(expectedMode),
+          { timeout: 5000 },
+          expectedLayoutMode,
         );
         await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         const responsiveState = await page.evaluate(() => {
@@ -1126,6 +1139,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           const inlineMainWidth = (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0);
           const sidebar = document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]');
           return {
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
             overflow: document.documentElement.scrollWidth > window.innerWidth,
             layoutMode: document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") ?? "",
             mainWidth: stage?.width ?? 0,
@@ -1136,14 +1151,16 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
             scrollTop: scroller?.scrollTop ?? -1,
           };
         });
+        expect(responsiveState.viewportWidth).toBe(width);
+        expect(responsiveState.viewportHeight).toBe(820);
+        expect(responsiveState.layoutMode).toBe(expectedLayoutMode);
+        if (expectedLayoutMode === "column") {
+          expect(responsiveState.inlineMainWidth).toBeGreaterThanOrEqual(520);
+        } else {
+          expect(responsiveState.inlineMainWidth).toBeLessThan(520);
+        }
         expect(responsiveState.overflow).toBe(false);
         expect(responsiveState.mainWidth).toBeGreaterThan(250);
-        if (responsiveState.layoutMode === "column") {
-          expect(responsiveState.mainWidth).toBeGreaterThanOrEqual(520);
-        }
-        if (responsiveState.inlineMainWidth < 520) {
-          expect(responsiveState.layoutMode).toBe("overlay");
-        }
         if (width === 821) expect(responsiveState.sidebarPosition).toBe("sticky");
         if (width === 820) expect(responsiveState.sidebarPosition).toBe("fixed");
         expect(responsiveState.selectedRequirement).toBe("REQ-001");
@@ -1277,21 +1294,83 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           expect(narrowContentVisibility.hitTests.length).toBeGreaterThan(0);
           expect(narrowContentVisibility.hitTests.every((hit) => hit.withinStep && !hit.topbar)).toBe(true);
         }
-        if (width === 1440) expect(responsiveState.layoutMode).toBe("column");
+        if ([1440, 821].includes(width)) {
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              const backdrop = document.querySelector(".drawer-backdrop");
+              const animations = [...(drawer?.getAnimations() ?? []), ...(backdrop?.getAnimations() ?? [])];
+              return Boolean(drawer?.classList.contains("open")) && animations.every((animation) => animation.playState !== "running");
+            },
+            { timeout: 5000 },
+          );
+          const openedBoundaryState = await page.evaluate(() => {
+            const workspace = document.querySelector<HTMLElement>(".hub-workspace");
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
+            const drawerWidth = Number.parseFloat(
+              workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+              layoutMode: drawer?.getAttribute("data-layout-mode") ?? "",
+              inlineMainWidth: (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0),
+              mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
+              sidebarPosition: getComputedStyle(document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]')!).position,
+            };
+          });
+          expect(openedBoundaryState.viewportWidth).toBe(width);
+          expect(openedBoundaryState.viewportHeight).toBe(820);
+          expect(openedBoundaryState.layoutMode).toBe(expectedLayoutMode);
+          expect(openedBoundaryState.overflow).toBe(false);
+          if (width === 1440) {
+            expect(openedBoundaryState.inlineMainWidth).toBeGreaterThanOrEqual(520);
+            expect(openedBoundaryState.mainWidth).toBeGreaterThanOrEqual(520);
+          } else {
+            expect(openedBoundaryState.inlineMainWidth).toBeLessThan(520);
+            expect(openedBoundaryState.sidebarPosition).toBe("sticky");
+          }
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              return Boolean(drawer?.classList.contains("settled")) && !drawer?.classList.contains("open");
+            },
+            { timeout: 5000 },
+          );
+        }
         if ([1360, 1280, 1024].includes(width)) {
           expect(responsiveState.layoutMode).toBe("overlay");
           await clickReady(page, '[data-testid="toggle-drawer-btn"]');
           await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
           const overlayCloseButton = await page.evaluate(() => {
+            const workspace = document.querySelector<HTMLElement>(".hub-workspace");
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
             const button = document.querySelector('[data-testid="right-drawer"] [data-testid="drawer-close-btn"]') as HTMLElement | null;
             const rect = button?.getBoundingClientRect();
+            const drawerWidth = Number.parseFloat(
+              workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+            );
             return {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              layoutMode: drawer?.getAttribute("data-layout-mode") ?? "",
+              inlineMainWidth: (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0),
+              mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
               visible: Boolean(button && getComputedStyle(button).display !== "none" && rect && rect.width > 0 && rect.height > 0),
               width: rect?.width ?? 0,
               height: rect?.height ?? 0,
               overflow: document.documentElement.scrollWidth > window.innerWidth,
             };
           });
+          expect(overlayCloseButton.viewportWidth).toBe(width);
+          expect(overlayCloseButton.viewportHeight).toBe(820);
+          expect(overlayCloseButton.layoutMode).toBe("overlay");
+          expect(overlayCloseButton.inlineMainWidth).toBeLessThan(520);
+          expect(overlayCloseButton.mainWidth).toBeGreaterThan(250);
           expect(overlayCloseButton.visible).toBe(true);
           expect(overlayCloseButton.width).toBeGreaterThanOrEqual(44);
           expect(overlayCloseButton.height).toBeGreaterThanOrEqual(44);
@@ -1370,19 +1449,82 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // 7. On mobile, opening the sidebar while the drawer is open closes the drawer instead of stacking overlays.
+      // 7. At 820px, each visible topbar switch must be hit-testable and switch overlays in one click.
       await page.setViewport({ width: 820, height: 820 });
+      await page.waitForFunction(() => window.innerWidth === 820 && window.innerHeight === 820, { timeout: 5000 });
+
+      const expectTopbarToggleHit = async (testId: string) => {
+        const hit = await page.evaluate((id: string) => {
+          const button = document.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
+          if (!button) return { visible: false, disabled: true, topButtonTestId: "" };
+          const rect = button.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          const top = document.elementFromPoint(x, y);
+          return {
+            visible: rect.width > 0 && rect.height > 0 && getComputedStyle(button).visibility !== "hidden",
+            disabled: button.disabled,
+            topButtonTestId: top?.closest("button")?.getAttribute("data-testid") ?? "",
+          };
+        }, testId);
+        expect(hit.visible).toBe(true);
+        expect(hit.disabled).toBe(false);
+        expect(hit.topButtonTestId).toBe(testId);
+      };
+
       await clickReady(page, '[data-testid="toggle-drawer-btn"]');
       await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      await expectTopbarToggleHit("toggle-sidebar-btn");
       await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
-      await page.waitForSelector('[data-testid="hub-sidebar"].open', { timeout: 5000 });
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
+        { timeout: 5000 },
+      );
       const mobilePanelState = await page.evaluate(() => ({
         sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
         drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
       }));
       expect(mobilePanelState).toEqual({ sidebarOpen: true, drawerOpen: false });
+      const sidebarCloseHit = await page.evaluate(() => {
+        const sidebar = document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]');
+        const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+        const button = sidebar?.querySelector<HTMLButtonElement>(".sb-close-btn");
+        const rect = button?.getBoundingClientRect();
+        if (!sidebar || !header || !button || !rect) return null;
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return {
+          visible: rect.width > 0 && rect.height > 0 && getComputedStyle(button).visibility !== "hidden",
+          closeButtonHit: hit?.closest("button") === button,
+          sidebarZ: Number(getComputedStyle(sidebar).zIndex),
+          headerZ: Number(getComputedStyle(header).zIndex),
+        };
+      });
+      expect(sidebarCloseHit?.visible).toBe(true);
+      expect(sidebarCloseHit?.closeButtonHit).toBe(true);
+      expect(sidebarCloseHit?.sidebarZ).toBeGreaterThan(sidebarCloseHit?.headerZ ?? 0);
+      await expectTopbarToggleHit("toggle-drawer-btn");
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="right-drawer"].open')) && !document.querySelector('[data-testid="hub-sidebar"].open'),
+        { timeout: 5000 },
+      );
+      const switchedBackToDrawer = await page.evaluate(() => ({
+        sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
+        drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
+      }));
+      expect(switchedBackToDrawer).toEqual({ sidebarOpen: false, drawerOpen: true });
+      await expectTopbarToggleHit("toggle-sidebar-btn");
+      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
+        { timeout: 5000 },
+      );
+      // The backdrop remains a close-only exit path; it must not open the drawer.
       await page.click(".sidebar-backdrop");
-      await page.waitForFunction(() => !document.querySelector('[data-testid="hub-sidebar"].open'), { timeout: 5000 });
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="hub-sidebar"].open') && !document.querySelector('[data-testid="right-drawer"].open'),
+        { timeout: 5000 },
+      );
 
       // 8. An in-progress design draft survives further narrow/wide transitions; routing settings stay inside the viewport.
       await page.setViewport({ width: 1440, height: 820 });

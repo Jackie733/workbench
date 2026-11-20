@@ -16,6 +16,7 @@ interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string }): Promise<unknown>;
   reload(opts?: { waitUntil?: string }): Promise<unknown>;
+  setRequestInterception(enabled: boolean): Promise<void>;
   url(): string;
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
   waitForFunction(
@@ -378,24 +379,94 @@ suite("Agent Observability E2E (Chromium)", () => {
 
     // The requirement's audit tab remains usable through the accepted wide-to-phone viewport matrix.
     const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
+    const waitForDrawerStable = async (open: boolean) => {
+      try {
+        await page.waitForFunction(
+          (expectedOpen: unknown) => {
+            const shouldBeOpen = Boolean(expectedOpen);
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
+            if (!drawer) return false;
+            const backdrop = document.querySelector(".drawer-backdrop");
+            const animations = [...drawer.getAnimations(), ...(backdrop?.getAnimations() ?? [])];
+            const stateMatches = shouldBeOpen
+              ? drawer.classList.contains("open") &&
+                drawer.getAttribute("aria-hidden") === "false" &&
+                !["entering", "opening", "closing"].some((phase) => drawer.classList.contains(phase))
+              : drawer.classList.contains("collapsed") &&
+                drawer.classList.contains("settled") &&
+                drawer.getAttribute("aria-hidden") === "true";
+            return stateMatches && animations.every((animation) => animation.playState !== "running");
+          },
+          { timeout: 5000 },
+          open,
+        );
+      } catch (error) {
+        const state = await page.evaluate(() => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          const backdrop = document.querySelector(".drawer-backdrop");
+          return {
+            width: window.innerWidth,
+            className: drawer?.className ?? "missing",
+            ariaHidden: drawer?.getAttribute("aria-hidden") ?? "missing",
+            runningAnimations: [...(drawer?.getAnimations() ?? []), ...(backdrop?.getAnimations() ?? [])]
+              .filter((animation) => animation.playState === "running")
+              .map((animation) => animation.effect?.getTiming().duration ?? "unknown"),
+          };
+        });
+        throw new Error(`Drawer failed to stabilize (${open ? "open" : "closed"}): ${JSON.stringify(state)}; ${String(error)}`);
+      }
+    };
+    const expectVisibleRun2Selection = async () => {
+      await page.waitForFunction(
+        () => {
+          const select = document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select');
+          const rect = select?.getBoundingClientRect();
+          const style = select ? getComputedStyle(select) : null;
+          return Boolean(select && style?.display !== "none" && style?.visibility !== "hidden" && rect && rect.width > 0 && rect.height > 0);
+        },
+        { timeout: 5000 },
+      );
+      const selection = await page.evaluate(() => {
+        const select = document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select');
+        const rect = select?.getBoundingClientRect();
+        const style = select ? getComputedStyle(select) : null;
+        return {
+          runId: select?.value ?? "",
+          visible: Boolean(select && style?.display !== "none" && style?.visibility !== "hidden" && rect && rect.width > 0 && rect.height > 0),
+        };
+      });
+      expect(selection.runId).toBe(run2Started.run.id);
+      expect(selection.visible).toBe(true);
+    };
     for (const width of responsiveWidths) {
       await page.setViewport({ width, height: 820 });
+      await page.waitForFunction(
+        (expectedWidth: unknown) => window.innerWidth === Number(expectedWidth) && window.innerHeight === 820,
+        { timeout: 5000 },
+        width,
+      );
       await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       const auditLayout = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
         overflow: document.documentElement.scrollWidth > window.innerWidth,
         mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
-        selectedRunId:
-          document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
         selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
         hasAuditSummary: Boolean(document.querySelector('[data-testid="req-audit-summary"]')),
         timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
       }));
+      expect(auditLayout.viewportWidth).toBe(width);
+      expect(auditLayout.viewportHeight).toBe(820);
       expect(auditLayout.overflow).toBe(false);
       expect(auditLayout.mainWidth).toBeGreaterThan(250);
-      expect(auditLayout.selectedRunId).toBe(run2Started.run.id);
       expect(auditLayout.selectedRequirement).toBe("REQ-001");
       expect(auditLayout.hasAuditSummary).toBe(true);
       expect(auditLayout.timelineActive).toBe(true);
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await waitForDrawerStable(true);
+      await expectVisibleRun2Selection();
+      await clickReady(page, width === 1440 ? '[data-testid="toggle-drawer-btn"]' : '[data-testid="drawer-close-btn"]');
+      await waitForDrawerStable(false);
     }
 
     // 4. Option A Global Insights view: topbar entry hides drawer, sets URL view=insights, and rolls up omp into opencode-go
@@ -415,13 +486,22 @@ suite("Agent Observability E2E (Chromium)", () => {
 
     for (const width of responsiveWidths) {
       await page.setViewport({ width, height: 820 });
+      await page.waitForFunction(
+        (expectedWidth: unknown) => window.innerWidth === Number(expectedWidth) && window.innerHeight === 820,
+        { timeout: 5000 },
+        width,
+      );
       await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       const insightsLayout = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
         overflow: document.documentElement.scrollWidth > window.innerWidth,
         contentWidth: document.querySelector('[data-testid="insights-view"]')?.getBoundingClientRect().width ?? 0,
         hasKpis: Boolean(document.querySelector('[data-testid="insights-kpi-grid"]')),
         routeStillInsights: new URL(window.location.href).searchParams.get("view") === "insights",
       }));
+      expect(insightsLayout.viewportWidth).toBe(width);
+      expect(insightsLayout.viewportHeight).toBe(820);
       expect(insightsLayout.overflow).toBe(false);
       expect(insightsLayout.contentWidth).toBeGreaterThan(250);
       expect(insightsLayout.hasKpis).toBe(true);
@@ -433,40 +513,42 @@ suite("Agent Observability E2E (Chromium)", () => {
     await clickReady(page, '[data-testid="insights-jump-req-REQ-001"]');
     await page.waitForSelector('[data-testid="tab-timeline"]', { timeout: 6000 });
 
-    const selectedRunAfterInsightsReturn = await page.evaluate(
-      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
-    );
-    expect(selectedRunAfterInsightsReturn).toBe(run2Started.run.id);
-
     await clickReady(page, '[data-testid="toggle-drawer-btn"]');
-    await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
-    const selectedRunWithDrawerOpen = await page.evaluate(
-      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
-    );
-    expect(selectedRunWithDrawerOpen).toBe(run2Started.run.id);
+    await waitForDrawerStable(true);
+    await expectVisibleRun2Selection();
     await clickReady(page, '[data-testid="drawer-close-btn"]');
-    await page.waitForFunction(() => !document.querySelector('[data-testid="right-drawer"].open'), { timeout: 5000 });
-    const selectedRunAfterDrawerClose = await page.evaluate(
-      () => document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
-    );
-    expect(selectedRunAfterDrawerClose).toBe(run2Started.run.id);
+    await waitForDrawerStable(false);
 
     await page.setViewport({ width: 820, height: 820 });
+    await page.waitForFunction(() => window.innerWidth === 820 && window.innerHeight === 820, { timeout: 5000 });
     await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await clickReady(page, '[data-testid="toggle-drawer-btn"]');
-    await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+    await waitForDrawerStable(true);
+    await expectVisibleRun2Selection();
     await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
     await page.waitForFunction(
       () => Boolean(document.querySelector('[data-testid="hub-sidebar"].open')) && !document.querySelector('[data-testid="right-drawer"].open'),
       { timeout: 5000 },
     );
     const mobilePanelState = await page.evaluate(() => ({
-      selectedRunId:
-        document.querySelector<HTMLSelectElement>('[data-testid="right-drawer"] .console-toolbar select')?.value ?? "",
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
       sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
       drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
     }));
-    expect(mobilePanelState).toEqual({ selectedRunId: run2Started.run.id, sidebarOpen: true, drawerOpen: false });
+    expect(mobilePanelState).toEqual({ viewportWidth: 820, viewportHeight: 820, sidebarOpen: true, drawerOpen: false });
+    await clickReady(page, '.sb-close-btn');
+    await page.waitForFunction(
+      () => !document.querySelector('[data-testid="hub-sidebar"].open') && !document.querySelector('[data-testid="right-drawer"].open'),
+      { timeout: 5000 },
+    );
+    await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+    await waitForDrawerStable(true);
+    await page.waitForFunction(
+      () => !document.querySelector('[data-testid="hub-sidebar"].open') && Boolean(document.querySelector('[data-testid="right-drawer"].open')),
+      { timeout: 5000 },
+    );
+    await expectVisibleRun2Selection();
 
     expect(pageErrors).toEqual([]);
     expect(httpErrors).toEqual([]);

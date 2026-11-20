@@ -1083,7 +1083,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 @media (max-width: 820px) {
   .mobile-only { display: inline-flex; }
   .desktop-only { display: none; }
-  .topbar.app-header { padding: 8px 10px; gap: 8px; flex-wrap: wrap; }
+  /* Keep panel switches above the dismiss backdrop, but below the open sidebar itself. */
+  .topbar.app-header { z-index: 35; padding: 8px 10px; gap: 8px; flex-wrap: wrap; }
   .header-btn-label { display: none; }
   .sidebar-backdrop {
     display: block;
