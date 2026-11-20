@@ -42,6 +42,7 @@ function computeMaxDrawerWidth(workspaceEl: HTMLElement | null): number {
 function clampDrawerWidth(width: number, maxWidth: number): number {
   return Math.min(Math.max(Math.round(width), MIN_DRAWER_WIDTH), Math.max(MIN_DRAWER_WIDTH, maxWidth));
 }
+const MIN_INLINE_MAIN_WIDTH = 520;
 
 export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDivElement | null> }) {
   const language = useUiStore((s) => s.language);
@@ -86,13 +87,16 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const threadRef = useRef<HTMLDivElement | null>(null);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const [maxWidth, setMaxWidth] = useState<number>(DEFAULT_DRAWER_WIDTH);
+  const [overlayMode, setOverlayMode] = useState(false);
 
   const syncDrawerCssWidth = useCallback(
     (preferredWidth: number) => {
       const wsEl = workspaceRef?.current ?? null;
+      const available = wsEl?.clientWidth ?? 0;
       const nextMax = computeMaxDrawerWidth(wsEl);
       const effective = clampDrawerWidth(preferredWidth, nextMax);
       setMaxWidth(nextMax);
+      setOverlayMode(available > 0 && available - effective < MIN_INLINE_MAIN_WIDTH);
       if (wsEl) {
         wsEl.style.setProperty("--drawer-w", `${effective}px`);
       }
@@ -254,13 +258,14 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   return (
     <>
       <div
-        className={`drawer-backdrop ${drawerOpen ? "open" : ""}`}
+        className={`drawer-backdrop ${overlayMode ? "overlay-mode" : ""} ${drawerOpen ? "open" : ""}`}
         aria-hidden="true"
         onClick={() => setDrawerOpen(false)}
       />
       <aside
-        className={`drawer ${openCls}`}
+        className={`drawer ${overlayMode ? "overlay-mode" : ""} ${openCls}`}
         data-testid="right-drawer"
+        data-layout-mode={overlayMode ? "overlay" : "column"}
         aria-hidden={!drawerOpen}
       >
         {drawerOpen && (

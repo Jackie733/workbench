@@ -33,6 +33,10 @@ export const DEFAULT_DRAWER_WIDTH = 720;
 export const MIN_DRAWER_WIDTH = 320;
 /** 暂缓热刷新提示的固定 id：重复事件只更新同一条提示，不堆叠。 */
 export const RELOAD_PENDING_TOAST_ID = "web-reload-pending";
+function isMobileOverlayViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia?.("(max-width: 820px)").matches ?? window.innerWidth <= 820;
+}
 
 function initialSidebarWidth(): number {
   const raw = Number(readStorageItem("wb-sidebar-width"));
@@ -211,7 +215,11 @@ export const useUiStore = create<UiStoreState>((set) => ({
     persistUiLanguage(language);
   },
   setBusy: (busy) => set({ busy }),
-  setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
+  setSidebarOpen: (sidebarOpen) =>
+    set((s) => ({
+      sidebarOpen,
+      drawerOpen: sidebarOpen && isMobileOverlayViewport() ? false : s.drawerOpen,
+    })),
   setDesktopSidebarOpen: (desktopSidebarOpen) => {
     writeStorageItem("wb-sidebar-open", String(desktopSidebarOpen));
     set({ desktopSidebarOpen });
@@ -260,7 +268,11 @@ export const useUiStore = create<UiStoreState>((set) => ({
       return { expandedLogs: next };
     }),
   clearExpandedLogs: () => set({ expandedLogs: {} }),
-  setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
+  setDrawerOpen: (drawerOpen) =>
+    set((s) => ({
+      drawerOpen,
+      sidebarOpen: drawerOpen && isMobileOverlayViewport() ? false : s.sidebarOpen,
+    })),
   setDrawerWidth: (width) => {
     const rounded = Math.max(MIN_DRAWER_WIDTH, Math.round(width));
     writeStorageItem("wb-drawer-width", String(rounded));

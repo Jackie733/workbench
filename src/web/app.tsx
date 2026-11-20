@@ -239,6 +239,17 @@ function WorkbenchShell() {
   }, [language]);
 
   useEffect(() => {
+    const reconcileMobileOverlays = () => {
+      if (!window.matchMedia("(max-width: 820px)").matches) return;
+      const ui = useUiStore.getState();
+      if (ui.sidebarOpen && ui.drawerOpen) ui.setDrawerOpen(true);
+    };
+    reconcileMobileOverlays();
+    window.addEventListener("resize", reconcileMobileOverlays);
+    return () => window.removeEventListener("resize", reconcileMobileOverlays);
+  }, []);
+
+  useEffect(() => {
     const reportedErrors = new Set<string>();
     const reportRuntimeError = (title: string, detail: string) => {
       if (!title || reportedErrors.has(title)) return;

@@ -610,6 +610,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(stageAfterAsk).toContain("待批准");
 
       // Direct human design.md editing
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
       await clickReady(page, '[data-testid="start-edit-design-btn"]');
       await page.waitForSelector('[data-testid="design-body-input"]', { timeout: 5000 });
       await page.type('[data-testid="design-body-input"]', "\n补充人工微调条目。");
@@ -629,6 +637,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
       await clickReady(page, '[data-testid="run-review-btn"]');
       await page.waitForFunction(
         () => Boolean(document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过")),
@@ -891,6 +907,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     const repo = initGitRepo();
     await initProject(repo, { name: "LayoutRepo", privacyMode: "local" });
     await createRequirement(repo, { goal: "Test global header and resizable sidebars" });
+    for (let version = 1; version <= 16; version += 1) {
+      await propose(repo, "REQ-001", {
+        designMarkdown: `# Responsive layout design ${version}\n\nPreserve the active requirement and its history while panels adapt to available width.`,
+        actor: "agent",
+      });
+    }
 
     const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
     servers.push(server);
@@ -1039,6 +1061,97 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? -1,
       );
       expect(closedDrawerW).toBe(0);
+
+      // 6. Keep the active requirement, activity tab, and its scroll position across the full viewport matrix.
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      await page.waitForSelector('[data-testid="workspace-tab-scroll"] .timeline-item', { timeout: 5000 });
+      const startingScrollTop = await page.evaluate(() => {
+        const scroller = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+        if (!scroller) return 0;
+        scroller.scrollTop = Math.min(240, scroller.scrollHeight - scroller.clientHeight);
+        return scroller.scrollTop;
+      });
+      expect(startingScrollTop).toBeGreaterThan(0);
+
+      const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
+      for (const width of responsiveWidths) {
+        await page.setViewport({ width, height: 820 });
+        await page.waitForFunction(
+          () => {
+            const workspace = document.querySelector(".hub-workspace");
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
+            if (!workspace || !drawer) return false;
+            const drawerWidth = Number.parseFloat(getComputedStyle(workspace).getPropertyValue("--drawer-w"));
+            const mainWidth = workspace.clientWidth - (Number.isFinite(drawerWidth) ? drawerWidth : 0);
+            return drawer.getAttribute("data-layout-mode") === (mainWidth >= 520 ? "column" : "overlay");
+          },
+          { timeout: 5000 },
+        );
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const responsiveState = await page.evaluate(() => {
+          const stage = document.querySelector(".main-stage")?.getBoundingClientRect();
+          const scroller = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          return {
+            overflow: document.documentElement.scrollWidth > window.innerWidth,
+            layoutMode: document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") ?? "",
+            mainWidth: stage?.width ?? 0,
+            selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+            timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+            scrollTop: scroller?.scrollTop ?? -1,
+          };
+        });
+        expect(responsiveState.overflow).toBe(false);
+        expect(responsiveState.mainWidth).toBeGreaterThan(250);
+        expect(responsiveState.selectedRequirement).toBe("REQ-001");
+        expect(responsiveState.timelineActive).toBe(true);
+        expect(Math.abs(responsiveState.scrollTop - startingScrollTop)).toBeLessThan(20);
+        if (width === 1440) expect(responsiveState.layoutMode).toBe("column");
+        if ([1360, 1280, 1024].includes(width)) expect(responsiveState.layoutMode).toBe("overlay");
+      }
+
+      // 7. On mobile, opening the sidebar while the drawer is open closes the drawer instead of stacking overlays.
+      await page.setViewport({ width: 820, height: 820 });
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+      await page.waitForSelector('[data-testid="hub-sidebar"].open', { timeout: 5000 });
+      const mobilePanelState = await page.evaluate(() => ({
+        sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"].open')),
+        drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"].open')),
+      }));
+      expect(mobilePanelState).toEqual({ sidebarOpen: true, drawerOpen: false });
+      await page.click(".sidebar-backdrop");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="hub-sidebar"].open'), { timeout: 5000 });
+
+      // 8. An in-progress design draft survives further narrow/wide transitions; routing settings stay inside the viewport.
+      await page.setViewport({ width: 1440, height: 820 });
+      await clickReady(page, '[data-testid="tab-spec"]');
+      await clickReady(page, '[data-testid="start-edit-design-btn"]');
+      await page.waitForSelector('[data-testid="design-body-input"]', { timeout: 5000 });
+      await page.type('[data-testid="design-body-input"]', "\nResponsive draft preserved across resize.");
+      for (const width of [390, 320, 1440]) {
+        await page.setViewport({ width, height: 820 });
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const draft = await page.evaluate(
+          () => (document.querySelector('[data-testid="design-body-input"]') as HTMLTextAreaElement | null)?.value ?? "",
+        );
+        expect(draft).toContain("Responsive draft preserved across resize.");
+      }
+      await clickReady(page, '[data-testid="save-design-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="design-body-input"]'), { timeout: 5000 });
+      await page.setViewport({ width: 390, height: 820 });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      const routingBounds = await page.evaluate(() => {
+        const rect = document.querySelector('[data-testid="routing-modal"]')?.getBoundingClientRect();
+        return { left: rect?.left ?? -1, right: rect?.right ?? -1, width: rect?.width ?? 0 };
+      });
+      expect(routingBounds.left).toBeGreaterThanOrEqual(0);
+      expect(routingBounds.right).toBeLessThanOrEqual(390);
+      expect(routingBounds.width).toBeGreaterThan(200);
+      await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
@@ -1382,6 +1495,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expectedRuns);
       runCalls.splice(0, runCalls.length, ...captured);
       await waitRecordSettled(expectedRuns - 1);
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
     };
 
     try {
@@ -2560,7 +2681,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
       await page.waitForFunction(
-        () => (document.querySelector('[data-testid="drawer-diff-panel"]')?.getBoundingClientRect().width ?? 0) >= 300,
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          const input = drawer?.querySelector('[data-testid="drawer-diff-file-search"]') as HTMLElement | null;
+          return Boolean(
+            drawer?.classList.contains("open") &&
+            input &&
+            getComputedStyle(input).visibility === "visible" &&
+            getComputedStyle(input).pointerEvents !== "none" &&
+            input.getBoundingClientRect().width > 0,
+          );
+        },
         { timeout: 5000 },
       );
       await clickReady(page, '[data-testid="drawer-diff-file-search"]');

@@ -312,6 +312,9 @@ suite("Agent Observability E2E (Chromium)", () => {
     fs.writeFileSync(releaseRun2Flag, "go");
     await run2Done;
 
+    await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="right-drawer"].open'), { timeout: 5000 });
+
     // 3. Execution Audit tab: summary strip + 4 inspector tabs including Context diff vs parent
     await clickReady(page, '[data-testid="tab-timeline"]');
     await page.waitForSelector('[data-testid="req-audit-summary"]', { timeout: 5000 });
@@ -326,7 +329,27 @@ suite("Agent Observability E2E (Chromium)", () => {
     await clickReady(page, '[data-testid="inspector-tab-raw"]');
     await page.waitForSelector('[data-testid="inspector-pane-raw"]', { timeout: 5000 });
 
+    // The requirement's audit tab remains usable through the accepted wide-to-phone viewport matrix.
+    const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
+    for (const width of responsiveWidths) {
+      await page.setViewport({ width, height: 820 });
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      const auditLayout = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
+        selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+        hasAuditSummary: Boolean(document.querySelector('[data-testid="req-audit-summary"]')),
+        timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+      }));
+      expect(auditLayout.overflow).toBe(false);
+      expect(auditLayout.mainWidth).toBeGreaterThan(250);
+      expect(auditLayout.selectedRequirement).toBe("REQ-001");
+      expect(auditLayout.hasAuditSummary).toBe(true);
+      expect(auditLayout.timelineActive).toBe(true);
+    }
+
     // 4. Option A Global Insights view: topbar entry hides drawer, sets URL view=insights, and rolls up omp into opencode-go
+    await page.setViewport({ width: 1360, height: 820 });
     await clickReady(page, '[data-testid="topbar-insights-btn"]');
     await page.waitForSelector('[data-testid="insights-view"]', { timeout: 6000 });
     await page.waitForSelector('[data-testid="insights-kpi-grid"]', { timeout: 6000 });
@@ -340,7 +363,23 @@ suite("Agent Observability E2E (Chromium)", () => {
     const hasOmpPool = await page.evaluate(() => Boolean(document.querySelector('[data-testid="pool-row-omp"]')));
     expect(hasOmpPool).toBe(false);
 
+    for (const width of responsiveWidths) {
+      await page.setViewport({ width, height: 820 });
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      const insightsLayout = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        contentWidth: document.querySelector('[data-testid="insights-view"]')?.getBoundingClientRect().width ?? 0,
+        hasKpis: Boolean(document.querySelector('[data-testid="insights-kpi-grid"]')),
+        routeStillInsights: new URL(window.location.href).searchParams.get("view") === "insights",
+      }));
+      expect(insightsLayout.overflow).toBe(false);
+      expect(insightsLayout.contentWidth).toBeGreaterThan(250);
+      expect(insightsLayout.hasKpis).toBe(true);
+      expect(insightsLayout.routeStillInsights).toBe(true);
+    }
+
     // Jump back from Insights into REQ-001 workspace
+    await page.setViewport({ width: 1360, height: 820 });
     await clickReady(page, '[data-testid="insights-jump-req-REQ-001"]');
     await page.waitForSelector('[data-testid="tab-timeline"]', { timeout: 6000 });
 
