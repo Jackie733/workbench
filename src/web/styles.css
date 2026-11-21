@@ -1159,6 +1159,27 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .app-shell.detail-mode > .topbar.app-header { flex-shrink: 0; }
 }
 
+/* Phone widths: keep the brand mark, but let readable, touch-sized controls wrap as needed. */
+@media (max-width: 600px) {
+  .app-brand-name { display: none; }
+  .topbar-left,
+  .topbar-right {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .topbar button,
+  .topbar select {
+    flex: 0 0 auto;
+    min-width: 44px;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+  .topbar button .header-btn-label {
+    display: inline-block;
+    white-space: nowrap;
+  }
+}
+
 /* ---------- 附件上传与展示 ---------- */
 .attachment-picker { margin-top: 10px; }
 .attachment-dropzone {

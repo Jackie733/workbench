@@ -1484,6 +1484,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
           if (!header) return null;
           const rect = header.getBoundingClientRect();
+          const brandName = header.querySelector<HTMLElement>(".app-brand-name");
           const controls = Array.from(header.querySelectorAll<HTMLElement>("button, select")).map((control) => {
             const controlRect = control.getBoundingClientRect();
             const style = getComputedStyle(control);
@@ -1491,8 +1492,54 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
               controlRect.left + controlRect.width / 2,
               controlRect.top + controlRect.height / 2,
             );
+            const isButton = control instanceof HTMLButtonElement;
+            const isBrandButton = isButton && control.classList.contains("app-brand-btn");
+            const labelMetrics = Array.from(control.querySelectorAll<HTMLElement>(".header-btn-label")).map((label) => {
+              const labelRect = label.getBoundingClientRect();
+              const labelStyle = getComputedStyle(label);
+              return {
+                visible:
+                  labelRect.width > 0 &&
+                  labelRect.height > 0 &&
+                  labelStyle.display !== "none" &&
+                  labelStyle.visibility !== "hidden",
+                whiteSpace: labelStyle.whiteSpace,
+                textOverflow: labelStyle.textOverflow,
+                fits: label.scrollWidth <= label.clientWidth + 1,
+              };
+            });
+            const textRects: DOMRect[] = [];
+            let hasText = false;
+            if (isButton && !isBrandButton) {
+              const walker = document.createTreeWalker(control, NodeFilter.SHOW_TEXT);
+              let node = walker.nextNode();
+              while (node) {
+                if (node.textContent?.trim()) {
+                  hasText = true;
+                  const range = document.createRange();
+                  range.selectNodeContents(node);
+                  for (const textRect of Array.from(range.getClientRects())) {
+                    if (textRect.width > 0 && textRect.height > 0) textRects.push(textRect);
+                  }
+                }
+                node = walker.nextNode();
+              }
+            }
+            const textRows: Array<{ top: number; bottom: number }> = [];
+            for (const textRect of textRects) {
+              const row = textRows.find((candidate) => textRect.top < candidate.bottom && textRect.bottom > candidate.top);
+              if (row) {
+                row.top = Math.min(row.top, textRect.top);
+                row.bottom = Math.max(row.bottom, textRect.bottom);
+              } else {
+                textRows.push({ top: textRect.top, bottom: textRect.bottom });
+              }
+            }
             return {
               name: control.getAttribute("data-testid") ?? control.getAttribute("aria-label") ?? control.tagName,
+              width: controlRect.width,
+              height: controlRect.height,
+              touchTarget: controlRect.width >= 44 && controlRect.height >= 44,
               visible:
                 controlRect.width > 0 &&
                 controlRect.height > 0 &&
@@ -1510,6 +1557,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
                 controlRect.top >= -1 &&
                 controlRect.bottom <= window.innerHeight + 1,
               hit: Boolean(hit && (hit === control || control.contains(hit))),
+              hasText,
+              textVisible: !hasText || textRects.length > 0,
+              textLineCount: textRows.length,
+              textNoWrap: !isButton || style.whiteSpace === "nowrap",
+              textFits: control.scrollWidth <= control.clientWidth + 1,
+              labels: labelMetrics,
             };
           });
           return {
@@ -1518,6 +1571,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
             top: rect.top,
             bottom: rect.bottom,
             overflow: document.documentElement.scrollWidth > window.innerWidth,
+            bodyOverflow: document.body.scrollWidth > window.innerWidth,
+            brandNameDisplay: brandName ? getComputedStyle(brandName).display : "missing",
             controls,
           };
         });
@@ -1527,12 +1582,30 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expect(report.top).toBeGreaterThanOrEqual(-1);
         expect(report.bottom).toBeLessThanOrEqual(820 + 1);
         expect(report.overflow).toBe(false);
+        expect(report.bodyOverflow).toBe(false);
+        if (width <= 600) expect(report.brandNameDisplay).toBe("none");
+        else expect(report.brandNameDisplay).not.toBe("none");
         expect(report.controls.length).toBeGreaterThan(0);
         for (const control of report.controls) {
           expect(control.visible, `${width}px header control ${control.name} must remain visible`).toBe(true);
           expect(control.withinHeader, `${width}px header control ${control.name} must fit inside the header`).toBe(true);
           expect(control.withinViewport, `${width}px header control ${control.name} must fit inside the viewport`).toBe(true);
           expect(control.hit, `${width}px header control ${control.name} must win the hit-test`).toBe(true);
+          if (width <= 600) {
+            expect(control.touchTarget, `${width}px header control ${control.name} must be touch-sized`).toBe(true);
+            expect(control.textFits, `${width}px header control ${control.name} text must not be clipped`).toBe(true);
+            if (control.hasText) {
+              expect(control.textVisible, `${width}px button ${control.name} text must be visible`).toBe(true);
+              expect(control.textLineCount, `${width}px button ${control.name} text must stay on one line`).toBe(1);
+              expect(control.textNoWrap, `${width}px button ${control.name} must not wrap its text`).toBe(true);
+              expect(
+                control.labels.every(
+                  (label) => label.visible && label.whiteSpace === "nowrap" && label.textOverflow !== "ellipsis" && label.fits,
+                ),
+                `${width}px button ${control.name} labels must be complete and untruncated`,
+              ).toBe(true);
+            }
+          }
         }
       };
 
@@ -1683,6 +1756,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       // 8. An in-progress design draft survives further narrow/wide transitions; routing settings stay inside the viewport.
       await page.setViewport({ width: 1440, height: 820 });
+      await page.waitForFunction(() => window.innerWidth === 1440, { timeout: 5000 });
+      const desktopBrandVisible = await page.evaluate(() => {
+        const element = document.querySelector<HTMLElement>('[data-testid="app-header"] .app-brand-name');
+        return Boolean(element && getComputedStyle(element).display !== "none");
+      });
+      expect(desktopBrandVisible).toBe(true);
       await clickReady(page, '[data-testid="tab-spec"]');
       await clickReady(page, '[data-testid="start-edit-design-btn"]');
       await page.waitForSelector('[data-testid="design-body-input"]', { timeout: 5000 });
