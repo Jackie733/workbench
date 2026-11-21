@@ -610,6 +610,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(stageAfterAsk).toContain("待批准");
 
       // Direct human design.md editing
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
       await clickReady(page, '[data-testid="start-edit-design-btn"]');
       await page.waitForSelector('[data-testid="design-body-input"]', { timeout: 5000 });
       await page.type('[data-testid="design-body-input"]', "\n补充人工微调条目。");
@@ -629,6 +637,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
       await clickReady(page, '[data-testid="run-review-btn"]');
       await page.waitForFunction(
         () => Boolean(document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过")),
@@ -891,6 +907,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     const repo = initGitRepo();
     await initProject(repo, { name: "LayoutRepo", privacyMode: "local" });
     await createRequirement(repo, { goal: "Test global header and resizable sidebars" });
+    for (let version = 1; version <= 16; version += 1) {
+      await propose(repo, "REQ-001", {
+        designMarkdown: `# Responsive layout design ${version}\n\nPreserve the active requirement and its history while panels adapt to available width.`,
+        actor: "agent",
+      });
+    }
 
     const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
     servers.push(server);
@@ -1039,11 +1061,739 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? -1,
       );
       expect(closedDrawerW).toBe(0);
+
+      // 6. Keep the active requirement, activity tab, and its scroll position across the full viewport matrix.
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      await page.waitForSelector('[data-testid="workspace-tab-scroll"] .timeline-item', { timeout: 5000 });
+      const startingScrollTop = await page.evaluate(() => {
+        const scroller = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+        if (!scroller) return 0;
+        scroller.scrollTop = Math.min(240, scroller.scrollHeight - scroller.clientHeight);
+        return scroller.scrollTop;
+      });
+      expect(startingScrollTop).toBeGreaterThan(0);
+
+      const expectedHeaderControlIds = await page.evaluate(() => {
+        const controls = Array.from(
+          document
+            .querySelector('[data-testid="app-header"]')
+            ?.querySelectorAll<HTMLElement>(".topbar-left button, .topbar-right button, .topbar-right select") ?? [],
+        );
+        return controls.map(
+          (control, index) =>
+            control.dataset.testid ??
+            control.dataset.action ??
+            (control.classList.contains("app-brand-btn") ? "app-brand-btn" : `header-control-${index}`),
+        );
+      });
+      for (const controlId of [
+        "app-brand-btn",
+        "toggle-sidebar-btn",
+        "back-home-btn",
+        "ui-language-select",
+        "topbar-insights-btn",
+        "open-evolution-btn",
+        "open-quick-report-btn",
+        "open-routing-btn",
+        "toggle-theme",
+        "toggle-drawer-btn",
+      ]) {
+        expect(expectedHeaderControlIds).toContain(controlId);
+      }
+
+      const responsiveWidths = [1440, 1360, 1280, 1024, 821, 820, 768, 390, 375, 320, 1440];
+      const expectedDrawerLayoutByWidth: Record<number, "column" | "overlay"> = {
+        1440: "column",
+        1360: "overlay",
+        1280: "overlay",
+        1024: "overlay",
+        821: "overlay",
+        820: "overlay",
+        768: "overlay",
+        390: "overlay",
+        375: "overlay",
+        320: "overlay",
+      };
+      for (const width of responsiveWidths) {
+        const expectedLayoutMode = expectedDrawerLayoutByWidth[width];
+        await page.setViewport({ width, height: 820 });
+        await page.waitForFunction(
+          (expectedWidth: unknown) => window.innerWidth === Number(expectedWidth) && window.innerHeight === 820,
+          { timeout: 5000 },
+          width,
+        );
+        await page.waitForFunction(
+          (expectedMode: unknown) =>
+            document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") === String(expectedMode),
+          { timeout: 5000 },
+          expectedLayoutMode,
+        );
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const responsiveState = await page.evaluate(() => {
+          const workspace = document.querySelector<HTMLElement>(".hub-workspace");
+          const stage = document.querySelector(".main-stage")?.getBoundingClientRect();
+          const scroller = document.querySelector('[data-testid="workspace-tab-scroll"]') as HTMLElement | null;
+          const drawerWidth = Number.parseFloat(
+            workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+          );
+          const inlineMainWidth = (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0);
+          const sidebar = document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]');
+          return {
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+            overflow: document.documentElement.scrollWidth > window.innerWidth,
+            layoutMode: document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") ?? "",
+            mainWidth: stage?.width ?? 0,
+            inlineMainWidth,
+            sidebarPosition: sidebar ? getComputedStyle(sidebar).position : "missing",
+            selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+            timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+            scrollTop: scroller?.scrollTop ?? -1,
+          };
+        });
+        expect(responsiveState.viewportWidth).toBe(width);
+        expect(responsiveState.viewportHeight).toBe(820);
+        expect(responsiveState.layoutMode).toBe(expectedLayoutMode);
+        if (expectedLayoutMode === "column") {
+          expect(responsiveState.inlineMainWidth).toBeGreaterThanOrEqual(520);
+        } else {
+          expect(responsiveState.inlineMainWidth).toBeLessThan(520);
+        }
+        expect(responsiveState.overflow).toBe(false);
+        expect(responsiveState.mainWidth).toBeGreaterThan(250);
+        if (width === 821) expect(responsiveState.sidebarPosition).toBe("sticky");
+        if (width === 820) expect(responsiveState.sidebarPosition).toBe("fixed");
+        expect(responsiveState.selectedRequirement).toBe("REQ-001");
+        expect(responsiveState.timelineActive).toBe(true);
+        expect(Math.abs(responsiveState.scrollTop - startingScrollTop)).toBeLessThan(20);
+        if ([320, 375, 390].includes(width)) {
+          const narrowContentVisibility = await page.evaluate(() => {
+            const header = document.querySelector('[data-testid="app-header"]');
+            const headerRect = header?.getBoundingClientRect() ?? null;
+            const allControls = Array.from(
+              header?.querySelectorAll<HTMLElement>(".topbar-left button, .topbar-right button, .topbar-right select") ?? [],
+            );
+            const controlId = (control: HTMLElement, index: number) =>
+              control.dataset.testid ??
+              control.dataset.action ??
+              (control.classList.contains("app-brand-btn") ? "app-brand-btn" : `header-control-${index}`);
+            const allControlIds = allControls.map(controlId);
+            const controls = allControls.filter((control) => {
+              const rect = control.getBoundingClientRect();
+              const style = getComputedStyle(control);
+              return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+            });
+            const stepper = document.querySelector('[data-testid="stage-stepper"]');
+            const stepperRect = stepper?.getBoundingClientRect() ?? null;
+            const steps = Array.from(stepper?.querySelectorAll<HTMLElement>(".step-item") ?? []);
+            const rectWithin = (child: DOMRect | null, parent: DOMRect | null) =>
+              Boolean(
+                child &&
+                  parent &&
+                  child.left >= parent.left - 0.5 &&
+                  child.right <= parent.right + 0.5 &&
+                  child.top >= parent.top - 0.5 &&
+                  child.bottom <= parent.bottom + 0.5,
+              );
+            const components = steps.flatMap((step, index) => {
+              const dot = step.querySelector<HTMLElement>(".step-dot");
+              const label = dot?.nextElementSibling as HTMLElement | null;
+              return [
+                ...(dot ? [{ step, index, name: "dot", element: dot }] : []),
+                ...(label ? [{ step, index, name: "label", element: label }] : []),
+              ];
+            });
+            const visibleControls = controls.map((control) => {
+              const rect = control.getBoundingClientRect();
+              const x = (rect.left + rect.right) / 2;
+              const y = (rect.top + rect.bottom) / 2;
+              const hit = document.elementFromPoint(x, y);
+              const hitControl = hit?.closest("button, select") ?? null;
+              return {
+                id: controlId(control, allControls.indexOf(control)),
+                withinHeader: Boolean(
+                  headerRect && rect.top >= headerRect.top - 0.5 && rect.bottom <= headerRect.bottom + 0.5,
+                ),
+                withinViewport: rect.left >= 0 && rect.right <= window.innerWidth,
+                centerHitsControl: hitControl === control,
+              };
+            });
+            const overlaps: Array<{ control: string; step: string; part: string; width: number; height: number }> = [];
+            for (const control of controls) {
+              const controlRect = control.getBoundingClientRect();
+              for (const component of components) {
+                const componentRect = component.element.getBoundingClientRect();
+                const overlapWidth = Math.min(controlRect.right, componentRect.right) - Math.max(controlRect.left, componentRect.left);
+                const overlapHeight = Math.min(controlRect.bottom, componentRect.bottom) - Math.max(controlRect.top, componentRect.top);
+                if (overlapWidth > 0.5 && overlapHeight > 0.5) {
+                  overlaps.push({
+                    control: controlId(control, allControls.indexOf(control)),
+                    step: component.step.textContent?.trim() ?? `step-${component.index + 1}`,
+                    part: component.name,
+                    width: overlapWidth,
+                    height: overlapHeight,
+                  });
+                }
+              }
+            }
+            const hitTests: Array<{ step: string; part: string; withinStep: boolean; topbar: boolean }> = [];
+            for (const component of components) {
+              const rect = component.element.getBoundingClientRect();
+              const visibleLeft = Math.max(rect.left, stepperRect?.left ?? 0, 0);
+              const visibleRight = Math.min(rect.right, stepperRect?.right ?? window.innerWidth, window.innerWidth);
+              const visibleTop = Math.max(rect.top, stepperRect?.top ?? 0, 0);
+              const visibleBottom = Math.min(rect.bottom, stepperRect?.bottom ?? window.innerHeight, window.innerHeight);
+              if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) continue;
+              const fractions = component.name === "dot" ? [0.5] : [0.05, 0.25, 0.5, 0.75, 0.95];
+              for (const fraction of fractions) {
+                const x = visibleLeft + (visibleRight - visibleLeft) * fraction;
+                const y = (visibleTop + visibleBottom) / 2;
+                const hit = document.elementFromPoint(x, y);
+                hitTests.push({
+                  step: component.step.textContent?.trim() ?? `step-${component.index + 1}`,
+                  part: component.name,
+                  withinStep: hit?.closest(".step-item") === component.step,
+                  topbar: Boolean(hit?.closest('[data-testid="app-header"]')),
+                });
+              }
+            }
+            const firstStep = steps[0] ?? null;
+            const firstDot = firstStep?.querySelector<HTMLElement>(".step-dot") ?? null;
+            const firstLabel = firstDot?.nextElementSibling as HTMLElement | null;
+            const firstStepFullyVisible = Boolean(
+              firstDot &&
+                firstLabel &&
+                rectWithin(firstDot.getBoundingClientRect(), stepperRect) &&
+                rectWithin(firstLabel.getBoundingClientRect(), stepperRect) &&
+                firstLabel.getBoundingClientRect().left >= 0 &&
+                firstLabel.getBoundingClientRect().right <= window.innerWidth,
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              documentWidth: document.documentElement.scrollWidth,
+              firstStepLabel: firstLabel?.textContent?.trim() ?? "",
+              firstStepFullyVisible,
+              stepperStartsBelowHeader: Boolean(headerRect && stepperRect && stepperRect.top >= headerRect.bottom - 0.5),
+              allControlIds,
+              controlHits: visibleControls,
+              overlaps,
+              hitTests,
+            };
+          });
+          expect(narrowContentVisibility.documentWidth).toBeLessThanOrEqual(narrowContentVisibility.viewportWidth);
+          expect(narrowContentVisibility.firstStepLabel).toBe("1. 需求草稿");
+          expect(narrowContentVisibility.firstStepFullyVisible).toBe(true);
+          expect(narrowContentVisibility.stepperStartsBelowHeader).toBe(true);
+          for (const requiredControl of expectedHeaderControlIds) {
+            expect(narrowContentVisibility.allControlIds).toContain(requiredControl);
+            expect(narrowContentVisibility.controlHits.map((control) => control.id)).toContain(requiredControl);
+          }
+          expect(narrowContentVisibility.controlHits.length).toBeGreaterThan(0);
+          expect(narrowContentVisibility.controlHits.every((control) => control.withinHeader && control.withinViewport && control.centerHitsControl)).toBe(true);
+          expect(narrowContentVisibility.overlaps).toEqual([]);
+          expect(narrowContentVisibility.hitTests.length).toBeGreaterThan(0);
+          expect(narrowContentVisibility.hitTests.every((hit) => hit.withinStep && !hit.topbar)).toBe(true);
+        }
+        if ([1440, 821].includes(width)) {
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              const backdrop = document.querySelector(".drawer-backdrop");
+              const animations = [...(drawer?.getAnimations() ?? []), ...(backdrop?.getAnimations() ?? [])];
+              return Boolean(drawer?.classList.contains("open")) && animations.every((animation) => animation.playState !== "running");
+            },
+            { timeout: 5000 },
+          );
+          const openedBoundaryState = await page.evaluate(() => {
+            const workspace = document.querySelector<HTMLElement>(".hub-workspace");
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
+            const drawerWidth = Number.parseFloat(
+              workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+              layoutMode: drawer?.getAttribute("data-layout-mode") ?? "",
+              inlineMainWidth: (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0),
+              mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
+              sidebarPosition: getComputedStyle(document.querySelector<HTMLElement>('[data-testid="hub-sidebar"]')!).position,
+            };
+          });
+          expect(openedBoundaryState.viewportWidth).toBe(width);
+          expect(openedBoundaryState.viewportHeight).toBe(820);
+          expect(openedBoundaryState.layoutMode).toBe(expectedLayoutMode);
+          expect(openedBoundaryState.overflow).toBe(false);
+          if (width === 1440) {
+            expect(openedBoundaryState.inlineMainWidth).toBeGreaterThanOrEqual(520);
+            expect(openedBoundaryState.mainWidth).toBeGreaterThanOrEqual(520);
+          } else {
+            expect(openedBoundaryState.inlineMainWidth).toBeLessThan(520);
+            expect(openedBoundaryState.sidebarPosition).toBe("sticky");
+          }
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              return Boolean(drawer?.classList.contains("settled")) && !drawer?.classList.contains("open");
+            },
+            { timeout: 5000 },
+          );
+        }
+        if ([1360, 1280, 1024].includes(width)) {
+          expect(responsiveState.layoutMode).toBe("overlay");
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+          const overlayCloseButton = await page.evaluate(() => {
+            const workspace = document.querySelector<HTMLElement>(".hub-workspace");
+            const drawer = document.querySelector('[data-testid="right-drawer"]');
+            const button = document.querySelector('[data-testid="right-drawer"] [data-testid="drawer-close-btn"]') as HTMLElement | null;
+            const rect = button?.getBoundingClientRect();
+            const drawerWidth = Number.parseFloat(
+              workspace ? getComputedStyle(workspace).getPropertyValue("--drawer-w") : "",
+            );
+            return {
+              viewportWidth: window.innerWidth,
+              viewportHeight: window.innerHeight,
+              layoutMode: drawer?.getAttribute("data-layout-mode") ?? "",
+              inlineMainWidth: (workspace?.clientWidth ?? 0) - (Number.isFinite(drawerWidth) ? drawerWidth : 0),
+              mainWidth: document.querySelector(".main-stage")?.getBoundingClientRect().width ?? 0,
+              visible: Boolean(button && getComputedStyle(button).display !== "none" && rect && rect.width > 0 && rect.height > 0),
+              width: rect?.width ?? 0,
+              height: rect?.height ?? 0,
+              overflow: document.documentElement.scrollWidth > window.innerWidth,
+            };
+          });
+          expect(overlayCloseButton.viewportWidth).toBe(width);
+          expect(overlayCloseButton.viewportHeight).toBe(820);
+          expect(overlayCloseButton.layoutMode).toBe("overlay");
+          expect(overlayCloseButton.inlineMainWidth).toBeLessThan(520);
+          expect(overlayCloseButton.mainWidth).toBeGreaterThan(250);
+          expect(overlayCloseButton.visible).toBe(true);
+          expect(overlayCloseButton.width).toBeGreaterThanOrEqual(44);
+          expect(overlayCloseButton.height).toBeGreaterThanOrEqual(44);
+          expect(overlayCloseButton.overflow).toBe(false);
+          await clickReady(page, '[data-testid="drawer-close-btn"]');
+          await page.waitForFunction(
+            () => {
+              const drawer = document.querySelector('[data-testid="right-drawer"]');
+              return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+            },
+            { timeout: 5000 },
+          );
+        }
+      }
+
+      // 6b. At 320px the drawer fills the viewport, so close it from its own 44px header control.
+      await page.setViewport({ width: 320, height: 820 });
+      await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("data-layout-mode") === "overlay",
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      const closeButtonBox = await page.evaluate(() => {
+        const drawer = document.querySelector('[data-testid="right-drawer"]');
+        const button = drawer?.querySelector('[data-testid="drawer-close-btn"]') as HTMLElement | null;
+        const rect = button?.getBoundingClientRect();
+        return {
+          inHeader: Boolean(drawer?.querySelector(".drawer-head")?.contains(button ?? null)),
+          visible: Boolean(button && getComputedStyle(button).display !== "none" && rect && rect.width > 0 && rect.height > 0),
+          width: rect?.width ?? 0,
+          height: rect?.height ?? 0,
+          overflow: document.documentElement.scrollWidth > window.innerWidth,
+        };
+      });
+      expect(closeButtonBox.inHeader).toBe(true);
+      expect(closeButtonBox.visible).toBe(true);
+      expect(closeButtonBox.width).toBeGreaterThanOrEqual(44);
+      expect(closeButtonBox.height).toBeGreaterThanOrEqual(44);
+      expect(closeButtonBox.overflow).toBe(false);
+      await clickReady(page, '[data-testid="drawer-close-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="tab-spec"]');
+      await clickReady(page, '[data-testid="tab-timeline"]');
+      const closedDrawerState = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+        timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+      }));
+      expect(closedDrawerState.overflow).toBe(false);
+      expect(closedDrawerState.selectedRequirement).toBe("REQ-001");
+      expect(closedDrawerState.timelineActive).toBe(true);
+
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      const reopenedDrawerState = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        selectedRequirement: document.querySelector(".app-req-id")?.textContent?.trim() ?? "",
+        timelineActive: Boolean(document.querySelector('[data-testid="tab-timeline"]')?.classList.contains("active")),
+        closeVisible: getComputedStyle(document.querySelector('[data-testid="drawer-close-btn"]') as HTMLElement).display !== "none",
+      }));
+      expect(reopenedDrawerState.overflow).toBe(false);
+      expect(reopenedDrawerState.selectedRequirement).toBe("REQ-001");
+      expect(reopenedDrawerState.timelineActive).toBe(true);
+      expect(reopenedDrawerState.closeVisible).toBe(true);
+      await clickReady(page, '[data-testid="drawer-close-btn"]');
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="right-drawer"]')?.getAttribute("aria-hidden") === "true",
+        { timeout: 5000 },
+      );
+
+      // 7. At supported narrow widths, the measured full header stays above both overlays and remains hit-testable.
+      const waitForMobileHeader = async (width: number) => {
+        await page.setViewport({ width, height: 820 });
+        await page.waitForFunction(`window.innerWidth === ${width} && window.innerHeight === 820`, { timeout: 5000 });
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        await page.waitForFunction(
+          () => {
+            const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+            const height = header?.getBoundingClientRect().height ?? 0;
+            const measured = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobile-header-h"));
+            return height > 0 && Math.abs(measured - Math.ceil(height)) < 0.1;
+          },
+          { timeout: 5000 },
+        );
+      };
+
+      const waitForPanelState = async (sidebarOpen: boolean, drawerOpen: boolean) => {
+        const expected = { sidebarOpen, drawerOpen };
+        await page.waitForFunction(
+          `Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("open")) === ${sidebarOpen} && ` +
+            `Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("open")) === ${drawerOpen}`,
+          { timeout: 5000 },
+        );
+        const actual = await page.evaluate(() => ({
+          sidebarOpen: Boolean(document.querySelector('[data-testid="hub-sidebar"]')?.classList.contains("open")),
+          drawerOpen: Boolean(document.querySelector('[data-testid="right-drawer"]')?.classList.contains("open")),
+        }));
+        expect(actual).toEqual(expected);
+      };
+
+      const auditHeader = async (width: number) => {
+        const report = await page.evaluate(() => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          if (!header) return null;
+          const rect = header.getBoundingClientRect();
+          const brandName = header.querySelector<HTMLElement>(".app-brand-name");
+          const controls = Array.from(header.querySelectorAll<HTMLElement>("button, select")).map((control) => {
+            const controlRect = control.getBoundingClientRect();
+            const style = getComputedStyle(control);
+            const hit = document.elementFromPoint(
+              controlRect.left + controlRect.width / 2,
+              controlRect.top + controlRect.height / 2,
+            );
+            const isButton = control instanceof HTMLButtonElement;
+            const isBrandButton = isButton && control.classList.contains("app-brand-btn");
+            const labelMetrics = Array.from(control.querySelectorAll<HTMLElement>(".header-btn-label")).map((label) => {
+              const labelRect = label.getBoundingClientRect();
+              const labelStyle = getComputedStyle(label);
+              return {
+                visible:
+                  labelRect.width > 0 &&
+                  labelRect.height > 0 &&
+                  labelStyle.display !== "none" &&
+                  labelStyle.visibility !== "hidden",
+                whiteSpace: labelStyle.whiteSpace,
+                textOverflow: labelStyle.textOverflow,
+                fits: label.scrollWidth <= label.clientWidth + 1,
+              };
+            });
+            const textRects: DOMRect[] = [];
+            let hasText = false;
+            if (isButton && !isBrandButton) {
+              const walker = document.createTreeWalker(control, NodeFilter.SHOW_TEXT);
+              let node = walker.nextNode();
+              while (node) {
+                if (node.textContent?.trim()) {
+                  hasText = true;
+                  const range = document.createRange();
+                  range.selectNodeContents(node);
+                  for (const textRect of Array.from(range.getClientRects())) {
+                    if (textRect.width > 0 && textRect.height > 0) textRects.push(textRect);
+                  }
+                }
+                node = walker.nextNode();
+              }
+            }
+            const textRows: Array<{ top: number; bottom: number }> = [];
+            for (const textRect of textRects) {
+              const row = textRows.find((candidate) => textRect.top < candidate.bottom && textRect.bottom > candidate.top);
+              if (row) {
+                row.top = Math.min(row.top, textRect.top);
+                row.bottom = Math.max(row.bottom, textRect.bottom);
+              } else {
+                textRows.push({ top: textRect.top, bottom: textRect.bottom });
+              }
+            }
+            return {
+              name: control.getAttribute("data-testid") ?? control.getAttribute("aria-label") ?? control.tagName,
+              width: controlRect.width,
+              height: controlRect.height,
+              touchTarget: controlRect.width >= 44 && controlRect.height >= 44,
+              visible:
+                controlRect.width > 0 &&
+                controlRect.height > 0 &&
+                style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                Number(style.opacity) > 0,
+              withinHeader:
+                controlRect.left >= rect.left - 1 &&
+                controlRect.right <= rect.right + 1 &&
+                controlRect.top >= rect.top - 1 &&
+                controlRect.bottom <= rect.bottom + 1,
+              withinViewport:
+                controlRect.left >= -1 &&
+                controlRect.right <= window.innerWidth + 1 &&
+                controlRect.top >= -1 &&
+                controlRect.bottom <= window.innerHeight + 1,
+              hit: Boolean(hit && (hit === control || control.contains(hit))),
+              hasText,
+              textVisible: !hasText || textRects.length > 0,
+              textLineCount: textRows.length,
+              textNoWrap: !isButton || style.whiteSpace === "nowrap",
+              textFits: control.scrollWidth <= control.clientWidth + 1,
+              labels: labelMetrics,
+            };
+          });
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+            overflow: document.documentElement.scrollWidth > window.innerWidth,
+            bodyOverflow: document.body.scrollWidth > window.innerWidth,
+            brandNameDisplay: brandName ? getComputedStyle(brandName).display : "missing",
+            controls,
+          };
+        });
+        if (!report) throw new Error("app header is missing");
+        expect(report.left).toBeGreaterThanOrEqual(-1);
+        expect(report.right).toBeLessThanOrEqual(width + 1);
+        expect(report.top).toBeGreaterThanOrEqual(-1);
+        expect(report.bottom).toBeLessThanOrEqual(820 + 1);
+        expect(report.overflow).toBe(false);
+        expect(report.bodyOverflow).toBe(false);
+        if (width <= 600) expect(report.brandNameDisplay).toBe("none");
+        else expect(report.brandNameDisplay).not.toBe("none");
+        expect(report.controls.length).toBeGreaterThan(0);
+        for (const control of report.controls) {
+          expect(control.visible, `${width}px header control ${control.name} must remain visible`).toBe(true);
+          expect(control.withinHeader, `${width}px header control ${control.name} must fit inside the header`).toBe(true);
+          expect(control.withinViewport, `${width}px header control ${control.name} must fit inside the viewport`).toBe(true);
+          expect(control.hit, `${width}px header control ${control.name} must win the hit-test`).toBe(true);
+          if (width <= 600) {
+            expect(control.touchTarget, `${width}px header control ${control.name} must be touch-sized`).toBe(true);
+            expect(control.textFits, `${width}px header control ${control.name} text must not be clipped`).toBe(true);
+            if (control.hasText) {
+              expect(control.textVisible, `${width}px button ${control.name} text must be visible`).toBe(true);
+              expect(control.textLineCount, `${width}px button ${control.name} text must stay on one line`).toBe(1);
+              expect(control.textNoWrap, `${width}px button ${control.name} must not wrap its text`).toBe(true);
+              expect(
+                control.labels.every(
+                  (label) => label.visible && label.whiteSpace === "nowrap" && label.textOverflow !== "ellipsis" && label.fits,
+                ),
+                `${width}px button ${control.name} labels must be complete and untruncated`,
+              ).toBe(true);
+            }
+          }
+        }
+      };
+
+      const expectTopbarToggleHit = async (testId: string) => {
+        const hit = await page.evaluate((id: string) => {
+          const button = document.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
+          if (!button) return { visible: false, disabled: true, topButtonTestId: "" };
+          const rect = button.getBoundingClientRect();
+          const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          return {
+            visible:
+              rect.width > 0 &&
+              rect.height > 0 &&
+              getComputedStyle(button).display !== "none" &&
+              getComputedStyle(button).visibility !== "hidden",
+            disabled: button.disabled,
+            topButtonTestId: top?.closest("button")?.getAttribute("data-testid") ?? "",
+          };
+        }, testId);
+        expect(hit.visible).toBe(true);
+        expect(hit.disabled).toBe(false);
+        expect(hit.topButtonTestId).toBe(testId);
+      };
+
+      const auditOpenPanel = async (kind: "sidebar" | "drawer") => {
+        const report = await page.evaluate((panelKind: "sidebar" | "drawer") => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          const panel = document.querySelector<HTMLElement>(
+            panelKind === "sidebar" ? '[data-testid="hub-sidebar"]' : '[data-testid="right-drawer"]',
+          );
+          const content = panel?.querySelector<HTMLElement>(panelKind === "sidebar" ? ".sidebar-inner" : ".drawer-inner");
+          const close = panel?.querySelector<HTMLElement>(
+            panelKind === "sidebar" ? ".sb-close-btn" : '[data-testid="drawer-close-btn"]',
+          );
+          const headerRect = header?.getBoundingClientRect();
+          const panelRect = panel?.getBoundingClientRect();
+          const contentRect = content?.getBoundingClientRect();
+          const closeRect = close?.getBoundingClientRect();
+          const closeHit = closeRect
+            ? document.elementFromPoint(closeRect.left + closeRect.width / 2, closeRect.top + closeRect.height / 2)
+            : null;
+          return {
+            open: Boolean(panel?.classList.contains("open")),
+            headerBottom: headerRect?.bottom ?? -1,
+            panelTop: panelRect?.top ?? -1,
+            panelBottom: panelRect?.bottom ?? -1,
+            contentTop: contentRect?.top ?? -1,
+            closeVisible: Boolean(
+              close &&
+                closeRect &&
+                closeRect.width > 0 &&
+                closeRect.height > 0 &&
+                getComputedStyle(close).display !== "none" &&
+                getComputedStyle(close).visibility !== "hidden",
+            ),
+            closeHit: Boolean(close && closeHit?.closest("button") === close),
+            headerZ: Number(header ? getComputedStyle(header).zIndex : 0),
+            panelZ: Number(panel ? getComputedStyle(panel).zIndex : 0),
+          };
+        }, kind);
+        expect(report.open).toBe(true);
+        expect(report.panelTop).toBeGreaterThanOrEqual(report.headerBottom - 1);
+        expect(report.contentTop).toBeGreaterThanOrEqual(report.headerBottom - 1);
+        expect(report.panelBottom).toBeLessThanOrEqual(821);
+        expect(report.closeVisible).toBe(true);
+        expect(report.closeHit).toBe(true);
+        expect(report.headerZ).toBeGreaterThan(report.panelZ);
+      };
+
+      const clickBackdropAndAssertOnlyClose = async (kind: "sidebar" | "drawer") => {
+        const point = await page.evaluate((backdropKind: "sidebar" | "drawer") => {
+          const header = document.querySelector<HTMLElement>('[data-testid="app-header"]');
+          const backdrop = document.querySelector<HTMLElement>(
+            backdropKind === "sidebar" ? ".sidebar-backdrop" : ".drawer-backdrop.overlay-mode",
+          );
+          const panel = document.querySelector<HTMLElement>(
+            backdropKind === "sidebar" ? '[data-testid="hub-sidebar"]' : '[data-testid="right-drawer"]',
+          );
+          if (!header || !backdrop || !panel) return null;
+          const headerBottom = header.getBoundingClientRect().bottom;
+          const panelRect = panel.getBoundingClientRect();
+          const x = backdropKind === "sidebar" ? window.innerWidth - 4 : 4;
+          const y = Math.min(window.innerHeight - 4, Math.ceil(headerBottom + 16));
+          const hit = document.elementFromPoint(x, y);
+          return { x, y, hitBackdrop: hit === backdrop || Boolean(hit && backdrop.contains(hit)), panelLeft: panelRect.left };
+        }, kind);
+        if (!point) throw new Error(`${kind} backdrop is missing`);
+        expect(point.hitBackdrop).toBe(true);
+        if (kind === "sidebar") expect(point.x).toBeGreaterThanOrEqual(360);
+        if (kind === "drawer") expect(point.x).toBeLessThan(point.panelLeft);
+        await page.mouse.move(point.x, point.y);
+        await page.mouse.down();
+        await page.mouse.up();
+        await waitForPanelState(false, false);
+      };
+
+      for (const width of [320, 375, 390, 768, 820]) {
+        await waitForMobileHeader(width);
+        await waitForPanelState(false, false);
+        await auditHeader(width);
+
+        // Drawer open -> the sidebar switch is the actual top hit and its first click switches panels.
+        await expectTopbarToggleHit("toggle-drawer-btn");
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await waitForPanelState(false, true);
+        await auditHeader(width);
+        await auditOpenPanel("drawer");
+        await expectTopbarToggleHit("toggle-sidebar-btn");
+        await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+        await waitForPanelState(true, false);
+        await auditHeader(width);
+        await auditOpenPanel("sidebar");
+
+        // The sidebar's own X closes only the current panel.
+        await clickReady(page, '[data-testid="hub-sidebar"] .sb-close-btn');
+        await waitForPanelState(false, false);
+
+        // Sidebar open -> the drawer switch is the actual top hit and its first click switches panels.
+        await expectTopbarToggleHit("toggle-sidebar-btn");
+        await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+        await waitForPanelState(true, false);
+        await auditHeader(width);
+        await auditOpenPanel("sidebar");
+        await expectTopbarToggleHit("toggle-drawer-btn");
+        await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+        await waitForPanelState(false, true);
+        await auditHeader(width);
+        await auditOpenPanel("drawer");
+
+        // The drawer's own X closes only the current panel.
+        await clickReady(page, '[data-testid="drawer-close-btn"]');
+        await waitForPanelState(false, false);
+
+        // At 375px and wider the sidebar leaves an exposed backdrop strip; backdrop clicks only close it.
+        if (width >= 375) {
+          await clickReady(page, '[data-testid="toggle-sidebar-btn"]');
+          await waitForPanelState(true, false);
+          await clickBackdropAndAssertOnlyClose("sidebar");
+        }
+
+        // The drawer leaves an exposed backdrop area at 768px and 820px.
+        if (width >= 768) {
+          await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+          await waitForPanelState(false, true);
+          await clickBackdropAndAssertOnlyClose("drawer");
+        }
+      }
+
+      // 8. An in-progress design draft survives further narrow/wide transitions; routing settings stay inside the viewport.
+      await page.setViewport({ width: 1440, height: 820 });
+      await page.waitForFunction(() => window.innerWidth === 1440, { timeout: 5000 });
+      const desktopBrandVisible = await page.evaluate(() => {
+        const element = document.querySelector<HTMLElement>('[data-testid="app-header"] .app-brand-name');
+        return Boolean(element && getComputedStyle(element).display !== "none");
+      });
+      expect(desktopBrandVisible).toBe(true);
+      await clickReady(page, '[data-testid="tab-spec"]');
+      await clickReady(page, '[data-testid="start-edit-design-btn"]');
+      await page.waitForSelector('[data-testid="design-body-input"]', { timeout: 5000 });
+      await page.type('[data-testid="design-body-input"]', "\nResponsive draft preserved across resize.");
+      for (const width of [390, 320, 1440]) {
+        await page.setViewport({ width, height: 820 });
+        await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        const draft = await page.evaluate(
+          () => (document.querySelector('[data-testid="design-body-input"]') as HTMLTextAreaElement | null)?.value ?? "",
+        );
+        expect(draft).toContain("Responsive draft preserved across resize.");
+      }
+      await clickReady(page, '[data-testid="save-design-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="design-body-input"]'), { timeout: 5000 });
+      await page.setViewport({ width: 390, height: 820 });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      const routingBounds = await page.evaluate(() => {
+        const rect = document.querySelector('[data-testid="routing-modal"]')?.getBoundingClientRect();
+        return { left: rect?.left ?? -1, right: rect?.right ?? -1, width: rect?.width ?? 0 };
+      });
+      expect(routingBounds.left).toBeGreaterThanOrEqual(0);
+      expect(routingBounds.right).toBeLessThanOrEqual(390);
+      expect(routingBounds.width).toBeGreaterThan(200);
+      await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   test("REQ-009: 需求详情固定顶部区域，仅 Tabs 下方内容拥有独立垂直滚动", async () => {
     const repo = initGitRepo();
@@ -1382,6 +2132,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         expectedRuns);
       runCalls.splice(0, runCalls.length, ...captured);
       await waitRecordSettled(expectedRuns - 1);
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForFunction(
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          return drawer?.getAttribute("aria-hidden") === "true" && Boolean(drawer?.classList.contains("settled"));
+        },
+        { timeout: 5000 },
+      );
     };
 
     try {
@@ -2560,7 +3318,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
       await page.waitForFunction(
-        () => (document.querySelector('[data-testid="drawer-diff-panel"]')?.getBoundingClientRect().width ?? 0) >= 300,
+        () => {
+          const drawer = document.querySelector('[data-testid="right-drawer"]');
+          const input = drawer?.querySelector('[data-testid="drawer-diff-file-search"]') as HTMLElement | null;
+          return Boolean(
+            drawer?.classList.contains("open") &&
+            input &&
+            getComputedStyle(input).visibility === "visible" &&
+            getComputedStyle(input).pointerEvents !== "none" &&
+            input.getBoundingClientRect().width > 0,
+          );
+        },
         { timeout: 5000 },
       );
       await clickReady(page, '[data-testid="drawer-diff-file-search"]');
