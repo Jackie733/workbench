@@ -151,7 +151,19 @@ describe("WB-08 multi-project hub registry and daemon", () => {
     const repo = makeGitRepo("daemon");
     const port = 24000 + Math.floor(Math.random() * 10000);
 
-    const started = await startDaemon({ port, registerRoot: repo });
+    // This test spawns a plain CLI daemon. When the test process itself runs under a service
+    // manager, inherited markers would falsely mark the child as an externally managed service.
+    const savedInvocationId = process.env.INVOCATION_ID;
+    const savedXpcServiceName = process.env.XPC_SERVICE_NAME;
+    delete process.env.INVOCATION_ID;
+    delete process.env.XPC_SERVICE_NAME;
+    let started;
+    try {
+      started = await startDaemon({ port, registerRoot: repo });
+    } finally {
+      if (savedInvocationId !== undefined) process.env.INVOCATION_ID = savedInvocationId;
+      if (savedXpcServiceName !== undefined) process.env.XPC_SERVICE_NAME = savedXpcServiceName;
+    }
     expect(started.started).toBe(true);
     expect(started.info.port).toBe(port);
 
@@ -492,6 +504,111 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     legacyRouting.stages.design.primary = { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "high" };
     const normalizedResolved = resolveRouteCandidates(legacyRouting, upgradedHarnesses, "design");
     expect(normalizedResolved[0]).toEqual({ harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" });
+  });
+});
+
+describe("REQ-013 AGY 启动参数按动作边界构建", () => {
+  const agyHarnesses: HarnessInfo[] = [
+    {
+      id: "agy",
+      label: "AGY",
+      subscription: "Pro",
+      installed: true,
+      executable: "agy",
+      models: [
+        {
+          id: "gemini-4-hydrogen",
+          tier: "sota",
+          source: "detected",
+          supportedEfforts: ["low", "medium", "high", "xhigh"],
+          effortVariants: {
+            low: "gemini-4-hydrogen-low",
+            medium: "gemini-4-hydrogen-medium",
+            high: "gemini-4-hydrogen-high",
+            xhigh: "gemini-4-hydrogen-xhigh",
+          },
+        },
+        {
+          id: "gpt-oss-120b-medium",
+          tier: "fast",
+          source: "detected",
+          supportedEfforts: ["medium"],
+          defaultEffort: "medium",
+          effortLocked: true,
+        },
+      ],
+      defaultModel: "gemini-4-hydrogen",
+      detectedAt: Date.now(),
+    },
+  ];
+  const build = (action: AgentAction, nativeSessionId: string | undefined = "conv-1") =>
+    buildHarnessCommand(
+      { harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" },
+      { root: "/repo", action, prompt: "PROMPT_MARKER", nativeSessionId, harnesses: agyHarnesses },
+    );
+
+  test("ask 与 review 显式使用计划模式且不自动批准工具", () => {
+    for (const action of ["ask", "review"] as AgentAction[]) {
+      const built = build(action);
+      expect(built.args).toEqual([
+        "-p",
+        "PROMPT_MARKER",
+        "--output-format",
+        "stream-json",
+        "--mode",
+        "plan",
+        "--model",
+        "gemini-4-hydrogen-high",
+        "--effort",
+        "high",
+        "--conversation",
+        "conv-1",
+      ]);
+      expect(built.args).not.toContain("--dangerously-skip-permissions");
+      expect(built.displayCommand).toBe("agy -p --output-format stream-json --mode plan (model=gemini-4-hydrogen-high)");
+      expect(built.displayCommand).not.toContain("PROMPT_MARKER");
+      expect(built.displayCommand).not.toContain("conv-1");
+    }
+  });
+
+  test("design、implement 与 fix 省略模式参数并保留自动批准工具", () => {
+    for (const action of ["design", "implement", "fix"] as AgentAction[]) {
+      const built = build(action);
+      expect(built.args).toEqual([
+        "-p",
+        "PROMPT_MARKER",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "gemini-4-hydrogen-high",
+        "--effort",
+        "high",
+        "--conversation",
+        "conv-1",
+      ]);
+      expect(built.args).not.toContain("--mode");
+      expect(built.displayCommand).toBe("agy -p --output-format stream-json (model=gemini-4-hydrogen-high)");
+      expect(built.displayCommand).not.toContain("PROMPT_MARKER");
+      expect(built.displayCommand).not.toContain("conv-1");
+    }
+  });
+
+  test("锁定强度的模型继续传递解析后的强度，且无会话时不附加会话参数", () => {
+    const built = buildHarnessCommand(
+      { harness: "agy", model: "gpt-oss-120b-medium", reasoningEffort: "high" },
+      { root: "/repo", action: "implement", prompt: "PROMPT_MARKER", harnesses: agyHarnesses, structuredJson: false },
+    );
+    expect(built.args).toEqual([
+      "-p",
+      "PROMPT_MARKER",
+      "--dangerously-skip-permissions",
+      "--model",
+      "gpt-oss-120b-medium",
+      "--effort",
+      "medium",
+    ]);
+    expect(built.args).not.toContain("--conversation");
   });
 });
 

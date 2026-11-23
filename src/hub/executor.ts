@@ -315,7 +315,9 @@ export function buildHarnessCommand(
 
     case "agy": {
       const bin = exe || "agy";
-      const mode = ctx.action === "ask" || ctx.action === "review" ? "plan" : "auto";
+      // Only read-only stages pin plan mode; execution stages let AGY resolve its configured mode
+      // so hosts without a terminal sandbox no longer get an explicitly requested auto mode.
+      const usePlanMode = ctx.action === "ask" || ctx.action === "review";
       const modelInfo =
         info?.models.find((m) => m.id === model) ??
         info?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(model));
@@ -353,13 +355,14 @@ export function buildHarnessCommand(
         resolvedEffort = undefined;
       }
 
+      const modeFlags = usePlanMode ? ["--mode", "plan"] : [];
+      const permissionFlags = usePlanMode ? [] : ["--dangerously-skip-permissions"];
       const args = [
         "-p",
         ctx.prompt,
         ...(structuredJson ? ["--output-format", "stream-json"] : []),
-        "--mode",
-        mode,
-        ...(mode === "auto" ? ["--dangerously-skip-permissions"] : []),
+        ...modeFlags,
+        ...permissionFlags,
         ...(resolvedModel && resolvedModel !== "default" ? ["--model", resolvedModel] : []),
         ...(resolvedEffort ? ["--effort", resolvedEffort] : []),
         ...(ctx.nativeSessionId ? ["--conversation", ctx.nativeSessionId] : []),
@@ -367,7 +370,7 @@ export function buildHarnessCommand(
       return {
         command: bin,
         args,
-        displayCommand: `${bin} -p${structuredJson ? " --output-format stream-json" : ""} --mode ${mode} (model=${resolvedModel})`,
+        displayCommand: `${bin} -p${structuredJson ? " --output-format stream-json" : ""}${usePlanMode ? " --mode plan" : ""} (model=${resolvedModel})`,
       };
     }
 
