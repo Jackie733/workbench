@@ -513,6 +513,7 @@ export type RunDispatchReason =
   | "session_affinity"
   | "manual_fallback"
   | "auto_fallback"
+  | "auto_heal"
   | "auto_review"
   | "conflict_resolve"
   | "refine"
@@ -1001,6 +1002,8 @@ export interface RequirementDiffView {
   scopeNote: string | null;
   scopeNoteKey?: string;
   observation: GitObservation | null;
+  /** Deterministic advisory signals when diff deletes test files, skips tests, or removes assertions. */
+  testTamperingSignals?: string[];
 }
 
 export type ActionId =

@@ -18,6 +18,14 @@ import {
 
 function buildStaticPresetRouting(preset: RoutingPreset): RoutingConfig {
   if (preset === "sota_first") {
+    const implRule: StageRouteRule = {
+      primary: { harness: "codex", model: "gpt-6.2-sol" },
+      fallbacks: [
+        { harness: "agy", model: "claude-sonnet-5-5" },
+        { harness: "qodercn", model: "Qwen4-Max" },
+        { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
+      ],
+    };
     return {
       activePreset: "sota_first",
       stages: {
@@ -29,21 +37,10 @@ function buildStaticPresetRouting(preset: RoutingPreset): RoutingConfig {
             { harness: "qodercn", model: "Kimi-K3.1-Pro", reasoningEffort: "high" },
           ],
         },
-        implement: {
-          primary: { harness: "codex", model: "gpt-6.2-sol", reasoningEffort: "medium" },
-          fallbacks: [
-            { harness: "agy", model: "claude-sonnet-5-5", reasoningEffort: "medium" },
-            { harness: "qodercn", model: "Qwen4-Max" },
-            { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-          ],
-        },
+        implement: implRule,
         fix: {
-          primary: { harness: "codex", model: "gpt-6.2-sol", reasoningEffort: "medium" },
-          fallbacks: [
-            { harness: "agy", model: "gemini-4-argon", reasoningEffort: "medium" },
-            { harness: "qodercn", model: "Qwen4-Max" },
-            { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-          ],
+          primary: { ...implRule.primary },
+          fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
         },
         review: {
           primary: { harness: "agy", model: "gemini-4-argon", reasoningEffort: "high" },
@@ -57,37 +54,34 @@ function buildStaticPresetRouting(preset: RoutingPreset): RoutingConfig {
   }
 
   if (preset === "quota_saver") {
+    const implRule: StageRouteRule = {
+      primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
+      fallbacks: [
+        { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
+        { harness: "qodercn", model: "DeepSeek-Flash" },
+        { harness: "agy", model: "gemini-3.8-flash" },
+      ],
+    };
     return {
       activePreset: "quota_saver",
       stages: {
         design: {
           primary: { harness: "qodercn", model: "Qwen4-Max" },
           fallbacks: [
-            { harness: "agy", model: "gemini-3.8-flash", reasoningEffort: "medium" },
+            { harness: "agy", model: "gemini-3.8-flash" },
             { harness: "qodercn", model: "Kimi-K3.1-Pro" },
             { harness: "qodercn", model: "DeepSeek-V4-Pro" },
           ],
         },
-        implement: {
-          primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-          fallbacks: [
-            { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
-            { harness: "qodercn", model: "DeepSeek-Flash" },
-            { harness: "agy", model: "gemini-3.8-flash", reasoningEffort: "low" },
-          ],
-        },
+        implement: implRule,
         fix: {
-          primary: { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
-          fallbacks: [
-            { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-            { harness: "qodercn", model: "DeepSeek-Flash" },
-            { harness: "qodercn", model: "Qwen3.8-Flash" },
-          ],
+          primary: { ...implRule.primary },
+          fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
         },
         review: {
           primary: { harness: "qodercn", model: "Qwen4-Max" },
           fallbacks: [
-            { harness: "agy", model: "gemini-3.8-flash", reasoningEffort: "medium" },
+            { harness: "agy", model: "gemini-3.8-flash" },
             { harness: "qodercn", model: "DeepSeek-Flash" },
             { harness: "codex", model: "codex-auto-review" },
           ],
@@ -96,38 +90,35 @@ function buildStaticPresetRouting(preset: RoutingPreset): RoutingConfig {
     };
   }
 
-  // Default: "balanced"
+  // Default: "balanced" — fix matches implement so coding and self-healing stay single-threaded without forced low effort.
+  const implRule: StageRouteRule = {
+    primary: { harness: "qodercn", model: "Qwen4-Max" },
+    fallbacks: [
+      { harness: "codex", model: "gpt-6.1-terra" },
+      { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
+      { harness: "agy", model: "gemini-3.8-flash" },
+    ],
+  };
   return {
     activePreset: "balanced",
     stages: {
       design: {
-        primary: { harness: "codex", model: "gpt-6.2-sol", reasoningEffort: "low" },
+        primary: { harness: "codex", model: "gpt-6.2-sol" },
         fallbacks: [
-          { harness: "agy", model: "gemini-4-argon", reasoningEffort: "medium" },
+          { harness: "agy", model: "gemini-4-argon" },
           { harness: "qodercn", model: "Qwen4-Max" },
           { harness: "qodercn", model: "Kimi-K3.1-Pro" },
         ],
       },
-      implement: {
-        primary: { harness: "qodercn", model: "Qwen4-Max" },
-        fallbacks: [
-          { harness: "codex", model: "gpt-6.1-terra", reasoningEffort: "low" },
-          { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-          { harness: "agy", model: "gemini-3.8-flash", reasoningEffort: "medium" },
-        ],
-      },
+      implement: implRule,
       fix: {
-        primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-        fallbacks: [
-          { harness: "agy", model: "gemini-3.8-flash", reasoningEffort: "medium" },
-          { harness: "qodercn", model: "DeepSeek-Flash" },
-          { harness: "codex", model: "gpt-6.2-sol", reasoningEffort: "low" },
-        ],
+        primary: { ...implRule.primary },
+        fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
       },
       review: {
         primary: { harness: "codex", model: "codex-auto-review" },
         fallbacks: [
-          { harness: "agy", model: "gemini-4-argon", reasoningEffort: "medium" },
+          { harness: "agy", model: "gemini-4-argon" },
           { harness: "qodercn", model: "Qwen4-Max" },
           { harness: "qodercn", model: "DeepSeek-Flash" },
         ],
@@ -220,23 +211,11 @@ function isWorkhorseCodingModel(model: DiscoveredModel): boolean {
 function desiredEffortForStage(preset: RoutingPreset, stage: RoutingStage, model: DiscoveredModel): ReasoningEffort | undefined {
   if (model.tier === "review" || model.effortLocked) return undefined;
   if (model.supportedEfforts && model.supportedEfforts.length === 0) return undefined;
-  if (preset === "sota_first") {
-    if (stage === "design" || stage === "review") return clampEffortForModel(model, "high");
-    return clampEffortForModel(model, "medium");
+  // Never force reasoning effort down to "low"; leave undefined so CLIs use their native default unless sota_first requests high reasoning on design/review.
+  if (preset === "sota_first" && (stage === "design" || stage === "review")) {
+    return clampEffortForModel(model, "high");
   }
-  if (preset === "balanced") {
-    if (stage === "design") return clampEffortForModel(model, "low");
-    if (stage === "review") return clampEffortForModel(model, "medium");
-    if (stage === "implement") {
-      return model.id === "Qwen4-Max" ? undefined : clampEffortForModel(model, "low");
-    }
-    return model.isFree ? undefined : clampEffortForModel(model, "medium");
-  }
-  // quota_saver
-  if (stage === "design" || stage === "review") {
-    return model.id === "Qwen4-Max" ? undefined : clampEffortForModel(model, "medium");
-  }
-  return model.isFree ? undefined : clampEffortForModel(model, "low");
+  return undefined;
 }
 
 interface CandidateScore {
@@ -262,11 +241,8 @@ function scoreModelForStage(
     if (stage === "design") {
       return cap + (expensive ? 4 : 0) + (model.tier === "sota" ? 4 : 0) - (model.tier === "fast" ? 12 : 0) - (isReviewModel ? 14 : 0);
     }
-    if (stage === "implement") {
+    if (stage === "implement" || stage === "fix") {
       return cap + (workhorse ? 5 : 0) + (model.tier === "sota" ? 3 : 0) - (model.tier === "fast" ? 12 : 0) - (isReviewModel ? 14 : 0);
-    }
-    if (stage === "fix") {
-      return cap + (workhorse ? 4 : 0) - (isReviewModel ? 12 : 0) - (model.tier === "fast" ? 8 : 0);
     }
     // review: prefer cross-model reviewer or dedicated review model
     const crossBonus = implementPrimaryHarness && harness !== implementPrimaryHarness ? 8 : 0;
@@ -293,7 +269,7 @@ function scoreModelForStage(
   if (stage === "design") {
     return cap + (workhorse ? 4 : 0) - (expensive ? 6 : 0) - (model.tier === "fast" ? 10 : 0) - (isReviewModel ? 12 : 0);
   }
-  if (stage === "implement") {
+  if (stage === "implement" || stage === "fix") {
     const balancedBonus =
       model.id === "Qwen4-Max"
         ? 18
@@ -306,10 +282,6 @@ function scoreModelForStage(
               : 0;
     const codexQuotaBalance = harness === "codex" ? -4 : 0;
     return cap + balancedBonus + codexQuotaBalance - (isReviewModel ? 12 : 0);
-  }
-  if (stage === "fix") {
-    const fixBonus = free ? 28 : model.tier === "fast" ? 18 : workhorse ? 6 : expensive ? -10 : 0;
-    return cap * 0.65 + fixBonus - (isReviewModel ? 12 : 0);
   }
   // review
   const crossBonus = implementPrimaryHarness && harness !== implementPrimaryHarness ? 4 : 0;
@@ -472,6 +444,7 @@ export function normalizeRoutingConfig(raw: unknown): RoutingConfig {
     stages,
     ...(typeof obj.autoReview === "boolean" ? { autoReview: obj.autoReview } : {}),
     ...(maxAutoReviewRounds !== undefined ? { maxAutoReviewRounds } : {}),
+    ...(typeof obj.autoHeal === "boolean" ? { autoHeal: obj.autoHeal } : {}),
   };
 }
 

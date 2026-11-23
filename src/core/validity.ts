@@ -5,6 +5,7 @@ import type {
   AcceptanceSnapshot,
   ActionBanner,
   ApprovalStatus,
+  ChangedFile,
   CriteriaCoverage,
   Criterion,
   CriterionCoverageItem,
@@ -17,6 +18,67 @@ import type {
   UiMessageRef,
   ValidityReport,
 } from "./types.ts";
+
+const TEST_FILE_PATH_RE = /(?:^|\/)(?:__tests__\/.*|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i;
+const TEST_SKIP_LINE_RE = /^\+(?!\+\+)(?:.*\b(?:describe|it|test|suite)\.(?:skip|only)\s*\(|.*\b(?:xit|xtest|xdescribe)\s*\(|.*@pytest\.mark\.skip\b|.*#\[\s*ignore\b)/;
+const ASSERTION_CALL_RE = /\b(?:expect|assert|assertEquals|assertEqual|assertThrows)\s*\(/;
+
+/**
+ * Deterministically inspects changed files and diff hunks for signs of deleted tests,
+ * newly skipped tests, or removed assertions without replacement. Advisory only.
+ */
+export function detectTestTamperingSignals(files: ChangedFile[], diff: string): string[] {
+  const signals: string[] = [];
+  const deletedTests = files
+    .filter((f) => TEST_FILE_PATH_RE.test(f.path) && (f.status === "D" || f.status.startsWith("D")))
+    .map((f) => f.path);
+  if (deletedTests.length > 0) {
+    signals.push(`删除了测试文件：${deletedTests.slice(0, 8).join("、")}`);
+  }
+
+  if (!diff.trim()) return signals;
+
+  let currentFile = "";
+  let inTestFile = false;
+  const perFileAssertions = new Map<string, { removed: number; added: number }>();
+  const skippedLocations: string[] = [];
+
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const m = /^diff --git a\/.+? b\/(.+)$/.exec(line);
+      currentFile = m ? m[1]! : "";
+      inTestFile = TEST_FILE_PATH_RE.test(currentFile);
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ")) continue;
+    if (inTestFile) {
+      if (TEST_SKIP_LINE_RE.test(line)) {
+        const label = currentFile || "diff";
+        if (!skippedLocations.includes(label)) skippedLocations.push(label);
+      }
+      if (line.startsWith("-") && ASSERTION_CALL_RE.test(line)) {
+        const counts = perFileAssertions.get(currentFile) ?? { removed: 0, added: 0 };
+        counts.removed += 1;
+        perFileAssertions.set(currentFile, counts);
+      } else if (line.startsWith("+") && ASSERTION_CALL_RE.test(line)) {
+        const counts = perFileAssertions.get(currentFile) ?? { removed: 0, added: 0 };
+        counts.added += 1;
+        perFileAssertions.set(currentFile, counts);
+      }
+    }
+  }
+
+  if (skippedLocations.length > 0) {
+    signals.push(`新增跳过测试标记（skip/ignore）：${skippedLocations.slice(0, 8).join("、")}`);
+  }
+  const droppedAssertionFiles = [...perFileAssertions.entries()]
+    .filter(([, counts]) => counts.removed >= 2 && counts.added === 0)
+    .map(([filePath, counts]) => `${filePath}（-${counts.removed}）`);
+  if (droppedAssertionFiles.length > 0) {
+    signals.push(`测试文件中移除了断言且未新增替代断言：${droppedAssertionFiles.slice(0, 8).join("、")}`);
+  }
+  return signals;
+}
 
 export const BASELINE_SCOPE_NOTE = "基于验收基线采集的全部改动（不证明本需求独占所有文件）";
 export const WORKTREE_SCOPE_NOTE = "基于工作区采集的改动（不证明本需求独占所有文件）";

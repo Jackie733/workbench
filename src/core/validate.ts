@@ -928,6 +928,7 @@ const RUN_DISPATCH_REASONS: readonly RunDispatchReason[] = [
   "session_affinity",
   "manual_fallback",
   "auto_fallback",
+  "auto_heal",
   "auto_review",
   "conflict_resolve",
   "refine",

@@ -253,7 +253,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(packet.markdown.indexOf("人类最新指令与未解决批注（当前最高优先级）")).toBeLessThan(
       packet.markdown.indexOf("历史跨模型 Code Review"),
     );
-    expect(fixPrompt).toContain("历史 Code Review 意见已过期仅供参考");
+    expect(fixPrompt).toContain("历史过期审查意见仅供参考");
   });
 
   test("executor parses structured findings, ignores non-header session_id lines, and auto-triggers review on submit", async () => {
@@ -572,15 +572,16 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     const snap2 = (await observeGitSnapshot(repo))!;
 
     const reviewHandoff = await synthesizeHandoffPacket(repo, "REQ-001", { action: "review" });
-    expect(reviewHandoff.markdown).toContain("第 2 轮 · 增量收敛模式");
-    expect(reviewHandoff.markdown).toContain("收缩规则缺失");
-    expect(reviewHandoff.markdown).toContain("other.ts");
+    expect(reviewHandoff.markdown).not.toContain("第 2 轮 · 增量收敛模式");
+    expect(reviewHandoff.markdown).not.toContain("增量收敛模式");
+    expect(reviewHandoff.markdown).not.toContain("项目持久避坑与偏好法则");
     const reviewPrompt = buildExecutionPrompt(reviewHandoff.detail, reviewHandoff.markdown, {
       root: repo,
       requirementId: "REQ-001",
       action: "review",
     });
-    expect(reviewPrompt).toContain("第 2 轮 · 增量收敛模式");
+    expect(reviewPrompt).not.toContain("增量收敛模式");
+    expect(reviewPrompt).toContain("只读 Code Review");
 
     // Round 2 non-blocking concern (no high finding) flips banner primaryAction to accept
     const r2 = await recordReviewReport(repo, "REQ-001", {

@@ -15,10 +15,11 @@ import {
   type RequirementDetail,
 } from "../core/types.ts";
 import { sanitizeOutput } from "../core/validate.ts";
+import { detectTestTamperingSignals } from "../core/validity.ts";
 import { estimateTokens } from "./pricing.ts";
 import { readHubConfig } from "./registry.ts";
 
-const HANDOFF_MAX_BYTES = 24 * 1024;
+const HANDOFF_MAX_BYTES = 8 * 1024;
 const PLAYBOOK_SECTION_MAX_BYTES = 1200;
 
 export interface HandoffComposition {
@@ -67,7 +68,7 @@ const SECTION_LABELS: Record<string, string> = {
   steering: "Review & Feedback",
   failures: "Failure Evidence",
   progress: "Tasks & HandoffNote",
-  contract: "Spec, Design & Criteria",
+  contract: "File Pointers & Criteria",
   git: "Git Snapshot",
 };
 
@@ -114,7 +115,7 @@ function assembleBudgetedPacket(
       if (targetSecBytes <= minBytes && sec.minText !== undefined) {
         sec.text = sec.minText;
       } else {
-        sec.text = clipTextByBytes(sec.text, targetSecBytes, "\n> …（因总简报预算限制已精简此节）");
+        sec.text = clipTextByBytes(sec.text, targetSecBytes, "\n> …（因简报预算限制已精简此节）");
       }
       trimmedKeys.add(sec.key);
       assembled = joinAll();
@@ -135,7 +136,6 @@ function assembleBudgetedPacket(
     },
   ];
   for (const sec of sections) {
-    if (sec.key === "steering_placeholder") continue;
     const rawBytes = rawSizes.get(sec.key) ?? 0;
     const finalBytes = Buffer.byteLength(sec.text, "utf8");
     const truncated = Boolean(sec.inlineTruncated) || trimmedKeys.has(sec.key) || finalBytes < rawBytes;
@@ -164,8 +164,9 @@ function assembleBudgetedPacket(
 }
 
 /**
- * Synthesizes a high-signal, priority-budgeted handoff brief from authoritative
- * disk state, review findings, objective git working-tree delta, failed evidence, and human annotations.
+ * Synthesizes a pointer-first, high-signal orientation packet from authoritative disk state,
+ * review findings, objective git file status, failed evidence, and human annotations.
+ * Never pre-truncates spec.md, design.md, or git diffs so agents read full ground truth natively.
  */
 export async function synthesizeHandoffPacket(
   root: string,
@@ -178,7 +179,12 @@ export async function synthesizeHandoffPacket(
   composition: HandoffComposition;
 }> {
   const codeRoot = resolveCodeRoot(root, id);
-  const gitChanges = await observeGitChanges(codeRoot, { maxDiffBytes: 4096 });
+  const preDetail = getRequirement(root, id);
+  const baselineHead = preDetail.state.baseline?.head ?? null;
+  const gitChanges = await observeGitChanges(codeRoot, {
+    sinceHead: baselineHead,
+    maxDiffBytes: options.action === "review" ? 64 * 1024 : 1024,
+  });
   const detail = getRequirement(root, id, { currentCodeSnapshotHash: gitChanges.fingerprint ?? null });
   const { state, specMarkdown, designMarkdown, validity } = detail;
   const projectMeta = getProjectStatus(root).project;
@@ -192,13 +198,13 @@ export async function synthesizeHandoffPacket(
 
   const itemDirHint = `${WORKBENCH_DIR}/items/${state.id}`;
   const headerLines: string[] = [
-    `# ${state.id} · ${state.title} — 上下文交接简报`,
+    `# ${state.id} · ${state.title} — 工作上下文简报`,
     "",
     `- **当前阶段**：\`${state.stage}\` | **轨道**：\`${state.track}\` | **拟执行动作**：\`${options.action}\``,
     `- **权威文件位置**：规范 \`${itemDirHint}/spec.md\` · 方案 \`${itemDirHint}/design.md\` · 状态 \`${itemDirHint}/state.json\``,
     outputLanguage === "en"
-      ? "- **Output Language Policy**：`English (en)` — Write all titles, specs, designs, criteria descriptions, tasks, reviews, and handoff memos strictly in English."
-      : "- **输出语言规范**：`简体中文 (zh-CN)` — 所有提交的标题、规范、方案、验收条件描述、任务、审查意见与交接备忘必须严格使用简体中文（代码符号与命令原文除外）。",
+      ? "- **Output Language Policy**：`English (en)`"
+      : "- **输出语言规范**：`简体中文 (zh-CN)`",
   ];
   if (state.parentId) {
     headerLines.push(
@@ -223,10 +229,10 @@ export async function synthesizeHandoffPacket(
   if (codeRoot !== root) {
     const sandboxHint =
       options.action === "implement" || options.action === "fix"
-        ? "请在当前沙箱目录修改代码并运行验证；数据仍绑定主仓库"
+        ? "请在当前沙箱目录修改代码；元数据仍绑定主仓库"
         : options.action === "design"
-          ? "设计阶段只读调研，禁止修改业务代码或运行验证；数据仍绑定主仓库"
-          : "只读调研，请勿修改代码；数据仍绑定主仓库";
+          ? "设计阶段请勿修改业务源码，可做只读检查；元数据仍绑定主仓库"
+          : "只读调研，请勿修改代码；元数据仍绑定主仓库";
     headerLines.push(`- **隔离沙箱目录**：\`${codeRoot}\`（${sandboxHint}）`);
   }
   if (options.previousRun) {
@@ -244,52 +250,52 @@ export async function synthesizeHandoffPacket(
 
   const sections: BudgetedSection[] = [];
 
-  // 0. Playbook (positioned immediately before ## 1. to preserve section delimiter stability, trimmed early if tight)
-  const playbook = readPlaybook(root);
-  if (playbook.rules.length > 0) {
-    const pbLines: string[] = ["## 0. 项目持久避坑与偏好法则（Playbook）"];
-    let usedBytes = 0;
-    for (const rule of playbook.rules.slice(-12)) {
-      const cleanRule = sanitizeOutput(rule, 480).text.trim();
-      if (!cleanRule) continue;
-      const bullet = `- ${cleanRule}`;
-      const bulletBytes = Buffer.byteLength(bullet, "utf8") + 1;
-      if (usedBytes > 0 && usedBytes + bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) break;
-      if (bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) {
-        pbLines.push(`- ${sanitizeOutput(cleanRule, PLAYBOOK_SECTION_MAX_BYTES - 20).text}`);
-        break;
+  // Playbook is omitted during blind review to avoid biasing independent judgment.
+  if (options.action !== "review") {
+    const playbook = readPlaybook(root);
+    if (playbook.rules.length > 0) {
+      const pbLines: string[] = [
+        "## 项目持久避坑与偏好法则（Playbook）",
+        `> 完整法则文件见 \`${WORKBENCH_DIR}/playbook.md\`（共 ${playbook.rules.length} 条）。`,
+      ];
+      let usedBytes = 0;
+      for (const rule of playbook.rules.slice(-12)) {
+        const cleanRule = sanitizeOutput(rule, 480).text.trim();
+        if (!cleanRule) continue;
+        const bullet = `- ${cleanRule}`;
+        const bulletBytes = Buffer.byteLength(bullet, "utf8") + 1;
+        if (usedBytes > 0 && usedBytes + bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) break;
+        if (bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) {
+          pbLines.push(`- ${sanitizeOutput(cleanRule, PLAYBOOK_SECTION_MAX_BYTES - 20).text}`);
+          break;
+        }
+        pbLines.push(bullet);
+        usedBytes += bulletBytes;
       }
-      pbLines.push(bullet);
-      usedBytes += bulletBytes;
+      pbLines.push("");
+      sections.push({
+        key: "playbook",
+        priority: 6,
+        text: pbLines.join("\n"),
+        minText: "",
+      });
     }
-    pbLines.push("");
-    sections.push({
-      key: "playbook",
-      priority: 6,
-      text: pbLines.join("\n"),
-      minText: "",
-    });
   }
 
-  // 1. Highest-priority steering: Cross-model Review findings, human feedback, unresolved annotations, and recent Ask Q&A
+  // Highest-priority steering: merge conflict / review findings (non-review actions) / human feedback / unresolved annotations
   const allDiscussions = state.discussions ?? [];
   const unresolvedRefineNotes = allDiscussions.filter((d) => d.mode === "refine" && !d.resolved);
   const recentAskNotes = allDiscussions.filter((d) => d.mode === "ask").slice(-4);
   const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
   const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));
   const review = state.reviewReport;
-  const priorReviews = state.reviewHistory?.length
-    ? state.reviewHistory
-    : review
-      ? [review]
-      : [];
-  const isDeltaReview = options.action === "review" && priorReviews.length > 0;
+  // Blind review should not be biased by prior review verdicts; only non-review actions see review findings.
   const includeReviewDetail =
+    options.action !== "review" &&
     Boolean(review) &&
-    (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement" || options.action === "review");
+    (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement");
   const hasSteering =
     Boolean(options.resolveConflict) ||
-    isDeltaReview ||
     includeReviewDetail ||
     pendingNotes.length > 0 ||
     Boolean(state.lastFeedback) ||
@@ -297,7 +303,7 @@ export async function synthesizeHandoffPacket(
 
   if (options.resolveConflict) {
     const cc = options.conflictContext;
-    const steerLines: string[] = ["## 1. 主干同步与冲突消解任务（最高优先级）"];
+    const steerLines: string[] = ["## 主干同步与冲突消解任务"];
     if (cc) {
       steerLines.push(
         `- **沙箱分支**：\`${cc.branch}\`（当前基线 \`${cc.baseHead.slice(0, 7)}\`，落后目标主干 \`${cc.targetRef ?? cc.mainHead.slice(0, 7)}\` 共 ${cc.behindCount} 个提交）`,
@@ -308,73 +314,27 @@ export async function synthesizeHandoffPacket(
       if (cc.mainCommitsSummary?.trim()) {
         steerLines.push("- **主干新增提交摘要**：");
         steerLines.push("```text");
-        steerLines.push(sanitizeOutput(cc.mainCommitsSummary.trim(), 1400).text);
+        steerLines.push(sanitizeOutput(cc.mainCommitsSummary.trim(), 1200).text);
         steerLines.push("```");
       }
       if (cc.conflictExcerpt?.trim()) {
         steerLines.push("- **冲突片段预览**：");
         steerLines.push("```diff");
-        steerLines.push(sanitizeOutput(cc.conflictExcerpt.trim(), 2600).text);
+        steerLines.push(sanitizeOutput(cc.conflictExcerpt.trim(), 1800).text);
         steerLines.push("```");
       }
     }
     if (options.humanInstruction?.trim()) {
-      steerLines.push(`- **同步指令**：${sanitizeOutput(options.humanInstruction.trim(), 2000).text}`);
+      steerLines.push(`- **同步指令**：${sanitizeOutput(options.humanInstruction.trim(), 1600).text}`);
     }
     steerLines.push("");
     sections.push({
       key: "steering",
       priority: 1,
-      text: clipTextByBytes(steerLines.join("\n"), 7500),
-    });
-  } else if (isDeltaReview) {
-    const nextRound = priorReviews.length + 1;
-    const prevReview = priorReviews[priorReviews.length - 1]!;
-    const prevFilesSet = new Set(prevReview.changedFiles ?? []);
-    const currentFiles = gitChanges.files.map((f) => f.path);
-    const newlyChanged =
-      prevFilesSet.size > 0 ? currentFiles.filter((p) => !prevFilesSet.has(p)) : [];
-    const findingFiles = Array.from(
-      new Set((prevReview.findings ?? []).flatMap((f) => f.files ?? [])),
-    ).slice(0, 20);
-    const deltaLines: string[] = [
-      `## 1. 复审上下文（第 ${nextRound} 轮 · 增量收敛模式）`,
-      `- **前序审查轮次**：已完成 ${priorReviews.length} 轮；上一轮（${prevReview.reviewerHarness}/${prevReview.reviewerModel} · \`${prevReview.verdict}\`）核心结论：${sanitizeOutput(prevReview.summary, 800).text}`,
-    ];
-    if (prevReview.findings && prevReview.findings.length > 0) {
-      deltaLines.push("- **待核验的上一轮 Finding 清单（请逐条确认是否已关闭）**：");
-      for (const f of prevReview.findings.slice(0, 20)) {
-        const loc = f.files?.length ? ` (${f.files.slice(0, 4).join(", ")})` : "";
-        const sug = f.suggestion ? ` → 建议：${sanitizeOutput(f.suggestion, 300).text}` : "";
-        deltaLines.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${loc}${sug}`);
-      }
-    }
-    if (state.handoffNote?.keyDecisions?.length) {
-      deltaLines.push("- **自上轮后的最新修复决策**：");
-      for (const d of state.handoffNote.keyDecisions.slice(-6)) {
-        deltaLines.push(`  - ${sanitizeOutput(d, 320).text}`);
-      }
-    }
-    if (newlyChanged.length > 0 || findingFiles.length > 0) {
-      deltaLines.push("- **增量核查焦点**：");
-      if (findingFiles.length > 0) {
-        deltaLines.push(`  - 上轮问题关联文件：${findingFiles.map((f) => `\`${f}\``).join("、")}`);
-      }
-      if (newlyChanged.length > 0) {
-        deltaLines.push(`  - 较上轮新增变更文件：${newlyChanged.slice(0, 20).map((f) => `\`${f}\``).join("、")}`);
-      }
-    }
-    if (state.lastFeedback) {
-      deltaLines.push(`- **人类最新反馈**：${sanitizeOutput(state.lastFeedback, 800).text}`);
-    }
-    deltaLines.push("");
-    sections.push({
-      key: "steering",
-      priority: 1,
-      text: clipTextByBytes(deltaLines.join("\n"), 7500),
+      text: clipTextByBytes(steerLines.join("\n"), 4000),
     });
   } else if (hasSteering) {
-    const steerLines: string[] = ["## 1. 跨模型审查待修复项与人类最新反馈（最高优先级）"];
+    const steerLines: string[] = ["## 待处理反馈与审查意见"];
     const hasFreshHumanGuidance = Boolean(state.lastFeedback) || Boolean(options.humanInstruction?.trim());
     const prioritizeHumanOverStaleReview =
       Boolean(review && includeReviewDetail) &&
@@ -396,14 +356,14 @@ export async function synthesizeHandoffPacket(
             : "建议通过 (pass)";
       const headingPrefix = prioritizeHumanOverStaleReview ? "历史跨模型 Code Review" : "最新跨模型 Code Review";
       out.push(`### ${headingPrefix}（${review.reviewerHarness}/${review.reviewerModel} · ${verdictText} · ${revStatusLabel}）`);
-      out.push(`- **核心结论**：${sanitizeOutput(review.summary, 1200).text}`);
+      out.push(`- **核心结论**：${sanitizeOutput(review.summary, 900).text}`);
       if (review.findings && review.findings.length > 0) {
         out.push("- **结构化审查问题清单**：");
         for (const f of review.findings.slice(0, 20)) {
           const critTag = f.criterionIds?.length ? ` [${f.criterionIds.join(", ")}]` : "";
           const fileTag = f.files?.length ? ` (${f.files.slice(0, 4).join(", ")})` : "";
           out.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${critTag}${fileTag}`);
-          if (f.suggestion) out.push(`    - 建议：${sanitizeOutput(f.suggestion, 400).text}`);
+          if (f.suggestion) out.push(`    - 建议：${sanitizeOutput(f.suggestion, 320).text}`);
         }
       }
       if (review.markdown.trim() && review.verdict !== "pass") {
@@ -425,98 +385,99 @@ export async function synthesizeHandoffPacket(
         prioritizeHumanOverStaleReview ? "### 人类最新指令与未解决批注（当前最高优先级）" : "### 人类最新指令与未解决批注",
       ];
       if (state.lastFeedback) {
-        out.push(`- **最新打回/修改意见**：${sanitizeOutput(state.lastFeedback, 1600).text}`);
+        out.push(`- **最新打回/修改意见**：${sanitizeOutput(state.lastFeedback, 1200).text}`);
       }
       if (options.humanInstruction?.trim()) {
-        out.push(`- **本次执行特别嘱咐**：${sanitizeOutput(options.humanInstruction.trim(), 2000).text}`);
+        out.push(`- **本次执行特别嘱咐**：${sanitizeOutput(options.humanInstruction.trim(), 1200).text}`);
       }
       for (const d of pendingNotes.slice(-10)) {
         const anchor = d.anchor ? `[${d.anchor}] ` : "";
-        out.push(`- (${d.actor}/${d.mode}) ${anchor}${sanitizeOutput(d.message, 600).text}`);
+        out.push(`- (${d.actor}/${d.mode}) ${anchor}${sanitizeOutput(d.message, 500).text}`);
       }
       out.push("");
       return out;
     };
 
     if (prioritizeHumanOverStaleReview) {
-      steerLines.push(...buildHumanLines(), ...buildReviewLines(1600));
+      steerLines.push(...buildHumanLines(), ...buildReviewLines(1000));
     } else {
-      steerLines.push(...buildReviewLines(3600), ...buildHumanLines());
+      steerLines.push(...buildReviewLines(1600), ...buildHumanLines());
     }
     sections.push({
       key: "steering",
       priority: 1,
-      text: clipTextByBytes(steerLines.join("\n"), 7500),
-    });
-  } else {
-    // Ensure ## 1. heading exists right after ## 0. Playbook for stable section delimiters.
-    sections.push({
-      key: "steering_placeholder",
-      priority: 1,
-      text: "",
+      text: clipTextByBytes(steerLines.join("\n"), 3800),
     });
   }
 
-  // 2. Latest failure evidence or previous run tail
-  const passedCriteria = new Set(
-    validity.coverage.items.filter((c) => c.state === "passed").map((c) => c.criterion.id),
-  );
-  const latestByCommand = new Map<string, (typeof validity.verifications)[number]>();
-  for (const v of validity.verifications) {
-    latestByCommand.set(v.record.command, v);
-  }
-  const isUnresolvedFailure = (v: (typeof validity.verifications)[number]): boolean => {
-    if (v.record.passed) return false;
-    const latestForCmd = latestByCommand.get(v.record.command);
-    if (
-      latestForCmd &&
-      latestForCmd.effectiveState === "passed" &&
-      latestForCmd.record.specHash === v.record.specHash &&
-      latestForCmd.record.codeSnapshotHash === v.record.codeSnapshotHash
-    ) {
-      return false;
+  // Latest unresolved failure evidence or previous run tail (for fix / implement)
+  if (options.action === "fix" || options.action === "implement") {
+    const passedCriteria = new Set(
+      validity.coverage.items.filter((c) => c.state === "passed").map((c) => c.criterion.id),
+    );
+    const latestByCommand = new Map<string, (typeof validity.verifications)[number]>();
+    for (const v of validity.verifications) {
+      latestByCommand.set(v.record.command, v);
     }
-    if (v.record.criterionIds.length > 0 && v.record.criterionIds.every((cid) => passedCriteria.has(cid))) {
-      return false;
-    }
-    return true;
-  };
-  const failedEv =
-    [...validity.verifications].reverse().find((v) => v.effectiveState === "failed" && isUnresolvedFailure(v)) ??
-    [...validity.verifications].reverse().find((v) => isUnresolvedFailure(v));
-  if (failedEv || options.previousLogTail?.trim()) {
-    const failLines: string[] = ["## 2. 最新失败证据与尾部现场"];
-    if (failedEv) {
-      let excerpt = failedEv.record.outputPreview;
-      try {
-        const full = getVerificationEvidence(root, id, failedEv.record.id);
-        excerpt = full.log.slice(-2200);
-      } catch {
-        // Fallback to preview.
+    const isUnresolvedFailure = (v: (typeof validity.verifications)[number]): boolean => {
+      if (v.record.passed) return false;
+      const latestForCmd = latestByCommand.get(v.record.command);
+      if (
+        latestForCmd &&
+        latestForCmd.effectiveState === "passed" &&
+        latestForCmd.record.specHash === v.record.specHash &&
+        latestForCmd.record.codeSnapshotHash === v.record.codeSnapshotHash
+      ) {
+        return false;
       }
-      const staleTag = failedEv.effectiveState !== "failed" ? " · 代码后续有改动" : "";
-      failLines.push(`- 最近失败验证 \`${failedEv.record.command}\`（退出码 ${failedEv.record.exitCode}${staleTag}）：`);
-      failLines.push("```text");
-      failLines.push(sanitizeOutput(excerpt, 2200).text);
-      failLines.push("```");
+      if (v.record.criterionIds.length > 0 && v.record.criterionIds.every((cid) => passedCriteria.has(cid))) {
+        return false;
+      }
+      return true;
+    };
+    const failedEvs = [...validity.verifications]
+      .reverse()
+      .filter((v) => v.effectiveState === "failed" && isUnresolvedFailure(v));
+    const unresolvedEvs = (
+      failedEvs.length > 0
+        ? failedEvs
+        : [...validity.verifications].reverse().filter((v) => isUnresolvedFailure(v))
+    ).slice(0, 3);
+    if (unresolvedEvs.length > 0 || options.previousLogTail?.trim()) {
+      const failLines: string[] = ["## 失败与运行现场"];
+      const perExcerptBudget = Math.max(600, Math.floor(1800 / Math.max(1, unresolvedEvs.length)));
+      for (const failedEv of unresolvedEvs) {
+        let excerpt = failedEv.record.outputPreview;
+        try {
+          const full = getVerificationEvidence(root, id, failedEv.record.id);
+          excerpt = full.log.slice(-perExcerptBudget);
+        } catch {
+          // Fallback to preview.
+        }
+        const staleTag = failedEv.effectiveState !== "failed" ? " · 代码后续有改动" : "";
+        failLines.push(`- 最近失败验证 \`${failedEv.record.command}\`（退出码 ${failedEv.record.exitCode}${staleTag}，完整日志 \`${itemDirHint}/${failedEv.record.outputPath}\`）：`);
+        failLines.push("```text");
+        failLines.push(sanitizeOutput(excerpt, perExcerptBudget).text);
+        failLines.push("```");
+      }
+      if (options.previousLogTail?.trim()) {
+        failLines.push("- 前序运行末尾输出：");
+        failLines.push("```text");
+        failLines.push(sanitizeOutput(options.previousLogTail.slice(-1000), 1000).text);
+        failLines.push("```");
+      }
+      failLines.push("");
+      sections.push({
+        key: "failures",
+        priority: 2,
+        text: clipTextByBytes(failLines.join("\n"), 3000),
+      });
     }
-    if (options.previousLogTail?.trim()) {
-      failLines.push("- 前序 Agent 运行末尾输出：");
-      failLines.push("```text");
-      failLines.push(sanitizeOutput(options.previousLogTail.slice(-1500), 1500).text);
-      failLines.push("```");
-    }
-    failLines.push("");
-    sections.push({
-      key: "failures",
-      priority: 2,
-      text: clipTextByBytes(failLines.join("\n"), 4200),
-    });
   }
 
-  // 3. Tasks & HandoffNote
-  if (state.tasks.length > 0 || state.handoffNote) {
-    const progLines: string[] = ["## 3. 实施进度与前序备忘（Dead-Ends & Decisions）"];
+  // Tasks & HandoffNote (omitted during review to keep blind review clean)
+  if (options.action !== "review" && (state.tasks.length > 0 || state.handoffNote)) {
+    const progLines: string[] = ["## 进度与备忘（Dead-Ends & Decisions）"];
     if (state.tasks.length > 0) {
       for (const t of state.tasks) {
         const mark = t.status === "done" ? "✓" : t.status === "in_progress" ? "●" : t.status === "blocked" ? "!" : "○";
@@ -542,26 +503,24 @@ export async function synthesizeHandoffPacket(
     sections.push({
       key: "progress",
       priority: 3,
-      text: clipTextByBytes(progLines.join("\n"), 3200),
+      text: clipTextByBytes(progLines.join("\n"), 2200),
     });
   }
 
-  // 4. Contract summary (Pointer-first Spec, Design, Criteria, Attachments)
+  // Authoritative file pointers + criteria coverage (NO spec/design body truncation!)
   const contractLines: string[] = [
-    hasSteering ? "## 4. 权威目标、方案与验收条件" : "## 1. 权威目标、方案与验收条件",
-    `### 需求目标（完整规范见 \`${itemDirHint}/spec.md\`）`,
-    clipTextByBytes(specMarkdown.trim() || "（暂无）", 1400, `\n> …（完整规范见 \`${itemDirHint}/spec.md\`）`),
-    "",
+    "## 权威文件指引与验收条件",
+    `- **需求规范**：\`${itemDirHint}/spec.md\`（请用原生工具直接读取全文）`,
+    designMarkdown.trim()
+      ? `- **技术方案**：\`${itemDirHint}/design.md\`（已存在，请直接读取全文）`
+      : `- **技术方案**：\`${itemDirHint}/design.md\`（尚未起草）`,
   ];
-  if (designMarkdown.trim()) {
-    contractLines.push(`### 当前技术方案（完整方案见 \`${itemDirHint}/design.md\`）`);
-    contractLines.push(
-      clipTextByBytes(designMarkdown.trim(), 1800, `\n> …（完整方案见 \`${itemDirHint}/design.md\`）`),
-    );
-    contractLines.push("");
+  if (validity.verifications.length > 0) {
+    contractLines.push(`- **验证证据目录**：\`${itemDirHint}/evidence/\`（共 ${validity.verifications.length} 条记录）`);
   }
+  contractLines.push("");
   if (validity.coverage.items.length > 0) {
-    contractLines.push("### 验收条件覆盖状态");
+    contractLines.push("### 验收条件状态");
     for (const item of validity.coverage.items) {
       const sym = item.state === "passed" ? "✓" : item.state === "failed" ? "×" : item.state === "stale" ? "⟳" : "○";
       const reqTag = item.criterion.required ? "必需" : "参考";
@@ -572,13 +531,13 @@ export async function synthesizeHandoffPacket(
   }
   if (state.attachments && state.attachments.length > 0) {
     contractLines.push("### 附件清单（可直接读取）");
-    contractLines.push("图片可直接读取查看；日志/文本可 grep，pdf/zip 请按需解压或下载。");
+    contractLines.push("图片可直接读取查看；日志/文本可检索，pdf/zip 请按需解压。");
     for (const meta of state.attachments.slice(0, 8)) {
       let fileName = `${meta.id}`;
       try {
         fileName = attachmentFileName(meta);
       } catch {
-        // 元数据异常时仍输出可读条目，交由人工排查。
+        // Keep fallback ID visible for debugging.
       }
       const absPath = path.join(codeRoot, WORKBENCH_DIR, "items", state.id, "attachments", fileName);
       contractLines.push(`- ${meta.name}（${meta.mimeType}，${formatAttachmentSize(meta.size)}）：\`${absPath}\``);
@@ -589,40 +548,45 @@ export async function synthesizeHandoffPacket(
     key: "contract",
     priority: 4,
     text: contractLines.join("\n"),
-    minText: `${hasSteering ? "## 4." : "## 1."} 权威目标与方案见 \`${itemDirHint}/spec.md\` 与 \`${itemDirHint}/design.md\`\n`,
-    inlineTruncated:
-      Buffer.byteLength(specMarkdown.trim(), "utf8") > 1400 ||
-      Buffer.byteLength(designMarkdown.trim(), "utf8") > 1800,
+    minText: `## 权威文件指引与验收条件\n- 规范：\`${itemDirHint}/spec.md\` · 方案：\`${itemDirHint}/design.md\`\n`,
   });
 
-  // 5. Objective Git Ground Truth
-  const gitLines: string[] = ["## 5. 当前客观 Git 代码现场"];
-  if (!gitChanges.isGitRepo) {
-    gitLines.push("- 当前目录非 Git 仓库");
-  } else {
-    gitLines.push(`- HEAD: \`${gitChanges.head || "(unborn)"}\` | 脏文件数: ${gitChanges.files.length}`);
-    if (gitChanges.files.length > 0) {
-      gitLines.push("- 变更文件清单：");
-      for (const f of gitChanges.files.slice(0, 25)) {
-        gitLines.push(`  - \`${f.status}\` ${f.path}`);
+  // Objective Git file list & baseline hint (NO truncated diff!)
+  if (options.action !== "design" || gitChanges.files.length > 0) {
+    const gitLines: string[] = ["## Git 变更现场"];
+    if (!gitChanges.isGitRepo) {
+      gitLines.push("- 当前目录非 Git 仓库");
+    } else {
+      const baseRef = state.baseline?.head ? ` | 基线: \`${state.baseline.head.slice(0, 10)}\`` : "";
+      gitLines.push(`- HEAD: \`${gitChanges.head || "(unborn)"}\`${baseRef} | 变更文件数: ${gitChanges.files.length}`);
+      if (gitChanges.files.length > 0) {
+        gitLines.push("- 变更文件清单：");
+        for (const f of gitChanges.files.slice(0, 30)) {
+          gitLines.push(`  - \`${f.status}\` ${f.path}`);
+        }
+        if (gitChanges.files.length > 30) {
+          gitLines.push(`  - …（其余 ${gitChanges.files.length - 30} 个文件请用 git status 查看）`);
+        }
       }
+      if (options.action === "review") {
+        const tampering = detectTestTamperingSignals(gitChanges.files, gitChanges.diff);
+        if (tampering.length > 0) {
+          gitLines.push(`- ⚠ **测试完整性提示**：${tampering.join("；")}`);
+        }
+      }
+      const diffCmd = state.baseline?.head ? `git diff ${state.baseline.head}` : "git diff";
+      gitLines.push(`- 完整代码差异请直接运行 \`${diffCmd}\`（工作区未暂存改动用 \`git status\` / \`git diff\`）。`);
     }
-    if (gitChanges.diff.trim()) {
-      gitLines.push("```diff");
-      gitLines.push(sanitizeOutput(gitChanges.diff, 2800).text);
-      gitLines.push("```");
-    }
+    gitLines.push("");
+    sections.push({
+      key: "git",
+      priority: 5,
+      text: gitLines.join("\n"),
+      minText: gitChanges.isGitRepo
+        ? `## Git 变更现场\n- HEAD: \`${gitChanges.head || "(unborn)"}\` | 变更文件数: ${gitChanges.files.length}\n`
+        : "",
+    });
   }
-  gitLines.push("");
-  sections.push({
-    key: "git",
-    priority: 5,
-    text: gitLines.join("\n"),
-    minText: gitChanges.isGitRepo
-      ? `## 5. 当前客观 Git 代码现场\n- HEAD: \`${gitChanges.head || "(unborn)"}\` | 脏文件数: ${gitChanges.files.length}\n`
-      : "",
-    inlineTruncated: Boolean(gitChanges.diffTruncated) || Buffer.byteLength(gitChanges.diff, "utf8") > 2800,
-  });
 
   const { markdown, composition } = assembleBudgetedPacket(headerText, sections, HANDOFF_MAX_BYTES);
   const saved = await saveHandoffMarkdown(root, id, markdown, gitChanges.fingerprint ?? null);

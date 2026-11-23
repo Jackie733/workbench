@@ -24,14 +24,14 @@
 3. **双轨自适应工作流（Plan-First vs Fast-Track）**
    - **标准模式（Plan-First）**：`draft` → `designing` → `awaiting_approval`（人审方案）→ `implementing` → `awaiting_acceptance`（人看证据与 Diff 验收）→ `done`。
    - **快速通道（Fast-Track）**：针对明确小需求，人可从 `draft` 直接授权跳过方案审批进入 `implementing`；但编码完成后仍须经过同等严格的**真实验证证据 + 人工验收**闭环。
-   - **设计阶段执行边界**：`design` 只产出规范、验收条件与方案，提示词与交接包禁止修改业务代码、运行验证或把实施任务标记为完成，提交方案后立即停止。核心引擎在批准前拒绝记录验证证据与完成任务，Hub 对 `implement` / `fix` 强制校验阶段与有效审批，杜绝设计模型一步完成编码验证。
+   - **设计阶段执行边界**：`design` 阶段允许运行只读测试或检查命令复现问题与调研现状，直接编辑 `spec.md`、`design.md`（及可选 `criteria.json`）后结束本轮即可（无需手动调用状态流转或进入编码）；宿主执行器在退出后自动同步为提案并交由人类审阅。核心引擎在批准前仍拒绝记录验证证据与完成任务，Hub 对 `implement` / `fix` 强制校验阶段与有效审批。
 4. **零废话 UI（Zero-Noise Interface）**
    - 主界面只展示**业务事实**（需求目标、方案正文、任务进度、验证绿/红状态、代码 Diff、交叉审查结论）和**当前唯一核心行动建议 + 执行器选择**。
    - 彻底清除免责说教、内部 UUID、SHA-256 指纹与协议术语；调试信息统一收纳于「更多 → 查看调试信息」。
 5. **多项目集中统筹与分阶段异构算力路由（Multi-Project Hub & Stage-Based Model Routing）**
    - **单守护进程统筹多项目**：通过全局 `wb start` 启动常驻后台 Hub 服务（默认固定端口 `4318`，支持 `wb status` / `wb stop` / `wb restart` / `wb open`），在同一个 Web 工作台中切换、新增与初始化多个本地 Git 仓库，无需按项目逐一开终端起服务。
    - **主动调度多种本地 CLI Harness**：工作台从被动“复制提示词/依赖单一会话”，升级为主动在目标项目根目录拉起本机已安装的 Coding Agent CLI（`codex`、`qodercn`、`opencode`、`agy`（Antigravity / Gemini CLI）、`omp`）并实时流式传输日志。
-   - **按阶段分配算力与控制 SOTA 额度**：将研发拆分为 **`design`（规划设计）**、**`implement`（编码实施）**、**`fix`（失败诊断修复）** 与 **`review`（交付前跨模型审查）** 四个执行阶段；昂贵稀缺的 SOTA 模型额度优先投入低 Token、高杠杆的 `design` 与跨模型 `review`，高频高消耗的 `implement` 与 `fix` 则优先路由至额度充裕的高性价比或免费主力编码模型。
+   - **按阶段分配算力与保持能力连续性**：将研发拆分为 **`design`（规划设计）**、**`implement`（编码实施）**、**`fix`（诊断修复，默认与 `implement` 同级并继承原会话上下文）** 与 **`review`（交付前单轮独立盲审）**；不再在默认预设中强行降级推理强度或打断原生会话，让 `implement`/`fix` 连续闭环、由宿主机自动执行 `runAllVerifications()` 与最多 2 轮 `auto_heal` 修复，高杠杆独立模型负责 `review`。
 
 ---
 
@@ -122,7 +122,7 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 | :--- | :--- | :--- | :--- |
 | **`design`（架构与规范整理）** | `codex` · `gpt-6-astra`（`reasoning_effort: medium`） | 1. `agy` · `gemini-4-argon-high`<br>2. `qodercn` · `DeepSeek-V4-Pro`<br>3. `qodercn` · `Qwen4-Max` | **低频高价值**：出方案和拆验收条件一次仅需少数几轮对话，调用强推理模型可大幅减少后续返工 Token。 |
 | **`implement`（编码与自测）** | `qodercn` · `Qwen4-Max`（或 `Auto`） | 1. `opencode` · `opencode/deepseek-v4.1-flash-free`<br>2. `opencode` · `opencode/glm-5.3-flash-free`<br>3. `codex` · `gpt-6-luna` | **高频大吞吐**：编码阶段反复读写文件和跑测试，优先使用 QoderCN 与 OpenCode Go/Free 模型保护 ChatGPT Plus SOTA 额度。 |
-| **`fix`（测试失败修复）** | `opencode` · `opencode/deepseek-v4.1-flash-free` | 1. `qodercn` · `DeepSeek-Flash`<br>2. `qodercn` · `Qwen3.8-Flash`<br>3. `codex` · `gpt-6-astra` | **聚焦报错快速收敛**：有清晰测试失败日志时，Fast/Flash 模型响应快、成本极低；连续失败可无缝升级至强模型。 |
+| **`fix`（诊断与自动自愈）** | 默认继承最近 `implement`/`fix` 会话；回退与 `implement` 同档路由 | 与 `implement` 同级候选链路 | **连续上下文零失忆**：保持原代码会话与推理强度继续修复失败或审查问题，避免弱模型切换与上下文重建损耗。 |
 | **`review`（跨模型交付审查）** | `codex` · `codex-auto-review`（或 `gpt-6.1-sol`） | 1. `qodercn` · `DeepSeek-Flash`<br>2. `agy` · `gemini-4-argon-medium`<br>3. `qodercn` · `DeepSeek-V4-Pro` | **异构交叉验收**：强制避免“同一模型自己写自己审”，由 ChatGPT Plus / QoderCN / Antigravity 独立审阅 Git Diff 与 Spec 一致性。 |
 
 #### B. 高上限攻坚：`sota_first`（复杂架构与关键核心改动）
@@ -145,7 +145,7 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 
 1. **同 Harness 连续执行：优先复用原生 Session**
    - 当同一需求连续调用相同 Harness（例如继续由 `codex` 或 `opencode` 补充修改）且存在有效 `nativeSessionId` 时，优先调用各 CLI 原生恢复能力（`codex exec resume`、`opencode run --session`、`omp --resume`、`agy --conversation`），保留原生对话缓存。
-2. **跨 Harness 切换或异常中断接力：自动合成精简交接包（`handoff.md`，上限约 1.5k–3k Tokens）**
+2. **按需指引或跨 Harness 接力：自动合成轻量指针简报（`handoff.md`，8KB 上限）**，固定语义小节名（不再使用易漂移编号）、指出 `spec.md`/`design.md`/`evidence/` 权威磁盘路径供 Agent 原生完整读取（不再预先切片 `git diff` 充当中间人）。
    - 一旦切换了 Harness（如 `codex` 出方案 → `qodercn` 写代码 → 限流切 `opencode` 接力），或前一进程因限流/超时/手动 Kill 中途中断，工作台**不转储原始长聊天记录**，而是自动合成并注入高信噪比 `handoff.md`：
      - **契约事实**：当前 `spec.md`、`design.md`、已通过（`✓`）与未通过（`×`）的验收条件；
      - **Agent 备忘与死胡同标记（`handoffNote`）**：前序 Agent 提交的关键代码定位与**已证实走不通的方案警示**；

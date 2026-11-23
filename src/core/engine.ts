@@ -138,6 +138,7 @@ import {
   WORKTREE_SCOPE_NOTE,
   computeDesignHash,
   computeSpecHash,
+  detectTestTamperingSignals,
   evaluateApproval,
   evaluateRequirement,
 } from "./validity.ts";
@@ -1568,6 +1569,8 @@ export async function getRequirementDiff(
     sinceHead: state.baseline?.head ?? null,
     maxDiffBytes: options.maxDiffBytes ?? MAX_ACCEPTANCE_DIFF_BYTES,
   });
+  const testTamperingSignals =
+    changes.diffStatus === "captured" ? detectTestTamperingSignals(changes.files, changes.diff) : [];
   return {
     context: "live",
     status: changes.diffStatus,
@@ -1584,6 +1587,7 @@ export async function getRequirementDiff(
         ? { scopeNoteKey: "evidence.scope.worktree" }
         : {}),
     observation: changes,
+    ...(testTamperingSignals.length > 0 ? { testTamperingSignals } : {}),
   };
 }
 

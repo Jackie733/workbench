@@ -1497,12 +1497,12 @@ export function Modals() {
                     <select
                       className="select xs"
                       data-testid="routing-max-auto-review-rounds"
-                      value={String(cfg.maxAutoReviewRounds ?? 2)}
+                      value={String(cfg.maxAutoReviewRounds ?? 1)}
                       onChange={(e) => {
                         const val = Number(e.target.value);
                         const nextCfg = {
                           ...cfg,
-                          maxAutoReviewRounds: Number.isFinite(val) ? val : 2,
+                          maxAutoReviewRounds: Number.isFinite(val) ? val : 1,
                         };
                         setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
                       }}

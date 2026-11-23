@@ -1547,7 +1547,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           overrideReason: typeof body.overrideReason === "string" ? body.overrideReason : undefined,
           acceptedRisks: readStringArray(body.acceptedRisks),
         });
-        await distillRequirementToPlaybook(base, detail).catch(() => {});
         const projectMeta = getProjectStatus(base).project;
         let githubSyncWarning: string | undefined;
         let githubSyncWarningRef: StructuredMessageRef | undefined;

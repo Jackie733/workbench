@@ -10,25 +10,27 @@ import {
   getRequirement,
   listRequirements,
   markDesigning,
+  propose,
   recordReviewReport,
   resolveDiscussions,
   saveAgentRunContext,
   startAgentRun,
+  updateTasks,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
 import { extractMergeConflictContext, observeGitChanges, observeGitSnapshot } from "../core/git.ts";
-import {
-  buildOutputLanguageDirective,
-  buildResumeLanguageReminder,
-  type ResolvedOutputLanguage,
-} from "../core/language.ts";
+import type { ResolvedOutputLanguage } from "../core/language.ts";
+import { runAllVerifications } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
+  MAX_DESIGN_BYTES,
   MAX_RUN_LOG_BYTES,
+  MAX_SPEC_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
   type AgentRunRecord,
+  type CriterionInput,
   type OutputLanguage,
   type RequirementDetail,
   type ReviewFinding,
@@ -39,7 +41,7 @@ import {
   type RunHandoffMode,
   type RunTraceEvent,
 } from "../core/types.ts";
-import { clipHeadTailUtf8, sanitizeOutput } from "../core/validate.ts";
+import { clipHeadTailUtf8, sanitizeOutput, validateMarkdownContent } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
@@ -54,12 +56,15 @@ import {
 import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
 import { appendRunLedger, type RunLedgerEntry } from "./ledger.ts";
 import { estimateTokens, resolveModelSpec, resolveQuotaPool } from "./pricing.ts";
+import { buildExecutionPrompt } from "./prompt.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
 import { createHarnessStreamAdapter, isUnsupportedJsonFlagError, stripCliNoise } from "./stream_adapters.ts";
 import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
 import { RunTraceCollector } from "./trace_collector.ts";
 import type { HarnessId, HarnessInfo, HubObservabilityConfig, ModelTarget, RoutingConfig } from "./types.ts";
+
+export { buildExecutionPrompt } from "./prompt.ts";
 
 export interface BuiltCommand {
   command: string;
@@ -118,6 +123,7 @@ export interface StartRunInput {
   mode?: "ask" | "refine";
   useFallback?: boolean;
   autoFallbackAttempt?: number;
+  autoHealAttempt?: number;
   forcePlainText?: boolean;
   isAutoReview?: boolean;
   timeoutMs?: number;
@@ -431,185 +437,6 @@ export function buildHarnessCommand(
   }
 }
 
-function buildCompactResumeContext(
-  detail: RequirementDetail,
-  input: StartRunInput,
-  outputLanguage: ResolvedOutputLanguage,
-): string {
-  const { state, validity } = detail;
-  const parts: string[] = [
-    `- **当前阶段**：\`${state.stage}\` | **版本**：rev ${state.revision}（当前为同会话原生续接，完整简报已更新至 \`${WORKBENCH_DIR}/items/${state.id}/handoff.md\`，无需重复通读未改动文件）`,
-    buildResumeLanguageReminder(outputLanguage),
-  ];
-  if (state.tasks.length > 0) {
-    const remaining = state.tasks.filter((t) => t.status !== "done");
-    if (remaining.length > 0) {
-      parts.push("**未完成任务**：");
-      for (const t of remaining) {
-        parts.push(`- [${t.status}] \`${t.id}\` ${t.title}${t.note ? `（${t.note}）` : ""}`);
-      }
-    }
-  }
-  const failedEv = [...validity.verifications].reverse().find((v) => v.effectiveState === "failed");
-  if (failedEv) {
-    parts.push(`- **最新失败验证**：\`${failedEv.record.command}\`（退出码 ${failedEv.record.exitCode}）`);
-  }
-  if (state.reviewReport && (state.reviewReport.verdict !== "pass" || input.action === "fix")) {
-    const rev = state.reviewReport;
-    parts.push(
-      `- **最新跨模型审查（${rev.verdict} / ${validity.reviewValidity.effectiveState}）**：${rev.summary}`,
-    );
-    if (rev.findings && rev.findings.length > 0) {
-      for (const f of rev.findings.slice(0, 10)) {
-        const loc = f.files && f.files.length > 0 ? ` (${f.files.join(", ")})` : "";
-        const detailHint = f.detail ? `：${f.detail}` : "";
-        const fixHint = f.suggestion ? ` → 建议：${f.suggestion}` : "";
-        parts.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${loc}${detailHint}${fixHint}`);
-      }
-    }
-  }
-  if (state.lastFeedback) {
-    parts.push(`- **最新打回意见**：${state.lastFeedback}`);
-  }
-  if (input.message?.trim() && input.action !== "ask") {
-    parts.push(`- **本次追加指令**：${input.message.trim()}`);
-  }
-  const pendingNotes = (state.discussions ?? []).filter((d) => !d.resolved);
-  if (pendingNotes.length > 0) {
-    parts.push("**待处理批注/讨论**：");
-    for (const d of pendingNotes.slice(-6)) {
-      parts.push(`- (${d.actor}/${d.mode}) ${d.anchor ? `[${d.anchor}] ` : ""}${d.message}`);
-    }
-  }
-  return parts.join("\n");
-}
-
-export function buildExecutionPrompt(
-  detail: RequirementDetail,
-  handoffMarkdown: string,
-  input: StartRunInput,
-  options: {
-    resumedSession?: boolean;
-    outputLanguage?: ResolvedOutputLanguage;
-    fastCommand?: string | null;
-    fullCommand?: string | null;
-  } = {},
-): string {
-  const reqId = detail.state.id;
-  const lang: ResolvedOutputLanguage = options.outputLanguage ?? "zh-CN";
-  const fastVerifyHint = options.fastCommand
-    ? `快速检查（\`${options.fastCommand}\`）及针对改动模块的轻量测试`
-    : "快速类型/语法检查及针对改动模块的轻量测试";
-
-  if (input.action === "ask") {
-    const langInstruction =
-      lang === "en"
-        ? "- Reply in clear, concise English Markdown."
-        : "- 请直接用清晰简练的简体中文 Markdown 给出解答、原理分析或方案权衡建议。";
-    return [
-      `你当前处于「仅提问探讨（Read-Only Consultation）」模式，请针对需求 ${reqId}（${detail.state.title}）回答用户问题。`,
-      "重要约束：",
-      "- 严禁修改任何仓库代码、严禁运行写操作工具、严禁修改 .workbench/ 文件或调用 wb propose / wb tasks。",
-      langInstruction,
-      buildOutputLanguageDirective(lang, "ask"),
-      "",
-      input.anchor ? `提问锚点：${input.anchor}` : "",
-      `用户问题：${input.message?.trim() || "请解释当前技术方案的核心思路与风险点。"}`,
-      "",
-      ...(options.resumedSession
-        ? [
-            `（同会话续接；如需最新完整上下文请按需查看 ${WORKBENCH_DIR}/items/${reqId}/handoff.md）`,
-          ]
-        : ["参考上下文简报：", handoffMarkdown]),
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (input.action === "review") {
-    const completedReviews =
-      detail.state.reviewHistory?.length ?? (detail.state.reviewReport ? 1 : 0);
-    const reviewRound = completedReviews + 1;
-    const roundDirective =
-      reviewRound <= 1
-        ? "- 初审全面性要求（第 1 轮）：请一次性全面检查所有改动文件、CSS 级联、关键边界与 AC 覆盖，在首轮列全所有真实缺陷，禁止只报前 1-2 个问题留待后续轮次再挖。"
-        : `- 增量收敛复审约束（第 ${reviewRound} 轮 · 增量收敛模式）：本次仅核验 ① 上一轮提出的 Finding 是否已真正关闭、② 本次修复改动是否引入新的 high/medium 回归。严禁在上一轮已审且未新增缺陷的老代码上继续构造更极端的假设边界来阻断验收；若历史问题已解决且无新回归，必须给出 \`pass\`（任何锦上添花建议只能作为 low 提示，不得阻断）。`;
-    return [
-      `请你作为独立的代码与交付审查者（Cross-Model Reviewer），审查工作台需求 ${reqId}（${detail.state.title}）。`,
-      "重要约束：",
-      "- 严禁修改仓库业务代码或调用 wb propose / wb tasks；只读检查 Git Diff、测试证据与 Spec 一致性。",
-      "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮，禁止调用需要人工确认的交互式表单或联网搜索工具（如 websearch）；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
-      "- 优先复用匹配证据：先核验 `.workbench/items/" +
-        reqId +
-        `/evidence/\` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行${fastVerifyHint}，禁止重跑耗时的全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。`,
-      "- 严格区分严重度与结论门槛：`high`（确定性功能故障、数据丢失、安全风险或必需 AC 未满足）给 `block`；`medium`（明确违反 Spec/Design 约定范围内的真实缺陷）给 `concern`；`low` 或超出 Spec 约定的极端理论边界/优化建议不得拉低 verdict，必须给 `pass`（仅可放入 `findings` 供参考）。若代码与证据均已达标，请给 `pass`，切勿要求超出当前 AC 范围的额外宿主证明。",
-      roundDirective,
-      "- 注：若当前处于只读沙箱且需要可写目录的端到端/浏览器用例因只读限制无法启动，请直接核验 `.workbench/items/" +
-        reqId +
-        "/evidence/` 既有真实运行日志并执行静态检查与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
-      buildOutputLanguageDirective(lang, "review"),
-      "- 请在输出最后附上一个明确的结论 JSON 块，格式严格如下（`findings` 为可选结构化问题列表，有具体问题时建议填写以便前端逐条定位修复）：",
-      lang === "en"
-        ? '```json\n{"verdict":"pass"|"concern"|"block","summary":"One-sentence core review summary in English","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"Short issue title","criterionIds":["AC-1"],"files":["src/path.ts:10"],"suggestion":"Concrete fix"}]}\n```'
-        : '```json\n{"verdict":"pass"|"concern"|"block","summary":"用简体中文写出的一句话核心审查结论","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"简明问题描述","criterionIds":["AC-1"],"files":["src/path.ts:10"],"suggestion":"具体修复建议"}]}\n```',
-      "",
-      "审查范围与交接简报（包含需求契约、验收状态与当前 Git 现场）：",
-      handoffMarkdown,
-    ].join("\n");
-  }
-
-  const hasReviewToFix = Boolean(detail.state.reviewReport && detail.state.reviewReport.verdict !== "pass");
-  const isCurrentReview = detail.validity.reviewValidity.effectiveState === "current";
-  const hasHumanFeedback = Boolean(detail.state.lastFeedback) || Boolean(input.message?.trim());
-  const isFastTrack = detail.state.track === "fast_track";
-  const modeVerb =
-    input.action === "design"
-      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（规范中需明确列出 \`In-Scope\` 改动边界与 \`Out-of-Scope\` 不扩散边界；若是 Bug/报错修复需求，必须在设计阶段即通过只读源码检索定位到确切的抛出文件、函数/组件名与行号区间并写入 design.md，严禁把查找报错源头推迟给实施阶段；验收条件按分层设计：${options.fastCommand ? `AC-1 用 \`${options.fastCommand}\`、` : ""}AC-2 优先绑定针对改动模块的局部测试命令；仅在改动业务/测试代码时才增加一条 \`${options.fullCommand ?? "全量测试"}\` 作为最终门禁，纯文档/配置调整勿捆绑全量测试；若预计改动局限在少数文件且风险可控，可建议采用轻量快速方案），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
-      : input.action === "fix" && input.resolveConflict
-        ? `本次任务仅聚焦将主干最新提交合并到当前沙箱分支并解决合并冲突（切勿重复返工已通过的既有实现或过期审查意见）：1) 若存在未提交业务改动请先安全暂存或提交（严禁提交 node_modules 或 .workbench）；2) 合并目标主干提交并完整保留本需求功能与主干新增改动；3) 运行 \`wb verify ${reqId} --all\` 验证全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-        : input.action === "fix"
-        ? hasReviewToFix && isCurrentReview
-          ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-          : hasReviewToFix && hasHumanFeedback
-            ? `请优先执行交接简报第 1 节中的人类最新指令/打回反馈（如同步主干、解决冲突或专项调整）；历史 Code Review 意见已过期仅供参考，切勿重复返工已修复项，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-            : hasReviewToFix || hasHumanFeedback
-              ? `请结合交接简报第 1 节中的最新跨模型 Code Review 问题清单、人类反馈及失败/过期验收条件，逐条定位修复问题并补充必要的回归测试；改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-              : `请诊断并修复 ${reqId} 当前失败或过期的验收条件，改完后务必运行 \`wb verify ${reqId} --all\`（或 wb_verify）获取最新真实验证证据，全部通过后执行 \`wb tasks ${reqId} --ready\`。`
-        : isFastTrack
-          ? `请依据需求目标（快速通道）完成 ${reqId} 的代码修改与验证：改完后运行 \`wb verify ${reqId} --all\`（或 \`wb verify ${reqId} --cmd ...\`）获取真实验证证据，全部通过后直接执行 \`wb tasks ${reqId} --ready\` 提交人类验收（快速通道无需额外拆解任务清单）。`
-          : `请依据已确认的规范/方案完成 ${reqId} 的代码实现与测试验证：用 \`wb tasks ${reqId}\` 维护步骤，用 \`wb verify ${reqId} --all\` 跑通真实测试，全部通过后执行 \`wb tasks ${reqId} --ready\` 提交人类验收。`;
-
-  const boundaryGuard =
-    input.action === "design"
-      ? "注意：你无权也无需执行批准或最终验收操作；本轮只产出方案，提交后立即停止，不要继续实施。"
-      : [
-          "注意：你无权也无需执行批准或最终验收操作；修改代码后请重新运行真实测试验证，勿留下后台未完成命令即结束本轮。",
-          "执行规范（减少无效耗时）：",
-          "- 开发调试期仅运行类型检查与针对当前改动模块的局部测试文件，禁止自行直接运行全量测试；全量验证统一通过 `wb verify <REQ-ID> --all` 触发（同快照已通过的条目会自动复用）。",
-          "- 严禁越界修改无关文件或试图修补与本需求无关的既有/偶发失败测试；遇无关失败先重试一次确认，并将情况记录到 `wb tasks <REQ-ID> --handoff-note` 即可。",
-          "- 严禁调用需要人工确认的交互式表单或联网搜索工具（如 `websearch`），非交互环境下此类工具无法响应并会导致运行报错。",
-          "- 更新交接/交付说明请使用 `wb tasks <REQ-ID> --handoff-note '{...}'`（或 MCP `wb_update_tasks`），禁止在实施或修复阶段为了写说明而调用 `wb propose`。",
-        ].join("\n");
-
-  const screenshotHint =
-    (input.action === "implement" || input.action === "fix") && detail.state.uiRelated === true
-      ? "若本次需求涉及 UI，提交验收时会自动采集界面截图证据；也可随时执行 `wb screenshot <REQ-ID>`（或 MCP wb_screenshot）补充采集。"
-      : "";
-
-  return [
-    `请接力执行工作台需求 ${reqId}（可用命令行 \`wb\` 工具操作，WORKBENCH_ROOT 已自动指向当前仓库）。`,
-    modeVerb,
-    boundaryGuard,
-    screenshotHint,
-    "",
-    buildOutputLanguageDirective(lang, "plan"),
-    "",
-    options.resumedSession ? buildCompactResumeContext(detail, input, lang) : handoffMarkdown,
-  ]
-    .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
-    .join("\n");
-}
-
 function parseReviewFindings(rawFindings: unknown): ReviewFinding[] | undefined {
   if (!Array.isArray(rawFindings) || rawFindings.length === 0) return undefined;
   const out: ReviewFinding[] = [];
@@ -701,29 +528,98 @@ function parseReviewOutput(
 }
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
-const MAX_RESUME_CONTEXT_TOKENS = 100_000;
-const MAX_CONSECUTIVE_NATIVE_RESUMES = 2;
+const MAX_AUTO_HEAL_ATTEMPTS = 2;
 const globalActiveRunIds = new Set<string>();
 
-function countConsecutiveNativeResumes(runs: AgentRunRecord[]): number {
-  let count = 0;
-  for (let i = runs.length - 1; i >= 0; i--) {
-    const r = runs[i]!;
-    if (r.action === "review" || r.action === "ask") continue;
-    if (r.action === "fix" && r.handoffMode === "native_resume") {
-      count += 1;
-      continue;
-    }
-    break;
-  }
-  return count;
+/** Allows continuous native session reuse without artificial token/turn cutoffs; CLIs handle auto-compaction natively. */
+function isHealthyForNativeResume(candidate: AgentRunRecord | null | undefined): boolean {
+  if (!candidate || !candidate.nativeSessionId) return false;
+  if (candidate.status === "cancelled" || candidate.rateLimited) return false;
+  if (candidate.errorSummary?.includes("模型不可用")) return false;
+  return true;
 }
 
-function isHealthyForNativeResume(runs: AgentRunRecord[], candidate: AgentRunRecord | null | undefined): boolean {
-  if (!candidate) return false;
-  if ((candidate.peakContextTokens ?? 0) >= MAX_RESUME_CONTEXT_TOKENS) return false;
-  if (countConsecutiveNativeResumes(runs) >= MAX_CONSECUTIVE_NATIVE_RESUMES) return false;
-  return true;
+function readDiskDesignCandidate(
+  base: string,
+  codeRoot: string,
+  id: string,
+  latestReq: RequirementDetail,
+  preSpecMarkdown: string,
+  preDesignMarkdown: string,
+): { specMarkdown: string; designMarkdown: string; criteria?: CriterionInput[]; criteriaPaths: string[] } | null {
+  const itemRel = `${WORKBENCH_DIR}/items/${id}`;
+  const readOpt = (rootDir: string, rel: string, maxBytes: number): string | null => {
+    try {
+      const full = resolveSafePath(rootDir, rel);
+      if (!fs.existsSync(full)) return null;
+      return readBoundedText(full, maxBytes);
+    } catch {
+      return null;
+    }
+  };
+  const criteriaPaths = new Set<string>();
+  const parseCriteriaFile = (rootDir: string): CriterionInput[] | undefined => {
+    const raw = readOpt(rootDir, `${itemRel}/criteria.json`, 64 * 1024);
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+      const valid: CriterionInput[] = [];
+      for (const entry of parsed.slice(0, 32)) {
+        if (!entry || typeof entry !== "object") continue;
+        const obj = entry as Record<string, unknown>;
+        if (typeof obj.description !== "string" || !obj.description.trim()) continue;
+        valid.push({
+          ...(typeof obj.id === "string" && obj.id.trim() ? { id: obj.id.trim() } : {}),
+          description: obj.description.trim(),
+          ...(typeof obj.required === "boolean" ? { required: obj.required } : {}),
+          ...(typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+        });
+      }
+      if (valid.length > 0) {
+        criteriaPaths.add(resolveSafePath(rootDir, `${itemRel}/criteria.json`));
+        return valid;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  let specMarkdown = latestReq.specMarkdown;
+  let designMarkdown = latestReq.designMarkdown;
+  let criteria = parseCriteriaFile(base);
+
+  if (codeRoot !== base) {
+    if (latestReq.specMarkdown === preSpecMarkdown) {
+      const mirrorSpec = readOpt(codeRoot, `${itemRel}/spec.md`, MAX_SPEC_BYTES);
+      if (mirrorSpec !== null && mirrorSpec !== preSpecMarkdown) specMarkdown = mirrorSpec;
+    }
+    if (latestReq.designMarkdown === preDesignMarkdown) {
+      const mirrorDesign = readOpt(codeRoot, `${itemRel}/design.md`, MAX_DESIGN_BYTES);
+      if (mirrorDesign !== null && mirrorDesign !== preDesignMarkdown) designMarkdown = mirrorDesign;
+    }
+    const mirrorCriteria = parseCriteriaFile(codeRoot);
+    if (!criteria && mirrorCriteria) criteria = mirrorCriteria;
+  }
+
+  const sanitizedSpec = validateMarkdownContent(specMarkdown, "spec", true);
+  const sanitizedDesign = validateMarkdownContent(designMarkdown, "design", true);
+  const changedFromBaseline =
+    sanitizedSpec !== preSpecMarkdown ||
+    sanitizedDesign !== preDesignMarkdown ||
+    criteria !== undefined ||
+    (sanitizedDesign.trim().length > 0 &&
+      (latestReq.state.stage === "draft" || latestReq.state.stage === "designing"));
+  if (!changedFromBaseline || !sanitizedDesign.trim()) {
+    return null;
+  }
+  return {
+    specMarkdown: sanitizedSpec,
+    designMarkdown: sanitizedDesign,
+    ...(criteria ? { criteria } : {}),
+    criteriaPaths: [...criteriaPaths],
+  };
 }
 
 export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
@@ -956,19 +852,24 @@ export class HubExecutor {
           : null;
 
     // Session affinity: when action is "fix" with no explicit override or fallback request,
-    // prefer the most recent healthy implement/fix runner when its context is still compact.
+    // keep coding and fixing single-threaded on the most recent implement/fix runner (even if it failed or timed out).
     if (!input.harness && !input.model && !input.useFallback && input.action === "fix") {
       const lastImplRun = [...runsList]
         .reverse()
-        .find((r) => (r.action === "implement" || r.action === "fix") && r.status === "succeeded" && !r.rateLimited);
+        .find(
+          (r) =>
+            (r.action === "implement" || r.action === "fix") &&
+            r.status !== "cancelled" &&
+            !r.rateLimited &&
+            !r.errorSummary?.includes("模型不可用"),
+        );
       const isRunnable =
         lastImplRun &&
         (harnesses.some((h) => h.id === lastImplRun.harness && h.installed) || Boolean(this.commandBuilder));
       if (
         lastImplRun &&
         isRunnable &&
-        !isModelCoolingDown(lastImplRun.harness, lastImplRun.model) &&
-        isHealthyForNativeResume(runsList, lastImplRun)
+        !isModelCoolingDown(lastImplRun.harness, lastImplRun.model)
       ) {
         sessionAffinityApplied = true;
         override = {
@@ -1077,16 +978,21 @@ export class HubExecutor {
     });
 
     // Determine whether we can safely use same-harness native session resume.
-    // Skip read-only "review" runs so persona stays clean while still resuming the prior write session.
-    const prevWriteRun = [...runsList].reverse().find((r) => r.action !== "review") ?? null;
+    // Coding (implement/fix) prefers the most recent coding session (skipping intervening ask runs),
+    // and only falls back to a prior design/ask session if no coding run exists yet.
+    const prevWriteRun =
+      input.action === "review"
+        ? null
+        : input.action === "implement" || input.action === "fix"
+          ? ([...runsList].reverse().find((r) => r.action === "implement" || r.action === "fix") ??
+            [...runsList].reverse().find((r) => r.action !== "review") ??
+            null)
+          : ([...runsList].reverse().find((r) => r.action === input.action) ?? null);
     const canResumeSameHarness =
       !input.useFallback &&
       prevWriteRun &&
       prevWriteRun.harness === target.harness &&
-      Boolean(prevWriteRun.nativeSessionId) &&
-      prevWriteRun.status !== "cancelled" &&
-      !prevWriteRun.rateLimited &&
-      isHealthyForNativeResume(runsList, prevWriteRun) &&
+      isHealthyForNativeResume(prevWriteRun) &&
       input.action !== "review";
 
     const handoffMode: RunHandoffMode = canResumeSameHarness
@@ -1097,26 +1003,30 @@ export class HubExecutor {
     const parentRunId = canResumeSameHarness ? prevWriteRun!.id : prevRun?.id;
     const dispatchReason: RunDispatchReason = input.resolveConflict
       ? "conflict_resolve"
-      : input.isAutoReview
-        ? "auto_review"
-        : input.useFallback
-          ? "auto_fallback"
-          : input.action === "ask"
-            ? "ask"
-            : input.mode === "refine"
-              ? "refine"
-              : input.harness && input.model
-                ? prevRun &&
-                  prevRun.status === "failed" &&
-                  `${prevRun.harness}::${prevRun.model}` !== `${input.harness}::${input.model}`
-                  ? "manual_fallback"
-                  : "user"
-                : sessionAffinityApplied
-                  ? "session_affinity"
-                  : "route_primary";
+      : (input.autoHealAttempt ?? 0) > 0
+        ? "auto_heal"
+        : input.isAutoReview
+          ? "auto_review"
+          : input.useFallback
+            ? "auto_fallback"
+            : input.action === "ask"
+              ? "ask"
+              : input.mode === "refine"
+                ? "refine"
+                : input.harness && input.model
+                  ? prevRun &&
+                    prevRun.status === "failed" &&
+                    `${prevRun.harness}::${prevRun.model}` !== `${input.harness}::${input.model}`
+                    ? "manual_fallback"
+                    : "user"
+                  : sessionAffinityApplied
+                    ? "session_affinity"
+                    : "route_primary";
 
     const projectMeta = getProjectStatus(base).project;
     const projectContext = discoverProjectContext(codeRoot, projectMeta);
+    const preSpecMarkdown = postHandoffDetail.specMarkdown;
+    const preDesignMarkdown = postHandoffDetail.designMarkdown;
     const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
       resumedSession: Boolean(canResumeSameHarness),
       outputLanguage,
@@ -1646,8 +1556,124 @@ export class HubExecutor {
                     ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
                     : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
-      const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
       const codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
+
+      const appendFinalizeNote = (line: string) => {
+        emitCleanChunk(line);
+        rawLog = this.runLogs.get(runId) ?? rawLog;
+      };
+
+      // File-Native Design Sync: if design agent edited spec.md/design.md directly on disk, sync & submit for approval.
+      if (status === "succeeded" && input.action === "design" && latestReq) {
+        try {
+          const diskDesign = readDiskDesignCandidate(base, codeRoot, id, latestReq, preSpecMarkdown, preDesignMarkdown);
+          if (diskDesign) {
+            let criteriaToSet = diskDesign.criteria;
+            if (!criteriaToSet && latestReq.state.criteria.length === 0) {
+              const fallbackCmd = projectContext.fullCommand ?? projectContext.fastCommand;
+              if (fallbackCmd) {
+                criteriaToSet = [
+                  {
+                    id: "AC-1",
+                    description: "项目自动化验证通过",
+                    required: true,
+                    command: fallbackCmd,
+                  },
+                ];
+              }
+            }
+            latestReq = await propose(base, id, {
+              specMarkdown: diskDesign.specMarkdown,
+              designMarkdown: diskDesign.designMarkdown,
+              ...(criteriaToSet ? { criteria: criteriaToSet } : {}),
+              actor: "agent",
+              currentCodeSnapshotHash: snap?.fingerprint ?? null,
+            });
+            for (const criteriaFilePath of diskDesign.criteriaPaths) {
+              try {
+                if (fs.existsSync(criteriaFilePath)) fs.unlinkSync(criteriaFilePath);
+              } catch {
+                // Ignore cleanup failure for consumed criteria.json.
+              }
+            }
+            appendFinalizeNote("[workbench] 已自动同步磁盘规范/方案文件并提交人类审阅。\n");
+          }
+        } catch (err) {
+          appendFinalizeNote(
+            `[workbench] 同步磁盘方案文件失败：${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+
+      // Orchestrator-Driven Gate: auto-verify and promote/auto-heal when implement/fix exits cleanly.
+      let autoHealPending = false;
+      if (
+        status === "succeeded" &&
+        (input.action === "implement" || input.action === "fix") &&
+        latestReq &&
+        !job.cancelled &&
+        !job.timedOut &&
+        !spawnErr &&
+        !rateLimited &&
+        !modelUnavailable
+      ) {
+        try {
+          if (latestReq.state.stage === "implementing" && latestReq.validity.acceptanceGate.ok) {
+            latestReq = await updateTasks(base, id, {
+              readyForAcceptance: true,
+              actor: "agent",
+              currentCodeSnapshotHash: snap?.fingerprint ?? null,
+            });
+            appendFinalizeNote("[workbench] 全部必需验收条件已通过，已自动提交人工验收。\n");
+          } else if (
+            codeChanged &&
+            (latestReq.state.stage === "implementing" || latestReq.state.stage === "awaiting_acceptance") &&
+            latestReq.validity.approval.valid &&
+            !latestReq.validity.acceptanceGate.ok &&
+            latestReq.state.criteria.some((c) => c.required && c.command?.trim())
+          ) {
+            appendFinalizeNote("\n[workbench] Agent 已完成修改，正在自动执行必需验收命令...\n");
+            await runAllVerifications(base, id);
+            snap = await observeGitSnapshot(codeRoot);
+            latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+            const requiredCommandItems = latestReq.validity.coverage.items.filter(
+              (item) => item.criterion.required && Boolean(item.criterion.command?.trim()),
+            );
+            const hasFailedCommandVerification = requiredCommandItems.some((item) => item.state === "failed");
+            const allCommandCriteriaPassed =
+              requiredCommandItems.length > 0 && requiredCommandItems.every((item) => item.state === "passed");
+            if (latestReq.validity.acceptanceGate.ok || (allCommandCriteriaPassed && !hasFailedCommandVerification)) {
+              if (latestReq.state.stage !== "awaiting_acceptance" && latestReq.validity.acceptanceGate.ok) {
+                latestReq = await updateTasks(base, id, {
+                  readyForAcceptance: true,
+                  actor: "agent",
+                  currentCodeSnapshotHash: snap?.fingerprint ?? null,
+                });
+              }
+              appendFinalizeNote(
+                latestReq.validity.acceptanceGate.ok
+                  ? "[workbench] 全部必需验收命令通过，已自动提交人工验收。\n"
+                  : `[workbench] 全部自动化验收命令通过，待人工确认非命令条件：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+              );
+            } else if (hasFailedCommandVerification) {
+              appendFinalizeNote(
+                `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+              );
+              autoHealPending = true;
+            } else {
+              appendFinalizeNote(
+                `[workbench] 自动验收未就绪：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+              );
+            }
+          }
+        } catch (err) {
+          appendFinalizeNote(
+            `[workbench] 自动验收执行异常：${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+
+      const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
 
       const traceSummary = collector.finalizeRun({
         status,
@@ -1707,8 +1733,6 @@ export class HubExecutor {
             });
           }
         } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview && latestReq) {
-          const priorCount =
-            latestReq.state.reviewHistory?.length ?? (latestReq.state.reviewReport ? 1 : 0);
           let changedFiles: string[] | undefined;
           try {
             const obs = await observeGitChanges(codeRoot, {
@@ -1730,7 +1754,7 @@ export class HubExecutor {
             ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
             reviewedSpecHash: latestReq.state.specHash,
             reviewedCodeSnapshotHash: snap.fingerprint,
-            reviewMode: priorCount > 0 ? "delta" : "full",
+            reviewMode: "full",
             ...(changedFiles ? { changedFiles } : {}),
           });
         } else if (status === "succeeded" && (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0))) {
@@ -1915,7 +1939,32 @@ export class HubExecutor {
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
 
-      // Auto-trigger cross-model review once plan_first implement/fix succeeds and submits for acceptance.
+      // Deterministic Auto-Heal: if orchestrator auto-verify failed after coding, resume same session to fix it.
+      const healAttempt = input.autoHealAttempt ?? 0;
+      if (autoHealPending && healAttempt < MAX_AUTO_HEAL_ATTEMPTS) {
+        try {
+          const latestPrefs = this.getHubPreferences?.();
+          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
+          const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
+          if (latestRouting.autoHeal !== false && !alreadyRunning) {
+            void this.startRun({
+              root: base,
+              requirementId: id,
+              action: "fix",
+              autoHealAttempt: healAttempt + 1,
+            }).catch((err) => {
+              console.error(
+                `[workbench] auto-heal failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+            return;
+          }
+        } catch {
+          // Never crash finalize if auto-heal dispatch encounters a routing error.
+        }
+      }
+
+      // One-shot blind cross-model review once plan_first implement/fix passes verification and submits for acceptance.
       // Fast-track skips automatic review so humans can inspect Diff and accept directly (or trigger review manually).
       if (
         status === "succeeded" &&
@@ -1931,19 +1980,23 @@ export class HubExecutor {
           const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
           const reviewHistoryCount =
             postRunDetail.state.reviewHistory?.length ?? (postRunDetail.state.reviewReport ? 1 : 0);
-          const maxAutoReviewRounds = Math.min(5, Math.max(1, latestRouting.maxAutoReviewRounds ?? 2));
-          const prevVerdict = postRunDetail.state.reviewReport?.verdict;
-          const effectiveAutoCap = prevVerdict === "block" ? maxAutoReviewRounds + 1 : maxAutoReviewRounds;
-          if (latestRouting.autoReview !== false && reviewHistoryCount < effectiveAutoCap) {
+          const maxAutoReviewRounds = Math.min(5, Math.max(1, latestRouting.maxAutoReviewRounds ?? 1));
+          if (latestRouting.autoReview !== false && reviewHistoryCount < maxAutoReviewRounds) {
             const availHarnesses = await this.getHarnesses(false);
-            const reviewTarget = resolveRouteCandidates(latestRouting, availHarnesses, "review")[0];
-            const canAutoRun = Boolean(reviewTarget) && isHarnessRunnable(reviewTarget!.harness, availHarnesses);
+            const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review").filter((c) =>
+              isHarnessRunnable(c.harness, availHarnesses),
+            );
+            const reviewTarget =
+              reviewCandidates.find((c) => c.harness !== target.harness) ?? reviewCandidates[0];
             const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
-            if (canAutoRun && !alreadyRunning) {
+            if (reviewTarget && !alreadyRunning) {
               void this.startRun({
                 root: base,
                 requirementId: id,
                 action: "review",
+                harness: reviewTarget.harness,
+                model: reviewTarget.model,
+                ...(reviewTarget.reasoningEffort ? { reasoningEffort: reviewTarget.reasoningEffort } : {}),
                 isAutoReview: true,
               }).catch((err) => {
                 console.error(

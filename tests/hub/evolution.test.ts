@@ -249,8 +249,13 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     await createRequirement(repo, { goal: "Next feature" });
     const handoff = await synthesizeHandoffPacket(repo, "REQ-002", { action: "design" });
     expect(handoff.markdown).toContain("项目持久避坑与偏好法则（Playbook）");
-    const pbSection = handoff.markdown.split("## 0. 项目持久避坑与偏好法则（Playbook）")[1]?.split("\n## 1.")[0] ?? "";
+    const pbSection = handoff.markdown.split("## 项目持久避坑与偏好法则（Playbook）")[1]?.split("\n## ")[0] ?? "";
+    expect(pbSection.trim().length).toBeGreaterThan(0);
     expect(Buffer.byteLength(pbSection, "utf8")).toBeLessThanOrEqual(1260);
+
+    // Blind review should omit Playbook injection to avoid bias
+    const reviewHandoff = await synthesizeHandoffPacket(repo, "REQ-002", { action: "review" });
+    expect(reviewHandoff.markdown).not.toContain("项目持久避坑与偏好法则（Playbook）");
 
     // Restore ASCII rule check too
     await writePlaybook(repo, "- Do not use react-dom/server inside browser bundle\n");

@@ -114,9 +114,9 @@ describe("execution guards", () => {
       model: "gpt-6-astra",
     });
     await waitForRun(executor, design.run.id);
-    expect(prompts[0]).toContain("设计阶段禁止修改业务代码或测试");
-    expect(prompts[0]).toContain("提交方案后立即结束本轮");
-    expect(prompts[0]).not.toContain("修改代码后请重新运行真实测试验证");
+    expect(prompts[0]).toContain("本轮仅完成设计方案");
+    expect(prompts[0]).toContain("方案写完后直接结束本轮");
+    expect(prompts[0]).not.toContain("工作台会在你退出后自动执行必需验收命令");
 
     await propose(repo, "REQ-001", { designMarkdown: "# Design" });
     await approveDesign(repo, "REQ-001");
@@ -129,7 +129,8 @@ describe("execution guards", () => {
       model: "gpt-6-astra",
     });
     await waitForRun(executor, implement.run.id);
-    expect(prompts[1]).toContain("修改代码后请重新运行真实测试验证");
+    expect(prompts[1]).toContain("完成后直接结束本轮即可");
+    expect(prompts[1]).toContain("工作台会在你退出后自动执行必需验收命令");
     expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.status).toBe("succeeded");
   }, { timeout: 15000 });
 
@@ -747,7 +748,7 @@ describe("execution guards", () => {
     expect(getRequirement(repo, "REQ-002").state.agentRuns?.[0]?.status).toBe("failed");
   }, { timeout: 15000 });
 
-  test("Phase 2: skips session_affinity and native_resume when prior peakContextTokens exceeds 100k", async () => {
+  test("Phase 2: preserves session_affinity and native_resume even when prior peakContextTokens exceeds 100k", async () => {
     makeTempHub();
     const repo = makeGitRepo("bloat-guard");
     await initProject(repo, { name: "BloatGuard", privacyMode: "local" });
@@ -807,11 +808,17 @@ describe("execution guards", () => {
     const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
     await waitForRun(executor, started.run.id);
 
-    expect(seen).toEqual([{ harness: "qodercn", model: "DeepSeek-Flash", nativeSessionId: undefined }]);
-    expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("fresh_handoff");
+    expect(seen).toEqual([
+      {
+        harness: "opencode",
+        model: "opencode-go/deepseek-v4.1-flash",
+        nativeSessionId: "ses_bloated_123456",
+      },
+    ]);
+    expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("native_resume");
   }, { timeout: 15000 });
 
-  test("Phase 3: enforces design In-Scope/Out-of-Scope + bug root-cause prompt and records drift/bloat healthWarnings", async () => {
+  test("Phase 3: builds clean File-Native design prompt and records drift/bloat healthWarnings", async () => {
     makeTempHub();
     const repo = makeGitRepo("phase3-guards");
     await initProject(repo, { name: "Phase3Guards", privacyMode: "local" });
@@ -828,11 +835,11 @@ describe("execution guards", () => {
       requirementId: "REQ-001",
       action: "design",
     });
-    expect(designPrompt).toContain("设计阶段禁止修改业务代码或测试");
-    expect(designPrompt).toContain("提交方案后立即结束本轮");
-    expect(designPrompt).toContain("In-Scope");
-    expect(designPrompt).toContain("Out-of-Scope");
-    expect(designPrompt).toContain("Bug/报错修复");
+    expect(designPrompt).toContain("本轮仅完成设计方案");
+    expect(designPrompt).toContain("方案写完后直接结束本轮");
+    expect(designPrompt).toContain("spec.md");
+    expect(designPrompt).toContain("design.md");
+    expect(designPrompt).toContain("运行只读测试或检查命令复现定位");
 
     const warningsEmitted: string[] = [];
     const collector = new RunTraceCollector({

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +15,7 @@ import {
   getDesignHistoryVersion,
   getProjectStatus,
   getRequirement,
+  getRequirementDiff,
   getVerificationEvidence,
   initProject,
   listRequirements,
@@ -28,6 +30,7 @@ import {
   updateSpec,
   updateTasks,
 } from "../../src/core/engine.ts";
+import { detectTestTamperingSignals } from "../../src/core/validity.ts";
 import { discoverProjectContext } from "../../src/core/context.ts";
 import { distillRequirementToPlaybook } from "../../src/core/playbook.ts";
 import { WorkbenchError } from "../../src/core/errors.ts";
@@ -726,5 +729,94 @@ describe("WB-01 core store and domain engine", () => {
         overrideReason: "试图跳过 0/0 约束",
       }),
     ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
+  });
+
+  test("detectTestTamperingSignals flags deleted/skipped tests and dropped assertions, and surfaces via getRequirementDiff", async () => {
+    expect(
+      detectTestTamperingSignals(
+        [{ path: "tests/foo.test.ts", status: "D", staged: false, unstaged: true }],
+        "",
+      ).length,
+    ).toBeGreaterThan(0);
+
+    expect(
+      detectTestTamperingSignals(
+        [{ path: "tests/foo.test.ts", status: "M", staged: false, unstaged: true }],
+        [
+          "diff --git a/tests/foo.test.ts b/tests/foo.test.ts",
+          "+test.skip('flaky', () => {});",
+        ].join("\n"),
+      ).length,
+    ).toBeGreaterThan(0);
+
+    expect(
+      detectTestTamperingSignals(
+        [{ path: "tests/foo.test.ts", status: "M", staged: false, unstaged: true }],
+        [
+          "diff --git a/tests/foo.test.ts b/tests/foo.test.ts",
+          "-  expect(res.ok).toBe(true);",
+          "-  expect(res.status).toBe(200);",
+        ].join("\n"),
+      ).length,
+    ).toBeGreaterThan(0);
+
+    // Replacing assertions without dropping them should not flag
+    expect(
+      detectTestTamperingSignals(
+        [{ path: "tests/foo.test.ts", status: "M", staged: false, unstaged: true }],
+        [
+          "diff --git a/tests/foo.test.ts b/tests/foo.test.ts",
+          "-  expect(res.ok).toBe(true);",
+          "+  expect(res.status).toBe(200);",
+        ].join("\n"),
+      ),
+    ).toEqual([]);
+
+    // Non-test file containing test.skip literal must not trigger false positive,
+    // while per-file dropped assertions still trigger even if another test file adds assertions.
+    expect(
+      detectTestTamperingSignals(
+        [{ path: "src/helper.ts", status: "M", staged: false, unstaged: true }],
+        [
+          "diff --git a/src/helper.ts b/src/helper.ts",
+          "+const pattern = /test\\.skip\\(/;",
+        ].join("\n"),
+      ),
+    ).toEqual([]);
+    expect(
+      detectTestTamperingSignals(
+        [
+          { path: "tests/a.test.ts", status: "M", staged: false, unstaged: true },
+          { path: "tests/b.test.ts", status: "M", staged: false, unstaged: true },
+        ],
+        [
+          "diff --git a/tests/a.test.ts b/tests/a.test.ts",
+          "-  expect(a).toBe(1);",
+          "-  expect(b).toBe(2);",
+          "diff --git a/tests/b.test.ts b/tests/b.test.ts",
+          "+  expect(c).toBe(3);",
+        ].join("\n"),
+      ).some((s) => s.includes("tests/a.test.ts")),
+    ).toBe(true);
+
+    // End-to-end via getRequirementDiff on a real git repo
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "wb-core-tamper-"));
+    tempDirs.push(repo);
+    execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo, stdio: "ignore" });
+    fs.mkdirSync(path.join(repo, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "tests/app.test.ts"), "test('works', () => { expect(1).toBe(1); });\n");
+    execFileSync("git", ["add", "tests/app.test.ts"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "TamperTest" });
+    await createRequirement(repo, { goal: "Detect test tampering" });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    // Agent disables a test using test.skip
+    fs.writeFileSync(path.join(repo, "tests/app.test.ts"), "test.skip('works', () => { expect(1).toBe(1); });\n");
+    const diffView = await getRequirementDiff(repo, "REQ-001");
+    expect(diffView.testTamperingSignals?.length).toBeGreaterThan(0);
   });
 });
