@@ -310,8 +310,8 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
             style={{ display: "flex", gap: 4, padding: "4px 6px 2px" }}
           >
             <input
-              className="input"
-              style={{ padding: "3px 6px", fontSize: 12 }}
+              className="input xs"
+              style={{ flex: 1 }}
               data-testid={`category-input-${p.id}`}
               maxLength={32}
               autoFocus

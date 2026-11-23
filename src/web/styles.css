@@ -21,6 +21,9 @@
   --header-h: 52px;
   --sidebar-w: 360px;
   --drawer-w: 720px;
+  --control-h: 34px;
+  --control-h-xs: 28px;
+  --badge-h: 22px;
   --ease-drawer-enter: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-drawer-exit: cubic-bezier(0.215, 0.61, 0.355, 1);
   --console-bg: #f8fafc;
@@ -315,9 +318,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .sb-req-top { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
 .sb-req-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .segmented.sb-scope-tabs { width: 100%; display: flex; }
-.segmented.sb-scope-tabs button { flex: 1 1 auto; justify-content: center; padding: 4px 5px; font-size: 11.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.segmented.sb-scope-tabs button { flex: 1 1 auto; justify-content: center; padding: 2px 5px; font-size: 11.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sb-sandbox-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.sb-sandbox-filter-btn { flex: 1 1 auto; min-width: 0; justify-content: flex-start; }
+.btn.sb-sandbox-filter-btn { flex: 1 1 auto; min-width: 0; justify-content: flex-start; }
 .sb-sandbox-alert-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--warning); flex-shrink: 0; }
 .sb-sandbox-filter-btn.primary .sb-sandbox-alert-dot { background: #fff; }
 .sb-req-item-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; width: 100%; }
@@ -552,7 +555,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .drawer-composer-actions .btn { flex: 1; justify-content: center; font-size: 12px; padding: 6px 8px; }
 
 .console-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
-.console-status-bar { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 6px 8px; background: var(--surface-2); border: 1px solid var(--console-border); border-radius: 6px; }
+.console-status-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding: 6px 8px; background: var(--surface-2); border: 1px solid var(--console-border); border-radius: 6px; }
+.console-status-info { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1 1 220px; min-width: 0; }
+.console-status-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; flex: 0 1 auto; margin-left: auto; }
 .console-controls-bar { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
 .console-controls-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .console-shell { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -701,12 +706,12 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .topbar-left, .topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .mobile-only { display: none; }
 .brand { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
-.bridge-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 3px 9px; border-radius: 999px; background: var(--surface-2); }
+.bridge-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 3px 9px; border-radius: 999px; background: var(--surface-2); min-height: var(--badge-h); line-height: 1.2; white-space: nowrap; flex-shrink: 0; }
 .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--muted); display: inline-block; flex-shrink: 0; }
 .dot.online { background: var(--success); }
 .dot.working { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
-.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 7px 12px; border-radius: 8px; cursor: pointer; font-weight: 500; font-size: 13px; transition: background 0.12s ease, border-color 0.12s ease; }
+.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); min-height: var(--control-h); padding: 5px 12px; border-radius: 8px; cursor: pointer; font-weight: 500; font-size: 13px; line-height: 1.25; white-space: nowrap; flex-shrink: 0; transition: background 0.12s ease, border-color 0.12s ease; }
 .btn:hover:not(:disabled) { background: var(--surface-2); }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -714,9 +719,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.ghost:hover:not(:disabled) { background: var(--surface-2); }
-.btn.xs { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+.btn.xs { min-height: var(--control-h-xs); padding: 3px 8px; font-size: 12px; line-height: 1.25; border-radius: 6px; }
+/* REQ-015 审查修复：触发按钮需要高于 .btn 基础 flex-shrink:0 的收缩优先级，长模型名才能内部省略。 */
+.btn.model-runner-trigger { min-width: 0; flex-shrink: 1; }
+.btn.routing-picker-trigger { width: 230px; max-width: 280px; min-width: 0; flex-shrink: 1; justify-content: space-between; }
+.btn.model-runner-trigger .truncate { min-width: 0; }
+.btn.routing-picker-trigger .truncate { min-width: 0; }
 
-.badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; min-height: var(--badge-h); padding: 2px 8px; line-height: 1.2; border-radius: 999px; background: var(--surface-2); color: var(--muted); white-space: nowrap; flex-shrink: 0; }
 .ui-icon { flex-shrink: 0; vertical-align: -0.125em; }
 .badge.info { background: var(--accent-soft); color: var(--accent); }
 .badge.success { background: var(--success-soft); color: var(--success); }
@@ -730,13 +740,13 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .stat-pill.warn { border-color: var(--warning); background: var(--warning-soft); }
 
 .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.search-wrap { flex: 1; min-width: 180px; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0 11px; color: var(--muted); }
+.search-wrap { flex: 1; min-width: 180px; min-height: var(--control-h); display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; color: var(--muted); }
 .search-wrap:focus-within { border-color: var(--accent); }
-.search-box { flex: 1; min-width: 0; background: transparent; border: 0; border-radius: 0; padding: 7px 0; color: var(--text); outline: none; }
-.select { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 13px; max-width: 100%; }
-.select.xs { padding: 4px 6px; font-size: 12px; border-radius: 6px; }
-.segmented { display: inline-flex; background: var(--surface-2); border-radius: 8px; padding: 2px; gap: 2px; }
-.segmented button { border: 0; background: transparent; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.search-box { flex: 1; min-width: 0; background: transparent; border: 0; border-radius: 0; padding: 5px 0; font-size: 13px; line-height: 1.25; color: var(--text); outline: none; }
+.select { height: var(--control-h); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 13px; line-height: 1.25; max-width: 100%; flex-shrink: 0; }
+.select.xs { height: var(--control-h-xs); padding: 2px 6px; font-size: 12px; line-height: 1.25; border-radius: 6px; }
+.segmented { display: inline-flex; align-items: center; min-height: var(--control-h-xs); background: var(--surface-2); border-radius: 7px; padding: 2px; gap: 2px; flex-shrink: 0; }
+.segmented button { min-height: 24px; border: 0; background: transparent; padding: 2px 9px; border-radius: 5px; cursor: pointer; font-size: 12px; line-height: 1.25; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .segmented button.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
 
 .req-list { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
@@ -931,6 +941,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .screenshot-thumb-label { font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .screenshot-lightbox-image { flex: 1; min-width: 0; max-height: 72vh; object-fit: contain; border-radius: 8px; background: var(--surface-2); }
 .evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.evidence-info { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1 1 260px; min-width: 0; }
+.evidence-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; flex: 0 1 auto; margin-left: auto; }
+.evidence-command { font-size: 12.5px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
 .evidence-log { margin: 8px 0 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-family: var(--mono); font-size: 12px; overflow-x: auto; max-height: 260px; white-space: pre-wrap; word-break: break-word; }
 
 .diff-split { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; align-items: stretch; }
@@ -970,8 +983,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 50; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: calc(100% - 32px); max-width: 560px; padding: 18px; box-shadow: 0 20px 50px rgba(0,0,0,0.22); max-height: 90vh; overflow-y: auto; }
 .modal.modal-wide { max-width: 780px; }
 .modal h3 { margin: 0 0 12px; font-size: 16px; }
-.textarea, .input { width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
-.textarea { min-height: 110px; resize: vertical; }
+.textarea, .input { width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; }
+.input { height: var(--control-h); padding: 5px 10px; font-size: 13px; line-height: 1.25; min-width: 0; }
+.input.xs { height: var(--control-h-xs); padding: 3px 8px; font-size: 12px; line-height: 1.25; border-radius: 6px; }
+.textarea { min-height: 110px; padding: 8px 10px; font-size: 13px; line-height: 1.5; resize: vertical; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 
 .browse-box { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-2); }
@@ -985,6 +1000,11 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .preset-card { text-align: left; border: 1px solid var(--border); background: var(--surface-2); border-radius: 8px; padding: 10px; cursor: pointer; }
 .preset-card.active { border-color: var(--accent); background: var(--accent-soft); }
+.new-req-stack-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding-left: 22px; min-width: 0; }
+.new-req-stack-label { white-space: nowrap; flex-shrink: 0; }
+.select.new-req-stack-select { flex: 1 1 0; width: 0; min-width: 0; max-width: 100%; }
+
+
 .routing-table { display: flex; flex-direction: column; gap: 8px; }
 .routing-row { display: grid; grid-template-columns: minmax(160px, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .handoff-preview-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; max-height: 55vh; overflow-y: auto; background: var(--surface-2); }

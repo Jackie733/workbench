@@ -548,10 +548,10 @@ export function Modals() {
                   <span>{t(language, "newReq.createSandbox")}</span>
                 </label>
                 {m.createSandbox && (projectSandboxes?.sandboxes.length ?? 0) > 0 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, paddingLeft: 22 }}>
-                    <span className="xs muted">{t(language, "newReq.stackedOn")}</span>
+                  <div className="new-req-stack-row">
+                    <span className="xs muted new-req-stack-label">{t(language, "newReq.stackedOn")}</span>
                     <select
-                      className="select"
+                      className="select xs new-req-stack-select"
                       data-testid="new-req-stack-select"
                       value={m.stackedOnReqId ?? ""}
                       onChange={(e) =>
@@ -668,7 +668,7 @@ export function Modals() {
                     ))}
                   </div>
                   <select
-                    className="select"
+                    className="select xs"
                     aria-label={t(language, "gitee.stateAria")}
                     data-testid="gitee-state-select"
                     value={giteeState}
@@ -1362,6 +1362,9 @@ export function Modals() {
                   const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
                   const efforts = effortCap.efforts;
                   const lockedEffort = effortCap.defaultEffort ?? efforts[0];
+                  const lockedLabel = t(language, "routing.effortLockedLabel", {
+                    effort: lockedEffort ? effortLabel(language, lockedEffort) : t(language, "routing.effortBuiltin"),
+                  });
 
                   const changePrimaryModel = (key: string) => {
                     const parsed = parseRunnerKey(key);
@@ -1413,7 +1416,7 @@ export function Modals() {
                         />
                         {effortCap.mode === "configurable" ? (
                           <select
-                            className="select font-mono w-[135px]"
+                            className="select xs font-mono w-[135px]"
                             data-testid={`route-effort-${stg}`}
                             title={t(language, "routing.effortTitle")}
                             value={
@@ -1450,23 +1453,21 @@ export function Modals() {
                           </select>
                         ) : effortCap.mode === "locked" ? (
                           <span
-                            className="inline-flex items-center justify-center w-[135px] px-2 py-1.5 rounded border border-[var(--border)] text-xs font-mono text-[var(--muted)]"
+                            className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs font-mono text-[var(--muted)] overflow-hidden"
                             data-testid={`route-effort-${stg}-locked`}
-                            title={t(language, "routing.effortLockedTitle")}
+                            title={`${lockedLabel} · ${t(language, "routing.effortLockedTitle")}`}
                           >
-                            {t(language, "routing.effortLockedLabel", {
-                              effort: lockedEffort
-                                ? effortLabel(language, lockedEffort)
-                                : t(language, "routing.effortBuiltin"),
-                            })}
+                            <span className="truncate min-w-0">{lockedLabel}</span>
                           </span>
                         ) : (
                           <span
-                            className="inline-flex items-center justify-center w-[135px] px-2 py-1.5 rounded border border-[var(--border)] text-xs text-[var(--muted)]"
+                            className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs text-[var(--muted)] overflow-hidden"
                             data-testid={`route-effort-${stg}-unsupported`}
-                            title={t(language, "routing.effortUnsupportedTitle")}
+                            title={`${t(language, "routing.effortUnsupportedLabel")} · ${t(language, "routing.effortUnsupportedTitle")}`}
                           >
-                            {t(language, "routing.effortUnsupportedLabel")}
+                            <span className="truncate min-w-0">
+                              {t(language, "routing.effortUnsupportedLabel")}
+                            </span>
                           </span>
                         )}
                       </div>
@@ -1601,7 +1602,7 @@ export function Modals() {
                   />
                   {hub?.giteeTokenConfigured && !m.clearGiteeToken && (
                     <button
-                      className="btn xs"
+                      className="btn"
                       type="button"
                       data-testid="hub-gitee-token-clear"
                       onClick={() =>
@@ -2403,7 +2404,7 @@ export function Modals() {
             }
           />
           <button
-            className="btn xs"
+            className="btn"
             type="button"
             data-testid="pick-element-btn"
             title={t(language, "report.pickTitle")}

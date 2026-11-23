@@ -515,6 +515,77 @@ describe("shared brand mark and browser icons", () => {
     expect(css).not.toContain(".sb-logo");
   });
 
+  test("REQ-015: controls share two height tiers and guard against flex squeezing", () => {
+    const css = read("src/web/styles.css");
+    const escape = (selector: string) => selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rule = (selector: string, declaration: RegExp) =>
+      new RegExp(`${escape(selector)}\\s*\\{[^}]*${declaration.source}`);
+    // 三档尺寸令牌：标准控件 34px、紧凑控件 28px、状态徽标 22px。
+    expect(css).toMatch(/:root\s*\{[^}]*--control-h:\s*34px/);
+    expect(css).toMatch(/:root\s*\{[^}]*--control-h-xs:\s*28px/);
+    expect(css).toMatch(/:root\s*\{[^}]*--badge-h:\s*22px/);
+
+    // 标准控件严格对齐 34px，并拒绝被同行输入框挤压换行。
+    for (const selector of [".btn", ".input", ".select"]) {
+      expect(css, `${selector} must use the standard control height`).toMatch(
+        rule(selector, /(min-height|height):\s*var\(--control-h\)/),
+      );
+    }
+    expect(css).toMatch(rule(".btn", /white-space:\s*nowrap/));
+    expect(css).toMatch(rule(".btn", /flex-shrink:\s*0/));
+    expect(css).toMatch(rule(".select", /flex-shrink:\s*0/));
+    expect(css).toMatch(rule(".input", /min-width:\s*0/));
+    expect(css).toMatch(rule(".search-wrap", /min-height:\s*var\(--control-h\)/));
+
+    // 紧凑控件严格对齐 28px，补齐此前缺失的 .input.xs 规则。
+    for (const selector of [".btn.xs", ".input.xs", ".select.xs"]) {
+      expect(css, `${selector} must use the compact control height`).toMatch(
+        rule(selector, /(min-height|height):\s*var\(--control-h-xs\)/),
+      );
+    }
+    expect(css).toMatch(rule(".segmented", /min-height:\s*var\(--control-h-xs\)/));
+    expect(css).toMatch(rule(".segmented", /align-items:\s*center/));
+    expect(css).toMatch(rule(".segmented button", /min-height:\s*24px/));
+    expect(css).toMatch(rule(".segmented button", /white-space:\s*nowrap/));
+
+    // REQ-015 审查修复：需要内部省略的特殊按钮必须以更高优先级覆盖基础 .btn 的 flex-shrink: 0。
+    expect(css).toMatch(rule(".btn.sb-sandbox-filter-btn", /flex:\s*1 1 auto/));
+    expect(css).toMatch(rule(".btn.sb-sandbox-filter-btn", /min-width:\s*0/));
+    expect(css).toMatch(rule(".btn.model-runner-trigger", /flex-shrink:\s*1/));
+    expect(css).toMatch(rule(".btn.routing-picker-trigger", /flex-shrink:\s*1/));
+    expect(css).toMatch(rule(".btn.routing-picker-trigger", /min-width:\s*0/));
+    expect(css).toMatch(rule(".btn.routing-picker-trigger", /width:\s*230px/));
+    expect(css).toMatch(rule(".btn.model-runner-trigger .truncate", /min-width:\s*0/));
+    expect(css).toMatch(rule(".btn.routing-picker-trigger .truncate", /min-width:\s*0/));
+
+    // REQ-015 审查修复：窄布局下终端状态栏可整体换行，分叉基准下拉框可收缩。
+    expect(css).toMatch(rule(".console-status-bar", /flex-wrap:\s*wrap/));
+    expect(css).toMatch(rule(".console-status-info", /flex:\s*1 1 220px/));
+    expect(css).toMatch(rule(".console-status-info", /min-width:\s*0/));
+    expect(css).toMatch(rule(".console-status-actions", /flex-wrap:\s*wrap/));
+    expect(css).toMatch(rule(".new-req-stack-label", /white-space:\s*nowrap/));
+    expect(css).toMatch(rule(".select.new-req-stack-select", /min-width:\s*0/));
+    expect(css).toMatch(rule(".select.new-req-stack-select", /flex:\s*1 1 0/));
+
+    // REQ-015 审查修复：窄屏证据卡片信息区弹性基准、操作组换行与长命令任意断行。
+    expect(css).toMatch(rule(".evidence-info", /flex:\s*1 1 260px/));
+    expect(css).toMatch(rule(".evidence-info", /min-width:\s*0/));
+    expect(css).toMatch(rule(".evidence-actions", /flex-wrap:\s*wrap/));
+    expect(css).toMatch(rule(".evidence-command", /overflow-wrap:\s*anywhere/));
+
+    // 状态徽标与顶栏连接胶囊保持单行且不被压缩。
+    expect(css).toMatch(rule(".badge", /min-height:\s*var\(--badge-h\)/));
+    expect(css).toMatch(rule(".badge", /flex-shrink:\s*0/));
+    expect(css).toMatch(rule(".bridge-pill", /white-space:\s*nowrap/));
+    expect(css).toMatch(rule(".bridge-pill", /flex-shrink:\s*0/));
+
+    // REQ-010 守卫：菜单项仍按内容自适应宽度，不拉伸、不块级化。
+    expect(css).toMatch(rule(".more-menu button", /width:\s*auto/));
+    expect(css).toMatch(rule(".more-menu button", /display:\s*flex/));
+    expect(css).not.toMatch(rule(".more-menu button", /display:\s*block/));
+    expect(css).not.toMatch(rule(".more-menu button", /width:\s*100%/));
+  });
+
   test("page declares the vector, compatibility, and apple touch icons", () => {
     const html = read("src/web/index.html");
     expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');

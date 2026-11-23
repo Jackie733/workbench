@@ -133,12 +133,12 @@ export function ModelRunnerBar({
         <PopoverTrigger asChild>
           <button
             type="button"
-            className="btn xs inline-flex items-center gap-1.5 max-w-[235px]"
+            className="btn xs model-runner-trigger inline-flex items-center gap-1.5 max-w-[235px]"
             data-testid={`${testId}-trigger`}
             title={t(language, "runner.current", { model: currentDisplay })}
           >
             <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
-            <span className="truncate font-mono text-[11.5px]">{currentDisplay}</span>
+            <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
             <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
           </button>
         </PopoverTrigger>
@@ -191,7 +191,7 @@ export function ModelRunnerBar({
       )}
       {selectedRunnerKey !== "manual_copy" && effortCap.mode === "locked" && (
         <div
-          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--border)] bg-[var(--surface-2,transparent)] text-[11px] font-mono text-[var(--muted)]"
+          className="inline-flex items-center gap-1 min-h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] bg-[var(--surface-2,transparent)] text-xs font-mono text-[var(--muted)] whitespace-nowrap shrink-0"
           data-testid={`${testId}-effort-locked`}
           title={t(language, "runner.effortLockedTitle")}
         >

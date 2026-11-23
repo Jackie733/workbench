@@ -11,6 +11,7 @@ import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
   type BrowserInstance,
+  type BrowserPage,
   cleanupE2eResources,
   clickReady,
   closeE2eBrowser,
@@ -24,6 +25,37 @@ const servers: WorkbenchServerHandle[] = [];
 const origHubDir = process.env.WORKBENCH_HUB_DIR;
 let browser: BrowserInstance | null = null;
 const initGitRepo = () => initGitRepoIn(tempDirs);
+
+async function measureControlRow(
+  page: BrowserPage,
+  selectors: string[],
+): Promise<Array<{ selector: string; height: number; singleLine: boolean }>> {
+  return page.evaluate((items: string[]) =>
+    items.map((selector) => {
+      const el = document.querySelector(selector) as HTMLElement | null;
+      if (!el) return { selector, height: -1, singleLine: false };
+      const rect = el.getBoundingClientRect();
+      return {
+        selector,
+        height: rect.height,
+        singleLine: el.scrollWidth <= el.clientWidth + 1,
+      };
+    }),
+  selectors);
+}
+
+async function expectControlsAligned(page: BrowserPage, selectors: string[], expectedHeight?: number): Promise<void> {
+  const controls = await measureControlRow(page, selectors);
+  for (const control of controls) {
+    expect(control.height, `${control.selector} must be rendered`).toBeGreaterThan(0);
+    expect(control.singleLine, `${control.selector} must stay on one line`).toBe(true);
+    if (expectedHeight !== undefined) {
+      expect(Math.abs(control.height - expectedHeight), `${control.selector} height`).toBeLessThanOrEqual(1);
+    }
+  }
+  const heights = controls.map((control) => control.height);
+  expect(Math.max(...heights) - Math.min(...heights), `${selectors.join(", ")} must share one height`).toBeLessThanOrEqual(1);
+}
 
 beforeAll(async () => {
   browser = await launchE2eBrowser();
@@ -206,6 +238,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="diff-viewer-panel"] .diff-code', { timeout: 5000 });
       const gitDiffText = await page.evaluate(() => document.querySelector('[data-testid="diff-viewer-panel"] .diff-code')?.textContent ?? "");
       expect(gitDiffText).toContain("export const sub");
+      // REQ-015: 需求详情「更多」按钮与 Diff 工具栏紧凑控件统一为 28px 单行。
+      await expectControlsAligned(page, ['[data-testid="more-menu-btn"]'], 28);
+      await expectControlsAligned(
+        page,
+        [
+          '[data-testid="diff-view-mode-toggle"]',
+          '[data-testid="diff-expand-height-btn"]',
+          '[data-testid="dock-diff-to-drawer-btn"]',
+        ],
+        28,
+      );
       await clickReady(page, '[data-testid="diff-view-mode-toggle"] button:nth-child(2)');
       await page.waitForSelector('[data-testid="diff-unified-list"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="diff-expand-height-btn"]');
@@ -223,6 +266,50 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await page.click('[data-testid="tab-changes"]');
       await page.waitForSelector('[data-testid="verify-diff-shortcut-card"]', { timeout: 5000 });
+      // REQ-015: 手动验证命令输入、条件输入与运行按钮严格等高 34px 且单行。
+      await expectControlsAligned(
+        page,
+        ['#manual-verify-cmd', '#manual-verify-criteria', '[data-testid="manual-verify-btn"]'],
+        34,
+      );
+      // REQ-015 审查修复：窄屏证据卡片信息区保留弹性基准，长命令可在任意位置换行，操作组另起一行。
+      await page.waitForSelector(".evidence-card", { timeout: 5000 });
+      await page.setViewport({ width: 390, height: 844 });
+      await Bun.sleep(150);
+      const narrowEvidence = await page.evaluate(() => {
+        const rect = (el: HTMLElement | null) => {
+          if (!el) return { left: -1, right: -1, top: -1, bottom: -1, width: -1, height: -1 };
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+        };
+        const head = document.querySelector(".evidence-head") as HTMLElement | null;
+        const info = head?.querySelector(".evidence-info") as HTMLElement | null;
+        const actions = head?.querySelector(".evidence-actions") as HTMLElement | null;
+        const command = head?.querySelector(".evidence-command") as HTMLElement | null;
+        const commandStyle = command ? getComputedStyle(command) : null;
+        return {
+          head: rect(head),
+          info: rect(info),
+          actions: rect(actions),
+          command: rect(command),
+          headOverflow: head ? head.scrollWidth - head.clientWidth : -1,
+          infoOverflow: info ? info.scrollWidth - info.clientWidth : -1,
+          commandOverflow: command ? command.scrollWidth - command.clientWidth : -1,
+          commandOverflowWrap: commandStyle?.overflowWrap ?? "",
+        };
+      });
+      expect(narrowEvidence.headOverflow).toBeLessThanOrEqual(1);
+      expect(narrowEvidence.infoOverflow).toBeLessThanOrEqual(1);
+      expect(narrowEvidence.commandOverflow).toBeLessThanOrEqual(1);
+      expect(narrowEvidence.command.right).toBeLessThanOrEqual(narrowEvidence.info.right + 1);
+      expect(narrowEvidence.commandOverflowWrap).toBe("anywhere");
+      const evidenceActionsSeparated =
+        narrowEvidence.actions.left >= narrowEvidence.info.right - 1 ||
+        narrowEvidence.actions.top >= narrowEvidence.info.bottom - 1;
+      expect(evidenceActionsSeparated).toBe(true);
+      expect(narrowEvidence.actions.right).toBeLessThanOrEqual(narrowEvidence.head.right + 1);
+      await page.setViewport({ width: 1280, height: 860 });
+      await Bun.sleep(150);
       await page.click('[data-action="toggle-log"]');
       await page.waitForSelector(".evidence-log", { timeout: 5000 });
 
@@ -314,6 +401,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           models: [
             { id: "gpt-6-astra", tier: "sota", source: "detected" },
             { id: "codex-auto-review", tier: "review", source: "detected" },
+            {
+              id: "gpt-6.2-xhigh-locked-variant-with-extra-long-name",
+              label: "GPT-6.2 XHigh 锁定超长变体名称",
+              tier: "sota",
+              source: "detected",
+              supportedEfforts: ["xhigh"],
+              defaultEffort: "xhigh",
+              effortLocked: true,
+            },
           ],
           defaultModel: "gpt-6-astra",
           detectedAt: Date.now(),
@@ -449,6 +545,38 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
       await page.select('[data-testid="hub-output-language-select"]', "zh-CN");
       await clickReady(page, '[data-testid="preset-quota_saver"]');
+      // REQ-015 审查修复：长模型名在路由选择器中内部省略，锁定推理强度标签保持 28px 单行且悬浮提示展示完整值。
+      await page.select('[data-testid="route-select-design"]', "codex::gpt-6.2-xhigh-locked-variant-with-extra-long-name");
+      await page.waitForSelector('[data-testid="route-effort-design-locked"]', { timeout: 5000 });
+      const lockedEffortMetrics = await page.evaluate(() => {
+        const picker = document.querySelector('[data-testid="route-select-design-trigger"]') as HTMLElement | null;
+        const pickerText = picker?.querySelector(".truncate") as HTMLElement | null;
+        const locked = document.querySelector('[data-testid="route-effort-design-locked"]') as HTMLElement | null;
+        const lockedText = locked?.querySelector(".truncate") as HTMLElement | null;
+        const pickerStyle = picker ? getComputedStyle(picker) : null;
+        const lockedTextStyle = lockedText ? getComputedStyle(lockedText) : null;
+        return {
+          pickerHeight: picker?.getBoundingClientRect().height ?? -1,
+          pickerFlexShrink: pickerStyle?.flexShrink ?? "",
+          pickerMinWidth: pickerStyle?.minWidth ?? "",
+          pickerTextTruncated: pickerText ? pickerText.scrollWidth > pickerText.clientWidth : false,
+          lockedHeight: locked?.getBoundingClientRect().height ?? -1,
+          lockedWhiteSpace: lockedTextStyle?.whiteSpace ?? "",
+          lockedTextOverflow: lockedTextStyle?.textOverflow ?? "",
+          lockedVerticalOverflow: locked ? locked.scrollHeight > locked.clientHeight + 1 : true,
+          lockedTitle: locked?.getAttribute("title") ?? "",
+        };
+      });
+      expect(lockedEffortMetrics.pickerFlexShrink).toBe("1");
+      expect(lockedEffortMetrics.pickerMinWidth).toBe("0px");
+      expect(lockedEffortMetrics.pickerHeight).toBeLessThanOrEqual(29);
+      expect(lockedEffortMetrics.pickerTextTruncated).toBe(true);
+      expect(Math.abs(lockedEffortMetrics.lockedHeight - 28)).toBeLessThanOrEqual(1);
+      expect(lockedEffortMetrics.lockedWhiteSpace).toBe("nowrap");
+      expect(lockedEffortMetrics.lockedTextOverflow).toBe("ellipsis");
+      expect(lockedEffortMetrics.lockedVerticalOverflow).toBe(false);
+      expect(lockedEffortMetrics.lockedTitle).toContain("XHigh (极高)");
+      await page.select('[data-testid="route-select-design"]', "qodercn::Qwen4-Max");
       await page.select('[data-testid="route-effort-design"]', "xhigh");
       await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
@@ -529,6 +657,30 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="action-approve_only"]');
       await page.waitForSelector('[data-testid="run-review-btn"]', { timeout: 5000 });
       await page.waitForSelector('[data-testid="banner-runner-select-trigger"]', { timeout: 5000 });
+      // REQ-015 审查修复：模型触发按钮的收缩规则必须高于基础 .btn，才能在窄行内省略长模型名。
+      const bannerRunnerMetrics = await page.evaluate(() => {
+        const trigger = document.querySelector('[data-testid="banner-runner-select-trigger"]') as HTMLElement | null;
+        const style = trigger ? getComputedStyle(trigger) : null;
+        return {
+          flexShrink: style?.flexShrink ?? "",
+          minWidth: style?.minWidth ?? "",
+          height: trigger?.getBoundingClientRect().height ?? -1,
+        };
+      });
+      expect(bannerRunnerMetrics.flexShrink).toBe("1");
+      expect(bannerRunnerMetrics.minWidth).toBe("0px");
+      expect(Math.abs(bannerRunnerMetrics.height - 28)).toBeLessThanOrEqual(1);
+      // REQ-015: 阶段横幅内模型触发器、推理强度下拉与运行/审查按钮严格等高 28px 且单行。
+      await expectControlsAligned(
+        page,
+        [
+          '[data-testid="banner-runner-select-trigger"]',
+          '[data-testid="banner-runner-select-effort"]',
+          '[data-testid="run-selected-model-btn"]',
+          '[data-testid="run-review-btn"]',
+        ],
+        28,
+      );
       await page.select('[data-testid="banner-runner-select-effort"]', "high");
       await clickReady(page, '[data-testid="run-selected-model-btn"]');
       await page.waitForFunction(
@@ -584,6 +736,16 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => (document.querySelector('[data-testid="quick-report-selector"]') as HTMLInputElement)?.value ?? "",
       );
       expect(pickedSel).toBe('[data-testid="new-req-btn"]');
+      // REQ-015: 快速上报分类下拉、选择器输入框与拾取元素按钮严格等高 34px 且单行。
+      await expectControlsAligned(
+        page,
+        [
+          '[data-testid="quick-report-category"]',
+          '[data-testid="quick-report-selector"]',
+          '[data-testid="pick-element-btn"]',
+        ],
+        34,
+      );
       await page.type('[data-testid="quick-report-title"]', "窄屏下工具栏按钮间距略紧");
       await page.type('[data-testid="quick-report-detail"]', "在 390px 宽度下建议增加 gap");
       await clickReady(page, '[data-testid="submit-quick-report-btn"]');
@@ -999,6 +1161,39 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await clickReady(page, '[data-testid="console-mode-structured"]');
       await page.waitForSelector('[data-testid="console-blocks"]', { timeout: 3000 });
+
+      // 4b. REQ-015 审查修复：窄终端抽屉中状态徽标不溢入操作区，操作组可整体换行。
+      await page.setViewport({ width: 390, height: 844 });
+      await Bun.sleep(150);
+      const narrowConsoleStatus = await page.evaluate(() => {
+        const rect = (el: HTMLElement | null) => {
+          if (!el) return { left: -1, right: -1, top: -1, bottom: -1, width: -1, height: -1 };
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+        };
+        const bar = document.querySelector(".console-status-bar") as HTMLElement | null;
+        const info = bar?.querySelector(".console-status-info") as HTMLElement | null;
+        const actions = bar?.querySelector(".console-status-actions") as HTMLElement | null;
+        const badge = info?.querySelector(".badge") as HTMLElement | null;
+        return {
+          bar: rect(bar),
+          info: rect(info),
+          actions: rect(actions),
+          badge: rect(badge),
+          barOverflow: bar ? bar.scrollWidth - bar.clientWidth : -1,
+          infoOverflow: info ? info.scrollWidth - info.clientWidth : -1,
+        };
+      });
+      expect(narrowConsoleStatus.barOverflow).toBeLessThanOrEqual(1);
+      expect(narrowConsoleStatus.infoOverflow).toBeLessThanOrEqual(1);
+      expect(narrowConsoleStatus.badge.right).toBeLessThanOrEqual(narrowConsoleStatus.info.right + 1);
+      expect(narrowConsoleStatus.badge.right).toBeLessThanOrEqual(narrowConsoleStatus.bar.right + 1);
+      const actionGroupSeparated =
+        narrowConsoleStatus.actions.left >= narrowConsoleStatus.info.right - 1 ||
+        narrowConsoleStatus.actions.top >= narrowConsoleStatus.info.bottom - 1;
+      expect(actionGroupSeparated).toBe(true);
+      await page.setViewport({ width: 1360, height: 860 });
+      await Bun.sleep(150);
 
       // 5. 页面刷新后重新进入需求并切到「执行终端」页签，自动加载历史 Run 日志
       await page.goto(server.url, { waitUntil: "networkidle0" });

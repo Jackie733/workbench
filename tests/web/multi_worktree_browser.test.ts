@@ -185,6 +185,21 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
 
       // 1. Unified sidebar exposes Sandbox Merge filter toolbar & inline merge-order strip without duplicating cards
       await page.waitForSelector('[data-testid="sandbox-toolbar"]', { timeout: 5000 });
+      // REQ-015 审查修复：沙箱筛选按钮需要覆盖基础 .btn 的 flex-shrink: 0，保持可收缩且单行。
+      const sandboxFilterMetrics = await page.evaluate(() => {
+        const button = document.querySelector('[data-testid="scope-sandboxes-btn"]') as HTMLElement | null;
+        const style = button ? getComputedStyle(button) : null;
+        return {
+          flexShrink: style?.flexShrink ?? "",
+          minWidth: style?.minWidth ?? "",
+          height: button?.getBoundingClientRect().height ?? -1,
+          singleLine: button ? button.scrollWidth <= button.clientWidth + 1 : false,
+        };
+      });
+      expect(sandboxFilterMetrics.flexShrink).toBe("1");
+      expect(sandboxFilterMetrics.minWidth).toBe("0px");
+      expect(sandboxFilterMetrics.height).toBeLessThanOrEqual(29);
+      expect(sandboxFilterMetrics.singleLine).toBe(true);
       expect(await page.evaluate(() => document.querySelectorAll('[data-testid="req-row-REQ-002"]').length)).toBe(1);
       await clickReady(page, '[data-testid="scope-sandboxes-btn"]');
       await page.waitForFunction(
@@ -210,6 +225,43 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       await page.waitForSelector('[data-testid="new-req-create-sandbox"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="new-req-create-sandbox"]');
       await page.waitForSelector('[data-testid="new-req-stack-select"]', { timeout: 5000 });
+      // REQ-015 审查修复：窄屏下分叉基准标签保持单行，下拉框使用剩余空间且不超出行宽。
+      await page.setViewport({ width: 390, height: 844 });
+      await Bun.sleep(150);
+      const narrowStackRow = await page.evaluate(() => {
+        const select = document.querySelector('[data-testid="new-req-stack-select"]') as HTMLElement | null;
+        const row = select?.parentElement as HTMLElement | null;
+        const label = row?.querySelector(".new-req-stack-label") as HTMLElement | null;
+        const selectRect = select?.getBoundingClientRect();
+        const rowRect = row?.getBoundingClientRect();
+        const labelRect = label?.getBoundingClientRect();
+        const selectStyle = select ? getComputedStyle(select) : null;
+        const labelStyle = label ? getComputedStyle(label) : null;
+        return {
+          rowOverflow: row ? row.scrollWidth - row.clientWidth : -1,
+          selectLeft: selectRect?.left ?? -1,
+          selectRight: selectRect?.right ?? -1,
+          rowRight: rowRect?.right ?? -1,
+          labelRight: labelRect?.right ?? -1,
+          labelHeight: labelRect?.height ?? -1,
+          selectHeight: selectRect?.height ?? -1,
+          labelWhiteSpace: labelStyle?.whiteSpace ?? "",
+          labelSingleLine: label ? label.scrollWidth <= label.clientWidth + 1 : false,
+          selectMinWidth: selectStyle?.minWidth ?? "",
+          selectFlexShrink: selectStyle?.flexShrink ?? "",
+        };
+      });
+      expect(narrowStackRow.rowOverflow).toBeLessThanOrEqual(1);
+      expect(narrowStackRow.selectRight).toBeLessThanOrEqual(narrowStackRow.rowRight + 1);
+      expect(narrowStackRow.selectLeft).toBeGreaterThanOrEqual(narrowStackRow.labelRight - 1);
+      expect(narrowStackRow.labelWhiteSpace).toBe("nowrap");
+      expect(narrowStackRow.labelSingleLine).toBe(true);
+      expect(narrowStackRow.labelHeight).toBeLessThanOrEqual(29);
+      expect(narrowStackRow.selectHeight).toBeLessThanOrEqual(29);
+      expect(narrowStackRow.selectMinWidth).toBe("0px");
+      expect(narrowStackRow.selectFlexShrink).toBe("1");
+      await page.setViewport({ width: 1360, height: 900 });
+      await Bun.sleep(150);
       await clickReady(page, '.modal-actions .btn:not(.primary)');
 
       // 3. Open REQ-002 -> auto_mergeable callout shows one-click auto-merge button + sibling radar -> click sync!

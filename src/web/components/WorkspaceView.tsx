@@ -798,7 +798,7 @@ function SpecDesignTab({
                       })
                     }
                   />
-                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4 }}>
+                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
                     <input
                       type="checkbox"
                       checked={c.required}
@@ -1901,20 +1901,20 @@ function ChangesVerifyTab({
             return (
               <div key={latest.record.id} className="evidence-card" data-testid={`ev-${latest.record.id}`}>
                 <div className="evidence-head">
-                  <div>
+                  <div className="evidence-info">
                     <span className={`badge ${meta.tone}`}>
                       <Icon icon={EVIDENCE_ICONS[latest.effectiveState]} size={14} />{" "}
                       {meta.labels[language]}
                     </span>
-                    <code style={{ marginLeft: 8, fontSize: 12.5 }}>{command}</code>
-                    <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                    <code className="evidence-command">{command}</code>
+                    <span className="muted" style={{ fontSize: 12 }}>
                       {latest.record.durationMs}ms ·{" "}
                       {t(language, "changes.criteriaLinked", {
                         ids: latest.record.criterionIds.join(", ") || t(language, "changes.criteriaNone"),
                       })}
                     </span>
                   </div>
-                  <div style={{ display: "flex", gap: 6 }}>
+                  <div className="evidence-actions">
                     <button
                       className="btn xs"
                       type="button"
@@ -2194,8 +2194,8 @@ export function WorkspaceView() {
         <div className="more-wrap">
           <DropdownRoot open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
             <DropdownTrigger asChild>
-              <button className="btn" type="button" data-testid="more-menu-btn">
-                <Icon icon={Ellipsis} /> {t(language, "ws.more")}
+              <button className="btn xs" type="button" data-testid="more-menu-btn">
+                <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
               </button>
             </DropdownTrigger>
             <DropdownPortal>

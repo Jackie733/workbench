@@ -62,7 +62,7 @@ export function RoutingModelPicker({
         <PopoverTrigger asChild>
           <button
             type="button"
-            className="btn xs inline-flex items-center gap-1.5 min-w-[230px] max-w-[280px] justify-between"
+            className="btn xs routing-picker-trigger inline-flex items-center gap-1.5"
             data-testid={`${testId}-trigger`}
             aria-label={t(language, "routing.pickerAriaCurrent", {
               label: resolvedAriaLabel,
@@ -70,7 +70,7 @@ export function RoutingModelPicker({
             })}
             title={selected?.label ?? value}
           >
-            <span className="truncate font-mono text-[11.5px]">{selected?.label ?? value}</span>
+            <span className="truncate min-w-0 font-mono text-[11.5px]">{selected?.label ?? value}</span>
             <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
           </button>
         </PopoverTrigger>

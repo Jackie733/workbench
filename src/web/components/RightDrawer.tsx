@@ -537,7 +537,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         </div>
                       )}
                       <div className="console-status-bar">
-                        <div>
+                        <div className="console-status-info">
                           <span className={`badge ${AGENT_RUN_TONE[currentRun.status]}`}>
                             <Icon
                               icon={
@@ -552,16 +552,16 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             />{" "}
                             {formatAgentStatusLabel(language, currentRun.status)}
                           </span>
-                          <span className="xs" style={{ marginLeft: 6 }}>
+                          <span className="xs">
                             <strong>{currentRun.harness}</strong> · {currentRun.model}
                           </span>
                           {currentRun.modelFallback && currentRun.effectiveModel && (
-                            <span className="badge warning xs" style={{ marginLeft: 6 }}>
+                            <span className="badge warning xs">
                               {t(language, "drawer.degraded", { model: currentRun.effectiveModel })}
                             </span>
                           )}
                         </div>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <div className="console-status-actions">
                           {currentRun.status === "running" ? (
                             <button
                               className="btn danger xs"
