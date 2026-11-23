@@ -242,6 +242,18 @@ function batchId(): string {
   return `SB-${Date.now()}-${randomUUID().slice(0, 6)}`;
 }
 
+function isExternalNonWorkbenchRepo(codeRoot: string): boolean {
+  const pkgPath = path.join(codeRoot, "package.json");
+  try {
+    const stat = fs.lstatSync(pkgPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const parsed = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { name?: unknown };
+    return typeof parsed.name === "string" && parsed.name.trim().length > 0 && parsed.name.trim() !== "workbench";
+  } catch {
+    return false;
+  }
+}
+
 async function persistSkippedBatch(
   root: string,
   id: string,
@@ -364,6 +376,19 @@ export async function captureRequirementScreenshots(
   const snapshot = await observeGitSnapshot(codeRoot);
   const codeSnapshotHash = snapshot?.fingerprint ?? state.specHash;
   const currentCodeSnapshotHash = input.currentCodeSnapshotHash ?? snapshot?.fingerprint ?? null;
+
+  if (isExternalNonWorkbenchRepo(codeRoot)) {
+    return persistSkippedBatch(base, id, {
+      trigger: input.trigger,
+      actor,
+      specHash: state.specHash,
+      codeSnapshotHash,
+      reason: "内置自动截图仅适用于 Workbench 自身界面；外部业务项目请直接通过附件上传或粘贴截图作为验收证据。",
+      reasonCode: "no_shots",
+      startedAt,
+      currentCodeSnapshotHash,
+    });
+  }
 
   const environment = resolveBrowserEnvironment();
   if (!environment.ok) {

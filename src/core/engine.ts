@@ -744,6 +744,13 @@ export async function removeRequirementAttachment(
   return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
 }
 
+function isHumanCriteriaAdjustmentPreservingApproval(prev: Criterion[], next: Criterion[]): boolean {
+  if (prev.length === 0 || !next.some((c) => c.required)) return false;
+  const prevIds = new Set(prev.map((c) => c.id));
+  // Allow relaxing/adjusting existing criteria without resetting approved design; brand-new required criteria still require re-approval.
+  return next.every((c) => !c.required || prevIds.has(c.id));
+}
+
 export async function updateSpec(
   root: string,
   id: string,
@@ -776,9 +783,18 @@ export async function updateSpec(
     if (specChanged) {
       summary = "更新需求规范或验收条件";
       if (nextApproval !== null) {
-        nextApproval = null;
-        if (nextStage === "implementing" || nextStage === "awaiting_acceptance") {
-          nextStage = current.designMarkdown.trim() ? "awaiting_approval" : "draft";
+        if (
+          (state.stage === "implementing" || state.stage === "awaiting_acceptance") &&
+          nextSpec === current.specMarkdown &&
+          isHumanCriteriaAdjustmentPreservingApproval(state.criteria, nextCriteria)
+        ) {
+          nextStage = state.stage;
+          nextApproval = { ...nextApproval, specHash: nextSpecHash };
+        } else {
+          nextApproval = null;
+          if (nextStage === "implementing" || nextStage === "awaiting_acceptance") {
+            nextStage = current.designMarkdown.trim() ? "awaiting_approval" : "draft";
+          }
         }
       }
     }
@@ -1620,8 +1636,13 @@ export async function acceptRequirement(
       messageParams: { stage: preBundle.state.stage },
     });
   }
+  const overrideReason = input.overrideReason?.trim()
+    ? normalizeReason(input.overrideReason, "忽略审查阻塞/接受风险说明")
+    : undefined;
   const preValidity = evaluateRequirement(preBundle.state, snapshotHash);
-  if (!preValidity.acceptanceGate.ok) {
+  const preNonWaivable =
+    !preValidity.approval.valid || preValidity.coverage.requiredTotal === 0;
+  if (!preValidity.acceptanceGate.ok && (preNonWaivable || !overrideReason)) {
     throw new WorkbenchError(
       "acceptance_gate_failed",
       `验收门禁未通过：${preValidity.acceptanceGate.blockers.join("；")}`,
@@ -1631,9 +1652,6 @@ export async function acceptRequirement(
       },
     );
   }
-  const overrideReason = input.overrideReason?.trim()
-    ? normalizeReason(input.overrideReason, "忽略审查阻塞/接受风险说明")
-    : undefined;
   if (
     preValidity.reviewValidity.effectiveState === "current" &&
     preBundle.state.reviewReport?.verdict === "block" &&
@@ -1710,7 +1728,8 @@ export async function acceptRequirement(
     }
 
     const validity = evaluateRequirement(state, snapshotHash);
-    if (!validity.acceptanceGate.ok) {
+    const nonWaivable = !validity.approval.valid || validity.coverage.requiredTotal === 0;
+    if (!validity.acceptanceGate.ok && (nonWaivable || !overrideReason)) {
       throw new WorkbenchError(
         "acceptance_gate_failed",
         `验收门禁未通过：${validity.acceptanceGate.blockers.join("；")}`,
@@ -1751,13 +1770,15 @@ export async function acceptRequirement(
       .map((v) => v.record.id);
     const passingSet = new Set(passingIds);
     const note = input.note?.trim() ? normalizeReason(input.note, "验收备注") : undefined;
-    const acceptedRisks = Array.isArray(input.acceptedRisks)
+    const rawUserRisks = Array.isArray(input.acceptedRisks)
       ? input.acceptedRisks
           .filter((r): r is string => typeof r === "string")
           .map((r) => sanitizeOutput(r.trim(), 900).text.trim())
           .filter(Boolean)
-          .slice(0, 50)
-      : undefined;
+      : [];
+    const gateBlockersForAudit = !validity.acceptanceGate.ok ? validity.acceptanceGate.blockers : [];
+    const mergedRisks = Array.from(new Set([...gateBlockersForAudit, ...rawUserRisks])).slice(0, 50);
+    const acceptedRisks = mergedRisks.length > 0 ? mergedRisks : undefined;
     const reviewDisposition: ReviewDisposition | undefined =
       state.reviewReport || overrideReason
         ? {
@@ -1952,6 +1973,10 @@ export async function getRequirementDeliveryPreview(
   }));
 
   const remoteProvider = await resolveProjectRemoteProvider(base, projectMeta, deps);
+  const explicitBaseBranch =
+    remoteProvider === "gitee"
+      ? projectMeta.gitee?.defaultBaseBranch?.trim() || undefined
+      : projectMeta.github?.defaultBaseBranch?.trim() || undefined;
   let baseBranch: string;
   let remoteRepo: string | null;
   let remoteReady: boolean;
@@ -1964,13 +1989,13 @@ export async function getRequirementDeliveryPreview(
       deps?.giteeToken ?? deps?.giteeDeps?.token,
       deps?.giteeDeps,
     );
-    baseBranch = projectMeta.gitee?.defaultBaseBranch ?? giteeEnv.defaultBaseBranch ?? "master";
+    baseBranch = explicitBaseBranch ?? giteeEnv.defaultBaseBranch ?? "master";
     remoteRepo = giteeEnv.repo;
     remoteReady = giteeEnv.ready;
     remoteReason = giteeEnv.reason;
   } else {
     const ghEnv = await inspectGitHubEnvironment(base, projectMeta.github, deps);
-    baseBranch = projectMeta.github?.defaultBaseBranch ?? ghEnv.defaultBaseBranch ?? "main";
+    baseBranch = explicitBaseBranch ?? ghEnv.defaultBaseBranch ?? "main";
     remoteRepo = ghEnv.repo;
     remoteReady = ghEnv.ready;
     remoteReason = ghEnv.reason;
@@ -1981,7 +2006,25 @@ export async function getRequirementDeliveryPreview(
     : tree.branch && tree.branch !== baseBranch
       ? baseBranch
       : null;
-  const aheadCommitsCount = tree.isGitRepo && aheadRef ? await countCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
+  let effectiveAheadCount =
+    tree.isGitRepo && aheadRef ? await countCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
+
+  const isFeaturePrefix = /^(?:feat|fix|rsi|chore|hotfix|bugfix|refactor|docs|test)\//i;
+  if (
+    !sandbox &&
+    tree.isGitRepo &&
+    tree.branch &&
+    tree.branch !== baseBranch &&
+    !explicitBaseBranch &&
+    !isFeaturePrefix.test(tree.branch) &&
+    effectiveAheadCount >= 10
+  ) {
+    const curRemote = await inspectRemoteBranchDivergence(codeRoot, tree.branch, "origin");
+    if (curRemote.remoteBranchExists) {
+      baseBranch = tree.branch;
+      effectiveAheadCount = 0;
+    }
+  }
 
   let reason: string | null = null;
   let canCommit = false;
@@ -1992,7 +2035,7 @@ export async function getRequirementDeliveryPreview(
   } else if (!tree.isGitRepo) {
     reason = "当前目录不是 Git 仓库，无法创建交付提交";
   } else if (sandboxActive) {
-    if (candidates.length === 0 && aheadCommitsCount === 0) {
+    if (candidates.length === 0 && effectiveAheadCount === 0) {
       reason = "隔离沙箱中暂无可提交或待推送的变更";
     } else if (!remoteReady) {
       reason =
@@ -2004,17 +2047,17 @@ export async function getRequirementDeliveryPreview(
       canCreatePr = true;
     }
   } else {
-    if (candidates.length === 0 && aheadCommitsCount === 0) {
+    if (candidates.length === 0 && effectiveAheadCount === 0) {
       reason = "当前工作区干净，暂无未提交改动";
     } else {
       canCommit = candidates.length > 0;
-      canCreatePr = remoteReady && (candidates.length > 0 || aheadCommitsCount > 0);
+      canCreatePr = remoteReady && (candidates.length > 0 || effectiveAheadCount > 0);
     }
   }
 
   const suggestedBranch = sandbox
     ? sandbox.branch
-    : tree.branch && tree.branch !== baseBranch && tree.branch !== "master"
+    : tree.branch && tree.branch !== baseBranch && tree.branch !== "main" && tree.branch !== "master"
       ? tree.branch
       : `feat/${state.id.toLowerCase()}`;
 
@@ -2032,7 +2075,7 @@ export async function getRequirementDeliveryPreview(
     head: tree.head,
     dirty: tree.dirty,
     sandboxActive,
-    aheadCommitsCount,
+    aheadCommitsCount: effectiveAheadCount,
     canCommit,
     canCreatePr,
     remoteProvider,
@@ -2225,10 +2268,18 @@ export async function deliverRequirement(
     );
   }
 
+  const requestedBranch = input.branchName?.trim() || "";
   let targetBranch = sandbox ? sandbox.branch : (tree.branch ?? "");
-  if (!sandbox && (!targetBranch || targetBranch === baseBranch || targetBranch === "master" || targetBranch === "HEAD")) {
-    const requestedBranch = input.branchName?.trim() || `feat/${id.toLowerCase()}`;
-    targetBranch = await createFeatureBranchAtHead(codeRoot, requestedBranch);
+  if (
+    !sandbox &&
+    (!targetBranch ||
+      targetBranch === baseBranch ||
+      targetBranch === "main" ||
+      targetBranch === "master" ||
+      targetBranch === "HEAD" ||
+      (requestedBranch && requestedBranch !== targetBranch))
+  ) {
+    targetBranch = await createFeatureBranchAtHead(codeRoot, requestedBranch || `feat/${id.toLowerCase()}`);
   }
   targetBranch = validateGitBranchName(targetBranch);
 

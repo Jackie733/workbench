@@ -1016,6 +1016,7 @@ export type ActionId =
   | "dispatch_fix_review"
   | "sync_base"
   | "accept"
+  | "accept_override"
   | "unblock"
   | "reopen";
 

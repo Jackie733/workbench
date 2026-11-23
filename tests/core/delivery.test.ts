@@ -142,4 +142,44 @@ describe("post-acceptance Git delivery wrap-up", () => {
     expect(reopened.state.delivery).toBeNull();
     expect(getRequirement(repo, "REQ-001").state.timeline.some((e) => e.kind === "delivered")).toBe(true);
   }, 20_000);
+
+  test("infers remote integration base branch when ahead >= 10 commits and supports explicit feature branchName", async () => {
+    makeTempHub();
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), "wb-delivery-remote-"));
+    tempDirs.push(remote);
+    execFileSync("git", ["init", "--bare"], { cwd: remote, stdio: "ignore" });
+
+    const repo = makeGitRepo();
+    execFileSync("git", ["branch", "-M", "master"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "master"], { cwd: repo, stdio: "ignore" });
+
+    // Create a shared integration branch (newMiddle) 12 commits ahead of master and push it
+    execFileSync("git", ["checkout", "-b", "newMiddle"], { cwd: repo, stdio: "ignore" });
+    for (let i = 1; i <= 12; i++) {
+      fs.writeFileSync(path.join(repo, `hist-${i}.txt`), `commit ${i}\n`);
+      execFileSync("git", ["add", `hist-${i}.txt`], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", `hist ${i}`], { cwd: repo, stdio: "ignore" });
+    }
+    execFileSync("git", ["push", "-u", "origin", "newMiddle"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "MonorepoService", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Only ship citation change to newMiddle",
+      criteria: [{ id: "AC-1", description: "lint ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Citation fix", actor: "agent" });
+    const baseSnap = await observeGitSnapshot(repo);
+    await approveDesign(repo, "REQ-001", { baseline: baseSnap });
+
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 3;\n");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const accSnap = await observeGitSnapshot(repo);
+    const done = await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: accSnap!.fingerprint });
+
+    const preview = await getRequirementDeliveryPreview(repo, "REQ-001");
+    expect(preview.baseBranch).toBe("newMiddle");
+    expect(preview.aheadCommitsCount).toBe(0);
+    expect(preview.suggestedBranch).toBe("feat/req-001");
+  });
 });

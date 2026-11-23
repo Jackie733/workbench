@@ -107,6 +107,7 @@ export const BANNER_ACTION_ICONS = {
   dispatch_fix_review: Wrench,
   sync_base: RefreshCw,
   accept: Check,
+  accept_override: AlertTriangle,
   unblock: Unlock,
   reopen: RotateCcw,
 } satisfies Record<ActionId, LucideIcon>;

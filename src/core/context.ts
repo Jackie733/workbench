@@ -59,6 +59,10 @@ function detectPackageManager(base: string): "bun" | "pnpm" | "yarn" | "npm" {
   return "npm";
 }
 
+function isMutatingScript(body: string): boolean {
+  return /(?:^|\s)--(?:fix|write)(?:\s|$)/i.test(body);
+}
+
 function detectRepoCommands(base: string): {
   fastCommand: string | null;
   fullCommand: string | null;
@@ -77,16 +81,27 @@ function detectRepoCommands(base: string): {
           const pm = detectPackageManager(base);
           let fastCommand: string | null = null;
           let fullCommand: string | null = null;
-          for (const key of ["typecheck", "check", "lint", "tsc"]) {
-            if (typeof scripts[key] === "string" && scripts[key].trim()) {
-              fastCommand = pm === "yarn" ? `yarn ${key}` : `${pm} run ${key}`;
-              break;
+          for (const key of ["typecheck", "type-check", "check", "lint:check", "lint", "tsc"]) {
+            if (typeof scripts[key] === "string") {
+              const body = scripts[key].trim();
+              if (body && !isMutatingScript(body)) {
+                fastCommand = pm === "yarn" ? `yarn ${key}` : `${pm} run ${key}`;
+                break;
+              }
             }
           }
-          if (typeof scripts.test === "string" && scripts.test.trim()) {
-            const testBody = scripts.test.trim();
-            if (!testBody.includes("no test specified")) {
-              fullCommand = pm === "bun" ? (testBody === "bun test" ? "bun test" : "bun run test") : `${pm} test`;
+          for (const key of ["test", "test:local", "test:unit", "test:ci"]) {
+            if (typeof scripts[key] === "string") {
+              const testBody = scripts[key].trim();
+              if (!testBody || testBody.includes("no test specified") || isMutatingScript(testBody)) {
+                continue;
+              }
+              if (key === "test") {
+                fullCommand = pm === "bun" ? (testBody === "bun test" ? "bun test" : "bun run test") : `${pm} test`;
+              } else {
+                fullCommand = pm === "yarn" ? `yarn ${key}` : `${pm} run ${key}`;
+              }
+              break;
             }
           }
           if (fastCommand || fullCommand) {

@@ -1123,7 +1123,18 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       }
       break;
     }
+    case "accept_override":
     case "accept": {
+      if (!detail.validity.acceptanceGate.ok) {
+        ui.setModal({
+          kind: "accept_override",
+          verdict: "block",
+          summary: detail.validity.acceptanceGate.blockers.join("；"),
+          reason: "",
+          acceptedRisks: detail.validity.acceptanceGate.blockers,
+        });
+        break;
+      }
       const report = detail.state.reviewReport;
       const revState = detail.validity.reviewValidity.effectiveState;
       const needsOverrideModal =

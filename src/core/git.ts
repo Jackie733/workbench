@@ -79,6 +79,16 @@ function execGit(
   });
 }
 
+/** Resolves the enclosing Git repository toplevel so repo-root-relative porcelain paths work inside monorepo subdirectories. */
+async function resolveGitToplevel(dir: string): Promise<string> {
+  const res = await execGit(dir, ["rev-parse", "--show-toplevel"]);
+  if (res.code === 0) {
+    const top = res.stdout.toString("utf8").trim();
+    if (top) return canonicalRoot(top);
+  }
+  return dir;
+}
+
 function parsePorcelainZ(buf: Buffer): Array<{ xy: string; path: string; origPath?: string }> {
   const entries: Array<{ xy: string; path: string; origPath?: string }> = [];
   const raw = buf.toString("utf8");
@@ -225,12 +235,13 @@ export async function observeGitSnapshot(root: string): Promise<BaselineSnapshot
   const head = headRes.code === 0 ? headRes.stdout.toString("utf8").trim() : "";
   const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
   entries.sort((a, b) => a.path.localeCompare(b.path));
+  const gitRoot = entries.length > 0 ? await resolveGitToplevel(base) : base;
 
   const hash = createHash("sha256");
   hash.update(`head:${head}\n`);
   for (let i = 0; i < Math.min(entries.length, MAX_HASHED_FILES); i++) {
     const entry = entries[i]!;
-    const contentHash = entry.xy[1] === "D" || entry.xy[0] === "D" ? "deleted" : hashWorkingEntry(base, entry.path);
+    const contentHash = entry.xy[1] === "D" || entry.xy[0] === "D" ? "deleted" : hashWorkingEntry(gitRoot, entry.path);
     hash.update(`${entry.xy}:${entry.path}:${contentHash}\n`);
   }
   if (entries.length > MAX_HASHED_FILES) {
@@ -375,9 +386,10 @@ export async function observeGitChanges(
     }
   }
 
+  const gitRoot = entries.some((entry) => entry.xy === "??") ? await resolveGitToplevel(base) : base;
   for (const entry of entries) {
     if (entry.xy === "??") {
-      const patch = formatUntrackedDiff(base, entry.path);
+      const patch = formatUntrackedDiff(gitRoot, entry.path);
       if (patch) diffChunks.push(patch);
     }
   }
@@ -512,7 +524,8 @@ export async function commitFilesInGit(
       messageKey: "git.errCommitNoFiles",
     });
   }
-  const addRes = await execGit(base, ["add", "--", ...files], 30_000);
+  const gitRoot = await resolveGitToplevel(base);
+  const addRes = await execGit(gitRoot, ["add", "--", ...files], 30_000);
   if (addRes.code !== 0) {
     const msg = addRes.stderr.toString("utf8").trim() || addRes.stdout.toString("utf8").trim();
     throw new WorkbenchError("execution_failed", `暂存文件失败: ${msg || "git add 返回非零"}`, {
@@ -521,7 +534,7 @@ export async function commitFilesInGit(
     });
   }
 
-  const commitRes = await execGit(base, ["commit", "--only", "-F", "-", "--", ...files], 30_000, commitMessage);
+  const commitRes = await execGit(gitRoot, ["commit", "--only", "-F", "-", "--", ...files], 30_000, commitMessage);
   if (commitRes.code !== 0) {
     const msg = commitRes.stderr.toString("utf8").trim() || commitRes.stdout.toString("utf8").trim();
     throw new WorkbenchError("execution_failed", `创建 Git 提交失败: ${msg || "git commit 返回非零"}`, {
@@ -855,13 +868,14 @@ export async function captureWorkingTreeTreeOid(wtDir: string, headRef = "HEAD")
   const tmpIndex = path.join(tmpDir, "index");
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: tmpIndex };
   try {
-    const readRes = await execGit(wt, ["read-tree", headRef], GIT_TIMEOUT_MS, undefined, env);
+    const gitRoot = await resolveGitToplevel(wt);
+    const readRes = await execGit(gitRoot, ["read-tree", headRef], GIT_TIMEOUT_MS, undefined, env);
     if (readRes.code !== 0) {
       return (await revParseCommit(wt, headRef)) ?? headRef;
     }
     for (let i = 0; i < uniquePaths.length; i += 100) {
       const chunk = uniquePaths.slice(i, i + 100);
-      await execGit(wt, ["add", "-A", "--", ...chunk], 30_000, undefined, env);
+      await execGit(gitRoot, ["add", "-A", "--", ...chunk], 30_000, undefined, env);
     }
     const treeRes = await execGit(wt, ["write-tree"], GIT_TIMEOUT_MS, undefined, env);
     if (treeRes.code === 0) {

@@ -327,6 +327,7 @@ describe("exhaustive status icon maps", () => {
   test("covers every banner action with a decorative Lucide glyph", () => {
     expect([...Object.keys(BANNER_ACTION_ICONS)].sort()).toEqual([
       "accept",
+      "accept_override",
       "approve_and_implement",
       "approve_only",
       "authorize_fast_track",

@@ -1861,7 +1861,7 @@ function ChangesVerifyTab({
                   <Icon icon={TASK_ICONS[task.status]} size={14} />
                   {tm.labels[language]}
                 </span>
-                <div>
+                <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13.5, fontWeight: 500 }}>{task.title}</div>
                   {task.note && (
                     <div className="muted" style={{ fontSize: 12 }}>
@@ -1869,6 +1869,41 @@ function ChangesVerifyTab({
                     </div>
                   )}
                 </div>
+                {(s.stage === "implementing" || s.stage === "awaiting_acceptance") && task.status === "blocked" && (
+                  <button
+                    className="btn xs"
+                    type="button"
+                    data-testid={`task-resolve-${task.id}`}
+                    disabled={busy || runLocked}
+                    style={{ marginLeft: "auto", flexShrink: 0 }}
+                    onClick={async () => {
+                      if (guardRequirementRunLock(s.id)) return;
+                      const nextTasks = s.tasks.map((item) =>
+                        item.id === task.id
+                          ? {
+                              id: item.id,
+                              title: item.title,
+                              status: "done" as const,
+                              note: item.note ? `${item.note}（人工解除阻塞）` : "人工解除阻塞",
+                            }
+                          : { id: item.id, title: item.title, status: item.status, note: item.note },
+                      );
+                      const updated = await runBusy(() =>
+                        api.updateTasks(s.id, {
+                          tasks: nextTasks,
+                          expectedRevision: s.revision,
+                          note: `人工解除任务 ${task.id} 阻塞`,
+                        }),
+                      );
+                      if (updated) {
+                        await invalidateAllWorkbenchQueries();
+                        showToastKey("toast.taskResolved", { id: task.id });
+                      }
+                    }}
+                  >
+                    <Icon icon={TASK_ICONS.done} size={14} /> {t(language, "changes.taskResolveBtn")}
+                  </button>
+                )}
               </div>
             );
           })

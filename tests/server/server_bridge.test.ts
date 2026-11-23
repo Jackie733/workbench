@@ -670,5 +670,30 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     expect(parentGet.status).toBe(200);
     const subReqs = (parentGet.body.detail as { subRequirements?: Array<{ id: string }> }).subRequirements ?? [];
     expect(subReqs.map((s) => s.id).sort()).toEqual(["REQ-002", "REQ-003"]);
+
+    // Human can resolve a blocked task via PATCH /api/requirements/:id/tasks
+    await executeWorkbenchTool(root, "wb_propose", {
+      id: "REQ-002",
+      criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
+    });
+    const ftRes = await apiJson(`${server.url}/api/requirements/REQ-002/fast-track`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(ftRes.status).toBe(200);
+    await executeWorkbenchTool(root, "wb_update_tasks", {
+      id: "REQ-002",
+      tasks: [{ id: "T-1", title: "需要真机核对", status: "blocked", note: "等待登录" }],
+    });
+    const taskPatchRes = await apiJson(`${server.url}/api/requirements/REQ-002/tasks`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        tasks: [{ id: "T-1", title: "需要真机核对", status: "done", note: "人工已放行" }],
+        note: "人工解除阻塞",
+      }),
+    });
+    expect(taskPatchRes.status).toBe(200);
+    const patchedTasks = (taskPatchRes.body.detail as { state: { tasks: Array<{ status: string }> } }).state.tasks;
+    expect(patchedTasks[0]?.status).toBe("done");
   });
 });

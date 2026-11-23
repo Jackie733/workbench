@@ -341,23 +341,31 @@ function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
   return true;
 }
 
-/** Runs all distinct verification commands configured on a requirement's acceptance criteria. */
+/** Runs distinct verification commands configured on a requirement's acceptance criteria (required criteria by default). */
 export async function runAllVerifications(
   root: string,
   id: string,
-  options: { timeoutMs?: number; force?: boolean } = {},
+  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean } = {},
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
   const codeRoot = resolveCodeRoot(base, id);
   const groups = new Map<string, string[]>();
 
-  for (const criterion of current.state.criteria) {
-    if (!criterion.command || !criterion.command.trim()) continue;
-    const cmd = criterion.command.trim();
-    const list = groups.get(cmd) ?? [];
-    list.push(criterion.id);
-    groups.set(cmd, list);
+  const collectCriteria = (includeOptional: boolean) => {
+    for (const criterion of current.state.criteria) {
+      if (!criterion.command || !criterion.command.trim()) continue;
+      if (!includeOptional && !criterion.required) continue;
+      const cmd = criterion.command.trim();
+      const list = groups.get(cmd) ?? [];
+      list.push(criterion.id);
+      groups.set(cmd, list);
+    }
+  };
+
+  collectCriteria(options.includeOptional === true);
+  if (groups.size === 0 && options.includeOptional !== true) {
+    collectCriteria(true);
   }
 
   if (groups.size === 0) {

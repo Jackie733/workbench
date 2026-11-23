@@ -14,6 +14,7 @@ import {
   recordVerification,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
+import { captureRequirementScreenshots } from "../../src/core/screenshots.ts";
 import { readRequirementBundle, readRequirementScreenshot } from "../../src/core/store.ts";
 import {
   MAX_SCREENSHOT_BYTES,
@@ -258,5 +259,28 @@ describe("REQ-011 screenshot evidence persistence", () => {
         currentCodeSnapshotHash: snapshot.fingerprint,
       }),
     ).rejects.toMatchObject({ code: "invalid_transition" });
+  });
+
+  test("AC-3: skips built-in Workbench UI screenshot matrix cleanly on external business repos", async () => {
+    const root = makeTempProject();
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "deepmdt-frontend-pc", version: "1.0.0" }));
+    execFileSync("git", ["add", "package.json"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add external package.json"], { cwd: root, stdio: "ignore" });
+    await initProject(root);
+    const snapshot = await observeGitSnapshot(root);
+    await createRequirement(root, {
+      goal: "外部项目不应运行自举截图矩阵",
+      criteria: [{ id: "AC-1", description: "lint ok", required: true, command: "echo ok" }],
+    });
+    await authorizeFastTrack(root, "REQ-001", { baseline: snapshot, currentCodeSnapshotHash: snapshot?.fingerprint });
+
+    const res = await captureRequirementScreenshots(root, "REQ-001", {
+      trigger: "manual",
+      actor: "human",
+      currentCodeSnapshotHash: snapshot?.fingerprint,
+    });
+    expect(res.status).toBe("skipped");
+    expect(res.reasonCode).toBe("no_shots");
+    expect(res.reason).toContain("外部业务项目");
   });
 });

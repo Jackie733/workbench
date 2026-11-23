@@ -831,7 +831,12 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
           {
             type: "turn.end",
             turnIndex: turn,
-            contextTokens: this.toolsInTurn <= 1 ? usage?.inputTokens : undefined,
+            contextTokens:
+              usage && usage.inputTokens > 0
+                ? this.toolsInTurn <= 1
+                  ? usage.inputTokens
+                  : Math.round(usage.inputTokens / (this.toolsInTurn + 1))
+                : undefined,
             usage,
           },
         ],

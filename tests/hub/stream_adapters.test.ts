@@ -283,6 +283,29 @@ describe("stream_adapters structured JSONL parsing & bounds", () => {
     expect(plainLine.events[0]?.type).toBe("raw.line");
     expect(plainLine.replyText).toBe("plain hello output");
 
+    // Multi-tool Codex turn still emits positive amortized contextTokens for native_resume gating
+    const codexMulti = createHarnessStreamAdapter("codex", "gpt-5.4", true);
+    codexMulti.feedLine(JSON.stringify({ type: "turn.started" }));
+    for (let i = 1; i <= 3; i++) {
+      codexMulti.feedLine(
+        JSON.stringify({
+          type: "item.started",
+          item: { id: `cmd-${i}`, type: "command_execution", command: `echo ${i}` },
+        }),
+      );
+    }
+    const multiEnd = codexMulti.feedLine(
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 400_000, cached_input_tokens: 300_000, output_tokens: 800, reasoning_tokens: 0 },
+      }),
+    );
+    const multiTe = multiEnd.events.find((e) => e.type === "turn.end");
+    expect(multiTe?.type).toBe("turn.end");
+    if (multiTe?.type === "turn.end") {
+      expect(multiTe.contextTokens).toBe(100_000);
+    }
+
     expect(isUnsupportedJsonFlagError("error: unknown option '--json'")).toBe(true);
     expect(isUnsupportedJsonFlagError("error: invalid argument '--output-format'")).toBe(true);
     expect(isUnsupportedJsonFlagError("all tests passed")).toBe(false);

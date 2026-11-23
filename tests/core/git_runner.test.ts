@@ -12,7 +12,7 @@ import {
   initProject,
   updateTasks,
 } from "../../src/core/engine.ts";
-import { observeGitChanges, observeGitSnapshot } from "../../src/core/git.ts";
+import { commitFilesInGit, observeGitChanges, observeGitSnapshot } from "../../src/core/git.ts";
 import { isHeavyVerificationCommand, runAllVerifications, runVerification } from "../../src/core/runner.ts";
 
 const tempDirs: string[] = [];
@@ -359,5 +359,50 @@ describe("WB-02 git observer and verification runner", () => {
       if (prevLang === undefined) delete process.env.WORKBENCH_OUTPUT_LANGUAGE;
       else process.env.WORKBENCH_OUTPUT_LANGUAGE = prevLang;
     }
+  });
+
+  test("handles monorepo subdirectory git paths for snapshot, untracked diff, and commitFilesInGit, and skips optional criteria in runAllVerifications", async () => {
+    const monorepo = initGitRepo(true);
+    const subDir = path.join(monorepo, "api-proxy");
+    fs.mkdirSync(path.join(subDir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(subDir, "src", "index.js"), "exports.ok = 1;\n");
+    execFileSync("git", ["add", "api-proxy/src/index.js"], { cwd: monorepo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "add api-proxy"], { cwd: monorepo, stdio: "ignore" });
+
+    await initProject(subDir);
+    await createRequirement(subDir, {
+      goal: "Monorepo 子目录改动快照与提交测试",
+      criteria: [
+        { id: "AC-1", description: "必需只读校验", required: true, command: "echo required-ok" },
+        { id: "AC-2", description: "可选副作用脚本不应执行", required: false, command: "echo optional-mutating > optional-marker.txt" },
+      ],
+    });
+    await authorizeFastTrack(subDir, "REQ-001");
+
+    // 1. runAllVerifications runs only required criteria when present; includeOptional runs both
+    const reqOnly = await runAllVerifications(subDir, "REQ-001");
+    expect(reqOnly.runs).toHaveLength(1);
+    expect(reqOnly.runs[0]!.record.criterionIds).toEqual(["AC-1"]);
+    expect(fs.existsSync(path.join(subDir, "optional-marker.txt"))).toBe(false);
+
+    // 2. Modified and untracked files under monorepo subdir produce distinct snapshots, captured diff, and clean commit
+    const beforeSnap = await observeGitSnapshot(subDir);
+    fs.writeFileSync(path.join(subDir, "src", "index.js"), "exports.ok = 2;\n");
+    const modSnap = await observeGitSnapshot(subDir);
+    expect(modSnap?.fingerprint).not.toBe(beforeSnap?.fingerprint);
+
+    fs.writeFileSync(path.join(subDir, "src", "extra.js"), "exports.extra = true;\n");
+    const obs = await observeGitChanges(subDir);
+    expect(obs.diff).toContain("api-proxy/src/extra.js");
+
+    const committed = await commitFilesInGit(subDir, ["api-proxy/src/index.js"], "fix(api-proxy): update index");
+    expect(committed.commitHash).toMatch(/^[0-9a-f]{40}$/);
+    const committedFiles = execFileSync("git", ["show", "--name-only", "--format=", "HEAD"], {
+      cwd: monorepo,
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n");
+    expect(committedFiles).toEqual(["api-proxy/src/index.js"]);
   });
 });

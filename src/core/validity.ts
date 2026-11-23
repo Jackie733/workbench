@@ -491,6 +491,10 @@ export function deriveActionBanner(
         return deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
       }
       if (failedCount > 0) {
+        const overrideAction =
+          approval.valid && coverage.requiredTotal > 0
+            ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
+            : [];
         return {
           needsDecision: false,
           decisionReason: null,
@@ -500,9 +504,12 @@ export function deriveActionBanner(
             headlineParams: { count: failedCount },
             tone: "danger",
             primaryAction: { id: "dispatch_fix", label: "让 Agent 修复失败项", labelKey: "core.action.dispatchFix" },
-            secondaryActions: hasVerifyCommands
-              ? [{ id: "run_all_verifications", label: "重新运行验证", labelKey: "core.action.rerun" }]
-              : [],
+            secondaryActions: [
+              ...(hasVerifyCommands
+                ? [{ id: "run_all_verifications" as const, label: "重新运行验证", labelKey: "core.action.rerun" }]
+                : []),
+              ...overrideAction,
+            ],
           },
         };
       }
@@ -534,6 +541,10 @@ export function deriveActionBanner(
           : state.tasks.length > 0
             ? "core.banner.implementing.readyApprovedTasks"
             : "core.banner.implementing.readyApproved";
+      const blockedOverrideAction =
+        approval.valid && coverage.requiredTotal > 0 && state.tasks.some((t) => t.status === "blocked")
+          ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
+          : [];
       return {
         needsDecision: false,
         decisionReason: null,
@@ -547,9 +558,12 @@ export function deriveActionBanner(
             label: state.tasks.length > 0 ? "继续让 Agent 实施" : "开始实施",
             labelKey: state.tasks.length > 0 ? "core.action.continueImplement" : "core.action.startImplement",
           },
-          secondaryActions: hasVerifyCommands
-            ? [{ id: "run_all_verifications", label: "运行全部验证", labelKey: "core.action.runAll" }]
-            : [],
+          secondaryActions: [
+            ...(hasVerifyCommands
+              ? [{ id: "run_all_verifications" as const, label: "运行全部验证", labelKey: "core.action.runAll" }]
+              : []),
+            ...blockedOverrideAction,
+          ],
         },
       };
     }
@@ -572,7 +586,12 @@ export function deriveActionBanner(
           primaryAction: hasVerifyCommands
             ? { id: "run_all_verifications", label: "重新运行验证", labelKey: "core.action.rerun" }
             : { id: "dispatch_fix", label: "让 Agent 补充验证", labelKey: "core.action.agentSupplement" },
-          secondaryActions: [{ id: "request_changes", label: "打回修改…", labelKey: "core.action.sendBack" }],
+          secondaryActions: [
+            ...(approval.valid && coverage.requiredTotal > 0
+              ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
+              : []),
+            { id: "request_changes", label: "打回修改…", labelKey: "core.action.sendBack" },
+          ],
         },
       };
 

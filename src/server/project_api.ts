@@ -35,6 +35,7 @@ import {
   updateDesign,
   updateProjectConfig,
   updateSpec,
+  updateTasks,
   type CorruptRequirementEntry,
   type SpawnSubRequirementItem,
 } from "../core/engine.ts";
@@ -88,6 +89,7 @@ import {
   type ProjectVerificationConfig,
   type RequirementDetail,
   type Stage,
+  type TaskInput,
   type Track,
 } from "../core/types.ts";
 import { isRecord, sanitizeOutput, validateGiteeIssueIdent } from "../core/validate.ts";
@@ -1137,6 +1139,23 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
         deps.broadcastUi({ type: "workbench.updated", reason: "design.updated", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "PATCH" && sub === "tasks") {
+        const body = await readBody(req);
+        if (!Array.isArray(body.tasks)) {
+          throw new WorkbenchError("invalid_input", "tasks 必须是数组");
+        }
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const detail = await updateTasks(base, id, {
+          tasks: body.tasks as TaskInput[],
+          note: typeof body.note === "string" ? body.note : undefined,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          actor: "human",
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        deps.broadcastUi({ type: "workbench.updated", reason: "tasks.updated", root: base, id, at: Date.now() });
         return jsonResponse({ detail });
       }
 

@@ -25,6 +25,7 @@ import type {
   SandboxDriftInfo,
   ScreenshotCaptureResult,
   Stage,
+  TaskInput,
   Track,
   VerificationRecord,
 } from "../core/types.ts";
@@ -608,6 +609,11 @@ export const api = {
     }),
   updateDesign: (id: string, input: { designMarkdown: string; expectedRevision?: number }) =>
     requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/design`), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  updateTasks: (id: string, input: { tasks: TaskInput[]; note?: string; expectedRevision?: number }) =>
+    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/tasks`), {
       method: "PATCH",
       body: JSON.stringify(input),
     }),

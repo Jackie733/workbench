@@ -3422,6 +3422,17 @@ export function Modals() {
                 />
               </div>
             </div>
+            {!sandboxActive &&
+              (deliveryPreview?.aheadCommitsCount ?? 0) >= 20 &&
+              (m.baseBranch ?? deliveryPreview?.baseBranch) === deliveryPreview?.baseBranch && (
+                <div className="callout warning xs" data-testid="deliver-large-ahead-warn">
+                  <Icon icon={AlertTriangle} size={14} />{" "}
+                  {t(language, "deliver.largeAheadWarn", {
+                    count: deliveryPreview!.aheadCommitsCount,
+                    base: deliveryPreview!.baseBranch ?? "main",
+                  })}
+                </div>
+              )}
             <div>
               <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
                 {t(language, "deliver.prTitleLabelPlatform", { platform: prPlatformLabel })}

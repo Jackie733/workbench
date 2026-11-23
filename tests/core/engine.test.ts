@@ -655,4 +655,76 @@ describe("WB-01 core store and domain engine", () => {
     expect(updatedNote.state.stage).toBe("awaiting_acceptance");
     expect(updatedNote.state.handoffNote?.nextSteps).toEqual(["ready for human accept"]);
   });
+
+  test("discoverProjectContext skips mutating --fix/--write scripts and prefers lint:check / test:local", () => {
+    const dir = makeTempProject();
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        name: "api-proxy",
+        scripts: {
+          lint: "eslint . --fix",
+          "lint:check": "eslint .",
+          test: "npm run lint -- --fix && npm run test:local",
+          "test:local": "egg-bin test",
+        },
+      }),
+    );
+    const ctx = discoverProjectContext(dir);
+    expect(ctx.fastCommand).toBe("npm run lint:check");
+    expect(ctx.fullCommand).toBe("npm run test:local");
+  });
+
+  test("preserves approval when human relaxes criteria to optional, and allows overrideReason waiver (except 0/0)", async () => {
+    const dir = makeTempProject();
+    await initProject(dir, { name: "Human Sovereignty" });
+    await createRequirement(dir, { goal: "外部验证豁免与人工放行" });
+    await propose(dir, "REQ-001", {
+      designMarkdown: "# Design\n\nScoped fix.",
+      criteria: [
+        { id: "AC-1", description: "lint", command: "echo ok", required: true },
+        { id: "AC-2", description: "manual login e2e", required: true },
+      ],
+      actor: "agent",
+    });
+    await approveDesign(dir, "REQ-001");
+
+    // Relaxing AC-2 to optional preserves approval & implementing stage
+    const relaxed = await updateSpec(dir, "REQ-001", {
+      criteria: [
+        { id: "AC-1", description: "lint", command: "echo ok", required: true },
+        { id: "AC-2", description: "manual login e2e", required: false },
+      ],
+    });
+    expect(relaxed.state.stage).toBe("implementing");
+    expect(relaxed.validity.approval.valid).toBe(true);
+
+    // Block a task and leave AC-1 unverified: plain accept fails, overrideReason succeeds cleanly
+    await updateTasks(dir, "REQ-001", {
+      tasks: [{ id: "T-1", title: "手工联调", status: "blocked", note: "无登录态" }],
+    });
+    const snap = sha("snapshot-waive");
+    await expect(acceptRequirement(dir, "REQ-001", { currentCodeSnapshotHash: snap })).rejects.toMatchObject({
+      code: "acceptance_gate_failed",
+    });
+
+    const waived = await acceptRequirement(dir, "REQ-001", {
+      currentCodeSnapshotHash: snap,
+      overrideReason: "已在测试环境人工确认并提交 PR",
+    });
+    expect(waived.state.stage).toBe("done");
+    expect(waived.state.acceptance?.overrideReason).toBe("已在测试环境人工确认并提交 PR");
+    expect(waived.state.acceptance?.reviewDisposition?.acceptedRisks?.length).toBeGreaterThanOrEqual(1);
+    expect(waived.acceptanceSnapshot?.requiredPassed).toBe(0);
+
+    // Even with overrideReason, 0/0 required criteria cannot be waived
+    await createRequirement(dir, { goal: "无必需条件不可验收" });
+    await authorizeFastTrack(dir, "REQ-002");
+    await expect(
+      acceptRequirement(dir, "REQ-002", {
+        currentCodeSnapshotHash: snap,
+        overrideReason: "试图跳过 0/0 约束",
+      }),
+    ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
+  });
 });
