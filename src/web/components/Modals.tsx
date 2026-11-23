@@ -61,7 +61,7 @@ import {
   type RoutingPreset,
   type RoutingStage,
 } from "../../hub/types.ts";
-import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse } from "../api.ts";
+import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse, type ProjectInfoResponse } from "../api.ts";
 import {
   dispatchSyncBaseWithAgent,
   guardRequirementRunLock,
@@ -70,6 +70,7 @@ import {
   openRequirement,
   queryClient,
   queryKeys,
+  resolveEffectiveRouting,
   runBusy,
   submitAcceptOverride,
   submitAnnotation,
@@ -114,6 +115,7 @@ import {
   getModelEffortCapability,
   parseRunnerKey,
 } from "../state.ts";
+import { useDraftStore } from "../stores/draftStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -444,7 +446,7 @@ export function Modals() {
   const runLocked = runLock !== null;
   const bridgeConnected = Boolean(project?.bridge.connected);
   const harnesses = hub?.harnesses ?? [];
-  const routing = hub?.routing ?? null;
+  const routing = resolveEffectiveRouting(hub, project);
   const detail = reqData?.detail ?? null;
 
   if (m.kind === "new_req") {
@@ -1168,7 +1170,7 @@ export function Modals() {
   }
 
   if (m.kind === "routing") {
-    const tab = m.tab ?? "global";
+    const tab = m.tab ?? (!noHubProject && project?.initialized ? "project" : "global");
     const cfg = m.draft ?? routing;
     const hubLangValue = m.hubLangDraft ?? hub?.outputLanguage ?? "zh-CN";
     const savedHubLang = hub?.outputLanguage ?? "zh-CN";
@@ -1199,7 +1201,20 @@ export function Modals() {
       queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
         prev ? { ...prev, ...patch } : prev,
       );
+      if (patch.routing) {
+        const projKey = queryKeys.project(activeProjectId);
+        queryClient.setQueryData<ProjectInfoResponse>(projKey, (prev) =>
+          prev
+            ? {
+                ...prev,
+                routing: patch.routing,
+                project: prev.project ? { ...prev.project, routing: patch.routing } : prev.project,
+              }
+            : prev,
+        );
+      }
       void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+      void queryClient.invalidateQueries({ queryKey: ["project"] });
     };
 
     const refreshHarnesses = async () => {
@@ -1213,37 +1228,38 @@ export function Modals() {
     };
 
     const applyPreset = async (preset: RoutingPreset) => {
+      const startModal = useUiStore.getState().modal;
+      const draftAtStart = startModal?.kind === "routing" ? startModal.draft : undefined;
       const res = await runBusy(() => api.applyPreset(preset));
       if (res) {
+        useDraftStore.getState().clearRunnerOverrides();
+        setModal((prev) =>
+          prev?.kind === "routing" && prev.draft === draftAtStart ? { ...prev, draft: res.routing } : prev,
+        );
         await syncHubStatePatch({ routing: res.routing });
-        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: res.routing } : prev));
         showToastKey("routing.presetApplied", { preset });
       }
     };
 
     const saveGlobal = async () => {
-      if (!cfg) return;
       const tokenPatch = m.clearGiteeToken
         ? null
         : giteeTokenValue.trim()
           ? giteeTokenValue.trim()
           : undefined;
-      const res = await runBusy(async () => {
-        const routingRes = await api.saveRouting(cfg);
-        const prefRes = await api.updateHubPreferences({
+      const res = await runBusy(() =>
+        api.updateHubPreferences({
           outputLanguage: hubLangValue,
           ...(tokenPatch !== undefined ? { giteeAccessToken: tokenPatch } : {}),
-        });
-        return { routingRes, prefRes };
-      });
+        }),
+      );
       if (res) {
         await syncHubStatePatch({
-          routing: res.routingRes.routing,
-          outputLanguage: res.prefRes.outputLanguage,
-          ...(res.prefRes.giteeTokenConfigured !== undefined
-            ? { giteeTokenConfigured: res.prefRes.giteeTokenConfigured }
+          outputLanguage: res.outputLanguage,
+          ...(res.giteeTokenConfigured !== undefined
+            ? { giteeTokenConfigured: res.giteeTokenConfigured }
             : {}),
-          ...(res.prefRes.giteeTokenMasked !== undefined ? { giteeTokenMasked: res.prefRes.giteeTokenMasked } : {}),
+          ...(res.giteeTokenMasked !== undefined ? { giteeTokenMasked: res.giteeTokenMasked } : {}),
         });
         await queryClient.invalidateQueries({ queryKey: ["gitee"] });
         setModal(null);
@@ -1252,42 +1268,82 @@ export function Modals() {
     };
 
     const saveProject = async () => {
+      const snapModal = useUiStore.getState().modal;
+      const lm = snapModal?.kind === "routing" ? snapModal : m;
+      const latestCfg = lm.draft ?? routing;
+      const latestProjLang = lm.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
+      const latestProjProvider: GitRemoteProvider = lm.projProviderDraft ?? (isGiteeProject ? "gitee" : "github");
+      const latestGhRepo = lm.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
+      const latestGhBase =
+        lm.ghBaseBranchDraft ?? project?.project?.github?.defaultBaseBranch ?? githubStatus?.defaultBaseBranch ?? "main";
+      const latestGhAutoCreate = lm.ghAutoCreateDraft ?? Boolean(project?.project?.github?.autoCreateIssue);
+      const latestGhAutoSync = lm.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
+      const latestGiteeRepo = lm.giteeRepoDraft ?? project?.project?.gitee?.repo ?? giteeStatus?.repo ?? "";
+      const latestGiteeEnterprise =
+        lm.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
+      const latestGiteeBase =
+        lm.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
+      const latestFastCmd = lm.fastCmdDraft ?? project?.project?.verification?.fastCommand ?? "";
+      const latestFullCmd = lm.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
+
       const out = await runBusy(() =>
         api.updateProjectSettings({
-          outputLanguage: projLangValue,
+          outputLanguage: latestProjLang,
+          ...(latestCfg ? { routing: latestCfg } : {}),
           verification: {
-            fastCommand: fastCmdValue.trim(),
-            fullCommand: fullCmdValue.trim(),
-            ...(m.autoScreenshotsDraft !== undefined
-              ? { autoScreenshots: m.autoScreenshotsDraft }
+            fastCommand: latestFastCmd.trim(),
+            fullCommand: latestFullCmd.trim(),
+            ...(lm.autoScreenshotsDraft !== undefined
+              ? { autoScreenshots: lm.autoScreenshotsDraft }
               : existingAutoScreenshots !== undefined
                 ? { autoScreenshots: existingAutoScreenshots }
                 : {}),
           },
-          ...(projProviderValue === "gitee"
+          ...(latestProjProvider === "gitee"
             ? {
                 gitee: {
-                  repo: giteeRepoValue.trim(),
-                  enterprise: giteeEnterpriseValue.trim(),
-                  defaultBaseBranch: giteeBaseValue.trim() || "master",
+                  repo: latestGiteeRepo.trim(),
+                  enterprise: latestGiteeEnterprise.trim(),
+                  defaultBaseBranch: latestGiteeBase.trim() || "master",
                 },
                 github: null,
               }
             : {
                 github: {
-                  repo: ghRepoValue.trim(),
-                  defaultBaseBranch: ghBaseValue.trim() || "main",
-                  autoCreateIssue: ghAutoCreateValue,
-                  autoSyncIssue: ghAutoSyncValue,
+                  repo: latestGhRepo.trim(),
+                  defaultBaseBranch: latestGhBase.trim() || "main",
+                  autoCreateIssue: latestGhAutoCreate,
+                  autoSyncIssue: latestGhAutoSync,
                 },
                 gitee: null,
               }),
         }),
       );
       if (out) {
-        await invalidateAllWorkbenchQueries();
+        if (lm.draft) {
+          useDraftStore.getState().clearRunnerOverrides();
+        }
+        const savedProject = out.project;
+        const projKey = queryKeys.project(activeProjectId);
+        await queryClient.cancelQueries({ queryKey: projKey });
+        queryClient.setQueryData<ProjectInfoResponse>(projKey, (prev) =>
+          prev
+            ? {
+                ...prev,
+                project: savedProject,
+                ...(savedProject.routing ? { routing: savedProject.routing } : {}),
+              }
+            : prev,
+        );
+        if (savedProject.routing) {
+          await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
+          queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
+            prev ? { ...prev, routing: savedProject.routing ?? prev.routing } : prev,
+          );
+        }
         setModal(null);
         showToastKey("routing.savedProject");
+        void invalidateAllWorkbenchQueries();
       }
     };
 
@@ -1303,16 +1359,6 @@ export function Modals() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={tab === "global"}
-                className={tab === "global" ? "active" : ""}
-                data-testid="settings-tab-global"
-                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "global" } : prev))}
-              >
-                <Icon icon={Globe} size={14} /> {t(language, "routing.global")}
-              </button>
-              <button
-                type="button"
-                role="tab"
                 aria-selected={tab === "project"}
                 className={tab === "project" ? "active" : ""}
                 data-testid="settings-tab-project"
@@ -1320,8 +1366,18 @@ export function Modals() {
               >
                 <Icon icon={Folder} size={14} /> {t(language, "routing.project")}
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "global"}
+                className={tab === "global" ? "active" : ""}
+                data-testid="settings-tab-global"
+                onClick={() => setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: "global" } : prev))}
+              >
+                <Icon icon={Globe} size={14} /> {t(language, "routing.global")}
+              </button>
             </div>
-            {tab === "global" && (
+            {tab === "project" && (
               <button
                 className="btn xs"
                 type="button"
@@ -1337,186 +1393,6 @@ export function Modals() {
 
         {tab === "global" ? (
           <div data-testid="settings-pane-global">
-            <div className="preset-grid" data-testid="routing-presets">
-              {PRESET_KEYS.map((p) => (
-                <button
-                  key={p.id}
-                  className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
-                  type="button"
-                  data-testid={`preset-${p.id}`}
-                  onClick={() => void applyPreset(p.id)}
-                >
-                  <strong>{t(language, p.nameKey)}</strong>
-                  <div className="xs muted" style={{ marginTop: 4 }}>
-                    {t(language, p.descKey)}
-                  </div>
-                </button>
-              ))}
-            </div>
-
-            {cfg && (
-              <div className="routing-table" style={{ marginTop: 12 }}>
-                {ROUTING_STAGES.map((stg) => {
-                  const rule = cfg.stages[stg];
-                  const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
-                  const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
-                  const efforts = effortCap.efforts;
-                  const lockedEffort = effortCap.defaultEffort ?? efforts[0];
-                  const lockedLabel = t(language, "routing.effortLockedLabel", {
-                    effort: lockedEffort ? effortLabel(language, lockedEffort) : t(language, "routing.effortBuiltin"),
-                  });
-
-                  const changePrimaryModel = (key: string) => {
-                    const parsed = parseRunnerKey(key);
-                    if (!parsed || !cfg) return;
-                    const { harness, model } = parsed;
-                    const nextCap = getModelEffortCapability(harnesses, harness, model);
-                    const keepEffort =
-                      nextCap.mode === "configurable" &&
-                      rule.primary.reasoningEffort &&
-                      nextCap.efforts.includes(rule.primary.reasoningEffort)
-                        ? rule.primary.reasoningEffort
-                        : undefined;
-                    const nextCfg = {
-                      ...cfg,
-                      stages: {
-                        ...cfg.stages,
-                        [stg]: {
-                          ...cfg.stages[stg],
-                          primary: {
-                            harness: harness as HarnessId,
-                            model,
-                            ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
-                          },
-                        },
-                      },
-                    };
-                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                  };
-
-                  return (
-                    <div key={stg} className="routing-row">
-                      <div className="min-w-0">
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>{t(language, STAGE_LABEL_KEYS[stg])}</div>
-                        <div className="xs muted truncate">
-                          {t(language, "routing.fallbacks", {
-                            list:
-                              rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") ||
-                              t(language, "common.none"),
-                          })}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <RoutingModelPicker
-                          testId={`route-select-${stg}`}
-                          harnesses={harnesses}
-                          value={selectedVal}
-                          onChange={changePrimaryModel}
-                          ariaLabel={t(language, "routing.primaryModelAria", { stage: t(language, STAGE_LABEL_KEYS[stg]) })}
-                        />
-                        {effortCap.mode === "configurable" ? (
-                          <select
-                            className="select xs font-mono w-[135px]"
-                            data-testid={`route-effort-${stg}`}
-                            title={t(language, "routing.effortTitle")}
-                            value={
-                              rule.primary.reasoningEffort && efforts.includes(rule.primary.reasoningEffort)
-                                ? rule.primary.reasoningEffort
-                                : ""
-                            }
-                            onChange={(e) => {
-                              const eff = e.target.value as ReasoningEffort | "";
-                              const nextPrimary = { ...rule.primary };
-                              if (eff) nextPrimary.reasoningEffort = eff;
-                              else delete nextPrimary.reasoningEffort;
-                              const nextCfg = {
-                                ...cfg,
-                                stages: {
-                                  ...cfg.stages,
-                                  [stg]: { ...cfg.stages[stg], primary: nextPrimary },
-                                },
-                              };
-                              setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                            }}
-                          >
-                            <option value="">
-                              {t(language, "routing.defaultEffort")}
-                              {effortCap.defaultEffort
-                                ? ` (${effortLabel(language, effortCap.defaultEffort)})`
-                                : ""}
-                            </option>
-                            {efforts.map((eff) => (
-                              <option key={eff} value={eff}>
-                                {effortLabel(language, eff)}
-                              </option>
-                            ))}
-                          </select>
-                        ) : effortCap.mode === "locked" ? (
-                          <span
-                            className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs font-mono text-[var(--muted)] overflow-hidden"
-                            data-testid={`route-effort-${stg}-locked`}
-                            title={`${lockedLabel} · ${t(language, "routing.effortLockedTitle")}`}
-                          >
-                            <span className="truncate min-w-0">{lockedLabel}</span>
-                          </span>
-                        ) : (
-                          <span
-                            className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs text-[var(--muted)] overflow-hidden"
-                            data-testid={`route-effort-${stg}-unsupported`}
-                            title={`${t(language, "routing.effortUnsupportedLabel")} · ${t(language, "routing.effortUnsupportedTitle")}`}
-                          >
-                            <span className="truncate min-w-0">
-                              {t(language, "routing.effortUnsupportedLabel")}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {cfg && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-                  <input
-                    type="checkbox"
-                    data-testid="routing-auto-review-checkbox"
-                    checked={cfg.autoReview !== false}
-                    onChange={(e) => {
-                      const nextCfg = { ...cfg, autoReview: e.target.checked };
-                      setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                    }}
-                  />
-                  <span>{t(language, "routing.autoReviewLabel")}</span>
-                </label>
-                {cfg.autoReview !== false && (
-                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, paddingLeft: 22 }}>
-                    <span className="muted">{t(language, "routing.maxAutoReviewRoundsLabel")}</span>
-                    <select
-                      className="select xs"
-                      data-testid="routing-max-auto-review-rounds"
-                      value={String(cfg.maxAutoReviewRounds ?? 1)}
-                      onChange={(e) => {
-                        const val = Number(e.target.value);
-                        const nextCfg = {
-                          ...cfg,
-                          maxAutoReviewRounds: Number.isFinite(val) ? val : 1,
-                        };
-                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                      }}
-                    >
-                      <option value="1">1</option>
-                      <option value="2">2</option>
-                      <option value="3">3</option>
-                      <option value="5">5</option>
-                    </select>
-                  </label>
-                )}
-              </div>
-            )}
-
             <div className="callout info xs" style={{ margin: "12px 0" }}>
               <Icon icon={Info} size={14} /> {t(language, "routing.outputLanguageCallout")}
             </div>
@@ -1643,40 +1519,233 @@ export function Modals() {
               </div>
             ) : (
               <>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <div>
-                    <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                      {t(language, "routing.projectLangLabel", { name: project.project?.name ?? "" })}
-                    </label>
-                    <select
-                      className="select"
-                      data-testid="project-output-language-select"
-                      style={{ width: "100%" }}
-                      value={projLangValue}
-                      onChange={(e) =>
-                        setModal((prev) =>
-                          prev?.kind === "routing"
-                            ? { ...prev, projLangDraft: e.target.value as OutputLanguage | "inherit" }
-                            : prev,
-                        )
-                      }
-                    >
-                      <option value="inherit">
-                        {t(language, "routing.inheritHub", { lang: savedHubLang })}
-                      </option>
-                      <option value="zh-CN">{t(language, "init.langZh")}</option>
-                      <option value="en">{t(language, "init.langEn")}</option>
-                      <option value="auto">{t(language, "routing.langAuto")}</option>
-                    </select>
+                    <div className="preset-grid" data-testid="routing-presets">
+                      {PRESET_KEYS.map((p) => (
+                        <button
+                          key={p.id}
+                          className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
+                          type="button"
+                          data-testid={`preset-${p.id}`}
+                          onClick={() => void applyPreset(p.id)}
+                        >
+                          <strong>{t(language, p.nameKey)}</strong>
+                          <div className="xs muted truncate" style={{ marginTop: 2 }} title={t(language, p.descKey)}>
+                            {t(language, p.descKey)}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {cfg && (
+                      <div className="routing-table" style={{ marginTop: 8 }}>
+                        {ROUTING_STAGES.map((stg) => {
+                          const rule = cfg.stages[stg];
+                          const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
+                          const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
+                          const efforts = effortCap.efforts;
+                          const lockedEffort = effortCap.defaultEffort ?? efforts[0];
+                          const lockedLabel = t(language, "routing.effortLockedLabel", {
+                            effort: lockedEffort ? effortLabel(language, lockedEffort) : t(language, "routing.effortBuiltin"),
+                          });
+
+                          const changePrimaryModel = (key: string) => {
+                            const parsed = parseRunnerKey(key);
+                            if (!parsed || !cfg) return;
+                            const { harness, model } = parsed;
+                            const nextCap = getModelEffortCapability(harnesses, harness, model);
+                            setModal((prev) => {
+                              if (prev?.kind !== "routing") return prev;
+                              const baseCfg = prev.draft ?? routing;
+                              if (!baseCfg) return prev;
+                              const prevRule = baseCfg.stages[stg];
+                              const keepEffort =
+                                nextCap.mode === "configurable" &&
+                                prevRule.primary.reasoningEffort &&
+                                nextCap.efforts.includes(prevRule.primary.reasoningEffort)
+                                  ? prevRule.primary.reasoningEffort
+                                  : undefined;
+                              return {
+                                ...prev,
+                                draft: {
+                                  ...baseCfg,
+                                  stages: {
+                                    ...baseCfg.stages,
+                                    [stg]: {
+                                      ...prevRule,
+                                      primary: {
+                                        harness: harness as HarnessId,
+                                        model,
+                                        ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
+                                      },
+                                    },
+                                  },
+                                },
+                              };
+                            });
+                          };
+
+                          return (
+                            <div key={stg} className="routing-row">
+                              <div className="min-w-0">
+                                <div style={{ fontWeight: 600, fontSize: 13 }}>{t(language, STAGE_LABEL_KEYS[stg])}</div>
+                                <div className="xs muted truncate">
+                                  {t(language, "routing.fallbacks", {
+                                    list:
+                                      rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") ||
+                                      t(language, "common.none"),
+                                  })}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <RoutingModelPicker
+                                  testId={`route-select-${stg}`}
+                                  harnesses={harnesses}
+                                  value={selectedVal}
+                                  onChange={changePrimaryModel}
+                                  ariaLabel={t(language, "routing.primaryModelAria", { stage: t(language, STAGE_LABEL_KEYS[stg]) })}
+                                />
+                                {effortCap.mode === "configurable" ? (
+                                  <select
+                                    className="select xs font-mono w-[135px]"
+                                    data-testid={`route-effort-${stg}`}
+                                    title={t(language, "routing.effortTitle")}
+                                    value={
+                                      rule.primary.reasoningEffort && efforts.includes(rule.primary.reasoningEffort)
+                                        ? rule.primary.reasoningEffort
+                                        : ""
+                                    }
+                                    onChange={(e) => {
+                                      const eff = e.target.value as ReasoningEffort | "";
+                                      setModal((prev) => {
+                                        if (prev?.kind !== "routing") return prev;
+                                        const baseCfg = prev.draft ?? routing;
+                                        if (!baseCfg) return prev;
+                                        const prevRule = baseCfg.stages[stg];
+                                        const nextPrimary = { ...prevRule.primary };
+                                        if (eff) nextPrimary.reasoningEffort = eff;
+                                        else delete nextPrimary.reasoningEffort;
+                                        return {
+                                          ...prev,
+                                          draft: {
+                                            ...baseCfg,
+                                            stages: {
+                                              ...baseCfg.stages,
+                                              [stg]: { ...prevRule, primary: nextPrimary },
+                                            },
+                                          },
+                                        };
+                                      });
+                                    }}
+                                  >
+                                    <option value="">
+                                      {t(language, "routing.defaultEffort")}
+                                      {effortCap.defaultEffort
+                                        ? ` (${effortLabel(language, effortCap.defaultEffort)})`
+                                        : ""}
+                                    </option>
+                                    {efforts.map((eff) => (
+                                      <option key={eff} value={eff}>
+                                        {effortLabel(language, eff)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : effortCap.mode === "locked" ? (
+                                  <span
+                                    className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs font-mono text-[var(--muted)] overflow-hidden"
+                                    data-testid={`route-effort-${stg}-locked`}
+                                    title={`${lockedLabel} · ${t(language, "routing.effortLockedTitle")}`}
+                                  >
+                                    <span className="truncate min-w-0">{lockedLabel}</span>
+                                  </span>
+                                ) : (
+                                  <span
+                                    className="inline-flex items-center justify-center w-[135px] h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] text-xs text-[var(--muted)] overflow-hidden"
+                                    data-testid={`route-effort-${stg}-unsupported`}
+                                    title={`${t(language, "routing.effortUnsupportedLabel")} · ${t(language, "routing.effortUnsupportedTitle")}`}
+                                  >
+                                    <span className="truncate min-w-0">
+                                      {t(language, "routing.effortUnsupportedLabel")}
+                                    </span>
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {cfg && (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                          flexWrap: "wrap",
+                          marginTop: 8,
+                        }}
+                      >
+                        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                          <input
+                            type="checkbox"
+                            data-testid="routing-auto-review-checkbox"
+                            checked={cfg.autoReview !== false}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setModal((prev) => {
+                                if (prev?.kind !== "routing") return prev;
+                                const baseCfg = prev.draft ?? routing;
+                                return baseCfg ? { ...prev, draft: { ...baseCfg, autoReview: checked } } : prev;
+                              });
+                            }}
+                          />
+                          <span>{t(language, "routing.autoReviewLabel")}</span>
+                        </label>
+                        {cfg.autoReview !== false && (
+                          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5 }}>
+                            <span className="muted">{t(language, "routing.maxAutoReviewRoundsLabel")}</span>
+                            <select
+                              className="select xs"
+                              data-testid="routing-max-auto-review-rounds"
+                              value={String(cfg.maxAutoReviewRounds ?? 1)}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setModal((prev) => {
+                                  if (prev?.kind !== "routing") return prev;
+                                  const baseCfg = prev.draft ?? routing;
+                                  return baseCfg
+                                    ? {
+                                        ...prev,
+                                        draft: {
+                                          ...baseCfg,
+                                          maxAutoReviewRounds: Number.isFinite(val) ? val : 1,
+                                        },
+                                      }
+                                    : prev;
+                                });
+                              }}
+                            >
+                              <option value="1">1</option>
+                              <option value="2">2</option>
+                              <option value="3">3</option>
+                              <option value="5">5</option>
+                            </select>
+                          </label>
+                        )}
+                      </div>
+                    )}
                   </div>
 
-                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
                     <div
                       style={{
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                        marginBottom: 8,
+                        marginBottom: 6,
                         gap: 8,
                         flexWrap: "wrap",
                       }}
@@ -1836,62 +1905,115 @@ export function Modals() {
                             />
                           </div>
                         </div>
-                        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 6 }}>
-                          <input
-                            type="checkbox"
-                            data-testid="project-github-autocreate"
-                            checked={ghAutoCreateValue}
-                            onChange={(e) =>
-                              setModal((prev) =>
-                                prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: e.target.checked } : prev,
-                              )
-                            }
-                          />
-                          <span>{t(language, "routing.ghAutoCreate")}</span>
-                        </label>
-                        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-                          <input
-                            type="checkbox"
-                            data-testid="project-github-autosync"
-                            checked={ghAutoSyncValue}
-                            onChange={(e) =>
-                              setModal((prev) =>
-                                prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: e.target.checked } : prev,
-                              )
-                            }
-                          />
-                          <span>{t(language, "routing.ghAutoSync")}</span>
-                        </label>
+                        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                            <input
+                              type="checkbox"
+                              data-testid="project-github-autocreate"
+                              checked={ghAutoCreateValue}
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: e.target.checked } : prev,
+                                )
+                              }
+                            />
+                            <span>{t(language, "routing.ghAutoCreate")}</span>
+                          </label>
+                          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                            <input
+                              type="checkbox"
+                              data-testid="project-github-autosync"
+                              checked={ghAutoSyncValue}
+                              onChange={(e) =>
+                                setModal((prev) =>
+                                  prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: e.target.checked } : prev,
+                                )
+                              }
+                            />
+                            <span>{t(language, "routing.ghAutoSync")}</span>
+                          </label>
+                        </div>
                       </>
                     )}
                   </div>
 
-                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-                    <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
-                      {t(language, "routing.verificationTitle")}
-                    </strong>
-                    <div style={{ marginBottom: 10 }}>
-                      <span className="muted xs" style={{ display: "block", marginBottom: 4 }}>
-                        {t(language, "routing.archDocsLabel")}
-                      </span>
-                      {project.context?.archDocs && project.context.archDocs.length > 0 ? (
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {project.context.archDocs.map((doc) => (
-                            <span
-                              key={doc.path}
-                              className="badge info"
-                              title={doc.headings.join(" / ")}
-                              data-testid={`proj-arch-doc-${doc.path}`}
-                            >
-                              {doc.path}
-                            </span>
-                          ))}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        marginBottom: 6,
+                      }}
+                    >
+                      <strong style={{ fontSize: 13 }}>
+                        {t(language, "routing.verificationTitle")}
+                      </strong>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
+                          <input
+                            type="checkbox"
+                            data-testid="project-auto-screenshots"
+                            checked={autoScreenshotsValue}
+                            onChange={(e) =>
+                              setModal((prev) =>
+                                prev?.kind === "routing" ? { ...prev, autoScreenshotsDraft: e.target.checked } : prev,
+                              )
+                            }
+                          />
+                          <span>{t(language, "routing.autoScreenshotsLabel")}</span>
+                        </label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          <span className="muted xs">
+                            {t(language, "routing.archDocsLabel")}
+                          </span>
+                          {project.context?.archDocs && project.context.archDocs.length > 0 ? (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {project.context.archDocs.map((doc) => (
+                                <span
+                                  key={doc.path}
+                                  className="badge info"
+                                  title={doc.headings.join(" / ")}
+                                  data-testid={`proj-arch-doc-${doc.path}`}
+                                >
+                                  {doc.path}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="xs muted">{t(language, "routing.archDocsNone")}</span>
+                          )}
                         </div>
-                      ) : (
-                        <span className="xs muted">{t(language, "routing.archDocsNone")}</span>
-                      )}
+                      </div>
                     </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 4 }}>
+                      <div>
+                        <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
+                          {t(language, "routing.projectLangLabel", { name: project.project?.name ?? "" })}
+                        </label>
+                        <select
+                          className="select"
+                          data-testid="project-output-language-select"
+                          style={{ width: "100%" }}
+                          value={projLangValue}
+                          onChange={(e) =>
+                            setModal((prev) =>
+                              prev?.kind === "routing"
+                                ? { ...prev, projLangDraft: e.target.value as OutputLanguage | "inherit" }
+                                : prev,
+                            )
+                          }
+                        >
+                          <option value="inherit">
+                            {t(language, "routing.inheritHub", { lang: savedHubLang })}
+                          </option>
+                          <option value="zh-CN">{t(language, "init.langZh")}</option>
+                          <option value="en">{t(language, "init.langEn")}</option>
+                          <option value="auto">{t(language, "routing.langAuto")}</option>
+                        </select>
+                      </div>
                       <div>
                         <label className="muted xs" style={{ display: "block", marginBottom: 4 }}>
                           {t(language, "routing.fastCmdLabel")}
@@ -1925,19 +2047,6 @@ export function Modals() {
                         />
                       </div>
                     </div>
-                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-                      <input
-                        type="checkbox"
-                        data-testid="project-auto-screenshots"
-                        checked={autoScreenshotsValue}
-                        onChange={(e) =>
-                          setModal((prev) =>
-                            prev?.kind === "routing" ? { ...prev, autoScreenshotsDraft: e.target.checked } : prev,
-                          )
-                        }
-                      />
-                      <span>{t(language, "routing.autoScreenshotsLabel")}</span>
-                    </label>
                   </div>
                 </div>
 

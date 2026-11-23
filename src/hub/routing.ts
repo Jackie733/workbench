@@ -491,6 +491,13 @@ function normalizeTargetWithHarnesses(
     }
   }
 
+  // When the harness only has an unverified builtin list (CLI discovery not yet completed),
+  // keep the persisted model ID verbatim rather than silently remapping to a builtin default.
+  const hasDetectedCatalog = harnessInfo.models.some((m) => m.source === "detected");
+  if (!hasDetectedCatalog) {
+    return { target, available: true };
+  }
+
   // Model ID no longer exists in this harness's discovered catalog: remap to best available model on the same harness.
   const scored = harnessInfo.models
     .map((m) => ({

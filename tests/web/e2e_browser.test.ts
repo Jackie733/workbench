@@ -529,10 +529,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
-      // 2. Routing Center: switch preset + set effort + save
+      // 2. Routing Center: global language/token vs project routing preset + effort + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="custom-model-input"]')))).toBe(false);
+      await clickReady(page, '[data-testid="settings-tab-global"]');
+      await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
       await page.select('[data-testid="hub-output-language-select"]', "en");
       await clickReady(page, '[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="project-github-repo-input"]', { timeout: 5000 });
@@ -542,9 +544,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       );
       expect(inheritLabel).toContain("当前：zh-CN"); // 已持久化的全局语言，而非未保存草稿
       await clickReady(page, '[data-testid="settings-tab-global"]');
-      await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
       await page.select('[data-testid="hub-output-language-select"]', "zh-CN");
+      await clickReady(page, '[data-testid="settings-tab-project"]');
+      await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="preset-quota_saver"]');
+      await page.waitForSelector('[data-testid="preset-quota_saver"].active', { timeout: 5000 });
       // REQ-015 审查修复：长模型名在路由选择器中内部省略，锁定推理强度标签保持 28px 单行且悬浮提示展示完整值。
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6.2-xhigh-locked-variant-with-extra-long-name");
       await page.waitForSelector('[data-testid="route-effort-design-locked"]', { timeout: 5000 });
@@ -578,7 +583,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(lockedEffortMetrics.lockedTitle).toContain("XHigh (极高)");
       await page.select('[data-testid="route-select-design"]', "qodercn::Qwen4-Max");
       await page.select('[data-testid="route-effort-design"]', "xhigh");
-      await clickReady(page, '[data-testid="save-routing-btn"]');
+      await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
       // Reopen immediately and verify saved preset/effort persisted, then customize model+effort, save, reopen & reload
@@ -594,7 +599,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.select('[data-testid="route-effort-design"]', "high");
       await page.select('[data-testid="route-select-implement"]', "opencode::opencode/deepseek-v4.1-flash-free");
       await page.select('[data-testid="route-effort-implement"]', "medium");
-      await clickReady(page, '[data-testid="save-routing-btn"]');
+      await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
       await clickReady(page, '[data-testid="open-routing-btn"]');

@@ -11,6 +11,7 @@ import type {
   Stage,
 } from "../core/types.ts";
 import type { DispatchOutcome } from "../server/index.ts";
+import type { RoutingConfig } from "../hub/types.ts";
 import {
   api,
   ApiClientError,
@@ -272,6 +273,13 @@ export function usePlaybookQuery(activeProjectId: string | null, enabled: boolea
   });
 }
 
+export function resolveEffectiveRouting(
+  hub?: HubStateResponse | null,
+  project?: ProjectInfoResponse | null,
+): RoutingConfig | null {
+  return project?.project?.routing ?? project?.routing ?? hub?.routing ?? null;
+}
+
 function applyHubState(hub: HubStateResponse, snapshotStartedAt: number): void {
   useStreamStore.getState().syncActiveRuns(hub.activeRuns, snapshotStartedAt);
   const ui = useUiStore.getState();
@@ -282,8 +290,13 @@ function applyHubState(hub: HubStateResponse, snapshotStartedAt: number): void {
       if (ui.activeProjectId !== nextId) {
         setApiProjectScope(nextId);
         ui.setActiveProjectId(nextId);
+        useDraftStore.getState().setProjectScope(nextId);
       }
+    } else {
+      useDraftStore.getState().setProjectScope(ui.activeProjectId);
     }
+  } else {
+    useDraftStore.getState().setProjectScope(null);
   }
 }
 
@@ -675,7 +688,6 @@ export async function openRequirement(id: string): Promise<void> {
   ui.clearExpandedLogs();
   useDraftStore.getState().cancelEditSpec();
   useDraftStore.getState().cancelEditDesign();
-  useDraftStore.getState().clearRunnerOverrides();
   await queryClient.invalidateQueries({ queryKey: queryKeys.requirement(ui.activeProjectId, id) });
 }
 
@@ -703,6 +715,7 @@ export async function switchProject(pid: string): Promise<void> {
     await api.activateHubProject(pid);
     setApiProjectScope(pid);
     ui.setActiveProjectId(pid);
+    useDraftStore.getState().setProjectScope(pid);
     ui.setSelectedId(null);
     ui.setInspectedRunId(null);
     ui.setSelectedDiffFile(null);
@@ -756,12 +769,13 @@ export async function triggerActiveRun(
   if (guardRequirementRunLock(reqId)) return;
   const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+  const project = queryClient.getQueryData<ProjectInfoResponse>(queryKeys.project(scope.projectId));
   const drafts = useDraftStore.getState().runnerOverrides;
   const override =
     opts?.runnerActionKey && drafts[opts.runnerActionKey]?.key ? drafts[opts.runnerActionKey] : drafts[action];
   const selectedRunnerKey = override?.key ?? "";
   const selectedEffort = override?.effort ?? "";
-  const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, action, selectedEffort);
+  const choice = activeRunnerChoice(selectedRunnerKey, resolveEffectiveRouting(hub, project), action, selectedEffort);
   const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
   const effectiveEffort =
     effortCap.mode === "configurable"
@@ -939,11 +953,12 @@ export async function dispatchSyncBaseWithAgent(
   const useCli = shouldUseCliRunner("fix");
   const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+  const project = queryClient.getQueryData<ProjectInfoResponse>(queryKeys.project(scope.projectId));
   const drafts = useDraftStore.getState().runnerOverrides;
   const override = drafts.fix;
   const selectedRunnerKey = override?.key ?? "";
   const selectedEffort = override?.effort ?? "";
-  const choice = activeRunnerChoice(selectedRunnerKey, hub?.routing ?? null, "fix", selectedEffort);
+  const choice = activeRunnerChoice(selectedRunnerKey, resolveEffectiveRouting(hub, project), "fix", selectedEffort);
   const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
   const effectiveEffort =
     effortCap.mode === "configurable"

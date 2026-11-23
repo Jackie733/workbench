@@ -551,12 +551,8 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       expect(await readSelectValue(page, "route-select-implement")).toBe("opencode::free-model");
       expect(await readSelectValue(page, "route-effort-implement")).toBe("");
 
-      await clickReady(page, '[data-testid="save-routing-btn"]');
+      await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
-      expect(readHubConfig().routing.stages.implement.primary).toEqual({
-        harness: "opencode",
-        model: "free-model",
-      });
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       expect(await readSelectValue(page, "route-select-implement")).toBe("opencode::free-model");
@@ -571,20 +567,8 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       expect(await readSelectValue(page, "route-effort-implement")).toBe("high");
 
       // 保存后确认同键点选未清除设计阶段既有的 xhigh
-      await clickReady(page, '[data-testid="save-routing-btn"]');
+      await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
-
-      const saved = readHubConfig();
-      expect(saved.routing.stages.design.primary).toEqual({
-        harness: "codex",
-        model: "gpt-6.1-sol",
-        reasoningEffort: "xhigh",
-      });
-      expect(saved.routing.stages.implement.primary).toEqual({
-        harness: "omp",
-        model: "gpt-6.1-sol",
-        reasoningEffort: "high",
-      });
 
       // 重新打开确认可见菜单选择与强度均已持久化
       await clickReady(page, '[data-testid="open-routing-btn"]');

@@ -12,6 +12,7 @@ export interface ProbeDependencies {
   hubDir?: string | null;
   which?: (cmd: string) => string | null;
   runCmd?: (cmd: string, args: string[], timeoutMs?: number) => Promise<{ code: number; stdout: string }>;
+  signal?: AbortSignal;
 }
 
 const VALID_EFFORTS = new Set<string>(REASONING_EFFORTS);
@@ -43,17 +44,48 @@ function defaultWhich(cmd: string): string | null {
   return null;
 }
 
-function defaultRunCmd(cmd: string, args: string[], timeoutMs = 6000): Promise<{ code: number; stdout: string }> {
+function defaultRunCmd(
+  cmd: string,
+  args: string[],
+  timeoutMs = 6000,
+  signal?: AbortSignal,
+): Promise<{ code: number; stdout: string }> {
+  if (signal?.aborted) return Promise.resolve({ code: 1, stdout: "" });
+  const home = os.homedir();
+  const cmdDir = path.isAbsolute(cmd) ? path.dirname(cmd) : "";
+  const extraDirs = [
+    cmdDir,
+    path.join(home, ".local/bin"),
+    path.join(home, ".opencode/bin"),
+    path.join(home, ".qoder-cn/entry"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ].filter(Boolean);
+  const existingPath = process.env.PATH ?? "";
+  const mergedPath = Array.from(new Set([...extraDirs, ...existingPath.split(path.delimiter).filter(Boolean)])).join(
+    path.delimiter,
+  );
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
-      const exitCode =
-        err && typeof (err as { code?: unknown }).code === "number"
-          ? ((err as { code: number }).code ?? 1)
-          : err
-            ? 1
-            : 0;
-      resolve({ code: exitCode, stdout: stdout ?? "" });
-    });
+    execFile(
+      cmd,
+      args,
+      {
+        timeout: timeoutMs,
+        encoding: "utf8",
+        maxBuffer: 2 * 1024 * 1024,
+        env: { ...process.env, PATH: mergedPath },
+        ...(signal ? { signal } : {}),
+      },
+      (err, stdout) => {
+        const exitCode =
+          err && typeof (err as { code?: unknown }).code === "number"
+            ? ((err as { code: number }).code ?? 1)
+            : err
+              ? 1
+              : 0;
+        resolve({ code: exitCode, stdout: stdout ?? "" });
+      },
+    );
   });
 }
 
@@ -302,7 +334,7 @@ const OPENCODE_DEFAULT_MODELS = [
   "opencode/nemotron-3.5-super-vl-free",
 ];
 
-function parseCodexModels(homeDir: string): { models: RawModelSpec[]; defaultModel: string | null } {
+function parseCodexModels(homeDir: string): { models: RawModelSpec[]; defaultModel: string | null; fromCache: boolean } {
   const models: RawModelSpec[] = [];
   let defaultModel: string | null = null;
   try {
@@ -371,9 +403,10 @@ function parseCodexModels(homeDir: string): { models: RawModelSpec[]; defaultMod
         { id: "codex-auto-review", supportedEfforts: fallbackEfforts, defaultEffort: "medium", priority: 12 },
       ],
       defaultModel,
+      fromCache: false,
     };
   }
-  return { models, defaultModel };
+  return { models, defaultModel, fromCache: true };
 }
 
 function parseOmpDefaultModel(homeDir: string): string | null {
@@ -818,6 +851,10 @@ export function getLocalCatalogFingerprint(homeDir = os.homedir()): string {
     .join("|");
 }
 
+function hasDetectedModels(h?: HarnessInfo | null): boolean {
+  return Boolean(h && h.models.length > 0 && h.models.some((m) => m.source === "detected"));
+}
+
 export function discoverHarnessesQuick(
   deps: Pick<ProbeDependencies, "homeDir" | "which" | "hubDir"> = {},
 ): HarnessInfo[] {
@@ -844,25 +881,32 @@ export function discoverHarnessesQuick(
     ...sqliteCatalog.ompModels,
   ];
 
+  const snapCodex = snapshot.get("codex");
   const snapQoder = snapshot.get("qodercn");
   const snapOpencode = snapshot.get("opencode");
   const snapAgy = snapshot.get("agy");
 
-  const qoderModels =
-    snapQoder && snapQoder.models.length > 0 && snapQoder.executable === qoderBin
-      ? snapQoder.models
-      : mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), "builtin", capIndex, "qoder-cn");
+  const codexModels = codexParsed.fromCache
+    ? mergeModels(codexParsed.models, "detected", capIndex, "openai-codex")
+    : hasDetectedModels(snapCodex)
+      ? snapCodex!.models
+      : mergeModels(codexParsed.models, "builtin", capIndex, "openai-codex");
 
+  const qoderHasSnap = hasDetectedModels(snapQoder);
+  const qoderModels = qoderHasSnap
+    ? snapQoder!.models
+    : mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), "builtin", capIndex, "qoder-cn");
+
+  const opencodeHasSnap = hasDetectedModels(snapOpencode);
   const opencodeFallbackList: Array<string | RawModelSpec> = [...OPENCODE_DEFAULT_MODELS];
-  const opencodeModels =
-    snapOpencode && snapOpencode.models.length > 0 && snapOpencode.executable === opencodeBin
-      ? snapOpencode.models
-      : mergeModels(opencodeFallbackList, "builtin", capIndex);
+  const opencodeModels = opencodeHasSnap
+    ? snapOpencode!.models
+    : mergeModels(opencodeFallbackList, "builtin", capIndex);
 
-  const agyModels =
-    snapAgy && snapAgy.models.length > 0 && snapAgy.executable === agyBin
-      ? snapAgy.models
-      : mergeModels(normalizeAgyModels(AGY_DEFAULT_MODELS), "builtin", capIndex, "google-antigravity");
+  const agyHasSnap = hasDetectedModels(snapAgy);
+  const agyModels = agyHasSnap
+    ? snapAgy!.models
+    : mergeModels(normalizeAgyModels(AGY_DEFAULT_MODELS), "builtin", capIndex, "google-antigravity");
 
   return [
     {
@@ -871,8 +915,11 @@ export function discoverHarnessesQuick(
       subscription: "ChatGPT Plus",
       installed: Boolean(codexBin),
       executable: codexBin,
-      models: mergeModels(codexParsed.models, "detected", capIndex, "openai-codex"),
-      defaultModel: codexParsed.defaultModel ?? codexParsed.models[0]?.id ?? null,
+      models: codexModels,
+      defaultModel:
+        codexParsed.defaultModel ??
+        (codexParsed.fromCache ? codexParsed.models[0]?.id : snapCodex?.defaultModel ?? codexParsed.models[0]?.id) ??
+        null,
       detectedAt: now,
     },
     {
@@ -884,7 +931,7 @@ export function discoverHarnessesQuick(
       models: qoderModels,
       defaultModel: snapQoder?.defaultModel ?? "Qwen4-Max",
       detectedAt: now,
-      note: snapQoder
+      note: qoderHasSnap
         ? "模型目录来自本地探测快照，后台将自动增量刷新"
         : "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
@@ -897,7 +944,7 @@ export function discoverHarnessesQuick(
       models: opencodeModels,
       defaultModel: snapOpencode?.defaultModel ?? OPENCODE_DEFAULT_MODELS[0] ?? null,
       detectedAt: now,
-      note: snapOpencode
+      note: opencodeHasSnap
         ? "模型目录来自本地探测快照，后台将自动增量刷新"
         : "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
@@ -914,7 +961,7 @@ export function discoverHarnessesQuick(
         agyModels[0]?.id ??
         null,
       detectedAt: now,
-      note: snapAgy
+      note: agyHasSnap
         ? "模型目录来自本地探测快照，后台将自动增量刷新"
         : "模型目录为内置名单，CLI 枚举完成后自动刷新；未验证当前账号可用性",
     },
@@ -934,8 +981,9 @@ export function discoverHarnessesQuick(
 export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<HarnessInfo[]> {
   const homeDir = deps.homeDir ?? os.homedir();
   const which = deps.which ?? defaultWhich;
-  const runCmd = deps.runCmd ?? defaultRunCmd;
+  const runCmd = deps.runCmd ?? ((cmd, args, timeoutMs) => defaultRunCmd(cmd, args, timeoutMs, deps.signal));
   const hubDir = resolveSnapshotHubDir(deps);
+  const prevSnapshot = readHarnessesSnapshot(hubDir);
   const now = Date.now();
 
   const codexBin = which("codex");
@@ -955,6 +1003,13 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
   const capIndex = sqliteCatalog.capabilityIndex;
   enrichCodexIndex(capIndex, codexParsed.models);
 
+  const prevCodex = prevSnapshot.get("codex");
+  const codexModels = codexParsed.fromCache
+    ? mergeModels(codexParsed.models, "detected", capIndex, "openai-codex")
+    : hasDetectedModels(prevCodex)
+      ? prevCodex!.models
+      : mergeModels(codexParsed.models, "builtin", capIndex, "openai-codex");
+
   const qoderIds =
     qoderRes.code === 0
       ? qoderRes.stdout
@@ -963,7 +1018,13 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
           .filter((l) => l.length > 0 && l.toUpperCase() !== "MODEL")
       : QODER_DEFAULT_MODELS;
   const qoderFromCli = qoderRes.code === 0 && qoderIds.length > 0;
-  const qoderModels = qoderSpecsFromIds(qoderFromCli ? qoderIds : QODER_DEFAULT_MODELS);
+  const prevQoder = prevSnapshot.get("qodercn");
+  const qoderKeptSnapshot = !qoderFromCli && hasDetectedModels(prevQoder);
+  const qoderModels = qoderFromCli
+    ? mergeModels(qoderSpecsFromIds(qoderIds), "detected", capIndex, "qoder-cn")
+    : qoderKeptSnapshot
+      ? prevQoder!.models
+      : mergeModels(qoderSpecsFromIds(QODER_DEFAULT_MODELS), "builtin", capIndex, "qoder-cn");
 
   const opencodeCliModels =
     opencodeRes.code === 0
@@ -973,14 +1034,24 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
           .filter((l) => l.includes("/") && !l.startsWith("ERROR"))
       : OPENCODE_DEFAULT_MODELS;
   const opencodeFromCli = opencodeRes.code === 0 && opencodeCliModels.length > 0;
-  const opencodeCombined: Array<string | RawModelSpec> = [
-    ...(opencodeFromCli ? opencodeCliModels : OPENCODE_DEFAULT_MODELS),
-  ];
+  const prevOpencode = prevSnapshot.get("opencode");
+  const opencodeKeptSnapshot = !opencodeFromCli && hasDetectedModels(prevOpencode);
+  const opencodeModels = opencodeFromCli
+    ? mergeModels(opencodeCliModels, "detected", capIndex)
+    : opencodeKeptSnapshot
+      ? prevOpencode!.models
+      : mergeModels(OPENCODE_DEFAULT_MODELS, "builtin", capIndex);
 
   const agyCliParsed = agyRes.code === 0 ? parseAgyCliOutput(agyRes.stdout) : [];
   const agyFromCli = agyCliParsed.length > 0;
+  const prevAgy = prevSnapshot.get("agy");
+  const agyKeptSnapshot = !agyFromCli && hasDetectedModels(prevAgy);
   const agyNormalized = normalizeAgyModels(agyFromCli ? agyCliParsed : AGY_DEFAULT_MODELS);
-  const agySource: DiscoveredModel["source"] = agyFromCli ? "detected" : "builtin";
+  const agyModels = agyFromCli
+    ? mergeModels(agyNormalized, "detected", capIndex, "google-antigravity")
+    : agyKeptSnapshot
+      ? prevAgy!.models
+      : mergeModels(agyNormalized, "builtin", capIndex, "google-antigravity");
 
   const ompDefault = parseOmpDefaultModel(homeDir) ?? "openai-codex/gpt-6.2-sol";
   const ompCombined: RawModelSpec[] = [
@@ -995,8 +1066,11 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "ChatGPT Plus",
       installed: Boolean(codexBin),
       executable: codexBin,
-      models: mergeModels(codexParsed.models, "detected", capIndex, "openai-codex"),
-      defaultModel: codexParsed.defaultModel ?? codexParsed.models[0]?.id ?? null,
+      models: codexModels,
+      defaultModel:
+        codexParsed.defaultModel ??
+        (codexParsed.fromCache ? codexParsed.models[0]?.id : prevCodex?.defaultModel ?? codexParsed.models[0]?.id) ??
+        null,
       detectedAt: now,
     },
     {
@@ -1005,10 +1079,22 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "QoderCN 订阅",
       installed: Boolean(qoderBin),
       executable: qoderBin,
-      models: mergeModels(qoderModels, qoderFromCli ? "detected" : "builtin", capIndex, "qoder-cn"),
-      defaultModel: qoderIds.includes("Qwen4-Max") ? "Qwen4-Max" : (qoderIds[0] ?? null),
+      models: qoderModels,
+      defaultModel: qoderFromCli
+        ? qoderIds.includes("Qwen4-Max")
+          ? "Qwen4-Max"
+          : (qoderIds[0] ?? null)
+        : qoderKeptSnapshot
+          ? (prevQoder!.defaultModel ?? "Qwen4-Max")
+          : "Qwen4-Max",
       detectedAt: now,
-      ...(qoderFromCli ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
+      ...(qoderFromCli
+        ? {}
+        : {
+            note: qoderKeptSnapshot
+              ? "本次 CLI 枚举未成功，已保留上次探测快照"
+              : "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性",
+          }),
     },
     {
       id: "opencode",
@@ -1016,10 +1102,20 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "OpenCode Go / Free",
       installed: Boolean(opencodeBin),
       executable: opencodeBin,
-      models: mergeModels(opencodeCombined, opencodeFromCli ? "detected" : "builtin", capIndex),
-      defaultModel: opencodeCliModels[0] ?? OPENCODE_DEFAULT_MODELS[0] ?? null,
+      models: opencodeModels,
+      defaultModel: opencodeFromCli
+        ? (opencodeCliModels[0] ?? OPENCODE_DEFAULT_MODELS[0] ?? null)
+        : opencodeKeptSnapshot
+          ? (prevOpencode!.defaultModel ?? OPENCODE_DEFAULT_MODELS[0] ?? null)
+          : (OPENCODE_DEFAULT_MODELS[0] ?? null),
       detectedAt: now,
-      ...(opencodeFromCli ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
+      ...(opencodeFromCli
+        ? {}
+        : {
+            note: opencodeKeptSnapshot
+              ? "本次 CLI 枚举未成功，已保留上次探测快照"
+              : "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性",
+          }),
     },
     {
       id: "agy",
@@ -1027,14 +1123,20 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
       subscription: "Google AI Pro / AGY",
       installed: Boolean(agyBin),
       executable: agyBin,
-      models: mergeModels(agyNormalized, agySource, capIndex, "google-antigravity"),
+      models: agyModels,
       defaultModel:
-        agyNormalized.find((m) => m.id === "gemini-4-argon")?.id ??
-        agyNormalized.find((m) => m.id === "gemini-4-argon-medium")?.id ??
-        agyNormalized[0]?.id ??
+        agyModels.find((m) => m.id === "gemini-4-argon")?.id ??
+        agyModels.find((m) => m.id === "gemini-4-argon-medium")?.id ??
+        agyModels[0]?.id ??
         null,
       detectedAt: now,
-      ...(agySource === "detected" ? {} : { note: "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性" }),
+      ...(agyFromCli
+        ? {}
+        : {
+            note: agyKeptSnapshot
+              ? "本次 CLI 枚举未成功，已保留上次探测快照"
+              : "模型目录来自内置名单（CLI 枚举失败），未验证当前账号可用性",
+          }),
     },
     {
       id: "omp",
@@ -1048,7 +1150,9 @@ export async function discoverHarnesses(deps: ProbeDependencies = {}): Promise<H
     },
   ];
 
-  writeHarnessesSnapshot(hubDir, results);
+  if (!deps.signal?.aborted) {
+    writeHarnessesSnapshot(hubDir, results);
+  }
   return results;
 }
 

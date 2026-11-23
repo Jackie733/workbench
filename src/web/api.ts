@@ -96,6 +96,7 @@ export interface GiteeIssueListItem extends GiteeIssueItem {
 export interface ProjectInfoResponse {
   initialized: boolean;
   project: ProjectMetadata | null;
+  routing?: RoutingConfig;
   root: string;
   bridge: BridgeStatus;
   effectiveOutputLanguage?: "zh-CN" | "en";
@@ -112,6 +113,7 @@ export interface HubProjectSummary extends HubProjectEntry {
   activeCount: number;
   decisionCount: number;
   runningCount: number;
+  routing?: RoutingConfig;
 }
 
 export interface HubStateResponse {
@@ -279,12 +281,12 @@ export const api = {
     return requestJson<{ harnesses: HarnessInfo[] }>(`/api/hub/harnesses/refresh${qs}`, { method: "POST" });
   },
   saveRouting: (routing: RoutingConfig) =>
-    requestJson<{ routing: RoutingConfig }>("/api/hub/routing", {
+    requestJson<{ routing: RoutingConfig }>(withProjectParam("/api/hub/routing"), {
       method: "PUT",
       body: JSON.stringify(routing),
     }),
   applyPreset: (preset: RoutingPreset) =>
-    requestJson<{ routing: RoutingConfig }>("/api/hub/routing/preset", {
+    requestJson<{ routing: RoutingConfig }>(withProjectParam("/api/hub/routing/preset"), {
       method: "POST",
       body: JSON.stringify({ preset }),
     }),
@@ -421,6 +423,7 @@ export const api = {
   updateProjectSettings: (input: {
     name?: string;
     outputLanguage?: OutputLanguage | "inherit" | null;
+    routing?: RoutingConfig | null;
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
     verification?: ProjectVerificationConfig | null;

@@ -58,7 +58,13 @@ import { appendRunLedger, type RunLedgerEntry } from "./ledger.ts";
 import { estimateTokens, resolveModelSpec, resolveQuotaPool } from "./pricing.ts";
 import { buildExecutionPrompt } from "./prompt.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
-import { detectModelUnavailableError, detectRateLimitOrQuotaError, resolveRouteCandidates } from "./routing.ts";
+import {
+  buildPresetRouting,
+  detectModelUnavailableError,
+  detectRateLimitOrQuotaError,
+  normalizeRoutingConfig,
+  resolveRouteCandidates,
+} from "./routing.ts";
 import { createHarnessStreamAdapter, isUnsupportedJsonFlagError, stripCliNoise } from "./stream_adapters.ts";
 import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
 import { RunTraceCollector } from "./trace_collector.ts";
@@ -642,15 +648,21 @@ export class HubExecutor {
   private readonly onLedgerEntry?: (entry: RunLedgerEntry) => void;
   private readonly nodeId?: string;
   private readonly hasCustomInitialHarnesses: boolean;
+  private readonly discoverQuickFn: () => HarnessInfo[];
+  private readonly discoverFullFn: (signal?: AbortSignal) => Promise<HarnessInfo[]>;
   private cachedHarnesses: HarnessInfo[] | null = null;
   private cachedHarnessesAt = 0;
+  private lastFullRefreshAt = 0;
   private cachedCatalogFingerprint = "";
   private inFlightRefresh: Promise<HarnessInfo[]> | null = null;
+  private refreshAbortController: AbortController | null = null;
 
   constructor(options: {
     cliEntryPath?: string;
     commandBuilder?: CustomCommandBuilder;
     initialHarnesses?: HarnessInfo[];
+    discoverQuick?: () => HarnessInfo[];
+    discoverFull?: (signal?: AbortSignal) => Promise<HarnessInfo[]>;
     getHubPreferences?: () => {
       routing?: RoutingConfig;
       outputLanguage?: OutputLanguage;
@@ -663,6 +675,8 @@ export class HubExecutor {
   } = {}) {
     this.cliEntryPath = options.cliEntryPath ?? path.resolve(import.meta.dir, "../cli/index.ts");
     this.commandBuilder = options.commandBuilder;
+    this.discoverQuickFn = options.discoverQuick ?? (() => discoverHarnessesQuick());
+    this.discoverFullFn = options.discoverFull ?? ((signal) => discoverHarnesses({ signal }));
     this.getHubPreferences = options.getHubPreferences;
     this.onTelemetryOutcome = options.onTelemetryOutcome;
     this.onPainPoint = options.onPainPoint;
@@ -672,6 +686,7 @@ export class HubExecutor {
     if (options.initialHarnesses) {
       this.cachedHarnesses = options.initialHarnesses;
       this.cachedHarnessesAt = Date.now();
+      this.lastFullRefreshAt = Date.now();
     }
   }
 
@@ -693,17 +708,32 @@ export class HubExecutor {
   private harnessesSignature(list: HarnessInfo[] | null): string {
     if (!list) return "";
     return list
-      .map((h) => `${h.id}:${h.installed}:${h.models.map((m) => `${m.id}@${m.tier}@${m.supportedEfforts?.join(",") ?? ""}`).join("|")}`)
+      .map(
+        (h) =>
+          `${h.id}:${h.installed}:${h.defaultModel ?? ""}:${h.note ?? ""}:${h.models
+            .map(
+              (m) =>
+                `${m.id}@${m.source}@${m.tier}@${m.label ?? ""}@${m.defaultEffort ?? ""}@${m.supportedEfforts?.join(",") ?? ""}`,
+            )
+            .join("|")}`,
+      )
       .join(";");
   }
 
   private runFullHarnessRefresh(): Promise<HarnessInfo[]> {
     if (this.inFlightRefresh) return this.inFlightRefresh;
     const prevSig = this.harnessesSignature(this.cachedHarnesses);
-    this.inFlightRefresh = discoverHarnesses()
+    const ac = new AbortController();
+    this.refreshAbortController = ac;
+    this.inFlightRefresh = this.discoverFullFn(ac.signal)
       .then((full) => {
+        if (ac.signal.aborted) {
+          return this.cachedHarnesses ?? full;
+        }
+        const now = Date.now();
         this.cachedHarnesses = full;
-        this.cachedHarnessesAt = Date.now();
+        this.cachedHarnessesAt = now;
+        this.lastFullRefreshAt = now;
         this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
         if (this.harnessesSignature(full) !== prevSig) {
           this.emit({
@@ -712,12 +742,15 @@ export class HubExecutor {
             root: "",
             requirementId: "",
             runId: "",
-            at: Date.now(),
+            at: now,
           });
         }
         return full;
       })
       .finally(() => {
+        if (this.refreshAbortController === ac) {
+          this.refreshAbortController = null;
+        }
         this.inFlightRefresh = null;
       });
     return this.inFlightRefresh;
@@ -729,22 +762,41 @@ export class HubExecutor {
       return this.runFullHarnessRefresh();
     }
     if (!this.cachedHarnesses) {
-      this.cachedHarnesses = discoverHarnessesQuick();
+      this.cachedHarnesses = this.discoverQuickFn();
       this.cachedHarnessesAt = Date.now();
       this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
-      if (!quickOnly) {
+      if (!quickOnly && !this.hasCustomInitialHarnesses) {
         void this.runFullHarnessRefresh().catch(() => {});
       }
       return this.cachedHarnesses;
     }
     if (!quickOnly && !this.hasCustomInitialHarnesses) {
       const currentFp = getLocalCatalogFingerprint();
-      const expired = Date.now() - this.cachedHarnessesAt > HARNESS_REFRESH_TTL_MS;
+      const expired =
+        this.lastFullRefreshAt === 0 || Date.now() - this.lastFullRefreshAt > HARNESS_REFRESH_TTL_MS;
       if (expired || currentFp !== this.cachedCatalogFingerprint) {
         void this.runFullHarnessRefresh().catch(() => {});
       }
     }
     return this.cachedHarnesses;
+  }
+
+  private resolveEffectiveRouting(projectRoot: string, harnesses?: HarnessInfo[] | null): RoutingConfig {
+    try {
+      const status = getProjectStatus(projectRoot);
+      if (status.initialized && status.project?.routing) {
+        return normalizeRoutingConfig(status.project.routing);
+      }
+    } catch {
+      // Fallback if project metadata is unreadable.
+    }
+    const prefs = this.getHubPreferences?.();
+    if (prefs?.routing) return normalizeRoutingConfig(prefs.routing);
+    try {
+      return normalizeRoutingConfig(readHubConfig().routing);
+    } catch {
+      return buildPresetRouting("balanced", harnesses);
+    }
   }
 
   getActiveRuns(root?: string): Array<AgentRunRecord & { requirementId: string; root?: string }> {
@@ -807,8 +859,9 @@ export class HubExecutor {
     }
 
     const prefs = this.getHubPreferences?.();
-    const cfg = prefs?.routing ? null : readHubConfig();
-    const activeRouting = prefs?.routing ?? cfg!.routing;
+    const harnesses = await this.getHarnesses(false);
+    const activeRouting = this.resolveEffectiveRouting(base, harnesses);
+    const cfg = prefs?.outputLanguage !== undefined || prefs?.observability !== undefined ? null : readHubConfig();
     const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
     let observability = prefs?.observability ?? cfg?.observability;
     if (!observability && prefs?.routing) {
@@ -818,7 +871,6 @@ export class HubExecutor {
         observability = undefined;
       }
     }
-    const harnesses = await this.getHarnesses(false);
     const codeRoot = resolveCodeRoot(base, id);
     let currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
     if (input.action === "fix" && input.resolveConflict && (currentDetail.state.stage === "done" || currentDetail.state.stage === "awaiting_acceptance")) {
@@ -1943,8 +1995,7 @@ export class HubExecutor {
       const healAttempt = input.autoHealAttempt ?? 0;
       if (autoHealPending && healAttempt < MAX_AUTO_HEAL_ATTEMPTS) {
         try {
-          const latestPrefs = this.getHubPreferences?.();
-          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
+          const latestRouting = this.resolveEffectiveRouting(base);
           const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
           if (latestRouting.autoHeal !== false && !alreadyRunning) {
             void this.startRun({
@@ -1976,13 +2027,12 @@ export class HubExecutor {
         postRunDetail.validity.reviewValidity.effectiveState !== "current"
       ) {
         try {
-          const latestPrefs = this.getHubPreferences?.();
-          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
+          const availHarnesses = await this.getHarnesses(false);
+          const latestRouting = this.resolveEffectiveRouting(base, availHarnesses);
           const reviewHistoryCount =
             postRunDetail.state.reviewHistory?.length ?? (postRunDetail.state.reviewReport ? 1 : 0);
           const maxAutoReviewRounds = Math.min(5, Math.max(1, latestRouting.maxAutoReviewRounds ?? 1));
           if (latestRouting.autoReview !== false && reviewHistoryCount < maxAutoReviewRounds) {
-            const availHarnesses = await this.getHarnesses(false);
             const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review").filter((c) =>
               isHarnessRunnable(c.harness, availHarnesses),
             );
@@ -2023,9 +2073,8 @@ export class HubExecutor {
 
       if (shouldAutoFallback) {
         try {
-          const latestPrefs = this.getHubPreferences?.();
-          const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
           const availHarnesses = await this.getHarnesses(false);
+          const latestRouting = this.resolveEffectiveRouting(base, availHarnesses);
           const candidates = resolveRouteCandidates(latestRouting, availHarnesses, input.action);
           const fallbackCandidate = candidates.find(
             (c) =>
@@ -2201,6 +2250,8 @@ export class HubExecutor {
   }
 
   stopAllRuns(): void {
+    this.refreshAbortController?.abort();
+    this.refreshAbortController = null;
     for (const job of this.activeJobs.values()) {
       job.cancelled = true;
       this.killProcessGroup(job);

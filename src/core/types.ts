@@ -84,6 +84,40 @@ export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
 export const GIT_REMOTE_PROVIDERS = ["github", "gitee"] as const;
 export type GitRemoteProvider = (typeof GIT_REMOTE_PROVIDERS)[number];
 
+export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
+export type HarnessId = (typeof HARNESS_IDS)[number];
+
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export const ROUTING_PRESETS = ["balanced", "sota_first", "quota_saver"] as const;
+export type RoutingPreset = (typeof ROUTING_PRESETS)[number];
+
+export const ROUTING_STAGES = ["design", "implement", "fix", "review"] as const;
+export type RoutingStage = (typeof ROUTING_STAGES)[number];
+
+export interface ModelTarget {
+  harness: HarnessId;
+  model: string;
+  reasoningEffort?: ReasoningEffort;
+}
+
+export interface StageRouteRule {
+  primary: ModelTarget;
+  fallbacks: ModelTarget[];
+}
+
+export interface RoutingConfig {
+  activePreset: RoutingPreset;
+  stages: Record<RoutingStage, StageRouteRule>;
+  /** Automatically dispatch cross-model review after agent submits readyForAcceptance (defaults to true). */
+  autoReview?: boolean;
+  /** Maximum automatic review rounds per requirement before yielding directly to human acceptance (defaults to 1). */
+  maxAutoReviewRounds?: number;
+  /** Automatically resume same session to fix failing verification commands after implement/fix exit 0 (defaults to true). */
+  autoHeal?: boolean;
+}
+
 export interface ProjectGitHubConfig {
   repo?: string;
   autoCreateIssue?: boolean;
@@ -113,6 +147,7 @@ export interface ProjectMetadata {
   nextNumber: number;
   privacyMode: PrivacyMode;
   outputLanguage?: OutputLanguage;
+  routing?: RoutingConfig;
   github?: ProjectGitHubConfig;
   gitee?: ProjectGiteeConfig;
   verification?: ProjectVerificationConfig;

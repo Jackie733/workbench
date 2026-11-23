@@ -1,38 +1,33 @@
-import type { AgentRunRecord, OutputLanguage, RunBillingMode } from "../core/types.ts";
+import {
+  HARNESS_IDS,
+  REASONING_EFFORTS,
+  ROUTING_PRESETS,
+  ROUTING_STAGES,
+  type AgentRunRecord,
+  type HarnessId,
+  type ModelTarget,
+  type OutputLanguage,
+  type ReasoningEffort,
+  type RoutingConfig,
+  type RoutingPreset,
+  type RoutingStage,
+  type RunBillingMode,
+  type StageRouteRule,
+} from "../core/types.ts";
 
-export const HARNESS_IDS = ["codex", "qodercn", "opencode", "agy", "omp"] as const;
-export type HarnessId = (typeof HARNESS_IDS)[number];
-
-export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"] as const;
-export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
-
-export const ROUTING_PRESETS = ["balanced", "sota_first", "quota_saver"] as const;
-export type RoutingPreset = (typeof ROUTING_PRESETS)[number];
-
-export const ROUTING_STAGES = ["design", "implement", "fix", "review"] as const;
-export type RoutingStage = (typeof ROUTING_STAGES)[number];
-
-export interface ModelTarget {
-  harness: HarnessId;
-  model: string;
-  reasoningEffort?: ReasoningEffort;
-}
-
-export interface StageRouteRule {
-  primary: ModelTarget;
-  fallbacks: ModelTarget[];
-}
-
-export interface RoutingConfig {
-  activePreset: RoutingPreset;
-  stages: Record<RoutingStage, StageRouteRule>;
-  /** Automatically dispatch cross-model review after agent submits readyForAcceptance (defaults to true). */
-  autoReview?: boolean;
-  /** Maximum automatic review rounds per requirement before yielding directly to human acceptance (defaults to 1). */
-  maxAutoReviewRounds?: number;
-  /** Automatically resume same session to fix failing verification commands after implement/fix exit 0 (defaults to true). */
-  autoHeal?: boolean;
-}
+export {
+  HARNESS_IDS,
+  REASONING_EFFORTS,
+  ROUTING_PRESETS,
+  ROUTING_STAGES,
+  type HarnessId,
+  type ModelTarget,
+  type ReasoningEffort,
+  type RoutingConfig,
+  type RoutingPreset,
+  type RoutingStage,
+  type StageRouteRule,
+};
 
 export interface DiscoveredModel {
   id: string;
@@ -81,6 +76,8 @@ export interface HubProjectEntry {
   pinned?: boolean;
   /** 用户自定义项目分类标签（如 "前端"、"核心"） */
   category?: string;
+  /** 项目级模型路由缓存（主要用于远程/未初始化项目兜底） */
+  routing?: RoutingConfig;
 }
 
 export interface NodeUpdateStatus {

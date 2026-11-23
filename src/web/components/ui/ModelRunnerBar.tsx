@@ -10,7 +10,7 @@ import { ChevronsUpDown, Cpu, Gauge } from "lucide-react";
 import type { AgentAction } from "../../../core/types.ts";
 import type { ReasoningEffort } from "../../../hub/types.ts";
 import { t } from "../../i18n.ts";
-import { useHubStateQuery } from "../../queries.ts";
+import { resolveEffectiveRouting, useHubStateQuery, useProjectQuery } from "../../queries.ts";
 import {
   activeRunnerChoice,
   collectModelOptions,
@@ -32,9 +32,11 @@ export function ModelRunnerBar({
   includeManualCopy?: boolean;
 }) {
   const language = useUiStore((s) => s.language);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
   const { data: hub } = useHubStateQuery();
+  const { data: project } = useProjectQuery(activeProjectId ?? hub?.activeProjectId ?? null);
   const harnesses = hub?.harnesses ?? [];
-  const routing = hub?.routing ?? null;
+  const routing = resolveEffectiveRouting(hub, project);
 
   const override = useDraftStore((s) => s.runnerOverrides[stageAction]);
   const selectedRunnerKey = override?.key ?? "";

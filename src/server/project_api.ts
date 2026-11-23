@@ -108,7 +108,15 @@ import type { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
 import { enrichAgentRunRecord } from "../hub/pricing.ts";
 import { readHubConfig } from "../hub/registry.ts";
-import { REASONING_EFFORTS, type ReasoningEffort } from "../hub/types.ts";
+import { buildPresetRouting, normalizeRoutingConfig } from "../hub/routing.ts";
+import {
+  REASONING_EFFORTS,
+  ROUTING_PRESETS,
+  type HarnessInfo,
+  type ReasoningEffort,
+  type RoutingConfig,
+  type RoutingPreset,
+} from "../hub/types.ts";
 import { buildAgentPrompt, type DispatchAction } from "./prompts.ts";
 
 export interface BridgeStatus {
@@ -133,6 +141,7 @@ export interface LocalProjectSnapshot {
   activeCount: number;
   decisionCount: number;
   runningCount: number;
+  routing?: RoutingConfig;
 }
 
 export function httpStatusForError(code: WorkbenchErrorCode): number {
@@ -230,12 +239,14 @@ export async function buildLocalProjectSnapshot(
     }
   }
   const runningCount = activeRuns.length;
+  const routing = status.initialized && status.project?.routing ? normalizeRoutingConfig(status.project.routing) : undefined;
   return {
     initialized: status.initialized,
     isGitRepo,
     activeCount,
     decisionCount,
     runningCount,
+    ...(routing ? { routing } : {}),
   };
 }
 
@@ -252,6 +263,7 @@ export interface ProjectApiDeps {
   ensureWatcherFor: (projectRoot: string) => void;
   reloadWebBundle: (opts?: { manual?: boolean }) => Promise<{ reloaded: boolean }>;
   getHubOutputLanguage: () => OutputLanguage | undefined;
+  getFallbackRouting?: () => RoutingConfig;
   getGiteeAccessToken?: () => string | null;
   githubDeps?: GitHubCommandDeps;
   giteeDeps?: GiteeApiDeps;
@@ -368,6 +380,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     }
   };
 
+  const resolveProjectRouting = (projectRoot: string, harnesses?: HarnessInfo[] | null): RoutingConfig => {
+    const status = getProjectStatus(projectRoot);
+    if (status.initialized && status.project?.routing) {
+      return normalizeRoutingConfig(status.project.routing);
+    }
+    return deps.getFallbackRouting?.() ?? buildPresetRouting("balanced", harnesses);
+  };
+
   return async function handleProjectApi(req: Request, url: URL, base: string): Promise<Response | null> {
     const pathname = url.pathname;
     const method = req.method.toUpperCase();
@@ -393,8 +413,11 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         projectLanguage: status.project?.outputLanguage,
         hubLanguage: deps.getHubOutputLanguage(),
       });
+      const effectiveRouting = resolveProjectRouting(base);
       return jsonResponse({
         ...status,
+        project: status.project ? { ...status.project, routing: status.project.routing ?? effectiveRouting } : null,
+        routing: effectiveRouting,
         root: base,
         bridge: bridgeStatus,
         effectiveOutputLanguage,
@@ -403,6 +426,36 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         context: discoverProjectContext(base, status.project),
         git: git ? { isGitRepo: true, head: git.head, dirty: git.dirty, fingerprint: git.fingerprint } : { isGitRepo: false },
       });
+    }
+
+    if (method === "GET" && pathname === "/api/project/routing") {
+      const harnesses = await deps.executor.getHarnesses(false);
+      return jsonResponse({ routing: resolveProjectRouting(base, harnesses) });
+    }
+
+    if (method === "PUT" && pathname === "/api/project/routing") {
+      const body = await readBody(req);
+      const routing = normalizeRoutingConfig(body);
+      if (isProjectInitialized(base)) {
+        await updateProjectConfig(base, { routing });
+      }
+      deps.broadcastUi({ type: "workbench.updated", reason: "project.routing", root: base, at: Date.now() });
+      return jsonResponse({ routing });
+    }
+
+    if (method === "POST" && pathname === "/api/project/routing/preset") {
+      const body = await readBody(req);
+      const preset = typeof body.preset === "string" ? body.preset : "";
+      if (!(ROUTING_PRESETS as readonly string[]).includes(preset)) {
+        throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
+      }
+      const harnesses = await deps.executor.getHarnesses(false);
+      const routing = buildPresetRouting(preset as RoutingPreset, harnesses);
+      if (isProjectInitialized(base)) {
+        await updateProjectConfig(base, { routing });
+      }
+      deps.broadcastUi({ type: "workbench.updated", reason: "project.routing.preset", root: base, at: Date.now() });
+      return jsonResponse({ routing });
     }
 
     if (method === "PATCH" && pathname === "/api/project/settings") {
@@ -416,6 +469,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
         }
         outputLanguagePatch = valid;
+      }
+      let routingPatch: RoutingConfig | null | undefined = undefined;
+      if (body.routing === null) {
+        routingPatch = null;
+      } else if (isRecord(body.routing)) {
+        routingPatch = normalizeRoutingConfig(body.routing);
       }
       let githubPatch: ProjectGitHubConfig | null | undefined = undefined;
       if (body.github === null) {
@@ -461,6 +520,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const project = await updateProjectConfig(base, {
         ...(typeof body.name === "string" ? { name: body.name } : {}),
         ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
+        ...(routingPatch !== undefined ? { routing: routingPatch } : {}),
         ...(githubPatch !== undefined ? { github: githubPatch } : {}),
         ...(giteePatch !== undefined ? { gitee: giteePatch } : {}),
         ...(verificationPatch !== undefined ? { verification: verificationPatch } : {}),
@@ -621,10 +681,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(body.outputLanguage)}`);
         }
       }
+      const routing = isRecord(body.routing)
+        ? normalizeRoutingConfig(body.routing)
+        : (deps.getFallbackRouting?.() ?? buildPresetRouting("balanced", await deps.executor.getHarnesses(false)));
       const project = await initProject(base, {
         name: typeof body.name === "string" ? body.name : undefined,
         privacyMode: body.privacyMode === "tracked" ? "tracked" : "local",
         ...(outputLanguage ? { outputLanguage } : {}),
+        routing,
       });
       deps.ensureWatcherFor(base);
       deps.broadcastUi({ type: "workbench.updated", reason: "project.init", root: base, at: Date.now() });

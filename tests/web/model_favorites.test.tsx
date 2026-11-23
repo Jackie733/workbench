@@ -429,3 +429,52 @@ describe("收藏选择菜单静态结构", () => {
     expect(/[\u4e00-\u9fff]/.test(pickerEn)).toBe(false);
   });
 });
+
+describe("工作区模型选择按项目持久化", () => {
+  test("runnerOverrides 按项目 ID 独立保存到 localStorage 并支持切换恢复", async () => {
+    const storeMap = new Map<string, string>();
+    const prevStorage = (globalThis as { localStorage?: unknown }).localStorage;
+    (globalThis as { localStorage: FakeStorage }).localStorage = memoryStorage();
+    Object.assign((globalThis as { localStorage: FakeStorage }).localStorage, {
+      getItem: (k: string) => storeMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        storeMap.set(k, v);
+      },
+      removeItem: (k: string) => {
+        storeMap.delete(k);
+      },
+    });
+    try {
+      const { useDraftStore } = await import("../../src/web/stores/draftStore.ts");
+      const draft = useDraftStore.getState();
+      draft.setProjectScope("proj-a");
+      draft.setSelectedRunnerKey("codex::gpt-6.2-sol", "design");
+      draft.setSelectedEffort("high", "design");
+      expect(useDraftStore.getState().runnerOverrides.design).toEqual({
+        key: "codex::gpt-6.2-sol",
+        effort: "high",
+      });
+
+      useDraftStore.getState().setProjectScope("proj-b");
+      expect(useDraftStore.getState().runnerOverrides).toEqual({});
+      useDraftStore.getState().setSelectedRunnerKey("agy::gemini-4-argon", "implement");
+
+      // Switch back to proj-a and verify proj-a's selection is restored from localStorage
+      useDraftStore.getState().setProjectScope("proj-a");
+      expect(useDraftStore.getState().runnerOverrides.design).toEqual({
+        key: "codex::gpt-6.2-sol",
+        effort: "high",
+      });
+      expect(useDraftStore.getState().runnerOverrides.implement).toBeUndefined();
+
+      useDraftStore.getState().clearRunnerOverrides("design");
+      expect(useDraftStore.getState().runnerOverrides.design).toBeUndefined();
+    } finally {
+      if (prevStorage === undefined) {
+        delete (globalThis as { localStorage?: unknown }).localStorage;
+      } else {
+        (globalThis as { localStorage?: unknown }).localStorage = prevStorage;
+      }
+    }
+  });
+});

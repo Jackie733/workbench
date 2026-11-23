@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { getDaemonStatus, startDaemon, stopDaemon } from "../../src/cli/daemon.ts";
 import { approveDesign, authorizeFastTrack, createRequirement, getRequirement, initProject, propose, startAgentRun, updateDesign } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { classifyTier, discoverHarnesses } from "../../src/hub/discovery.ts";
+import { classifyTier, discoverHarnesses, discoverHarnessesQuick } from "../../src/hub/discovery.ts";
 import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
@@ -1824,5 +1824,237 @@ printf 'done\\n'
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(fs.readFileSync(diskLogPath, "utf8")).toContain("LIVE_CHUNK_TWO");
+  });
+
+  test("isolates model routing configurations per project across API, state, and executor dispatch", async () => {
+    const hubDir = makeTempHub();
+    const repoA = makeGitRepo("routing-alpha");
+    const repoB = makeGitRepo("routing-beta");
+    await initProject(repoA, { name: "Alpha", privacyMode: "local" });
+    await initProject(repoB, { name: "Beta", privacyMode: "local" });
+    await createRequirement(repoA, { goal: "Alpha routing test" });
+    await createRequirement(repoB, { goal: "Beta routing test" });
+
+    const { project: pA } = registerHubProject(repoA);
+    const { project: pB } = registerHubProject(repoB);
+
+    const dispatched: string[] = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        fakeCodexHarness("codex"),
+        qoderHarness(),
+        {
+          id: "agy",
+          label: "AGY",
+          subscription: "Pro",
+          installed: true,
+          executable: "agy",
+          models: [
+            { id: "gemini-4-argon", tier: "sota", source: "detected" },
+            { id: "gemini-3.8-flash", tier: "fast", source: "detected" },
+          ],
+          defaultModel: "gemini-4-argon",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: (target, ctx) => {
+        dispatched.push(`${path.basename(ctx.root)}:${target.harness}/${target.model}`);
+        return {
+          command: process.execPath,
+          args: ["-e", "console.log('ok')"],
+          displayCommand: "mock-routing-check",
+        };
+      },
+    });
+
+    const server = await startWorkbenchServer({
+      root: repoA,
+      port: 0,
+      writeDiscovery: false,
+      hubMode: true,
+      executor,
+    });
+    servers.push(server);
+
+    const routingA = buildPresetRouting("sota_first");
+    routingA.stages.design.primary = { harness: "codex", model: "gpt-6-astra", reasoningEffort: "high" };
+    const routingB = buildPresetRouting("quota_saver");
+    routingB.stages.design.primary = { harness: "qodercn", model: "DeepSeek-V4-Pro" };
+
+    const putA = await fetch(`${server.url}/api/hub/routing?project=${encodeURIComponent(pA.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(routingA),
+    });
+    expect(putA.status).toBe(200);
+
+    const patchB = await fetch(`${server.url}/api/project/settings?project=${encodeURIComponent(pB.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ routing: routingB }),
+    });
+    expect(patchB.status).toBe(200);
+
+    // Project metadata on disk stores independent routing configs
+    const projMetaA = JSON.parse(fs.readFileSync(path.join(repoA, ".workbench/project.json"), "utf8")) as {
+      routing?: { activePreset?: string; stages?: { design?: { primary?: ModelTarget } } };
+    };
+    const projMetaB = JSON.parse(fs.readFileSync(path.join(repoB, ".workbench/project.json"), "utf8")) as {
+      routing?: { activePreset?: string; stages?: { design?: { primary?: ModelTarget } } };
+    };
+    expect(projMetaA.routing?.activePreset).toBe("sota_first");
+    expect(projMetaA.routing?.stages?.design?.primary).toEqual({
+      harness: "codex",
+      model: "gpt-6-astra",
+      reasoningEffort: "high",
+    });
+    expect(projMetaB.routing?.activePreset).toBe("quota_saver");
+    expect(projMetaB.routing?.stages?.design?.primary).toEqual({
+      harness: "qodercn",
+      model: "DeepSeek-V4-Pro",
+    });
+
+    // Activating project A vs B reflects its own routing in /api/hub/state and /api/project
+    await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pA.id)}/activate`, { method: "POST" });
+    const stateA = (await (await fetch(`${server.url}/api/hub/state`)).json()) as {
+      routing: { activePreset: string; stages: { design: { primary: ModelTarget } } };
+    };
+    expect(stateA.routing.activePreset).toBe("sota_first");
+    expect(stateA.routing.stages.design.primary.model).toBe("gpt-6-astra");
+
+    await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pB.id)}/activate`, { method: "POST" });
+    const stateB = (await (await fetch(`${server.url}/api/hub/state`)).json()) as {
+      routing: { activePreset: string; stages: { design: { primary: ModelTarget } } };
+    };
+    expect(stateB.routing.activePreset).toBe("quota_saver");
+    expect(stateB.routing.stages.design.primary.model).toBe("DeepSeek-V4-Pro");
+
+    // Executor dispatches each project's own routing without cross-project contamination
+    const runA = await executor.startRun({ root: repoA, requirementId: "REQ-001", action: "design" });
+    const runB = await executor.startRun({ root: repoB, requirementId: "REQ-001", action: "design" });
+    expect(runA.target.model).toBe("gpt-6-astra");
+    expect(runB.target.model).toBe("DeepSeek-V4-Pro");
+    expect(dispatched).toEqual([
+      `${path.basename(repoA)}:codex/gpt-6-astra`,
+      `${path.basename(repoB)}:qodercn/DeepSeek-V4-Pro`,
+    ]);
+    expect(fs.existsSync(path.join(hubDir, "hub.json"))).toBe(true);
+  });
+
+  test("preserves detected model snapshots across CLI failures, restores across binary path shifts, and skips silent builtin remapping", async () => {
+    const hubDir = makeTempHub();
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "wb-snap-home-"));
+    tempDirs.push(fakeHome);
+
+    // 1. Initial full discovery succeeds and persists detected snapshot
+    const first = await discoverHarnesses({
+      homeDir: fakeHome,
+      hubDir,
+      which: (cmd) => (cmd === "agy" ? "/old/bin/agy" : null),
+      runCmd: async (cmd) => {
+        if (cmd.includes("agy")) {
+          return {
+            code: 0,
+            stdout: "gemini-5-neon-high   Gemini 5 Neon (High)\ngemini-5-neon-low    Gemini 5 Neon (Low)\n",
+          };
+        }
+        return { code: 1, stdout: "" };
+      },
+    });
+    const agyFirst = first.find((h) => h.id === "agy")!;
+    expect(agyFirst.models.some((m) => m.id === "gemini-5-neon" && m.source === "detected")).toBe(true);
+
+    // 2. Quick discovery after binary path shift still restores the detected snapshot
+    const quickShifted = discoverHarnessesQuick({
+      homeDir: fakeHome,
+      hubDir,
+      which: (cmd) => (cmd === "agy" ? "/new/bin/agy" : null),
+    });
+    const agyQuick = quickShifted.find((h) => h.id === "agy")!;
+    expect(agyQuick.models.some((m) => m.id === "gemini-5-neon" && m.source === "detected")).toBe(true);
+
+    // 3. Subsequent full discovery with transient CLI failure preserves detected snapshot instead of downgrading to builtin
+    const afterFailure = await discoverHarnesses({
+      homeDir: fakeHome,
+      hubDir,
+      which: (cmd) => (cmd === "agy" ? "/new/bin/agy" : null),
+      runCmd: async () => ({ code: 1, stdout: "" }),
+    });
+    const agyAfterFail = afterFailure.find((h) => h.id === "agy")!;
+    expect(agyAfterFail.models.some((m) => m.id === "gemini-5-neon" && m.source === "detected")).toBe(true);
+    expect(agyAfterFail.note).toContain("保留上次探测快照");
+
+    // 4. Builtin-only catalog must not silently remap a user's configured model ID
+    const builtinHarnesses: HarnessInfo[] = [
+      {
+        id: "agy",
+        label: "AGY",
+        subscription: "Pro",
+        installed: true,
+        executable: "agy",
+        models: [{ id: "gemini-4-argon", tier: "sota", source: "builtin" }],
+        defaultModel: "gemini-4-argon",
+        detectedAt: Date.now(),
+      },
+    ];
+    const customRouting = buildPresetRouting("balanced");
+    customRouting.stages.design.primary = { harness: "agy", model: "gemini-5-neon", reasoningEffort: "high" };
+    const candidates = resolveRouteCandidates(customRouting, builtinHarnesses, "design");
+    expect(candidates[0]).toEqual({ harness: "agy", model: "gemini-5-neon", reasoningEffort: "high" });
+  });
+
+  test("quickOnly discovery does not poison the 30m full refresh TTL and emits hub.updated when source upgrades to detected", async () => {
+    makeTempHub();
+    let fullCalls = 0;
+    const hBuiltin: HarnessInfo[] = [
+      {
+        id: "agy",
+        label: "AGY",
+        subscription: "Pro",
+        installed: true,
+        executable: "/usr/bin/agy",
+        models: [{ id: "gemini-4-argon", tier: "sota", source: "builtin" }],
+        defaultModel: "gemini-4-argon",
+        detectedAt: 1,
+      },
+    ];
+    const hDetected: HarnessInfo[] = [
+      {
+        id: "agy",
+        label: "AGY",
+        subscription: "Pro",
+        installed: true,
+        executable: "/usr/bin/agy",
+        models: [{ id: "gemini-4-argon", tier: "sota", source: "detected" }],
+        defaultModel: "gemini-4-argon",
+        detectedAt: 2,
+      },
+    ];
+    const executor = new HubExecutor({
+      discoverQuick: () => hBuiltin,
+      discoverFull: async () => {
+        fullCalls += 1;
+        return hDetected;
+      },
+    });
+    const events: Array<{ type: string; reason?: string }> = [];
+    executor.subscribe((ev) => events.push({ type: ev.type, reason: ev.reason }));
+
+    // 1. quickOnly populates initial cache without marking lastFullRefreshAt or running full discovery
+    const quick = await executor.getHarnesses(false, true);
+    expect(quick[0]?.models[0]?.source).toBe("builtin");
+    expect(fullCalls).toBe(0);
+
+    // 2. Subsequent non-quick call triggers background full refresh since lastFullRefreshAt === 0
+    await executor.getHarnesses(false, false);
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      if (fullCalls > 0 && events.some((e) => e.type === "hub.updated" && e.reason === "harnesses.refreshed")) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(fullCalls).toBe(1);
+    expect(events.some((e) => e.type === "hub.updated" && e.reason === "harnesses.refreshed")).toBe(true);
+    const upgraded = await executor.getHarnesses(false, false);
+    expect(upgraded[0]?.models[0]?.source).toBe("detected");
   });
 });

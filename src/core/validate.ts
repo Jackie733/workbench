@@ -4,6 +4,7 @@ import {
   ACCEPTANCE_SNAPSHOT_SCHEMA_VERSION,
   AGENT_ACTIONS,
   GIT_REMOTE_PROVIDERS,
+  HARNESS_IDS,
   MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_ACCEPTANCE_SNAPSHOT_BYTES,
   MAX_AGENT_RUNS,
@@ -22,8 +23,11 @@ import {
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
   OUTPUT_LANGUAGES,
+  REASONING_EFFORTS,
   REVIEW_FINDING_SEVERITIES,
   REVIEW_VERDICTS,
+  ROUTING_PRESETS,
+  ROUTING_STAGES,
   SCHEMA_VERSION,
   STAGES,
   TASK_STATUSES,
@@ -50,11 +54,14 @@ import {
   type EffectiveVerificationState,
   type GitRemoteProvider,
   type HandoffNote,
+  type HarnessId,
+  type ModelTarget,
   type OutputLanguage,
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
   type ProjectVerificationConfig,
+  type ReasoningEffort,
   type RequirementGitHubIssueLink,
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
@@ -64,6 +71,9 @@ import {
   type ReviewFindingSeverity,
   type ReviewReport,
   type ReviewVerdict,
+  type RoutingConfig,
+  type RoutingPreset,
+  type RoutingStage,
   type RunBillingMode,
   type RunCostSource,
   type RunCostSummary,
@@ -76,6 +86,7 @@ import {
   type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
   type Stage,
+  type StageRouteRule,
   type TaskInput,
   type TaskItem,
   type TaskStatus,
@@ -402,6 +413,82 @@ function validateProjectVerificationConfig(raw: unknown): ProjectVerificationCon
   return raw as unknown as ProjectVerificationConfig;
 }
 
+function validateModelTarget(raw: unknown, label: string): ModelTarget {
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 必须是对象`);
+  assertAllowedKeys(raw, ["harness", "model", "reasoningEffort"], label);
+  let rawHarness = typeof raw.harness === "string" ? raw.harness.trim() : "";
+  let rawModel = typeof raw.model === "string" ? raw.model.trim() : "";
+  if (rawHarness === "gemini") {
+    rawHarness = "agy";
+    if (!rawModel || rawModel === "default") rawModel = "gemini-4-argon";
+  }
+  if (!(HARNESS_IDS as readonly string[]).includes(rawHarness)) {
+    throw new WorkbenchError("corrupt_record", `${label}.harness 格式不合法: ${String(raw.harness)}`);
+  }
+  if (!isSafeText(rawModel, 200)) {
+    throw new WorkbenchError("corrupt_record", `${label}.model 格式不合法`);
+  }
+  if (
+    raw.reasoningEffort !== undefined &&
+    (typeof raw.reasoningEffort !== "string" || !(REASONING_EFFORTS as readonly string[]).includes(raw.reasoningEffort))
+  ) {
+    throw new WorkbenchError("corrupt_record", `${label}.reasoningEffort 格式不合法`);
+  }
+  return {
+    harness: rawHarness as HarnessId,
+    model: rawModel,
+    ...(raw.reasoningEffort !== undefined ? { reasoningEffort: raw.reasoningEffort as ReasoningEffort } : {}),
+  };
+}
+
+export function validateProjectRoutingConfig(raw: unknown): RoutingConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json routing 配置必须是对象");
+  assertAllowedKeys(raw, ["activePreset", "stages", "autoReview", "maxAutoReviewRounds", "autoHeal"], "project.routing");
+  if (typeof raw.activePreset !== "string" || !(ROUTING_PRESETS as readonly string[]).includes(raw.activePreset)) {
+    throw new WorkbenchError("corrupt_record", "project.routing.activePreset 格式不合法");
+  }
+  if (!isRecord(raw.stages)) {
+    throw new WorkbenchError("corrupt_record", "project.routing.stages 必须是对象");
+  }
+  assertAllowedKeys(raw.stages, ROUTING_STAGES, "project.routing.stages");
+  const stages = {} as Record<RoutingStage, StageRouteRule>;
+  for (const stage of ROUTING_STAGES) {
+    const rule = raw.stages[stage];
+    if (!isRecord(rule)) {
+      throw new WorkbenchError("corrupt_record", `project.routing.stages.${stage} 必须是对象`);
+    }
+    assertAllowedKeys(rule, ["primary", "fallbacks"], `project.routing.stages.${stage}`);
+    const primary = validateModelTarget(rule.primary, `project.routing.stages.${stage}.primary`);
+    if (!Array.isArray(rule.fallbacks) || rule.fallbacks.length > 6) {
+      throw new WorkbenchError("corrupt_record", `project.routing.stages.${stage}.fallbacks 格式不合法`);
+    }
+    const fallbacks = rule.fallbacks.map((item, idx) =>
+      validateModelTarget(item, `project.routing.stages.${stage}.fallbacks[${idx}]`),
+    );
+    stages[stage] = { primary, fallbacks };
+  }
+  if (raw.autoReview !== undefined && typeof raw.autoReview !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.routing.autoReview 必须是布尔值");
+  }
+  if (
+    raw.maxAutoReviewRounds !== undefined &&
+    (!isSafeInt(raw.maxAutoReviewRounds, 1) || raw.maxAutoReviewRounds > 5)
+  ) {
+    throw new WorkbenchError("corrupt_record", "project.routing.maxAutoReviewRounds 格式不合法");
+  }
+  if (raw.autoHeal !== undefined && typeof raw.autoHeal !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.routing.autoHeal 必须是布尔值");
+  }
+  return {
+    activePreset: raw.activePreset as RoutingPreset,
+    stages,
+    ...(raw.autoReview !== undefined ? { autoReview: raw.autoReview } : {}),
+    ...(raw.maxAutoReviewRounds !== undefined ? { maxAutoReviewRounds: raw.maxAutoReviewRounds } : {}),
+    ...(raw.autoHeal !== undefined ? { autoHeal: raw.autoHeal } : {}),
+  };
+}
+
 export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json 必须是对象");
   if (raw.schemaVersion !== SCHEMA_VERSION) {
@@ -420,10 +507,12 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   ) {
     throw new WorkbenchError("corrupt_record", "project.json 字段不合法");
   }
+  const routing = validateProjectRoutingConfig(raw.routing);
   validateProjectGitHubConfig(raw.github);
   validateProjectGiteeConfig(raw.gitee);
   validateProjectVerificationConfig(raw.verification);
-  return raw as unknown as ProjectMetadata;
+  const meta = raw as unknown as ProjectMetadata;
+  return routing ? { ...meta, routing } : meta;
 }
 
 function validateApproval(raw: unknown): ApprovalRecord | null {

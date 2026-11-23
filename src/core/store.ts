@@ -35,6 +35,7 @@ import {
   type PrivacyMode,
   type ProjectMetadata,
   type RequirementState,
+  type RoutingConfig,
   type RunContextSnapshot,
   type RunTraceEvent,
   type ScreenshotBatch,
@@ -51,6 +52,7 @@ import {
   validateAcceptanceSnapshot,
   validateMarkdownContent,
   validateProjectMetadata,
+  validateProjectRoutingConfig,
   validateRequirementState,
   validateScreenshotBatch,
   validateScreenshotShot,
@@ -102,7 +104,7 @@ function ensureLocalGitExclude(base: string): void {
 
 export async function initProject(
   root: string,
-  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage } = {},
+  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage; routing?: RoutingConfig } = {},
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
   return withProjectWriteLock(base, () => {
@@ -121,6 +123,7 @@ export async function initProject(
     if (options.outputLanguage !== undefined && !outputLanguage) {
       throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(options.outputLanguage)}`);
     }
+    const routing = options.routing !== undefined ? validateProjectRoutingConfig(options.routing) : undefined;
     const now = Date.now();
     const metadata: ProjectMetadata = {
       schemaVersion: SCHEMA_VERSION,
@@ -129,6 +132,7 @@ export async function initProject(
       nextNumber: 1,
       privacyMode,
       ...(outputLanguage ? { outputLanguage } : {}),
+      ...(routing ? { routing } : {}),
       createdAt: now,
       updatedAt: now,
     };

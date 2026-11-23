@@ -4,7 +4,15 @@ import { BarChart3, Check, ChevronDown, ChevronRight, Folder, Plus, Settings, St
 import { api, type HubProjectSummary } from "../api.ts";
 import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
-import { openAddProjectModal, queryClient, queryKeys, switchProject, useHubStateQuery, useProjectQuery } from "../queries.ts";
+import {
+  openAddProjectModal,
+  queryClient,
+  queryKeys,
+  resolveEffectiveRouting,
+  switchProject,
+  useHubStateQuery,
+  useProjectQuery,
+} from "../queries.ts";
 import { groupHubProjects, type ProjectGroupMode, type ProjectSortMode } from "../state.ts";
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
@@ -184,7 +192,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
 
   const harnesses = hub?.harnesses ?? [];
   const installedHarnesses = harnesses.filter((h) => h.installed);
-  const routing = hub?.routing ?? null;
+  const routing = resolveEffectiveRouting(hub, project);
   const desktopPhase = useCollapsePhase(desktopSidebarOpen, 245, 195);
   const desktopCls =
     desktopPhase === "open"
@@ -559,7 +567,13 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   type="button"
                   data-action="open-routing"
                   data-testid="sidebar-routing-btn"
-                  onClick={() => setModal({ kind: "routing", draft: null })}
+                  onClick={() =>
+                    setModal({
+                      kind: "routing",
+                      tab: project?.initialized && !noHubProject ? "project" : "global",
+                      draft: null,
+                    })
+                  }
                 >
                   <Icon icon={Settings} size={14} /> {t(language, "sidebar.configure")}
                 </button>
@@ -568,10 +582,20 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                 className="sb-preset-pill"
                 role="button"
                 tabIndex={0}
-                onClick={() => setModal({ kind: "routing", draft: null })}
+                onClick={() =>
+                  setModal({
+                    kind: "routing",
+                    tab: project?.initialized && !noHubProject ? "project" : "global",
+                    draft: null,
+                  })
+                }
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    setModal({ kind: "routing", draft: null });
+                    setModal({
+                      kind: "routing",
+                      tab: project?.initialized && !noHubProject ? "project" : "global",
+                      draft: null,
+                    });
                   }
                 }}
               >

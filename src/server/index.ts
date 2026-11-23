@@ -11,7 +11,7 @@ import {
   readAttachmentForServe,
   stageUpload,
 } from "../core/attachments.ts";
-import { getProjectStatus, getRequirement, initProject, pruneProjectTraces } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, initProject, pruneProjectTraces, updateProjectConfig } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import type { GiteeApiDeps } from "../core/gitee.ts";
@@ -20,6 +20,7 @@ import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/langua
 import { hubBindUrl } from "../core/net.ts";
 import { readPlaybook } from "../core/playbook.ts";
 import { readSandboxes } from "../core/sandbox.ts";
+import { isProjectInitialized } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
   MAX_ATTACHMENT_TOTAL_BYTES,
@@ -55,7 +56,6 @@ import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
 import { NodeUpdates } from "../hub/node_updates.ts";
 import { enrichAgentRunRecord, QUOTA_POOL_LABELS } from "../hub/pricing.ts";
 import {
-  applyHubRoutingPreset,
   browseDirectory,
   isAutoRegistrableProjectRoot,
   isLocalNodeId,
@@ -72,9 +72,11 @@ import {
   updateHubObservability,
   updateHubPreferences,
   updateHubProjectMeta,
+  updateHubProjectRouting,
   updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
+import { buildPresetRouting, normalizeRoutingConfig } from "../hub/routing.ts";
 import { readSourceRevision } from "../core/revision.ts";
 import { clearModelCooldown, readModelTelemetry, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
@@ -442,6 +444,7 @@ export async function startWorkbenchServer(options: {
             nodeId: LOCAL_NODE_ID,
             nodeOnline: true,
             ...snap,
+            routing: snap.routing ?? entry.routing ?? cfg.routing,
           };
         }
         const nid = entry.nodeId!;
@@ -457,6 +460,7 @@ export async function startWorkbenchServer(options: {
           activeCount: snap?.activeCount ?? 0,
           decisionCount: snap?.decisionCount ?? 0,
           runningCount: snap?.runningCount ?? 0,
+          routing: snap?.routing ?? entry.routing ?? cfg.routing,
         };
       }),
     );
@@ -566,6 +570,7 @@ export async function startWorkbenchServer(options: {
     ensureWatcherFor,
     reloadWebBundle,
     getHubOutputLanguage: () => readHubConfig().outputLanguage,
+    getFallbackRouting: () => readHubConfig().routing,
     getGiteeAccessToken: () => resolveEffectiveGiteeToken(readHubConfig()),
     githubDeps: options.githubDeps,
     giteeDeps: options.giteeDeps,
@@ -640,7 +645,7 @@ export async function startWorkbenchServer(options: {
     if (method === "GET" && pathname === "/api/hub/state") {
       const [{ cfg, projects }, localHarnesses] = await Promise.all([
         buildHubProjectsSnapshot(),
-        executor.getHarnesses(false, !hubMode),
+        executor.getHarnesses(false, false),
       ]);
       const evolutionOpenCount = readPainPoints().filter((p) => p.status === "open").length;
       const telemetry = summarizeTelemetry();
@@ -654,6 +659,19 @@ export async function startWorkbenchServer(options: {
           ? activeNode.harnesses
           : localHarnesses;
       const activeRuns = nodes.flatMap((n) => n.activeRuns);
+      let activeRouting = cfg.routing;
+      if (hubMode) {
+        activeRouting = activeProj?.routing ?? cfg.routing;
+      } else {
+        try {
+          const localStatus = getProjectStatus(defaultRoot);
+          if (localStatus.initialized && localStatus.project?.routing) {
+            activeRouting = normalizeRoutingConfig(localStatus.project.routing);
+          }
+        } catch {
+          // Fallback to cfg.routing
+        }
+      }
 
       const effectiveGiteeToken = resolveEffectiveGiteeToken(cfg);
       return jsonResponse({
@@ -663,7 +681,7 @@ export async function startWorkbenchServer(options: {
         projects: hubMode ? projects : [],
         nodes,
         harnesses: effectiveHarnesses,
-        routing: cfg.routing,
+        routing: activeRouting,
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
         giteeTokenConfigured: Boolean(effectiveGiteeToken),
         giteeTokenMasked: maskAccessToken(effectiveGiteeToken),
@@ -733,7 +751,12 @@ export async function startWorkbenchServer(options: {
         activate: body.activate !== false,
       });
       if (initPrivacy && !getProjectStatus(project.root).initialized) {
-        await initProject(project.root, { name: project.name, privacyMode: initPrivacy });
+        const harnesses = await executor.getHarnesses(false);
+        await initProject(project.root, {
+          name: project.name,
+          privacyMode: initPrivacy,
+          routing: buildPresetRouting("balanced", harnesses),
+        });
       }
       ensureWatcherFor(project.root);
       broadcastUi({ type: "hub.updated", reason: "project.added", projectId: project.id, at: Date.now() });
@@ -813,15 +836,76 @@ export async function startWorkbenchServer(options: {
 
     if (method === "GET" && pathname === "/api/hub/routing") {
       const cfg = readHubConfig();
-      return jsonResponse({ routing: cfg.routing });
+      const target = resolveRequestTarget(req, url, true);
+      if (target && !isLocalNodeId(target.nodeId)) {
+        if (nodeRegistry.isConnected(target.nodeId)) {
+          return nodeRegistry.forwardProjectHttp(
+            target.nodeId,
+            target.root,
+            req,
+            new URL("/api/project/routing", url.origin),
+            cfg.routing,
+            cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
+            resolveEffectiveGiteeToken(cfg),
+            cfg.observability,
+          );
+        }
+        const cachedProj = target.projectId ? cfg.projects.find((p) => p.id === target.projectId) : undefined;
+        return jsonResponse({ routing: cachedProj?.routing ?? cfg.routing });
+      }
+      if (target && isProjectInitialized(target.root)) {
+        const meta = getProjectStatus(target.root).project;
+        if (meta?.routing) return jsonResponse({ routing: normalizeRoutingConfig(meta.routing) });
+      }
+      const cachedProj = target?.projectId ? cfg.projects.find((p) => p.id === target.projectId) : undefined;
+      return jsonResponse({ routing: cachedProj?.routing ?? cfg.routing });
     }
+
+    const persistProjectRouting = async (
+      target: { root: string; nodeId: string; projectId: string | null } | null,
+      routing: RoutingConfig,
+    ): Promise<HubConfig> => {
+      const baseCfg = readHubConfig();
+      const token = resolveEffectiveGiteeToken(baseCfg);
+      const lang = baseCfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+      if (target && !isLocalNodeId(target.nodeId)) {
+        if (target.projectId) updateHubProjectRouting(target.projectId, routing);
+        if (nodeRegistry.isConnected(target.nodeId)) {
+          await nodeRegistry
+            .rpc(
+              target.nodeId,
+              {
+                kind: "project_http",
+                method: "PUT",
+                pathname: "/api/project/routing",
+                search: "",
+                bodyText: JSON.stringify(routing),
+                projectRoot: target.root,
+                routing,
+                outputLanguage: lang,
+                ...(token !== undefined ? { giteeAccessToken: token } : {}),
+                ...(baseCfg.observability !== undefined ? { observability: baseCfg.observability } : {}),
+              },
+              15_000,
+            )
+            .catch(() => null);
+        }
+      } else if (target && isProjectInitialized(target.root)) {
+        await updateProjectConfig(target.root, { routing });
+      } else if (target?.projectId) {
+        updateHubProjectRouting(target.projectId, routing);
+      }
+      return updateHubRouting(routing);
+    };
 
     if (method === "PUT" && pathname === "/api/hub/routing") {
       const body = await readBody(req);
-      const cfg = updateHubRouting(body as unknown as RoutingConfig);
+      const routing = normalizeRoutingConfig(body);
+      const target = resolveRequestTarget(req, url, true);
+      const cfg = await persistProjectRouting(target, routing);
       nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
-      broadcastUi({ type: "hub.updated", reason: "routing.updated", at: Date.now() });
-      return jsonResponse({ routing: cfg.routing });
+      broadcastUi({ type: "hub.updated", reason: "routing.updated", ...(target?.projectId ? { projectId: target.projectId } : {}), at: Date.now() });
+      return jsonResponse({ routing });
     }
 
     if (method === "POST" && pathname === "/api/hub/routing/preset") {
@@ -830,11 +914,22 @@ export async function startWorkbenchServer(options: {
       if (!(ROUTING_PRESETS as readonly string[]).includes(preset)) {
         throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
       }
-      const harnesses = await executor.getHarnesses(false);
-      const cfg = applyHubRoutingPreset(preset as RoutingPreset, harnesses);
+      const target = resolveRequestTarget(req, url, true);
+      const harnesses =
+        target && !isLocalNodeId(target.nodeId)
+          ? (nodeRegistry.getNode(target.nodeId)?.harnesses ?? (await executor.getHarnesses(false)))
+          : await executor.getHarnesses(false);
+      const routing = buildPresetRouting(preset as RoutingPreset, harnesses);
+      const cfg = await persistProjectRouting(target, routing);
       nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
-      broadcastUi({ type: "hub.updated", reason: "routing.preset", preset, at: Date.now() });
-      return jsonResponse({ routing: cfg.routing });
+      broadcastUi({
+        type: "hub.updated",
+        reason: "routing.preset",
+        preset,
+        ...(target?.projectId ? { projectId: target.projectId } : {}),
+        at: Date.now(),
+      });
+      return jsonResponse({ routing });
     }
 
     if (method === "GET" && pathname === "/api/hub/evolution") {

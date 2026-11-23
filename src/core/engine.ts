@@ -100,6 +100,7 @@ import {
   type ReviewFinding,
   type ReviewReport,
   type ReviewVerdict,
+  type RoutingConfig,
   type RunBillingMode,
   type RunContextSnapshot,
   type RunCostSummary,
@@ -130,6 +131,7 @@ import {
   validateGitHubRepoSlug,
   validateMarkdownContent,
   validateProjectMetadata,
+  validateProjectRoutingConfig,
   validateScreenshotBatch,
   validateVerificationRecord,
 } from "./validate.ts";
@@ -273,7 +275,7 @@ export function getProjectStatus(root: string): { initialized: boolean; project:
 
 export async function initProject(
   root: string,
-  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage } = {},
+  options: { name?: string; privacyMode?: PrivacyMode; outputLanguage?: OutputLanguage; routing?: RoutingConfig } = {},
 ): Promise<ProjectMetadata> {
   return storeInitProject(root, options);
 }
@@ -283,6 +285,7 @@ export async function updateProjectConfig(
   patch: {
     name?: string;
     outputLanguage?: OutputLanguage | null;
+    routing?: RoutingConfig | null;
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
     verification?: ProjectVerificationConfig | null;
@@ -313,6 +316,12 @@ export async function updateProjectConfig(
         throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(patch.outputLanguage)}`);
       }
       next.outputLanguage = valid;
+    }
+
+    if (patch.routing === null) {
+      delete next.routing;
+    } else if (patch.routing !== undefined) {
+      next.routing = validateProjectRoutingConfig(patch.routing);
     }
 
     if (patch.github === null) {

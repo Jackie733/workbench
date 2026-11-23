@@ -106,6 +106,10 @@ export function readHubConfig(): HubConfig {
         typeof obj.category === "string"
           ? obj.category.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 32) || undefined
           : undefined;
+      const projRouting =
+        obj.routing && typeof obj.routing === "object" && !Array.isArray(obj.routing)
+          ? normalizeRoutingConfig(obj.routing)
+          : undefined;
       projects.push({
         id: obj.id,
         name: typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : path.basename(obj.root),
@@ -116,6 +120,7 @@ export function readHubConfig(): HubConfig {
         lastOpenedAt: typeof obj.lastOpenedAt === "number" ? obj.lastOpenedAt : Date.now(),
         ...(pinned ? { pinned: true } : {}),
         ...(category ? { category } : {}),
+        ...(projRouting ? { routing: projRouting } : {}),
       });
     }
 
@@ -253,6 +258,16 @@ export function updateHubProjectMeta(
 export function updateHubRouting(routing: RoutingConfig): HubConfig {
   const config = readHubConfig();
   config.routing = normalizeRoutingConfig(routing);
+  return writeHubConfig(config);
+}
+
+export function updateHubProjectRouting(projectId: string, routing: RoutingConfig): HubConfig {
+  const config = readHubConfig();
+  const target = config.projects.find((p) => p.id === projectId);
+  if (!target) {
+    throw new WorkbenchError("not_found", `未找到已注册的项目: ${projectId}`);
+  }
+  target.routing = normalizeRoutingConfig(routing);
   return writeHubConfig(config);
 }
 

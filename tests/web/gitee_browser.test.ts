@@ -185,6 +185,8 @@ describe("Gitee Web UI workflow", () => {
       // 1. Open Settings -> configure Gitee Token.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-global"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
       await page.click('[data-testid="save-routing-btn"]');
@@ -320,6 +322,8 @@ describe("Gitee Web UI workflow", () => {
       // 1. Save an invalid token that triggers mock HTTP 401 Unauthorized, then switch UI to English.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-global"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "bad-gitee-token");
       await page.click('[data-testid="save-routing-btn"]');
@@ -383,6 +387,8 @@ describe("Gitee Web UI workflow", () => {
       // 1. Configure valid token so manual import pane submits to backend validation.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-global"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
       await page.click('[data-testid="save-routing-btn"]');

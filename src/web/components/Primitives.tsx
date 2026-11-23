@@ -178,7 +178,14 @@ export function ModalShell({
           className={`modal ${wide ? "modal-wide" : ""}`}
           data-testid={testId}
           onEscapeKeyDown={onClose}
-          onPointerDownOutside={onClose}
+          onPointerDownOutside={(e) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest("[data-sonner-toaster], [data-sonner-toast]")) {
+              e.preventDefault();
+              return;
+            }
+            onClose();
+          }}
         >
           <Title className="sr-only">{t(language, "app.dialogTitle")}</Title>
           {children}
