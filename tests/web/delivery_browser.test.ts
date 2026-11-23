@@ -32,6 +32,7 @@ interface BrowserPage {
     predicate: (res: { url(): string; status(): number; request(): { method(): string } }) => boolean | Promise<boolean>,
     opts?: { timeout?: number },
   ): Promise<unknown>;
+  waitForNetworkIdle(opts?: { idleTime?: number; concurrency?: number; timeout?: number }): Promise<void>;
   click(sel: string): Promise<void>;
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
@@ -66,6 +67,26 @@ function makeTempHub(): string {
   tempDirs.push(dir);
   process.env.WORKBENCH_HUB_DIR = dir;
   return dir;
+}
+
+async function clickWithDetachedRetry(
+  page: BrowserPage,
+  selector: string,
+  maxAttempts = 3,
+  timeout = 10_000,
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await page.waitForSelector(selector, { timeout });
+      await page.click(selector);
+      return;
+    } catch (err) {
+      if (attempt < maxAttempts && err instanceof Error && err.message.includes("detached")) {
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 beforeAll(async () => {
@@ -551,10 +572,11 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="req-row-REQ-001"]');
       await reqLoaded;
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10_000 });
+      await page.waitForNetworkIdle({ idleTime: 250, timeout: 10_000 });
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(undefined))));
       // Dirty tracked file right before Accept so server observes stale verification against current snapshot.
       fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 99;\n");
-      await page.click('[data-testid="action-accept"]');
+      await clickWithDetachedRetry(page, '[data-testid="action-accept"]');
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll("[data-sonner-toast]")).some(

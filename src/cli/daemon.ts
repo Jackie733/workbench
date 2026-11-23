@@ -93,11 +93,17 @@ export async function startDaemon(options: {
     args.push("--root", options.registerRoot);
   }
 
+  // Strip service-manager markers inherited from a hosted parent (e.g. Hub systemd/launchd service)
+  // so CLI-spawned daemons are not misclassified as externally managed services.
+  const childEnv = { ...process.env };
+  delete childEnv.INVOCATION_ID;
+  delete childEnv.XPC_SERVICE_NAME;
+
   const child = spawn("bun", args, {
     cwd: path.resolve(cliEntry, "../../.."),
     detached: true,
     stdio: ["ignore", outFd, outFd],
-    env: process.env,
+    env: childEnv,
   });
   child.unref();
   fs.closeSync(outFd);

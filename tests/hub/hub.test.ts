@@ -151,21 +151,24 @@ describe("WB-08 multi-project hub registry and daemon", () => {
     const repo = makeGitRepo("daemon");
     const port = 24000 + Math.floor(Math.random() * 10000);
 
-    // This test spawns a plain CLI daemon. When the test process itself runs under a service
-    // manager, inherited markers would falsely mark the child as an externally managed service.
+    // Even when invoked from a systemd/launchd hosted environment, CLI-spawned daemons must not
+    // inherit service-manager markers and misclassify themselves as managedService.
     const savedInvocationId = process.env.INVOCATION_ID;
     const savedXpcServiceName = process.env.XPC_SERVICE_NAME;
-    delete process.env.INVOCATION_ID;
-    delete process.env.XPC_SERVICE_NAME;
+    process.env.INVOCATION_ID = "parent-systemd-unit-123";
+    process.env.XPC_SERVICE_NAME = "com.example.parent-service";
     let started;
     try {
       started = await startDaemon({ port, registerRoot: repo });
     } finally {
-      if (savedInvocationId !== undefined) process.env.INVOCATION_ID = savedInvocationId;
-      if (savedXpcServiceName !== undefined) process.env.XPC_SERVICE_NAME = savedXpcServiceName;
+      if (savedInvocationId === undefined) delete process.env.INVOCATION_ID;
+      else process.env.INVOCATION_ID = savedInvocationId;
+      if (savedXpcServiceName === undefined) delete process.env.XPC_SERVICE_NAME;
+      else process.env.XPC_SERVICE_NAME = savedXpcServiceName;
     }
     expect(started.started).toBe(true);
     expect(started.info.port).toBe(port);
+    expect(started.info.managedService).toBeUndefined();
 
     const status = await getDaemonStatus();
     expect(status.running).toBe(true);
