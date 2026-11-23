@@ -1477,18 +1477,43 @@ export function Modals() {
             )}
 
             {cfg && (
-              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 12 }}>
-                <input
-                  type="checkbox"
-                  data-testid="routing-auto-review-checkbox"
-                  checked={cfg.autoReview !== false}
-                  onChange={(e) => {
-                    const nextCfg = { ...cfg, autoReview: e.target.checked };
-                    setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
-                  }}
-                />
-                <span>{t(language, "routing.autoReviewLabel")}</span>
-              </label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    data-testid="routing-auto-review-checkbox"
+                    checked={cfg.autoReview !== false}
+                    onChange={(e) => {
+                      const nextCfg = { ...cfg, autoReview: e.target.checked };
+                      setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                    }}
+                  />
+                  <span>{t(language, "routing.autoReviewLabel")}</span>
+                </label>
+                {cfg.autoReview !== false && (
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, paddingLeft: 22 }}>
+                    <span className="muted">{t(language, "routing.maxAutoReviewRoundsLabel")}</span>
+                    <select
+                      className="select xs"
+                      data-testid="routing-max-auto-review-rounds"
+                      value={String(cfg.maxAutoReviewRounds ?? 2)}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        const nextCfg = {
+                          ...cfg,
+                          maxAutoReviewRounds: Number.isFinite(val) ? val : 2,
+                        };
+                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, draft: nextCfg } : prev));
+                      }}
+                    >
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                      <option value="5">5</option>
+                    </select>
+                  </label>
+                )}
+              </div>
             )}
 
             <div className="callout info xs" style={{ margin: "12px 0" }}>

@@ -278,11 +278,18 @@ export async function synthesizeHandoffPacket(
   const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
   const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));
   const review = state.reviewReport;
+  const priorReviews = state.reviewHistory?.length
+    ? state.reviewHistory
+    : review
+      ? [review]
+      : [];
+  const isDeltaReview = options.action === "review" && priorReviews.length > 0;
   const includeReviewDetail =
     Boolean(review) &&
     (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement" || options.action === "review");
   const hasSteering =
     Boolean(options.resolveConflict) ||
+    isDeltaReview ||
     includeReviewDetail ||
     pendingNotes.length > 0 ||
     Boolean(state.lastFeedback) ||
@@ -319,6 +326,52 @@ export async function synthesizeHandoffPacket(
       key: "steering",
       priority: 1,
       text: clipTextByBytes(steerLines.join("\n"), 7500),
+    });
+  } else if (isDeltaReview) {
+    const nextRound = priorReviews.length + 1;
+    const prevReview = priorReviews[priorReviews.length - 1]!;
+    const prevFilesSet = new Set(prevReview.changedFiles ?? []);
+    const currentFiles = gitChanges.files.map((f) => f.path);
+    const newlyChanged =
+      prevFilesSet.size > 0 ? currentFiles.filter((p) => !prevFilesSet.has(p)) : [];
+    const findingFiles = Array.from(
+      new Set((prevReview.findings ?? []).flatMap((f) => f.files ?? [])),
+    ).slice(0, 20);
+    const deltaLines: string[] = [
+      `## 1. 复审上下文（第 ${nextRound} 轮 · 增量收敛模式）`,
+      `- **前序审查轮次**：已完成 ${priorReviews.length} 轮；上一轮（${prevReview.reviewerHarness}/${prevReview.reviewerModel} · \`${prevReview.verdict}\`）核心结论：${sanitizeOutput(prevReview.summary, 800).text}`,
+    ];
+    if (prevReview.findings && prevReview.findings.length > 0) {
+      deltaLines.push("- **待核验的上一轮 Finding 清单（请逐条确认是否已关闭）**：");
+      for (const f of prevReview.findings.slice(0, 20)) {
+        const loc = f.files?.length ? ` (${f.files.slice(0, 4).join(", ")})` : "";
+        const sug = f.suggestion ? ` → 建议：${sanitizeOutput(f.suggestion, 300).text}` : "";
+        deltaLines.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${loc}${sug}`);
+      }
+    }
+    if (state.handoffNote?.keyDecisions?.length) {
+      deltaLines.push("- **自上轮后的最新修复决策**：");
+      for (const d of state.handoffNote.keyDecisions.slice(-6)) {
+        deltaLines.push(`  - ${sanitizeOutput(d, 320).text}`);
+      }
+    }
+    if (newlyChanged.length > 0 || findingFiles.length > 0) {
+      deltaLines.push("- **增量核查焦点**：");
+      if (findingFiles.length > 0) {
+        deltaLines.push(`  - 上轮问题关联文件：${findingFiles.map((f) => `\`${f}\``).join("、")}`);
+      }
+      if (newlyChanged.length > 0) {
+        deltaLines.push(`  - 较上轮新增变更文件：${newlyChanged.slice(0, 20).map((f) => `\`${f}\``).join("、")}`);
+      }
+    }
+    if (state.lastFeedback) {
+      deltaLines.push(`- **人类最新反馈**：${sanitizeOutput(state.lastFeedback, 800).text}`);
+    }
+    deltaLines.push("");
+    sections.push({
+      key: "steering",
+      priority: 1,
+      text: clipTextByBytes(deltaLines.join("\n"), 7500),
     });
   } else if (hasSteering) {
     const steerLines: string[] = ["## 1. 跨模型审查待修复项与人类最新反馈（最高优先级）"];
@@ -408,15 +461,29 @@ export async function synthesizeHandoffPacket(
   const passedCriteria = new Set(
     validity.coverage.items.filter((c) => c.state === "passed").map((c) => c.criterion.id),
   );
+  const latestByCommand = new Map<string, (typeof validity.verifications)[number]>();
+  for (const v of validity.verifications) {
+    latestByCommand.set(v.record.command, v);
+  }
+  const isUnresolvedFailure = (v: (typeof validity.verifications)[number]): boolean => {
+    if (v.record.passed) return false;
+    const latestForCmd = latestByCommand.get(v.record.command);
+    if (
+      latestForCmd &&
+      latestForCmd.effectiveState === "passed" &&
+      latestForCmd.record.specHash === v.record.specHash &&
+      latestForCmd.record.codeSnapshotHash === v.record.codeSnapshotHash
+    ) {
+      return false;
+    }
+    if (v.record.criterionIds.length > 0 && v.record.criterionIds.every((cid) => passedCriteria.has(cid))) {
+      return false;
+    }
+    return true;
+  };
   const failedEv =
-    [...validity.verifications].reverse().find((v) => v.effectiveState === "failed") ??
-    [...validity.verifications]
-      .reverse()
-      .find(
-        (v) =>
-          !v.record.passed &&
-          (v.record.criterionIds.length === 0 || v.record.criterionIds.some((cid) => !passedCriteria.has(cid))),
-      );
+    [...validity.verifications].reverse().find((v) => v.effectiveState === "failed" && isUnresolvedFailure(v)) ??
+    [...validity.verifications].reverse().find((v) => isUnresolvedFailure(v));
   if (failedEv || options.previousLogTail?.trim()) {
     const failLines: string[] = ["## 2. 最新失败证据与尾部现场"];
     if (failedEv) {

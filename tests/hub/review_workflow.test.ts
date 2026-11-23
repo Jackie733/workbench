@@ -529,4 +529,163 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(fs.existsSync(mirroredLog)).toBe(true);
     expect(fs.existsSync(mirroredMeta)).toBe(true);
   });
+
+  test("Phase 2: tracks reviewHistory/round, enforces delta re-review convergence, downgrades low-only concern, and caps auto-review rounds", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("review-converge");
+    await initProject(repo, { name: "ReviewConverge", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "验证审查历史与增量收敛机制",
+      criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nConverge.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap1 = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap1.fingerprint,
+    });
+
+    // Round 1 review: full mode
+    const r1 = await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "concern",
+      summary: "首轮发现一处样式收缩规则缺失",
+      markdown: "F-1 details",
+      findings: [{ id: "F-1", severity: "medium", title: "收缩规则缺失", files: ["app.ts:1"] }],
+      reviewedSpecHash: getRequirement(repo, "REQ-001").state.specHash,
+      reviewedCodeSnapshotHash: snap1.fingerprint,
+      changedFiles: ["app.ts"],
+    });
+    expect(r1.state.reviewReport?.round).toBe(1);
+    expect(r1.state.reviewReport?.reviewMode).toBe("full");
+    expect(r1.state.reviewHistory).toHaveLength(1);
+    expect(r1.validity.banner.primaryAction?.id).toBe("dispatch_fix_review");
+
+    // Round 2 handoff & prompt enter delta convergence mode
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
+    fs.writeFileSync(path.join(repo, "other.ts"), "export const other = 2;\n");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap2 = (await observeGitSnapshot(repo))!;
+
+    const reviewHandoff = await synthesizeHandoffPacket(repo, "REQ-001", { action: "review" });
+    expect(reviewHandoff.markdown).toContain("第 2 轮 · 增量收敛模式");
+    expect(reviewHandoff.markdown).toContain("收缩规则缺失");
+    expect(reviewHandoff.markdown).toContain("other.ts");
+    const reviewPrompt = buildExecutionPrompt(reviewHandoff.detail, reviewHandoff.markdown, {
+      root: repo,
+      requirementId: "REQ-001",
+      action: "review",
+    });
+    expect(reviewPrompt).toContain("第 2 轮 · 增量收敛模式");
+
+    // Round 2 non-blocking concern (no high finding) flips banner primaryAction to accept
+    const r2 = await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "concern",
+      summary: "历史问题已修，仅剩非阻塞建议",
+      markdown: "F-2 details",
+      findings: [{ id: "F-2", severity: "medium", title: "极端超长文案可优化" }],
+      reviewedSpecHash: r1.state.specHash,
+      reviewedCodeSnapshotHash: snap2.fingerprint,
+    });
+    expect(r2.state.reviewReport?.round).toBe(2);
+    expect(r2.state.reviewReport?.reviewMode).toBe("delta");
+    expect(r2.state.reviewHistory).toHaveLength(2);
+    expect(r2.validity.banner.primaryAction?.id).toBe("accept");
+
+    // Executor: low-only concern downgrades to pass, and maxAutoReviewRounds: 1 prevents 2nd auto review
+    const routing = buildPresetRouting("balanced");
+    routing.autoReview = true;
+    routing.maxAutoReviewRounds = 1;
+    const ranActions: string[] = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "codex",
+          label: "Codex",
+          subscription: "Plus",
+          installed: true,
+          executable: "codex",
+          models: [
+            { id: "codex-auto-review", tier: "review", source: "detected" },
+            { id: "gpt-6.2-sol", tier: "sota", source: "detected" },
+          ],
+          defaultModel: "gpt-6.2-sol",
+          detectedAt: Date.now(),
+        },
+      ],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: (_target, ctx) => {
+        ranActions.push(ctx.action);
+        if (ctx.action === "review") {
+          return {
+            command: "bash",
+            args: [
+              "-c",
+              `printf '%s\\n' '\`\`\`json' '{"verdict":"concern","summary":"仅剩低优先级注释建议","findings":[{"id":"F-LOW","severity":"low","title":"可补充注释"}]}' '\`\`\`'`,
+            ],
+            displayCommand: "mock-review-low",
+          };
+        }
+        return { command: "bash", args: ["-c", "echo ok"], displayCommand: "mock-fix" };
+      },
+    });
+
+    await createRequirement(repo, {
+      goal: "测试低优先级自动转通过及轮次上限",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-002", { designMarkdown: "# Design\nCap test.", actor: "agent" });
+    await approveDesign(repo, "REQ-002");
+    await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
+    const req2Snap = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-002", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: req2Snap.fingerprint,
+    });
+
+    const waitReview = new Promise<void>((resolve) => {
+      const unsub = executor.subscribe((ev) => {
+        if (ev.type === "agent.run.finished" && ev.action === "review") {
+          unsub();
+          resolve();
+        }
+      });
+    });
+    await executor.startRun({ root: repo, requirementId: "REQ-002", action: "review", isAutoReview: true });
+    await waitReview;
+    await new Promise((r) => setTimeout(r, 80));
+
+    const req2Detail = getRequirement(repo, "REQ-002", { currentCodeSnapshotHash: req2Snap.fingerprint });
+    expect(req2Detail.state.reviewReport?.verdict).toBe("pass");
+    expect(req2Detail.state.reviewReport?.findings?.[0]?.severity).toBe("low");
+
+    // Subsequent fix submit with maxAutoReviewRounds=1 must NOT trigger a 2nd auto review
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 3;\n");
+    await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
+    const req2Snap2 = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-002", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: req2Snap2.fingerprint,
+    });
+    const waitFix = new Promise<void>((resolve) => {
+      const unsub = executor.subscribe((ev) => {
+        if (ev.type === "agent.run.finished" && ev.action === "fix") {
+          unsub();
+          resolve();
+        }
+      });
+    });
+    await executor.startRun({ root: repo, requirementId: "REQ-002", action: "fix" });
+    await waitFix;
+    await new Promise((r) => setTimeout(r, 120));
+    expect(ranActions).toEqual(["review", "fix"]);
+  }, { timeout: 15000 });
 });

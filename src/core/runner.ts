@@ -47,9 +47,12 @@ function executeShellCommand(cwd: string, command: string, timeoutMs: number): P
     const shellArgs = isWin ? ["/d", "/s", "/c", command] : ["-lc", command];
 
     const childEnv: NodeJS.ProcessEnv = { ...process.env };
-    // Never leak a parent agent's WORKBENCH_ROOT/WORKBENCH_REQ_ID into verification test children.
+    // Never leak a parent agent's WORKBENCH_ROOT/WORKBENCH_REQ_ID/RSI depth into verification test children.
     delete childEnv.WORKBENCH_ROOT;
     delete childEnv.WORKBENCH_REQ_ID;
+    delete childEnv.WORKBENCH_RSI_DEPTH;
+    delete childEnv.WORKBENCH_HUB_PID;
+    delete childEnv.WORKBENCH_OUTPUT_LANGUAGE;
 
     const child = spawn(shell, shellArgs, {
       cwd,

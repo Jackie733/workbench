@@ -457,6 +457,13 @@ function SpecDesignTab({
           <div className="card-head">
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <h3>{t(language, "review.title")}</h3>
+              {typeof review.round === "number" && (
+                <span className="badge neutral" data-testid="review-round-badge">
+                  {t(language, review.reviewMode === "full" || review.round === 1 ? "review.roundFull" : "review.roundDelta", {
+                    round: review.round,
+                  })}
+                </span>
+              )}
               <span className={`badge ${VERDICT_META[review.verdict].tone}`}>
                 <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
                 {VERDICT_META[review.verdict].labels[language]}
@@ -512,6 +519,35 @@ function SpecDesignTab({
                       {review.verdict === "block"
                         ? t(language, "core.action.ignoreBlockAccept")
                         : t(language, "core.action.acceptRisk")}
+                    </button>
+                  )}
+                  {findings.length > 0 && (
+                    <button
+                      className="btn xs"
+                      type="button"
+                      data-testid="review-to-pain-point-btn"
+                      disabled={busy}
+                      onClick={() => {
+                        const unchecked = findings.filter((f) => !selectedFindingIds.includes(f.id));
+                        const targets = unchecked.length > 0 ? unchecked : findings;
+                        const detailLines = targets.map(
+                          (f) =>
+                            `- [${f.severity}] ${f.id} ${f.title}${f.files?.length ? ` (${f.files.join(", ")})` : ""}${f.suggestion ? `\n  ${f.suggestion}` : ""}`,
+                        );
+                        void runBusy(async () => {
+                          await api.reportPainPoint({
+                            source: "ui_quick_report",
+                            category: "feature_gap",
+                            title: `[后续跟进 ${s.id}] ${targets[0]!.title}`.slice(0, 140),
+                            detail: `来自需求 ${s.id} 第 ${review.round ?? 1} 轮审查（${review.verdict}）：\n${detailLines.join("\n")}`,
+                            context: { requirementId: s.id },
+                          });
+                          await queryClient.invalidateQueries({ queryKey: queryKeys.evolution });
+                          showToastKey("review.toPainPointDone");
+                        });
+                      }}
+                    >
+                      <Icon icon={Bug} size={14} /> {t(language, "review.toPainPoint")}
                     </button>
                   )}
                 </>
@@ -594,6 +630,45 @@ function SpecDesignTab({
             </summary>
             <MarkdownView markdown={review.markdown} className="md-body xs" />
           </details>
+          {(s.reviewHistory?.length ?? 0) > 1 && (
+            <details data-testid="review-history-details" style={{ marginTop: 8 }}>
+              <summary className="xs muted" style={{ cursor: "pointer" }}>
+                {t(language, "review.historySummary", { count: s.reviewHistory!.length })}
+              </summary>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                {[...s.reviewHistory!].slice(0, -1).reverse().map((item) => (
+                  <div
+                    key={item.id}
+                    className="xs"
+                    style={{
+                      padding: "6px 8px",
+                      borderRadius: 6,
+                      border: "1px solid var(--border)",
+                      background: "var(--surface-2)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <span className={`badge ${VERDICT_META[item.verdict].tone}`}>
+                        {VERDICT_META[item.verdict].labels[language]}
+                      </span>
+                      <strong>
+                        {t(language, item.reviewMode === "full" || item.round === 1 ? "review.roundFull" : "review.roundDelta", {
+                          round: item.round ?? 1,
+                        })}
+                      </strong>
+                      <span className="muted">
+                        {item.reviewerHarness}/{item.reviewerModel}
+                      </span>
+                      {(item.findings?.length ?? 0) > 0 && (
+                        <span className="muted">({item.findings!.length})</span>
+                      )}
+                    </div>
+                    <div className="muted" style={{ marginTop: 2 }}>{item.summary}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 

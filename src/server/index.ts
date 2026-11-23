@@ -165,11 +165,17 @@ async function buildWebBundle(webDir: string): Promise<{ html: string; css: stri
     const compiler = await compile(css, { base: webDir, onDependency() {} });
     css = compiler.build(candidates);
   }
+  const buildCommit = readSourceRevision()?.slice(0, 12) ?? "";
+  const buildTime = new Date().toISOString();
   const build = await Bun.build({
     entrypoints: [entryTs],
     target: "browser",
     format: "esm",
     minify: false,
+    define: {
+      __WORKBENCH_BUILD_COMMIT__: JSON.stringify(buildCommit),
+      __WORKBENCH_BUILD_TIME__: JSON.stringify(buildTime),
+    },
   });
   if (!build.success || build.outputs.length === 0) {
     const msgs = build.logs.map((l) => l.message).join("; ");

@@ -263,6 +263,34 @@ function deriveReadyAcceptanceBanner(
       };
     }
     if (report.verdict === "concern") {
+      const round = report.round ?? state.reviewHistory?.length ?? 1;
+      const hasHigh = (report.findings ?? []).some((f) => f.severity === "high");
+      const distinctReviewedSnapshots = new Set(
+        (state.reviewHistory ?? []).map((r) => r.reviewedCodeSnapshotHash).filter(Boolean),
+      ).size;
+      if (round >= 2 && !hasHigh && distinctReviewedSnapshots >= 2) {
+        return {
+          needsDecision: true,
+          decisionReason: "审查有关注点",
+          decisionReasonKey: "core.decision.reviewConcern",
+          banner: {
+            headline: `第 ${round} 轮复审仅剩非阻塞关注点：${report.summary}`,
+            headlineKey: "core.banner.review.concernConverged",
+            headlineParams: { round, summary: report.summary },
+            tone: "warning",
+            primaryAction: {
+              id: "accept",
+              label: "确认关注点并验收通过",
+              labelKey: "core.action.acceptConcernConverged",
+            },
+            secondaryActions: [
+              { id: "dispatch_fix_review", label: "按审查意见修复", labelKey: "core.action.fixPerReview" },
+              { id: "dispatch_review", label: "重新审查", labelKey: "core.action.dispatchReview" },
+              { id: "request_changes", label: "打回修改…", labelKey: "core.action.requestChanges" },
+            ],
+          },
+        };
+      }
       return {
         needsDecision: true,
         decisionReason: "审查有关注点",

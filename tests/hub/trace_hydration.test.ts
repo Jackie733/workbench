@@ -15,6 +15,7 @@ import { HubExecutor } from "../../src/hub/executor.ts";
 import { readRunLedger } from "../../src/hub/ledger.ts";
 import { resolveModelSpec } from "../../src/hub/pricing.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
+import { createHarnessStreamAdapter } from "../../src/hub/stream_adapters.ts";
 import { RunTraceCollector } from "../../src/hub/trace_collector.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
@@ -362,5 +363,40 @@ echo "PLAIN_RETRY_OK"
     expect(fs.existsSync(path.join(runsDir, `run-${oldId}.context.json`))).toBe(false);
     expect(fs.existsSync(path.join(runsDir, `run-${oldId}.log`))).toBe(false);
     expect(reg.project.id).toBeTruthy();
+  });
+
+  test("preserves back-to-back tool.end durationMs for OpenCode stream adapter", () => {
+    const dir = makeTempHub();
+    const traceFile = path.join(dir, "run-opencode-dur.events.jsonl");
+    const collector = new RunTraceCollector({
+      runId: "RUN-OC-DUR",
+      traceFilePath: traceFile,
+      startedAt: Date.now() - 8000,
+      billingMode: "subscription",
+      quotaPool: "opencode-go",
+      modelSpec: resolveModelSpec("opencode", "opencode-go/deepseek-v4.1-flash"),
+    });
+
+    const adapter = createHarnessStreamAdapter("opencode", "opencode-go/deepseek-v4.1-flash", true);
+    const parsed = adapter.feedLine(
+      JSON.stringify({
+        type: "tool_use",
+        sessionID: "oc-dur",
+        part: {
+          callID: "oc-1",
+          tool: "bash",
+          state: {
+            input: { command: "bun run test" },
+            output: "ok",
+            time: { start: 1000, end: 6200 },
+          },
+        },
+      }),
+    );
+    for (const ev of parsed.events) collector.append(ev);
+
+    const summary = collector.finalizeRun({ status: "succeeded", exitCode: 0, durationMs: 8000 });
+    expect(summary.toolDurationMs).toBeGreaterThanOrEqual(5200);
+    expect(summary.llmDurationMs).toBeLessThanOrEqual(2800);
   });
 });

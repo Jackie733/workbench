@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Component, useEffect, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { Crosshair, X } from "lucide-react";
@@ -32,6 +32,108 @@ import {
 import { useStreamStore } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
 import { applyDocumentLanguage, t } from "./i18n.ts";
+
+declare const __WORKBENCH_BUILD_COMMIT__: string | undefined;
+declare const __WORKBENCH_BUILD_TIME__: string | undefined;
+
+const BUILD_COMMIT =
+  typeof __WORKBENCH_BUILD_COMMIT__ === "string" && __WORKBENCH_BUILD_COMMIT__ ? __WORKBENCH_BUILD_COMMIT__ : undefined;
+const MAX_BREADCRUMBS = 12;
+const uiBreadcrumbs: string[] = [];
+const reportedRuntimeErrors = new Set<string>();
+
+function pushUiBreadcrumb(entry: string): void {
+  const normalized = entry.trim().replace(/\s+/g, " ").slice(0, 180);
+  if (!normalized) return;
+  if (uiBreadcrumbs[uiBreadcrumbs.length - 1] === normalized) return;
+  uiBreadcrumbs.push(normalized);
+  if (uiBreadcrumbs.length > MAX_BREADCRUMBS) {
+    uiBreadcrumbs.splice(0, uiBreadcrumbs.length - MAX_BREADCRUMBS);
+  }
+}
+
+function sendRuntimeErrorPainPoint(
+  title: string,
+  detail: string,
+  extra?: { component?: string; componentStack?: string },
+): void {
+  if (!title || reportedRuntimeErrors.has(title)) return;
+  reportedRuntimeErrors.add(title);
+  const ui = useUiStore.getState();
+  const stack = extra?.componentStack?.trim();
+  const fallbackComponent = stack?.split(/\r?\n/)[1]?.trim().slice(0, 120);
+  void api
+    .reportPainPoint({
+      source: "ui_error",
+      category: "ui_anomaly",
+      title: title.slice(0, 140),
+      detail,
+      context: {
+        requirementId: ui.selectedId ?? undefined,
+        viewport: typeof window !== "undefined" ? `${window.innerWidth}x${window.innerHeight}` : undefined,
+        theme: ui.theme,
+        urlPath: typeof window !== "undefined" ? window.location.pathname : undefined,
+        ...(BUILD_COMMIT ? { buildCommit: BUILD_COMMIT } : {}),
+        ...((extra?.component ?? fallbackComponent) ? { component: extra?.component ?? fallbackComponent } : {}),
+        ...(stack ? { componentStack: stack.slice(0, 2000) } : {}),
+        ...(uiBreadcrumbs.length > 0 ? { breadcrumbs: uiBreadcrumbs.slice(-MAX_BREADCRUMBS) } : {}),
+      },
+    })
+    .catch(() => {});
+}
+
+class RootErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; message: string }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: "" };
+  }
+
+  static getDerivedStateFromError(error: Error): { hasError: boolean; message: string } {
+    return { hasError: true, message: error?.message || "Unexpected UI render error" };
+  }
+
+  override componentDidCatch(error: Error, info: ErrorInfo): void {
+    const lang = useUiStore.getState().language;
+    sendRuntimeErrorPainPoint(
+      t(lang, "runtime.errorTitle", { message: error?.message || t(lang, "runtime.unknownError") }),
+      error?.stack ?? error?.message ?? "React render error",
+      {
+        component: "RootErrorBoundary",
+        componentStack: info.componentStack ?? undefined,
+      },
+    );
+  }
+
+  override render() {
+    if (!this.state.hasError) return this.props.children;
+    const isEn = useUiStore.getState().language === "en";
+    return (
+      <div className="shell" data-testid="root-error-fallback" style={{ paddingTop: 48 }}>
+        <div className="surface-card" style={{ maxWidth: 560, margin: "0 auto", padding: 20 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>
+            {isEn ? "Interface encountered a runtime error" : "工作台界面发生渲染异常"}
+          </h2>
+          <p className="muted" style={{ margin: "0 0 12px", fontSize: 13 }}>
+            {this.state.message}
+          </p>
+          <button
+            type="button"
+            className="btn sm primary"
+            onClick={() => {
+              this.setState({ hasError: false, message: "" });
+              if (typeof window !== "undefined") window.location.reload();
+            }}
+          >
+            {isEn ? "Reload Workbench" : "重新加载工作台"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
 
 function describePickedElement(el: HTMLElement): { selector: string; snippet: string } {
   const testId = el.getAttribute("data-testid");
@@ -239,30 +341,29 @@ function WorkbenchShell() {
   }, [language]);
 
   useEffect(() => {
-    const reportedErrors = new Set<string>();
-    const reportRuntimeError = (title: string, detail: string) => {
-      if (!title || reportedErrors.has(title)) return;
-      reportedErrors.add(title);
-      const ui = useUiStore.getState();
-      void api
-        .reportPainPoint({
-          source: "ui_error",
-          category: "ui_anomaly",
-          title: title.slice(0, 140),
-          detail,
-          context: {
-            requirementId: ui.selectedId ?? undefined,
-            viewport: `${window.innerWidth}x${window.innerHeight}`,
-            theme: ui.theme,
-            urlPath: window.location.pathname,
-          },
-        })
-        .catch(() => {});
+    const onDocClick = (ev: MouseEvent) => {
+      const rawTarget = ev.target;
+      if (!(rawTarget instanceof HTMLElement)) return;
+      const actionable = rawTarget.closest("button, a, [role='button'], [data-testid], [data-action]") as HTMLElement | null;
+      const target = actionable ?? rawTarget;
+      const desc = describePickedElement(target);
+      pushUiBreadcrumb(`click ${desc.selector}${desc.snippet ? ` (${desc.snippet.slice(0, 40)})` : ""}`);
     };
-
+    const unsubscribeUi = useUiStore.subscribe((next, prev) => {
+      if (
+        next.mainView !== prev.mainView ||
+        next.selectedId !== prev.selectedId ||
+        next.workspaceTab !== prev.workspaceTab ||
+        next.modal?.kind !== prev.modal?.kind
+      ) {
+        pushUiBreadcrumb(
+          `ui view=${next.mainView} req=${next.selectedId ?? "-"} tab=${next.workspaceTab} modal=${next.modal?.kind ?? "-"}`,
+        );
+      }
+    });
     const onError = (ev: ErrorEvent) => {
       const lang = useUiStore.getState().language;
-      reportRuntimeError(
+      sendRuntimeErrorPainPoint(
         t(lang, "runtime.errorTitle", { message: ev.message || t(lang, "runtime.unknownError") }),
         ev.error?.stack ?? `${ev.filename}:${ev.lineno}`,
       );
@@ -270,7 +371,7 @@ function WorkbenchShell() {
     const onRejection = (ev: PromiseRejectionEvent) => {
       const lang = useUiStore.getState().language;
       const msg = ev.reason instanceof Error ? ev.reason.message : String(ev.reason ?? t(lang, "runtime.rejection"));
-      reportRuntimeError(
+      sendRuntimeErrorPainPoint(
         t(lang, "runtime.rejectionTitle", { message: msg }),
         ev.reason instanceof Error ? (ev.reason.stack ?? msg) : msg,
       );
@@ -298,10 +399,13 @@ function WorkbenchShell() {
       }
     };
 
+    document.addEventListener("click", onDocClick, true);
     window.addEventListener("error", onError);
     window.addEventListener("unhandledrejection", onRejection);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      document.removeEventListener("click", onDocClick, true);
+      unsubscribeUi();
       window.removeEventListener("error", onError);
       window.removeEventListener("unhandledrejection", onRejection);
       window.removeEventListener("keydown", onKeyDown);
@@ -453,8 +557,10 @@ applyDocumentLanguage(useUiStore.getState().language);
 const rootEl = document.getElementById("app");
 if (rootEl) {
   createRoot(rootEl).render(
-    <QueryClientProvider client={queryClient}>
-      <AuthGate />
-    </QueryClientProvider>,
+    <RootErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </RootErrorBoundary>,
   );
 }

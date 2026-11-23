@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
   MAX_RUN_TRACE_BYTES,
+  type AgentAction,
   type AgentRunRecord,
   type RunBillingMode,
   type RunCostSummary,
@@ -13,6 +14,7 @@ import type { PartialTraceEvent } from "./stream_adapters.ts";
 
 export interface TraceCollectorOptions {
   runId: string;
+  action?: AgentAction;
   traceFilePath: string;
   startedAt: number;
   billingMode: RunBillingMode;
@@ -20,6 +22,7 @@ export interface TraceCollectorOptions {
   modelSpec: ResolvedModelPriceSpec;
   onEvent?: (ev: RunTraceEvent) => void;
   onMetrics?: (metrics: Partial<AgentRunRecord>) => void;
+  onWarning?: (line: string) => void;
 }
 
 const MAX_IN_MEMORY_EVENTS = 4000;
@@ -90,6 +93,10 @@ export class RunTraceCollector {
   private toolBusyStartedAt: number | null = null;
   private accumulatedToolMs = 0;
   private lastMetricsEmitAt = 0;
+  private hasWriteActivity = false;
+  private warnedPureReadDrift = false;
+  private warnedContextBloat = false;
+  private readonly healthWarnings: string[] = [];
 
   constructor(private readonly opts: TraceCollectorOptions) {}
 
@@ -188,6 +195,27 @@ export class RunTraceCollector {
             );
           }
           this.prevTurnContextTokens = input.contextTokens;
+          const bloatThreshold = Math.min(100_000, Math.floor(this.opts.modelSpec.contextWindow * 0.65));
+          if (bloatThreshold > 0 && input.contextTokens >= bloatThreshold && !this.warnedContextBloat) {
+            this.warnedContextBloat = true;
+            this.healthWarnings.push(`context_bloat:单轮上下文达到 ${input.contextTokens} tokens（阈值 ${bloatThreshold}）`);
+            this.opts.onWarning?.(
+              `[workbench] ⚠️ 上下文膨胀告警：单轮上下文已达 ${input.contextTokens} tokens，建议尽快收敛并完成当前任务。\n`,
+            );
+          }
+        }
+        const effectiveTurns = Math.max(this.turnsCount, this.maxTurnIndexSeen);
+        if (
+          (this.opts.action === "implement" || this.opts.action === "fix") &&
+          !this.hasWriteActivity &&
+          effectiveTurns >= 15 &&
+          !this.warnedPureReadDrift
+        ) {
+          this.warnedPureReadDrift = true;
+          this.healthWarnings.push("pure_read_drift:连续15+轮未产生任何代码写操作");
+          this.opts.onWarning?.(
+            `[workbench] ⚠️ 探索漂移告警：已连续 ${effectiveTurns} 轮未产生任何代码修改，请收敛范围直接定位并修改目标文件。\n`,
+          );
         }
         this.sawExplicitCompactionInTurn = false;
         break;
@@ -202,6 +230,12 @@ export class RunTraceCollector {
           this.ttftMs = Math.max(0, now - this.opts.startedAt);
         }
         this.toolCallsCount += 1;
+        if (
+          input.category === "write" ||
+          /^(edit|write|patch|apply_patch|multiedit|notebookedit|wb_propose|wb_update_tasks)/i.test(input.toolName)
+        ) {
+          this.hasWriteActivity = true;
+        }
         if (this.activeTools.size === 0) {
           this.toolBusyStartedAt = now;
         }
@@ -218,7 +252,13 @@ export class RunTraceCollector {
         } else {
           this.activeTools.delete(input.callId);
           if (this.activeTools.size === 0 && this.toolBusyStartedAt !== null) {
-            this.accumulatedToolMs += Math.max(0, now - this.toolBusyStartedAt);
+            const wallDelta = Math.max(0, now - this.toolBusyStartedAt);
+            // Stream adapters like OpenCode emit tool.start and tool.end back-to-back with an authoritative durationMs.
+            const effectiveDelta =
+              typeof input.durationMs === "number" && input.durationMs > 0 && wallDelta < 5
+                ? input.durationMs
+                : wallDelta;
+            this.accumulatedToolMs += effectiveDelta;
             this.toolBusyStartedAt = null;
           }
         }
@@ -301,6 +341,7 @@ export class RunTraceCollector {
       toolDurationMs,
       ...(this.ttftMs !== undefined ? { ttftMs: this.ttftMs } : {}),
       ...(this.traceTruncated ? { traceTruncated: true } : {}),
+      ...(this.healthWarnings.length > 0 ? { healthWarnings: [...this.healthWarnings] } : {}),
     };
   }
 
@@ -324,6 +365,7 @@ export class RunTraceCollector {
     toolDurationMs: number;
     ttftMs?: number;
     traceTruncated: boolean;
+    healthWarnings?: string[];
   } {
     if (this.toolBusyStartedAt !== null) {
       this.accumulatedToolMs += Math.max(0, Date.now() - this.toolBusyStartedAt);
@@ -371,6 +413,7 @@ export class RunTraceCollector {
       toolDurationMs,
       ...(this.ttftMs !== undefined ? { ttftMs: this.ttftMs } : {}),
       traceTruncated: this.traceTruncated,
+      ...(this.healthWarnings.length > 0 ? { healthWarnings: [...this.healthWarnings] } : {}),
     };
   }
 

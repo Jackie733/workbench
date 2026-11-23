@@ -38,7 +38,7 @@ export function buildAgentPrompt(
       feedback,
       "请执行以下步骤：",
       `1. 先调用 wb_get({ id: "${state.id}" }) 读取完整上下文，并结合代码库调研现状。`,
-      `2. 调用 wb_propose({ id: "${state.id}", title, spec, criteria, design, summary }) 提交清晰的规范正文、分层验收条件（快速检查 + 针对性局部测试命令，仅在修改核心逻辑时附加单条全量门禁，纯文档勿捆绑全量）和技术方案 Markdown。`,
+      `2. 调用 wb_propose({ id: "${state.id}", title, spec, criteria, design, summary }) 提交清晰的规范正文（需显式写明 \`In-Scope\` 改动边界与 \`Out-of-Scope\` 不扩散边界）、分层验收条件（快速检查 + 针对性局部测试命令，仅在修改核心逻辑时附加单条全量门禁，纯文档勿捆绑全量）和技术方案 Markdown。若是 Bug/报错修复需求，设计阶段必须先在源码中精准定位抛出错误的文件、组件/函数名与行号区间并写入 design.md，严禁把定位源头推迟到实施阶段。`,
       "3. 提交后状态将变为待批准，等待我在工作台审阅拍板。",
     ]
       .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))

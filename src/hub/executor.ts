@@ -17,7 +17,7 @@ import {
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
-import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
+import { extractMergeConflictContext, observeGitChanges, observeGitSnapshot } from "../core/git.ts";
 import {
   buildOutputLanguageDirective,
   buildResumeLanguageReminder,
@@ -205,6 +205,34 @@ function ensureWbShim(cliEntryPath: string): string {
 
 const QODER_PRINT_MODE_GUARD =
   "Non-interactive -p print mode: NEVER run Bash/shell commands in the background (never set run_in_background=true, never trail commands with &), and NEVER end your turn waiting for a background notification (ending the turn immediately exits the CLI and kills running child processes). Execute checks synchronously and output the complete final response in this turn.";
+
+const NON_FATAL_FORM_CANCEL_RE = /Cancelled a request for input this run cannot answer:/i;
+
+/** Builds OPENCODE_CONFIG_CONTENT disabling interactive-form tools (such as websearch) in headless runs. */
+export function buildOpencodeNonInteractiveConfig(existingRaw?: string): string {
+  let baseObj: Record<string, unknown> = {};
+  if (existingRaw?.trim()) {
+    try {
+      const parsed = JSON.parse(existingRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        baseObj = { ...(parsed as Record<string, unknown>) };
+      }
+    } catch {
+      // Ignore malformed inherited JSON and enforce non-interactive tool policy cleanly.
+    }
+  }
+  const existingTools =
+    baseObj.tools && typeof baseObj.tools === "object" && !Array.isArray(baseObj.tools)
+      ? (baseObj.tools as Record<string, unknown>)
+      : {};
+  return JSON.stringify({
+    ...baseObj,
+    tools: {
+      ...existingTools,
+      websearch: false,
+    },
+  });
+}
 
 export function buildHarnessCommand(
   target: ModelTarget,
@@ -499,15 +527,23 @@ export function buildExecutionPrompt(
   }
 
   if (input.action === "review") {
+    const completedReviews =
+      detail.state.reviewHistory?.length ?? (detail.state.reviewReport ? 1 : 0);
+    const reviewRound = completedReviews + 1;
+    const roundDirective =
+      reviewRound <= 1
+        ? "- 初审全面性要求（第 1 轮）：请一次性全面检查所有改动文件、CSS 级联、关键边界与 AC 覆盖，在首轮列全所有真实缺陷，禁止只报前 1-2 个问题留待后续轮次再挖。"
+        : `- 增量收敛复审约束（第 ${reviewRound} 轮 · 增量收敛模式）：本次仅核验 ① 上一轮提出的 Finding 是否已真正关闭、② 本次修复改动是否引入新的 high/medium 回归。严禁在上一轮已审且未新增缺陷的老代码上继续构造更极端的假设边界来阻断验收；若历史问题已解决且无新回归，必须给出 \`pass\`（任何锦上添花建议只能作为 low 提示，不得阻断）。`;
     return [
       `请你作为独立的代码与交付审查者（Cross-Model Reviewer），审查工作台需求 ${reqId}（${detail.state.title}）。`,
       "重要约束：",
       "- 严禁修改仓库业务代码或调用 wb propose / wb tasks；只读检查 Git Diff、测试证据与 Spec 一致性。",
-      "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
+      "- 非交互同步约束：禁止在后台运行命令（如 run_in_background 或 &）或以“等待后台任务通知”结束本轮，禁止调用需要人工确认的交互式表单或联网搜索工具（如 websearch）；请同步执行命令并在本轮直接输出完整结论与 JSON 块。",
       "- 优先复用匹配证据：先核验 `.workbench/items/" +
         reqId +
         `/evidence/\` 是否已有通过且 codeSnapshotHash 与当前工作区一致的验证日志；若已有匹配通过证据，直接核验日志并仅运行${fastVerifyHint}，禁止重跑耗时的全量多分钟测试套（仅在证据缺失、过期或存在疑点时再重跑全量）。`,
-      "- 结论判定聚焦代码与 AC：只有实际代码缺陷、安全风险或必需 AC 未满足时才给出 `block` 或 `concern`；若代码与证据均已达标、仅存在待人工确认或非必需流程提醒，请给 `pass` 并在正文说明，切勿要求超出当前 AC 范围的额外宿主证明。",
+      "- 严格区分严重度与结论门槛：`high`（确定性功能故障、数据丢失、安全风险或必需 AC 未满足）给 `block`；`medium`（明确违反 Spec/Design 约定范围内的真实缺陷）给 `concern`；`low` 或超出 Spec 约定的极端理论边界/优化建议不得拉低 verdict，必须给 `pass`（仅可放入 `findings` 供参考）。若代码与证据均已达标，请给 `pass`，切勿要求超出当前 AC 范围的额外宿主证明。",
+      roundDirective,
       "- 注：若当前处于只读沙箱且需要可写目录的端到端/浏览器用例因只读限制无法启动，请直接核验 `.workbench/items/" +
         reqId +
         "/evidence/` 既有真实运行日志并执行静态检查与非浏览器单元测试，勿将沙箱只读限制误判为代码缺失。",
@@ -528,7 +564,7 @@ export function buildExecutionPrompt(
   const isFastTrack = detail.state.track === "fast_track";
   const modeVerb =
     input.action === "design"
-      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（验收条件按分层设计：${options.fastCommand ? `AC-1 用 \`${options.fastCommand}\`、` : ""}AC-2 优先绑定针对改动模块的局部测试命令；仅在改动业务/测试代码时才增加一条 \`${options.fullCommand ?? "全量测试"}\` 作为最终门禁，纯文档/配置调整勿捆绑全量测试；若预计改动局限在少数文件且风险可控，可建议采用轻量快速方案），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
+      ? `请仅执行 ${reqId} 的设计阶段：梳理或修订规范、结构化验收条件与技术方案（规范中需明确列出 \`In-Scope\` 改动边界与 \`Out-of-Scope\` 不扩散边界；若是 Bug/报错修复需求，必须在设计阶段即通过只读源码检索定位到确切的抛出文件、函数/组件名与行号区间并写入 design.md，严禁把查找报错源头推迟给实施阶段；验收条件按分层设计：${options.fastCommand ? `AC-1 用 \`${options.fastCommand}\`、` : ""}AC-2 优先绑定针对改动模块的局部测试命令；仅在改动业务/测试代码时才增加一条 \`${options.fullCommand ?? "全量测试"}\` 作为最终门禁，纯文档/配置调整勿捆绑全量测试；若预计改动局限在少数文件且风险可控，可建议采用轻量快速方案），并通过 \`wb propose ${reqId} ...\`（或 MCP 工具 wb_propose）提交，同时在 --note 或 handoffNote 中总结关键决策。设计阶段禁止修改业务代码或测试，禁止运行 \`wb verify\`、\`wb tasks --ready\` 或把实施任务标记为完成；提交方案后立即结束本轮，等待人类在工作台审阅批准。`
       : input.action === "fix" && input.resolveConflict
         ? `本次任务仅聚焦将主干最新提交合并到当前沙箱分支并解决合并冲突（切勿重复返工已通过的既有实现或过期审查意见）：1) 若存在未提交业务改动请先安全暂存或提交（严禁提交 node_modules 或 .workbench）；2) 合并目标主干提交并完整保留本需求功能与主干新增改动；3) 运行 \`wb verify ${reqId} --all\` 验证全部通过后执行 \`wb tasks ${reqId} --ready\`。`
         : input.action === "fix"
@@ -551,6 +587,7 @@ export function buildExecutionPrompt(
           "执行规范（减少无效耗时）：",
           "- 开发调试期仅运行类型检查与针对当前改动模块的局部测试文件，禁止自行直接运行全量测试；全量验证统一通过 `wb verify <REQ-ID> --all` 触发（同快照已通过的条目会自动复用）。",
           "- 严禁越界修改无关文件或试图修补与本需求无关的既有/偶发失败测试；遇无关失败先重试一次确认，并将情况记录到 `wb tasks <REQ-ID> --handoff-note` 即可。",
+          "- 严禁调用需要人工确认的交互式表单或联网搜索工具（如 `websearch`），非交互环境下此类工具无法响应并会导致运行报错。",
           "- 更新交接/交付说明请使用 `wb tasks <REQ-ID> --handoff-note '{...}'`（或 MCP `wb_update_tasks`），禁止在实施或修复阶段为了写说明而调用 `wb propose`。",
         ].join("\n");
 
@@ -664,7 +701,30 @@ function parseReviewOutput(
 }
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
+const MAX_RESUME_CONTEXT_TOKENS = 100_000;
+const MAX_CONSECUTIVE_NATIVE_RESUMES = 2;
 const globalActiveRunIds = new Set<string>();
+
+function countConsecutiveNativeResumes(runs: AgentRunRecord[]): number {
+  let count = 0;
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const r = runs[i]!;
+    if (r.action === "review" || r.action === "ask") continue;
+    if (r.action === "fix" && r.handoffMode === "native_resume") {
+      count += 1;
+      continue;
+    }
+    break;
+  }
+  return count;
+}
+
+function isHealthyForNativeResume(runs: AgentRunRecord[], candidate: AgentRunRecord | null | undefined): boolean {
+  if (!candidate) return false;
+  if ((candidate.peakContextTokens ?? 0) >= MAX_RESUME_CONTEXT_TOKENS) return false;
+  if (countConsecutiveNativeResumes(runs) >= MAX_CONSECUTIVE_NATIVE_RESUMES) return false;
+  return true;
+}
 
 export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
 
@@ -896,7 +956,7 @@ export class HubExecutor {
           : null;
 
     // Session affinity: when action is "fix" with no explicit override or fallback request,
-    // prefer the most recent healthy implement/fix runner instead of cold-starting a third harness.
+    // prefer the most recent healthy implement/fix runner when its context is still compact.
     if (!input.harness && !input.model && !input.useFallback && input.action === "fix") {
       const lastImplRun = [...runsList]
         .reverse()
@@ -904,7 +964,12 @@ export class HubExecutor {
       const isRunnable =
         lastImplRun &&
         (harnesses.some((h) => h.id === lastImplRun.harness && h.installed) || Boolean(this.commandBuilder));
-      if (lastImplRun && isRunnable && !isModelCoolingDown(lastImplRun.harness, lastImplRun.model)) {
+      if (
+        lastImplRun &&
+        isRunnable &&
+        !isModelCoolingDown(lastImplRun.harness, lastImplRun.model) &&
+        isHealthyForNativeResume(runsList, lastImplRun)
+      ) {
         sessionAffinityApplied = true;
         override = {
           harness: lastImplRun.harness as HarnessId,
@@ -1021,6 +1086,7 @@ export class HubExecutor {
       Boolean(prevWriteRun.nativeSessionId) &&
       prevWriteRun.status !== "cancelled" &&
       !prevWriteRun.rateLimited &&
+      isHealthyForNativeResume(runsList, prevWriteRun) &&
       input.action !== "review";
 
     const handoffMode: RunHandoffMode = canResumeSameHarness
@@ -1158,13 +1224,16 @@ export class HubExecutor {
     }
 
     const traceDiskPath = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/${traceRelPath}`);
+    let emitWarningChunk: ((line: string) => void) | null = null;
     const collector = new RunTraceCollector({
       runId,
+      action: input.action,
       traceFilePath: traceDiskPath,
       startedAt,
       billingMode: poolInfo.billingMode,
       quotaPool: poolInfo.quotaPool,
       modelSpec,
+      onWarning: (line) => emitWarningChunk?.(line),
       onEvent: (ev) => {
         this.emit({
           type: "agent.run.event",
@@ -1245,6 +1314,9 @@ export class HubExecutor {
       WORKBENCH_HUB_PID: String(process.pid),
       WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
       ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
+      ...(target.harness === "opencode"
+        ? { OPENCODE_CONFIG_CONTENT: buildOpencodeNonInteractiveConfig(process.env.OPENCODE_CONFIG_CONTENT) }
+        : {}),
     };
 
     const liveLogPath = path.join(base, WORKBENCH_DIR, "items", id, "runs", `run-${runId}.log`);
@@ -1371,6 +1443,7 @@ export class HubExecutor {
         at: Date.now(),
       });
     };
+    emitWarningChunk = emitCleanChunk;
 
     const streamAdapter = createHarnessStreamAdapter(
       target.harness,
@@ -1458,7 +1531,7 @@ export class HubExecutor {
       const endedAt = Date.now();
       const durationMs = Math.max(0, endedAt - startedAt);
       const assembledLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
-      const rawLog =
+      let rawLog =
         Buffer.byteLength(assembledLog, "utf8") > MAX_RUN_LOG_BYTES
           ? clipHeadTailUtf8(assembledLog, 1_500_000, 2_500_000).text
           : assembledLog;
@@ -1479,17 +1552,57 @@ export class HubExecutor {
         this.plainTextFallbackHarnesses.add(target.harness);
       }
 
+      let snap: Awaited<ReturnType<typeof observeGitSnapshot>> = null;
+      let latestReq: RequirementDetail | null = null;
+      try {
+        if (codeRoot !== base) {
+          await reconcileRsiSandboxBaseline(base, id).catch(() => null);
+        }
+        snap = await observeGitSnapshot(codeRoot);
+        latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+      } catch {
+        // Ignore git/requirement read errors during finalize pre-observation; handled below.
+      }
+
       let status: AgentRunRecord["status"] = job.cancelled
         ? "cancelled"
         : exitCode === 0 && !spawnErr && !job.timedOut
           ? "succeeded"
           : "failed";
+      if (
+        status === "failed" &&
+        (input.action === "implement" || input.action === "fix") &&
+        !job.cancelled &&
+        !job.timedOut &&
+        !spawnErr &&
+        !rateLimited &&
+        !modelUnavailable &&
+        NON_FATAL_FORM_CANCEL_RE.test(rawLog.slice(-4096)) &&
+        latestReq &&
+        latestReq.state.stage === "awaiting_acceptance" &&
+        latestReq.validity.acceptanceGate.ok &&
+        latestReq.state.updatedAt >= startedAt
+      ) {
+        status = "succeeded";
+        const note = "[workbench] 检测到 CLI 非致命交互表单取消退出码，但本轮已完成全部验证并提交验收，按成功终态收尾。\n";
+        rawLog = `${rawLog}${rawLog.endsWith("\n") || !rawLog ? "" : "\n"}${note}`;
+        this.runLogs.set(runId, rawLog);
+      }
       const replySource =
         cleanReplyParts.join("\n\n").trim() ||
         stdoutReplyTail.trim() ||
         stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
       const parsedReview =
         status === "succeeded" && input.action === "review" ? parseReviewOutput(replySource) : null;
+      if (
+        parsedReview &&
+        parsedReview.verdict === "concern" &&
+        Array.isArray(parsedReview.findings) &&
+        parsedReview.findings.length > 0 &&
+        parsedReview.findings.every((f) => f.severity === "low")
+      ) {
+        parsedReview.verdict = "pass";
+      }
       const reviewParseFailed = status === "succeeded" && input.action === "review" && parsedReview === null;
       if (reviewParseFailed) status = "failed";
 
@@ -1533,18 +1646,6 @@ export class HubExecutor {
                     ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
                     : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
-
-      let snap: Awaited<ReturnType<typeof observeGitSnapshot>> = null;
-      let latestReq: RequirementDetail | null = null;
-      try {
-        if (codeRoot !== base) {
-          await reconcileRsiSandboxBaseline(base, id).catch(() => null);
-        }
-        snap = await observeGitSnapshot(codeRoot);
-        latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-      } catch {
-        // Ignore git/requirement read errors during finalize pre-observation; handled below.
-      }
       const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
       const codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
 
@@ -1606,6 +1707,20 @@ export class HubExecutor {
             });
           }
         } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview && latestReq) {
+          const priorCount =
+            latestReq.state.reviewHistory?.length ?? (latestReq.state.reviewReport ? 1 : 0);
+          let changedFiles: string[] | undefined;
+          try {
+            const obs = await observeGitChanges(codeRoot, {
+              sinceHead: latestReq.state.baseline?.head ?? null,
+              maxDiffBytes: 1024,
+            });
+            if (obs.files.length > 0) {
+              changedFiles = obs.files.map((f) => f.path).slice(0, 64);
+            }
+          } catch {
+            changedFiles = undefined;
+          }
           await recordReviewReport(base, id, {
             reviewerHarness: target.harness,
             reviewerModel: target.model,
@@ -1615,6 +1730,8 @@ export class HubExecutor {
             ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
             reviewedSpecHash: latestReq.state.specHash,
             reviewedCodeSnapshotHash: snap.fingerprint,
+            reviewMode: priorCount > 0 ? "delta" : "full",
+            ...(changedFiles ? { changedFiles } : {}),
           });
         } else if (status === "succeeded" && (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0))) {
           if (input.anchorIds && input.anchorIds.length > 0) {
@@ -1654,6 +1771,7 @@ export class HubExecutor {
             tracePath: traceRelPath,
             contextPath: contextRelPath,
             ...(traceSummary.traceTruncated ? { traceTruncated: true } : {}),
+            ...(traceSummary.healthWarnings?.length ? { healthWarnings: traceSummary.healthWarnings } : {}),
           },
           rawLog,
           snap?.fingerprint ?? null,
@@ -1811,7 +1929,12 @@ export class HubExecutor {
         try {
           const latestPrefs = this.getHubPreferences?.();
           const latestRouting = latestPrefs?.routing ?? readHubConfig().routing;
-          if (latestRouting.autoReview !== false) {
+          const reviewHistoryCount =
+            postRunDetail.state.reviewHistory?.length ?? (postRunDetail.state.reviewReport ? 1 : 0);
+          const maxAutoReviewRounds = Math.min(5, Math.max(1, latestRouting.maxAutoReviewRounds ?? 2));
+          const prevVerdict = postRunDetail.state.reviewReport?.verdict;
+          const effectiveAutoCap = prevVerdict === "block" ? maxAutoReviewRounds + 1 : maxAutoReviewRounds;
+          if (latestRouting.autoReview !== false && reviewHistoryCount < effectiveAutoCap) {
             const availHarnesses = await this.getHarnesses(false);
             const reviewTarget = resolveRouteCandidates(latestRouting, availHarnesses, "review")[0];
             const canAutoRun = Boolean(reviewTarget) && isHarnessRunnable(reviewTarget!.harness, availHarnesses);

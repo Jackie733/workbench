@@ -93,6 +93,9 @@ export interface PainPointContext {
   viewport?: string;
   theme?: string;
   urlPath?: string;
+  buildCommit?: string;
+  componentStack?: string;
+  breadcrumbs?: string[];
 }
 
 export interface PainPointReportInput {
@@ -161,6 +164,14 @@ function sanitizeContext(ctx?: PainPointContext): PainPointContext {
   const viewport = cleanStr(ctx.viewport, 64);
   const theme = cleanStr(ctx.theme, 32);
   const urlPath = cleanStr(ctx.urlPath, 240);
+  const buildCommit = cleanStr(ctx.buildCommit, 64);
+  const componentStack = cleanStr(ctx.componentStack, 2000);
+  const breadcrumbs = Array.isArray(ctx.breadcrumbs)
+    ? ctx.breadcrumbs
+        .map((item) => cleanStr(item, 200))
+        .filter((item): item is string => Boolean(item))
+        .slice(-20)
+    : undefined;
   if (nodeId) out.nodeId = nodeId;
   if (projectRoot) out.projectRoot = projectRoot;
   if (requirementId) out.requirementId = requirementId;
@@ -170,6 +181,9 @@ function sanitizeContext(ctx?: PainPointContext): PainPointContext {
   if (viewport) out.viewport = viewport;
   if (theme) out.theme = theme;
   if (urlPath) out.urlPath = urlPath;
+  if (buildCommit) out.buildCommit = buildCommit;
+  if (componentStack) out.componentStack = componentStack;
+  if (breadcrumbs && breadcrumbs.length > 0) out.breadcrumbs = breadcrumbs;
   return out;
 }
 
@@ -1638,8 +1652,11 @@ export async function promotePainPoint(
     pain.context.nodeId ? `- 来源节点：\`${pain.context.nodeId}\`` : "",
     pain.context.projectRoot ? `- 触发项目：\`${pain.context.projectRoot}\`` : "",
     pain.context.requirementId ? `- 关联需求：\`${pain.context.requirementId}\`` : "",
+    pain.context.buildCommit ? `- 前端构建提交：\`${pain.context.buildCommit}\`` : "",
+    pain.context.component ? `- 触发组件：\`${pain.context.component}\`` : "",
     pain.context.domSelector ? `- 页面元素锚点：\`${pain.context.domSelector}\`` : "",
     pain.context.viewport ? `- 视口与主题：\`${pain.context.viewport}\` (${pain.context.theme ?? "default"})` : "",
+    pain.context.breadcrumbs?.length ? `- 最近操作轨迹：${pain.context.breadcrumbs.join(" -> ")}` : "",
   ].filter(Boolean);
 
   const painAttachments = normalizeAttachments(pain.attachments) ?? [];
@@ -1663,6 +1680,9 @@ export async function promotePainPoint(
     "",
     "## 详细描述",
     pain.detail,
+    ...(pain.context.componentStack
+      ? ["", "## React 组件栈", "```", pain.context.componentStack, "```"]
+      : []),
     "",
     "## 预期效果",
     "修复上述工作台问题，补充针对性回归测试，并确保类型检查与全量测试通过。",

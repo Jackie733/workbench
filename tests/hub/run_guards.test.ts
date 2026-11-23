@@ -22,7 +22,7 @@ import {
   isModelCoolingDown,
   readModelTelemetry,
 } from "../../src/hub/telemetry.ts";
-import { buildExecutionPrompt, buildHarnessCommand, HubExecutor } from "../../src/hub/executor.ts";
+import { buildExecutionPrompt, buildHarnessCommand, buildOpencodeNonInteractiveConfig, HubExecutor } from "../../src/hub/executor.ts";
 import { buildPresetRouting, detectModelUnavailableError } from "../../src/hub/routing.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import type { HarnessInfo } from "../../src/hub/types.ts";
@@ -626,4 +626,269 @@ describe("execution guards", () => {
 
     expect(ranActions).toEqual(["implement"]);
   }, { timeout: 15000 });
+
+  test("Phase 1: disables opencode websearch, upgrades non-fatal form cancel after ready submission, and drops resolved failures from handoff", async () => {
+    const mergedCfg = JSON.parse(
+      buildOpencodeNonInteractiveConfig('{"model":"opencode-go/deepseek-v4.1-flash","tools":{"bash":true}}'),
+    ) as { model?: string; tools?: Record<string, boolean> };
+    expect(mergedCfg.model).toBe("opencode-go/deepseek-v4.1-flash");
+    expect(mergedCfg.tools).toEqual({ bash: true, websearch: false });
+
+    makeTempHub();
+    const repo = makeGitRepo("opencode-nonfatal");
+    await initProject(repo, { name: "OpencodeNonFatal", privacyMode: "local" });
+    await createRequirement(repo, { goal: "验证 OpenCode 延迟表单报错兜底与交接包清理" });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# Design\nClean.",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+      actor: "agent",
+    });
+    await approveDesign(repo, "REQ-001");
+
+    // Seed an initial failed verification, then pass on the exact same code snapshot
+    await runVerification(repo, "REQ-001", { command: "echo broken && exit 1", criterionIds: ["AC-1"] });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+
+    // Handoff packet must NOT include the superseded failure log
+    const cleanPacket = await synthesizeHandoffPacket(repo, "REQ-001", { action: "implement" });
+    expect(cleanPacket.markdown).not.toContain("echo broken");
+
+    const routing = buildPresetRouting("balanced");
+    routing.autoReview = true;
+    routing.stages.implement = {
+      primary: { harness: "opencode", model: "opencode-go/deepseek-v4.1-flash" },
+      fallbacks: [],
+    };
+    routing.stages.review = {
+      primary: { harness: "codex", model: "gpt-6.2-sol" },
+      fallbacks: [],
+    };
+
+    const actionsSeen: string[] = [];
+    let observedOpencodeCfg = "";
+    const executor = new HubExecutor({
+      initialHarnesses: [harness("opencode", "opencode"), harness("codex", "codex")],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: (_target, ctx) => {
+        actionsSeen.push(ctx.action);
+        if (ctx.action === "implement") {
+          const enginePath = path.resolve(import.meta.dir, "../../src/core/engine.ts");
+          const gitPath = path.resolve(import.meta.dir, "../../src/core/git.ts");
+          return {
+            command: "bun",
+            args: [
+              "-e",
+              `
+              import { updateTasks } from ${JSON.stringify(enginePath)};
+              import { observeGitSnapshot } from ${JSON.stringify(gitPath)};
+              console.log("OPENCODE_CFG=" + (process.env.OPENCODE_CONFIG_CONTENT ?? ""));
+              const snap = await observeGitSnapshot(process.cwd());
+              await updateTasks(process.cwd(), "REQ-001", {
+                tasks: [{ title: "done", status: "done" }],
+                readyForAcceptance: true,
+                currentCodeSnapshotHash: snap.fingerprint,
+              });
+              console.log('{"type":"error","error":{"type":"unknown","message":"Cancelled a request for input this run cannot answer: Web Search"}}');
+              process.exit(1);
+              `,
+            ],
+            displayCommand: "mock-opencode-late-cancel",
+          };
+        }
+        return {
+          command: "bash",
+          args: ["-c", `printf '%s\\n' '\`\`\`json' '{"verdict":"pass","summary":"复核通过"}' '\`\`\`'`],
+          displayCommand: "mock-review",
+        };
+      },
+    });
+
+    const reviewFinished = new Promise<void>((resolve) => {
+      const unsub = executor.subscribe((ev) => {
+        if (ev.type === "agent.run.finished" && ev.action === "implement") {
+          observedOpencodeCfg = executor.getLiveLog(ev.runId) ?? "";
+        }
+        if (ev.type === "agent.run.finished" && ev.action === "review") {
+          unsub();
+          resolve();
+        }
+      });
+    });
+
+    await executor.startRun({ root: repo, requirementId: "REQ-001", action: "implement" });
+    await reviewFinished;
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(observedOpencodeCfg).toContain('"websearch":false');
+    expect(actionsSeen).toEqual(["implement", "review"]);
+    const finalDetail = getRequirement(repo, "REQ-001");
+    expect(finalDetail.state.agentRuns?.[0]?.status).toBe("succeeded");
+    expect(finalDetail.state.reviewReport?.verdict).toBe("pass");
+
+    // If NOT readyForAcceptance, the same exit code still results in status === "failed"
+    await createRequirement(repo, { goal: "未提交验收仍应判定失败" });
+    await propose(repo, "REQ-002", {
+      designMarkdown: "# Design\nIncomplete.",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+      actor: "agent",
+    });
+    await approveDesign(repo, "REQ-002");
+    const executor2 = new HubExecutor({
+      initialHarnesses: [harness("opencode", "opencode")],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: () => ({
+        command: "bash",
+        args: ["-c", `echo 'Cancelled a request for input this run cannot answer: Web Search'; exit 1`],
+        displayCommand: "mock-opencode-incomplete-fail",
+      }),
+    });
+    const started2 = await executor2.startRun({ root: repo, requirementId: "REQ-002", action: "implement" });
+    await waitForRun(executor2, started2.run.id);
+    expect(getRequirement(repo, "REQ-002").state.agentRuns?.[0]?.status).toBe("failed");
+  }, { timeout: 15000 });
+
+  test("Phase 2: skips session_affinity and native_resume when prior peakContextTokens exceeds 100k", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("bloat-guard");
+    await initProject(repo, { name: "BloatGuard", privacyMode: "local" });
+    await createRequirement(repo, { goal: "上下文膨胀后自动切回干净交接" });
+    await propose(repo, "REQ-001", {
+      designMarkdown: "# Design\nClean.",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+      actor: "agent",
+    });
+    await approveDesign(repo, "REQ-001");
+
+    const { startAgentRun, finishAgentRun } = await import("../../src/core/engine.ts");
+    const runId = "RUN-BLOATED-1";
+    await startAgentRun(repo, "REQ-001", {
+      id: runId,
+      action: "implement",
+      harness: "opencode",
+      model: "opencode-go/deepseek-v4.1-flash",
+      status: "running",
+      startedAt: Date.now() - 2000,
+      endedAt: null,
+      exitCode: null,
+      durationMs: 0,
+      logPath: `runs/run-${runId}.log`,
+    });
+    await finishAgentRun(
+      repo,
+      "REQ-001",
+      runId,
+      {
+        status: "succeeded",
+        endedAt: Date.now() - 1000,
+        exitCode: 0,
+        durationMs: 1000,
+        nativeSessionId: "ses_bloated_123456",
+        peakContextTokens: 150_000,
+      },
+      "ok\n",
+    );
+
+    const routing = buildPresetRouting("balanced");
+    routing.autoReview = false;
+    routing.stages.fix = {
+      primary: { harness: "qodercn", model: "DeepSeek-Flash" },
+      fallbacks: [],
+    };
+    const seen: Array<{ harness: string; model: string; nativeSessionId?: string }> = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [harness("opencode", "opencode"), harness("qodercn", "qodercn")],
+      getHubPreferences: () => ({ routing }),
+      commandBuilder: (target, ctx) => {
+        seen.push({ harness: target.harness, model: target.model, nativeSessionId: ctx.nativeSessionId });
+        return { command: "bash", args: ["-c", "echo ok"], displayCommand: "mock-fix" };
+      },
+    });
+
+    const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
+    await waitForRun(executor, started.run.id);
+
+    expect(seen).toEqual([{ harness: "qodercn", model: "DeepSeek-Flash", nativeSessionId: undefined }]);
+    expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("fresh_handoff");
+  }, { timeout: 15000 });
+
+  test("Phase 3: enforces design In-Scope/Out-of-Scope + bug root-cause prompt and records drift/bloat healthWarnings", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("phase3-guards");
+    await initProject(repo, { name: "Phase3Guards", privacyMode: "local" });
+    await createRequirement(repo, { goal: "定位并修复前端运行时报错" });
+    const detail = getRequirement(repo, "REQ-001");
+
+    const { buildExecutionPrompt } = await import("../../src/hub/executor.ts");
+    const { synthesizeHandoffPacket } = await import("../../src/hub/handoff.ts");
+    const { RunTraceCollector } = await import("../../src/hub/trace_collector.ts");
+
+    const handoff = await synthesizeHandoffPacket(repo, "REQ-001", { action: "design" });
+    const designPrompt = buildExecutionPrompt(detail, handoff.markdown, {
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+    });
+    expect(designPrompt).toContain("设计阶段禁止修改业务代码或测试");
+    expect(designPrompt).toContain("提交方案后立即结束本轮");
+    expect(designPrompt).toContain("In-Scope");
+    expect(designPrompt).toContain("Out-of-Scope");
+    expect(designPrompt).toContain("Bug/报错修复");
+
+    const warningsEmitted: string[] = [];
+    const collector = new RunTraceCollector({
+      runId: "RUN-DRIFT-1",
+      action: "fix",
+      traceFilePath: path.join(repo, ".workbench/items/REQ-001/runs/run-drift.events.jsonl"),
+      startedAt: Date.now() - 5000,
+      billingMode: "api",
+      quotaPool: "openai",
+      modelSpec: {
+        contextWindow: 128_000,
+        input: 1,
+        cacheRead: 0.25,
+        cacheWrite: 0,
+        output: 2,
+        source: "builtin",
+      },
+      onWarning: (line) => warningsEmitted.push(line),
+    });
+
+    for (let i = 1; i <= 15; i++) {
+      collector.append({ type: "turn.start", turnIndex: i });
+      collector.append({
+        type: "tool.start",
+        turnIndex: i,
+        callId: `c-${i}`,
+        toolName: "read",
+        category: "read",
+        summary: "read file",
+      });
+      collector.append({
+        type: "tool.end",
+        turnIndex: i,
+        callId: `c-${i}`,
+        toolName: "read",
+        category: "read",
+        summary: "done",
+      });
+      collector.append({
+        type: "turn.end",
+        turnIndex: i,
+        ...(i === 15 ? { contextTokens: 90_000 } : {}),
+      });
+    }
+
+    const summary = collector.finalizeRun({
+      status: "succeeded",
+      exitCode: 0,
+      durationMs: 5000,
+    });
+    expect(summary.healthWarnings).toEqual([
+      "context_bloat:单轮上下文达到 90000 tokens（阈值 83200）",
+      "pure_read_drift:连续15+轮未产生任何代码写操作",
+    ]);
+    expect(warningsEmitted).toHaveLength(2);
+    expect(warningsEmitted[0]).toContain("上下文膨胀告警");
+    expect(warningsEmitted[1]).toContain("探索漂移告警");
+  });
 });

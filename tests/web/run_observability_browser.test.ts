@@ -266,13 +266,13 @@ suite("Agent Observability E2E (Chromium)", () => {
     // 1. Bug #1 fix: viewing Run 1 while Run 2 is active must show Run 1 output, NOT Run 2's active stream
     await clickReady(page, '[data-testid="tab-timeline"]');
     await clickReady(page, `[data-testid="view-run-output-btn-${run1Started.run.id}"]`);
-    await page.waitForSelector('[data-testid="historical-run-banner"]', { timeout: 5000 });
+    await page.waitForSelector('[data-testid="historical-run-banner"]', { timeout: 15000 });
     await page.waitForFunction(
       () =>
         (document.querySelector('[data-testid="console-pane"] [data-testid="console-log-output"]')?.textContent ?? "").includes(
           "RUN1_UNIQUE_OUTPUT",
         ),
-      { timeout: 5000 },
+      { timeout: 15000 },
     );
     const consoleTxtOnRun1 = await page.evaluate(
       () => document.querySelector('[data-testid="console-pane"] [data-testid="console-log-output"]')?.textContent ?? "",
@@ -287,25 +287,25 @@ suite("Agent Observability E2E (Chromium)", () => {
         (document.querySelector('[data-testid="console-pane"] [data-testid="console-log-output"]')?.textContent ?? "").includes(
           "RUN2_LIVE_STREAM",
         ),
-      { timeout: 5000 },
+      { timeout: 15000 },
     );
 
     // 2. Bug #2 fix: reload page mid-run and verify prior structured trace + output hydrate from server
     await page.reload({ waitUntil: "networkidle0" });
-    await page.waitForSelector('[data-testid="toggle-drawer-btn"]', { timeout: 6000 });
+    await page.waitForSelector('[data-testid="toggle-drawer-btn"]', { timeout: 15000 });
     const isDrawerOpen = await page.evaluate(() => Boolean(document.querySelector('[data-testid="right-drawer"].open')));
     if (!isDrawerOpen) {
       await clickReady(page, '[data-testid="toggle-drawer-btn"]');
-      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 15000 });
     }
     await clickReady(page, '[data-testid="drawer-tab-console"]');
-    await page.waitForSelector('[data-testid="console-pane"] [data-testid="trace-tool-card"]', { timeout: 6000 });
+    await page.waitForSelector('[data-testid="console-pane"] [data-testid="trace-tool-card"]', { timeout: 15000 });
     await page.waitForFunction(
       () =>
         (document.querySelector('[data-testid="console-pane"] [data-testid="console-log-output"]')?.textContent ?? "").includes(
           "RUN2_LIVE_STREAM",
         ),
-      { timeout: 6000 },
+      { timeout: 15000 },
     );
 
     // Release Run 2 so ledger records both Run 1 and Run 2

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -16,6 +16,11 @@ const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 const nodeClients: NodeClientHandle[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
+const origRsiDepth = process.env.WORKBENCH_RSI_DEPTH;
+
+beforeEach(() => {
+  delete process.env.WORKBENCH_RSI_DEPTH;
+});
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -54,6 +59,8 @@ afterEach(() => {
   while (servers.length > 0) servers.pop()!.stop();
   if (origHubEnv === undefined) delete process.env.WORKBENCH_HUB_DIR;
   else process.env.WORKBENCH_HUB_DIR = origHubEnv;
+  if (origRsiDepth === undefined) delete process.env.WORKBENCH_RSI_DEPTH;
+  else process.env.WORKBENCH_RSI_DEPTH = origRsiDepth;
   while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 

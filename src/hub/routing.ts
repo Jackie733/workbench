@@ -463,10 +463,15 @@ export function normalizeRoutingConfig(raw: unknown): RoutingConfig {
       : defRule.fallbacks;
     stages[stage] = { primary, fallbacks };
   }
+  const maxAutoReviewRounds =
+    typeof obj.maxAutoReviewRounds === "number" && Number.isFinite(obj.maxAutoReviewRounds)
+      ? Math.min(5, Math.max(1, Math.floor(obj.maxAutoReviewRounds)))
+      : undefined;
   return {
     activePreset,
     stages,
     ...(typeof obj.autoReview === "boolean" ? { autoReview: obj.autoReview } : {}),
+    ...(maxAutoReviewRounds !== undefined ? { maxAutoReviewRounds } : {}),
   };
 }
 

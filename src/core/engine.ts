@@ -63,6 +63,7 @@ import {
   MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_AGENT_RUNS,
   MAX_DISCUSSIONS,
+  MAX_REVIEW_HISTORY,
   MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TIMELINE,
   REVIEW_VERDICTS,
@@ -2782,6 +2783,7 @@ export async function finishAgentRun(
     tracePath?: string;
     contextPath?: string;
     traceTruncated?: boolean;
+    healthWarnings?: string[];
   },
   rawLog: string,
   currentCodeSnapshotHash?: string | null,
@@ -2822,6 +2824,7 @@ export async function finishAgentRun(
       ...(patch.tracePath ? { tracePath: patch.tracePath } : {}),
       ...(patch.contextPath ? { contextPath: patch.contextPath } : {}),
       ...(patch.traceTruncated !== undefined ? { traceTruncated: patch.traceTruncated } : {}),
+      ...(patch.healthWarnings?.length ? { healthWarnings: patch.healthWarnings.slice(0, 20) } : {}),
     });
     const nextRuns = prevRuns.map((r) => (r.id === runId ? updated : r)).slice(-MAX_AGENT_RUNS);
     const statusText = patch.status === "succeeded" ? "完成" : patch.status === "cancelled" ? "已终止" : "失败";
@@ -2861,6 +2864,8 @@ export async function recordReviewReport(
     findings?: ReviewFinding[];
     reviewedSpecHash: string;
     reviewedCodeSnapshotHash: string;
+    reviewMode?: "full" | "delta";
+    changedFiles?: string[];
   },
 ): Promise<RequirementDetail> {
   if (!REVIEW_VERDICTS.includes(input.verdict)) {
@@ -2896,8 +2901,23 @@ export async function recordReviewReport(
             : {}),
         }))
       : undefined;
+  const cleanChangedFiles =
+    Array.isArray(input.changedFiles) && input.changedFiles.length > 0
+      ? input.changedFiles
+          .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+          .map((f) => sanitizeOutput(f.trim(), 480).text.trim())
+          .filter(Boolean)
+          .slice(0, 64)
+      : undefined;
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
+    const prevHistory: ReviewReport[] = Array.isArray(state.reviewHistory)
+      ? [...state.reviewHistory]
+      : state.reviewReport
+        ? [{ ...state.reviewReport, round: state.reviewReport.round ?? 1 }]
+        : [];
+    const round = prevHistory.length + 1;
+    const reviewMode = input.reviewMode ?? (round > 1 ? "delta" : "full");
     const report: ReviewReport = {
       id: `REV-${now}-${randomUUID().slice(0, 6)}`,
       reviewerHarness: input.reviewerHarness.trim(),
@@ -2909,19 +2929,28 @@ export async function recordReviewReport(
       reviewedSpecHash: input.reviewedSpecHash,
       reviewedCodeSnapshotHash: input.reviewedCodeSnapshotHash,
       reviewedAt: now,
+      round,
+      reviewMode,
+      ...(cleanChangedFiles && cleanChangedFiles.length > 0 ? { changedFiles: cleanChangedFiles } : {}),
     };
+    const archivedReport: ReviewReport = {
+      ...report,
+      markdown: sanitizeOutput(report.markdown, 8192).text,
+    };
+    const nextHistory = [...prevHistory, archivedReport].slice(-MAX_REVIEW_HISTORY);
     const verdictLabel = input.verdict === "pass" ? "建议通过" : input.verdict === "concern" ? "有关注点" : "建议阻塞修复";
     return {
       state: {
         ...state,
         reviewReport: report,
+        reviewHistory: nextHistory,
         timeline: appendTimeline(
           state.timeline,
           makeEvent(
             now,
             "review_submitted",
             "agent",
-            `跨模型审查 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}`,
+            `跨模型审查 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}${round > 1 ? `（第 ${round} 轮）` : ""}`,
             report.summary,
           ),
         ),

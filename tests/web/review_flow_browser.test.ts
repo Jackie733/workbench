@@ -593,4 +593,97 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.close();
     }
   }, 30_000);
+
+  test("Phase 2: displays review round badge, prior round history, and converts remaining findings to follow-up pain points", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "ReviewRoundsWeb", privacyMode: "local" });
+    registerHubProject(repo);
+    await createRequirement(repo, {
+      goal: "Verify multi-round review UI convergence",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nClean.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap.fingerprint,
+    });
+
+    const specHash = getRequirement(repo, "REQ-001").state.specHash;
+    await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "concern",
+      summary: "第1轮样式缺陷",
+      markdown: "round 1",
+      findings: [{ id: "F-1", severity: "medium", title: "按钮收缩失效" }],
+      reviewedSpecHash: specHash,
+      reviewedCodeSnapshotHash: snap.fingerprint,
+    });
+    fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap2 = (await observeGitSnapshot(repo))!;
+    await updateTasks(repo, "REQ-001", {
+      tasks: [{ title: "done", status: "done" }],
+      readyForAcceptance: true,
+      currentCodeSnapshotHash: snap2.fingerprint,
+    });
+    await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "concern",
+      summary: "第2轮仅剩极端窄屏建议",
+      markdown: "round 2",
+      findings: [{ id: "F-2", severity: "medium", title: "极长模型名在窄抽屉裁切" }],
+      reviewedSpecHash: specHash,
+      reviewedCodeSnapshotHash: snap2.fingerprint,
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="review-round-badge"]', { timeout: 10000 });
+
+      const roundBadgeText = await page.evaluate(
+        () => document.querySelector('[data-testid="review-round-badge"]')?.textContent ?? "",
+      );
+      expect(roundBadgeText).toContain("第 2 轮");
+      expect(roundBadgeText).toContain("增量复审");
+
+      const primaryBtnText = await page.evaluate(
+        () => document.querySelector('[data-testid="action-accept"]')?.textContent ?? "",
+      );
+      expect(primaryBtnText).toContain("确认关注点并验收通过");
+
+      const hasHistory = await page.evaluate(
+        () => Boolean(document.querySelector('[data-testid="review-history-details"]')),
+      );
+      expect(hasHistory).toBe(true);
+
+      await clickReady(page, '[data-testid="review-to-pain-point-btn"]');
+      await page.waitForFunction(
+        () => (document.body.textContent ?? "").includes("已将残余审查项记入自进化痛点收集箱"),
+        { timeout: 8000 },
+      );
+
+      const evoRes = (await (await fetch(`${server.url}/api/hub/evolution`)).json()) as {
+        painPoints: Array<{ title: string }>;
+      };
+      expect(evoRes.painPoints.some((p) => p.title.includes("[后续跟进 REQ-001]"))).toBe(true);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
 });

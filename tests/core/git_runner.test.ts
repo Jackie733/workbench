@@ -324,4 +324,40 @@ describe("WB-02 git observer and verification runner", () => {
       else process.env.WORKBENCH_HUB_DIR = prevHub;
     }
   });
+
+  test("strips inherited WORKBENCH_RSI_DEPTH, WORKBENCH_HUB_PID, and WORKBENCH_OUTPUT_LANGUAGE from verification env", async () => {
+    const repo = initGitRepo(true);
+    await initProject(repo);
+    await createRequirement(repo, {
+      goal: "验证验证命令清理 RSI 与宿主环境标记",
+      criteria: [
+        {
+          id: "AC-1",
+          description: "验证命令中不存在 WORKBENCH_RSI_DEPTH",
+          required: true,
+          command:
+            "bun -e 'if (process.env.WORKBENCH_RSI_DEPTH || process.env.WORKBENCH_HUB_PID || process.env.WORKBENCH_OUTPUT_LANGUAGE) process.exit(1);'",
+        },
+      ],
+    });
+    await authorizeFastTrack(repo, "REQ-001");
+
+    const prevDepth = process.env.WORKBENCH_RSI_DEPTH;
+    const prevPid = process.env.WORKBENCH_HUB_PID;
+    const prevLang = process.env.WORKBENCH_OUTPUT_LANGUAGE;
+    process.env.WORKBENCH_RSI_DEPTH = "1";
+    process.env.WORKBENCH_HUB_PID = "99999";
+    process.env.WORKBENCH_OUTPUT_LANGUAGE = "zh-CN";
+    try {
+      const res = await runAllVerifications(repo, "REQ-001");
+      expect(res.runs[0]!.record.passed).toBe(true);
+    } finally {
+      if (prevDepth === undefined) delete process.env.WORKBENCH_RSI_DEPTH;
+      else process.env.WORKBENCH_RSI_DEPTH = prevDepth;
+      if (prevPid === undefined) delete process.env.WORKBENCH_HUB_PID;
+      else process.env.WORKBENCH_HUB_PID = prevPid;
+      if (prevLang === undefined) delete process.env.WORKBENCH_OUTPUT_LANGUAGE;
+      else process.env.WORKBENCH_OUTPUT_LANGUAGE = prevLang;
+    }
+  });
 });

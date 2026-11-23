@@ -12,6 +12,7 @@ import {
   MAX_DISCUSSIONS,
   MAX_HANDOFF_BYTES,
   MAX_REASON_CHARS,
+  MAX_REVIEW_HISTORY,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_BATCHES,
   MAX_SCREENSHOTS_PER_BATCH,
@@ -1029,6 +1030,7 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
       "tracePath",
       "contextPath",
       "traceTruncated",
+      "healthWarnings",
     ],
     "agentRun",
   );
@@ -1065,7 +1067,11 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     (raw.codeChanged !== undefined && typeof raw.codeChanged !== "boolean") ||
     (raw.tracePath !== undefined && !isSafeText(raw.tracePath, 260, true)) ||
     (raw.contextPath !== undefined && !isSafeText(raw.contextPath, 260, true)) ||
-    (raw.traceTruncated !== undefined && typeof raw.traceTruncated !== "boolean")
+    (raw.traceTruncated !== undefined && typeof raw.traceTruncated !== "boolean") ||
+    (raw.healthWarnings !== undefined &&
+      (!Array.isArray(raw.healthWarnings) ||
+        raw.healthWarnings.length > 20 ||
+        raw.healthWarnings.some((w) => !isSafeText(w, 300))))
   ) {
     throw new WorkbenchError("corrupt_record", "agentRun 记录损坏");
   }
@@ -1114,6 +1120,9 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
       "reviewedSpecHash",
       "reviewedCodeSnapshotHash",
       "reviewedAt",
+      "round",
+      "reviewMode",
+      "changedFiles",
     ],
     "reviewReport",
   );
@@ -1130,7 +1139,13 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     !SHA256_RE.test(raw.reviewedSpecHash) ||
     typeof raw.reviewedCodeSnapshotHash !== "string" ||
     !SHA256_RE.test(raw.reviewedCodeSnapshotHash) ||
-    !isSafeInt(raw.reviewedAt, 0)
+    !isSafeInt(raw.reviewedAt, 0) ||
+    (raw.round !== undefined && !isSafeInt(raw.round, 1)) ||
+    (raw.reviewMode !== undefined && raw.reviewMode !== "full" && raw.reviewMode !== "delta") ||
+    (raw.changedFiles !== undefined &&
+      (!Array.isArray(raw.changedFiles) ||
+        raw.changedFiles.length > 100 ||
+        raw.changedFiles.some((f) => !isSafeText(f, 512))))
   ) {
     throw new WorkbenchError("corrupt_record", "reviewReport 记录损坏");
   }
@@ -1234,6 +1249,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     raw.timeline.length > MAX_TIMELINE ||
     (raw.discussions !== undefined && (!Array.isArray(raw.discussions) || raw.discussions.length > MAX_DISCUSSIONS)) ||
     (raw.agentRuns !== undefined && (!Array.isArray(raw.agentRuns) || raw.agentRuns.length > MAX_AGENT_RUNS)) ||
+    (raw.reviewHistory !== undefined && (!Array.isArray(raw.reviewHistory) || raw.reviewHistory.length > MAX_REVIEW_HISTORY)) ||
     (raw.lastFeedback !== null && !isSafeText(raw.lastFeedback, 8000, true)) ||
     (raw.blockedFrom !== null && !STAGES.includes(raw.blockedFrom as Stage)) ||
     (raw.blockedReason !== null && !isSafeText(raw.blockedReason, 8000, true)) ||
@@ -1272,6 +1288,12 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
   validateBaseline(raw.baseline);
   validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);
+  if (Array.isArray(raw.reviewHistory)) {
+    for (const rev of raw.reviewHistory) {
+      if (!rev || typeof rev !== "object") throw new WorkbenchError("corrupt_record", "reviewHistory 项无效");
+      validateReviewReport(rev);
+    }
+  }
   validateRequirementGitHubLink(raw.github);
   if (raw.screenshotBatches !== undefined) validateScreenshotBatches(raw.screenshotBatches);
   normalizeAttachments(raw.attachments);

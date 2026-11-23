@@ -28,6 +28,8 @@ export interface RoutingConfig {
   stages: Record<RoutingStage, StageRouteRule>;
   /** Automatically dispatch cross-model review after agent submits readyForAcceptance (defaults to true). */
   autoReview?: boolean;
+  /** Maximum automatic review rounds per requirement before yielding directly to human acceptance (defaults to 2). */
+  maxAutoReviewRounds?: number;
 }
 
 export interface DiscoveredModel {

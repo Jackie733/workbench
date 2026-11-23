@@ -874,4 +874,49 @@ describe("Self-Evolving Agent & RSI closed loop", () => {
     expect(applied.touchesWeb).toBe(true);
     expect(fs.existsSync(path.join(wbRepo, "src/web/committed_feature.ts"))).toBe(true);
   });
+
+  test("Phase 3: preserves buildCommit, componentStack, and breadcrumbs into promoted spec.md", async () => {
+    makeTempHub();
+    const wbRepo = makeGitRepo("workbench");
+    await initProject(wbRepo, { name: "workbench", privacyMode: "local" });
+
+    const reported = reportPainPoint({
+      source: "ui_error",
+      category: "ui_anomaly",
+      title: "Runtime error: Cannot read properties of undefined",
+      detail: "TypeError: Cannot read properties of undefined (reading 'id')",
+      context: {
+        requirementId: "REQ-014",
+        viewport: "1440x900",
+        theme: "dark",
+        urlPath: "/",
+        buildCommit: "ee00eb012345",
+        component: "RootErrorBoundary",
+        componentStack: "\n    at ModelRunnerBar (src/web/components/ui/ModelRunnerBar.tsx:42)\n    at WorkspaceView",
+        breadcrumbs: [
+          "ui view=workspace req=REQ-014 tab=spec modal=-",
+          "click [data-testid=\"action-implement\"] (开始实施)",
+        ],
+      },
+    });
+    expect(reported).not.toBeNull();
+    expect(reported!.context.buildCommit).toBe("ee00eb012345");
+    expect(reported!.context.breadcrumbs).toHaveLength(2);
+    expect(reported!.context.componentStack).toContain("ModelRunnerBar");
+
+    const promoted = await promotePainPoint(reported!.id, {
+      workbenchRoot: wbRepo,
+      createSandbox: false,
+      createGitHubIssue: false,
+    });
+    const specText = fs.readFileSync(
+      path.join(wbRepo, ".workbench/items", promoted.requirement.state.id, "spec.md"),
+      "utf8",
+    );
+    expect(specText).toContain("前端构建提交：`ee00eb012345`");
+    expect(specText).toContain("触发组件：`RootErrorBoundary`");
+    expect(specText).toContain("最近操作轨迹：ui view=workspace req=REQ-014");
+    expect(specText).toContain("## React 组件栈");
+    expect(specText).toContain("ModelRunnerBar");
+  });
 });

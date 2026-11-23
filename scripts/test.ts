@@ -20,7 +20,13 @@ function collectTestFiles(dir: string): string[] {
 }
 
 function estimateWeight(relPath: string): number {
-  if (relPath.endsWith("e2e_browser.test.ts")) return 1000;
+  if (
+    relPath.endsWith("e2e_browser.test.ts") ||
+    relPath.endsWith("e2e_i18n_layout_browser.test.ts") ||
+    relPath.endsWith("e2e_run_lock_browser.test.ts")
+  ) {
+    return 600;
+  }
   if (relPath.endsWith("_browser.test.ts")) return 300;
   if (relPath.includes("delivery.test.ts") || relPath.includes("hub.test.ts")) return 150;
   try {
@@ -63,13 +69,17 @@ function parseCounts(output: string): { passCount: number; failCount: number } {
 function runTestFile(file: string, workerTmpDir: string): Promise<FileRunResult> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
+    const workerHubDir = path.join(workerTmpDir, "hub");
+    fs.mkdirSync(workerHubDir, { recursive: true });
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       TMPDIR: workerTmpDir,
       TEMP: workerTmpDir,
       TMP: workerTmpDir,
+      WORKBENCH_HUB_DIR: workerHubDir,
       WORKBENCH_DISABLE_VERIFY_LOCK: "1",
     };
+    delete env.WORKBENCH_RSI_DEPTH;
     const child = spawn(process.execPath, ["test", file], {
       cwd: ROOT,
       stdio: ["ignore", "pipe", "pipe"],

@@ -18,6 +18,7 @@ export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
 export const MAX_DISCUSSIONS = 200;
 export const MAX_AGENT_RUNS = 100;
+export const MAX_REVIEW_HISTORY = 12;
 export const MAX_RUN_LOG_BYTES = 4 * 1024 * 1024;
 export const MAX_RUN_TRACE_BYTES = 8 * 1024 * 1024;
 export const MAX_TOOL_INPUT_BYTES = 16 * 1024;
@@ -776,6 +777,7 @@ export interface AgentRunRecord {
   tracePath?: string;
   contextPath?: string;
   traceTruncated?: boolean;
+  healthWarnings?: string[];
 }
 
 export const REVIEW_FINDING_SEVERITIES = ["high", "medium", "low"] as const;
@@ -802,6 +804,9 @@ export interface ReviewReport {
   reviewedSpecHash: string;
   reviewedCodeSnapshotHash: string;
   reviewedAt: number;
+  round?: number;
+  reviewMode?: "full" | "delta";
+  changedFiles?: string[];
 }
 
 export type ScreenshotTrigger = "auto_submit" | "manual";
@@ -893,6 +898,7 @@ export interface RequirementState {
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
   reviewReport?: ReviewReport | null;
+  reviewHistory?: ReviewReport[];
   github?: RequirementGitHubLink | null;
   /** 可选附件元数据；旧数据无该字段时行为不变。 */
   attachments?: AttachmentMeta[];
