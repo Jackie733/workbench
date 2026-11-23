@@ -24,7 +24,8 @@ import {
 import type { PainPointReportInput } from "./evolution.ts";
 import { HubExecutor, type CustomCommandBuilder, type TelemetryOutcomeInput } from "./executor.ts";
 import type { RunLedgerEntry } from "./ledger.ts";
-import { browseDirectory } from "./registry.ts";
+import { enrichAgentRunRecord } from "./pricing.ts";
+import { browseDirectory, readHubConfig } from "./registry.ts";
 import { buildPresetRouting } from "./routing.ts";
 import type { NodeUpdateReport } from "../cli/node_update.ts";
 import type { HarnessInfo, HubObservabilityConfig, RemoteNodeInfo, RoutingConfig } from "./types.ts";
@@ -190,7 +191,10 @@ export class RemoteNodeRegistry {
       entry.info.updateEnabled = parsed.updateEnabled === true;
       if (Array.isArray(parsed.harnesses)) entry.info.harnesses = parsed.harnesses as HarnessInfo[];
       if (Array.isArray(parsed.activeRuns)) {
-        entry.info.activeRuns = parsed.activeRuns as RemoteNodeInfo["activeRuns"];
+        const obs = readHubConfig().observability;
+        entry.info.activeRuns = (parsed.activeRuns as RemoteNodeInfo["activeRuns"]).map((r) =>
+          enrichAgentRunRecord(r, undefined, { harnesses: entry.info.harnesses, observability: obs }),
+        );
       }
       cb.onStatusChanged();
       return;
@@ -404,21 +408,47 @@ export class RemoteNodeRegistry {
     const runId = typeof evt.runId === "string" ? evt.runId : "";
     if (!runId) return;
     if (type === "agent.run.started") {
-      const rec: AgentRunRecord & { requirementId: string; root?: string } = {
-        id: runId,
-        requirementId: typeof evt.requirementId === "string" ? evt.requirementId : "",
-        ...(typeof evt.root === "string" ? { root: evt.root } : {}),
-        action: (evt.action as AgentAction) ?? "design",
-        harness: String(evt.harness ?? ""),
-        model: String(evt.model ?? ""),
-        status: "running",
-        startedAt: typeof evt.at === "number" ? evt.at : Date.now(),
-        endedAt: null,
-        exitCode: null,
-        durationMs: 0,
-        logPath: `runs/run-${runId}.log`,
-      };
+      const obs = readHubConfig().observability;
+      const metricsPatch = isRecord(evt.metrics) ? (evt.metrics as Partial<AgentRunRecord>) : {};
+      const rec = enrichAgentRunRecord(
+        {
+          id: runId,
+          requirementId: typeof evt.requirementId === "string" ? evt.requirementId : "",
+          ...(typeof evt.root === "string" ? { root: evt.root } : {}),
+          action: (evt.action as AgentAction) ?? "design",
+          harness: String(evt.harness ?? ""),
+          model: String(evt.model ?? ""),
+          ...(typeof evt.reasoningEffort === "string" ? { reasoningEffort: evt.reasoningEffort } : {}),
+          ...(typeof evt.quotaPool === "string" ? { quotaPool: evt.quotaPool } : {}),
+          ...(typeof evt.billingMode === "string" ? { billingMode: evt.billingMode as AgentRunRecord["billingMode"] } : {}),
+          ...(typeof evt.dispatchReason === "string"
+            ? { dispatchReason: evt.dispatchReason as AgentRunRecord["dispatchReason"] }
+            : {}),
+          ...(typeof evt.handoffMode === "string"
+            ? { handoffMode: evt.handoffMode as AgentRunRecord["handoffMode"] }
+            : {}),
+          ...(typeof evt.parentRunId === "string" ? { parentRunId: evt.parentRunId } : {}),
+          ...(typeof evt.contextWindow === "number" ? { contextWindow: evt.contextWindow } : {}),
+          ...(typeof evt.tracePath === "string" ? { tracePath: evt.tracePath } : {}),
+          ...(typeof evt.contextPath === "string" ? { contextPath: evt.contextPath } : {}),
+          ...metricsPatch,
+          status: "running",
+          startedAt: typeof evt.at === "number" ? evt.at : Date.now(),
+          endedAt: null,
+          exitCode: null,
+          durationMs: typeof metricsPatch.durationMs === "number" ? metricsPatch.durationMs : 0,
+          logPath: `runs/run-${runId}.log`,
+        },
+        undefined,
+        { harnesses: entry.info.harnesses, observability: obs },
+      );
       entry.info.activeRuns = [...entry.info.activeRuns.filter((r) => r.id !== runId), rec];
+    } else if (type === "agent.run.metrics") {
+      const metricsPatch = isRecord(evt.metrics) ? (evt.metrics as Partial<AgentRunRecord>) : null;
+      if (!metricsPatch) return;
+      entry.info.activeRuns = entry.info.activeRuns.map((r) =>
+        r.id === runId ? { ...r, ...metricsPatch, durationMs: Math.max(r.durationMs, Date.now() - r.startedAt) } : r,
+      );
     } else if (type === "agent.run.finished") {
       entry.info.activeRuns = entry.info.activeRuns.filter((r) => r.id !== runId);
     }

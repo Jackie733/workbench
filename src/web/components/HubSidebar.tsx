@@ -517,18 +517,25 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                           <span className="muted xs">{n.connected ? t(language, "common.online") : t(language, "common.offline")}</span>
                         </div>
                         {canUpdate && !running && (
-                          <button
-                            className="btn ghost xs"
-                            type="button"
-                            disabled={updateNode.isPending || n.activeRuns.length > 0}
-                            onClick={() => {
-                              if (window.confirm(t(language, "sidebar.nodeUpdateConfirm", { node: n.name, revision: hubRevision.slice(0, 7) }))) {
-                                updateNode.mutate({ nodeId: n.nodeId, revision: hubRevision });
-                              }
-                            }}
-                          >
-                            {t(language, "sidebar.nodeUpdateAction", { revision: hubRevision.slice(0, 7) })}
-                          </button>
+                          <>
+                            <button
+                              className="btn ghost xs"
+                              type="button"
+                              disabled={updateNode.isPending || n.activeRuns.length > 0}
+                              onClick={() => {
+                                if (window.confirm(t(language, "sidebar.nodeUpdateConfirm", { node: n.name, revision: hubRevision.slice(0, 7) }))) {
+                                  updateNode.mutate({ nodeId: n.nodeId, revision: hubRevision });
+                                }
+                              }}
+                            >
+                              {t(language, "sidebar.nodeUpdateAction", { revision: hubRevision.slice(0, 7) })}
+                            </button>
+                            {n.activeRuns.length > 0 && (
+                              <div className="muted xs">
+                                {t(language, "sidebar.nodeUpdateBusyHint", { revision: hubRevision.slice(0, 7) })}
+                              </div>
+                            )}
+                          </>
                         )}
                         {n.update && (
                           <div className="muted xs" role="status">

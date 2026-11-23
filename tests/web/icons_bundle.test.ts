@@ -82,10 +82,11 @@ describe("icon dependency and bundle contract", () => {
     // Bundle includes React 19, Zustand, TanStack Query, ReactMarkdown, jsdiff, Radix UI, cmdk, and tree-shaken Lucide icons.
     // Ensure it stays well below adding the un-tree-shaken Lucide catalog on top.
     // 2026-11 threshold raised from 2.7MB to 2.9MB after bilingual UI (REQ-003) and model favorites (REQ-002),
-    // and to 3.2MB after adding execution observability, run audit inspector, SVG charts, and global InsightsView;
-    // the un-tree-shaken catalog baseline (fixture raw ≈ 1.52MB) remains the real guard (~4.5MB if broken) alongside <580KB gzip.
-    expect(app.raw).toBeLessThan(3_200_000);
-    expect(app.gzip).toBeLessThan(580_000);
+    // to 3.2MB after adding execution observability, run audit inspector, and global InsightsView,
+    // and to 3.8MB raw / 720KB gzip after replacing hand-drawn SVGs with modular tree-shaken chart.js (+~98KB gzip);
+    // the un-tree-shaken catalog baseline (fixture raw ≈ 1.47MB) remains the real guard (~5.0MB if broken).
+    expect(app.raw).toBeLessThan(3_800_000);
+    expect(app.gzip).toBeLessThan(720_000);
   });
 
   test("static named imports tree-shake instead of pulling the whole catalog", async () => {

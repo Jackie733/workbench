@@ -1,16 +1,19 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { atomicWriteFile, withFileLockSync } from "../core/fs.ts";
-import type {
-  AgentAction,
-  AgentRunRecord,
-  RunBillingMode,
-  RunCostSource,
-  RunDispatchReason,
-  RunHandoffMode,
-  RunTokenUsage,
+import { getRequirement, listRequirements } from "../core/engine.ts";
+import { atomicWriteFile, resolveSafePath, withFileLockSync } from "../core/fs.ts";
+import {
+  WORKBENCH_DIR,
+  type AgentAction,
+  type AgentRunRecord,
+  type RunBillingMode,
+  type RunCostSource,
+  type RunDispatchReason,
+  type RunHandoffMode,
+  type RunTokenUsage,
 } from "../core/types.ts";
-import { formatQuotaPoolLabel } from "./pricing.ts";
+import { enrichAgentRunRecord, formatQuotaPoolLabel } from "./pricing.ts";
 import { readHubConfig, resolveHubDir } from "./registry.ts";
 
 const LEDGER_MAX_BYTES = 16 * 1024 * 1024;
@@ -249,6 +252,12 @@ export function appendRunLedger(entry: RunLedgerEntry): void {
   });
 }
 
+function isTempPath(targetPath: string): boolean {
+  const norm = targetPath.replace(/\\/g, "/");
+  const tmpBase = os.tmpdir().replace(/\\/g, "/").replace(/\/+$/, "");
+  return norm.startsWith("/tmp/") || norm === "/tmp" || (tmpBase.length > 1 && norm.startsWith(`${tmpBase}/`));
+}
+
 export function readRunLedger(filter: InsightsQueryFilter = {}): RunLedgerEntry[] {
   const filePath = runLedgerFilePath();
   if (!fs.existsSync(filePath)) return [];
@@ -261,8 +270,10 @@ export function readRunLedger(filter: InsightsQueryFilter = {}): RunLedgerEntry[
   const now = filter.now ?? Date.now();
   const days = typeof filter.days === "number" && Number.isFinite(filter.days) && filter.days > 0 ? Math.floor(filter.days) : 0;
   const minTs = days > 0 ? now - days * 86_400_000 : 0;
+  const ignoreTempEntries = !isTempPath(resolveHubDir());
 
   const byRunId = new Map<string, RunLedgerEntry>();
+  let droppedTempCount = 0;
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -271,9 +282,27 @@ export function readRunLedger(filter: InsightsQueryFilter = {}): RunLedgerEntry[
       if (!obj || typeof obj !== "object" || typeof obj.runId !== "string" || typeof obj.startedAt !== "number") {
         continue;
       }
+      if (ignoreTempEntries && obj.projectRoot && isTempPath(obj.projectRoot)) {
+        droppedTempCount++;
+        continue;
+      }
       byRunId.set(obj.runId, obj);
     } catch {
       // Skip malformed line safely.
+    }
+  }
+
+  // Prune stray temporary test entries if reading the production Hub ledger.
+  if (droppedTempCount > 0) {
+    try {
+      withFileLockSync(runLedgerLockPath(), () => {
+        const kept = Array.from(byRunId.values())
+          .map((e) => JSON.stringify(e))
+          .join("\n");
+        atomicWriteFile(filePath, kept ? `${kept}\n` : "", 0o600);
+      });
+    } catch {
+      // Non-fatal cleanup.
     }
   }
 
@@ -315,10 +344,76 @@ export function queryHubInsights(
 ): InsightsResponse {
   const now = filter.now ?? Date.now();
   const days = filter.days === 0 ? 0 : filter.days === 30 ? 30 : 7;
+  const hubCfg = readHubConfig();
+  const projectsList = options.projects ?? hubCfg.projects;
   const allEntries = readRunLedger({ now });
 
-  // Collect global filter facets before applying item filters
-  const projectsList = options.projects ?? readHubConfig().projects;
+  // Backfill historical runs from local registered projects if absent in the ledger.
+  const seenRunIds = new Set(allEntries.map((e) => e.runId));
+  for (const p of projectsList) {
+    if (p.nodeId && p.nodeId !== "local") continue;
+    if (!p.root || !fs.existsSync(path.join(p.root, WORKBENCH_DIR, "items"))) continue;
+    try {
+      const summaries = listRequirements(p.root);
+      for (const summary of summaries) {
+        const detail = getRequirement(p.root, summary.id);
+        for (const run of detail.state.agentRuns ?? []) {
+          if (seenRunIds.has(run.id) || run.status === "running") continue;
+          let rawLog: string | undefined;
+          if (!run.usage) {
+            try {
+              const lp = resolveSafePath(p.root, `${WORKBENCH_DIR}/items/${summary.id}/runs/run-${path.basename(run.id)}.log`);
+              if (fs.existsSync(lp)) rawLog = fs.readFileSync(lp, "utf8");
+            } catch {
+              // ignore unreadable log
+            }
+          }
+          const enriched = enrichAgentRunRecord(run, rawLog, { observability: hubCfg.observability });
+          if (!enriched.usage && enriched.durationMs <= 0) continue;
+          seenRunIds.add(enriched.id);
+          allEntries.push({
+            schemaVersion: 1,
+            runId: enriched.id,
+            projectId: p.id,
+            projectName: p.name,
+            projectRoot: p.root,
+            nodeId: "local",
+            nodeName: "本机",
+            requirementId: summary.id,
+            requirementTitle: summary.title,
+            action: enriched.action,
+            harness: enriched.harness,
+            model: enriched.model,
+            ...(enriched.effectiveModel ? { effectiveModel: enriched.effectiveModel } : {}),
+            ...(enriched.modelFallback ? { modelFallback: true } : {}),
+            ...(enriched.reasoningEffort ? { reasoningEffort: enriched.reasoningEffort } : {}),
+            quotaPool: enriched.quotaPool ?? enriched.harness,
+            billingMode: enriched.billingMode ?? "subscription",
+            status: enriched.status,
+            ...(enriched.dispatchReason ? { dispatchReason: enriched.dispatchReason } : {}),
+            ...(enriched.handoffMode ? { handoffMode: enriched.handoffMode } : {}),
+            startedAt: enriched.startedAt,
+            endedAt: enriched.endedAt ?? enriched.startedAt + enriched.durationMs,
+            durationMs: enriched.durationMs,
+            ...(typeof enriched.llmDurationMs === "number" ? { llmDurationMs: enriched.llmDurationMs } : {}),
+            ...(typeof enriched.toolDurationMs === "number" ? { toolDurationMs: enriched.toolDurationMs } : {}),
+            ...(enriched.usage ? { usage: enriched.usage } : {}),
+            apiCostUsd: enriched.cost?.apiCostUsd ?? 0,
+            equivalentCostUsd: enriched.cost?.equivalentCostUsd ?? 0,
+            costSource: enriched.cost?.costSource ?? "unknown",
+            turnsCount: enriched.turnsCount ?? 0,
+            toolCallsCount: enriched.toolCallsCount ?? 0,
+            toolErrorCount: enriched.toolErrorCount ?? 0,
+            compactionCount: enriched.compactionCount ?? 0,
+            ...(enriched.rateLimited ? { rateLimited: true } : {}),
+            ...(typeof enriched.contextWindow === "number" ? { contextWindow: enriched.contextWindow } : {}),
+          });
+        }
+      }
+    } catch {
+      // Ignore inaccessible local project during insights rollup.
+    }
+  }
   const projectMap = new Map<string, string>();
   const projectByRootAndNode = new Map<string, { id: string; name: string }>();
   const projectByRoot = new Map<string, { id: string; name: string }>();

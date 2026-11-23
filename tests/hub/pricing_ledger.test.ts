@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { appendRunLedger, queryHubInsights, readRunLedger, type RunLedgerEntry } from "../../src/hub/ledger.ts";
-import { computeRunCost, resolveModelSpec, resolveQuotaPool } from "../../src/hub/pricing.ts";
+import { computeRunCost, enrichAgentRunRecord, inferRunMetricsFromRawLog, resolveModelSpec, resolveQuotaPool } from "../../src/hub/pricing.ts";
 import { readHubConfig, updateHubObservability } from "../../src/hub/registry.ts";
 
 const tempDirs: string[] = [];
@@ -208,5 +208,65 @@ describe("quota pool attribution, dual pricing & global insights ledger", () => 
 
     const filteredPool = queryHubInsights({ days: 7, quotaPool: "opencode-go" }, { cooldowns: {} });
     expect(filteredPool.kpi.totalRuns).toBe(3);
+  });
+
+  test("infers token usage and cost from legacy codex and opencode raw logs", () => {
+    const codexLog = [
+      "$ codex exec --model gpt-6.1-sol",
+      "Some work happened",
+      "tokens used",
+      "69,615",
+    ].join("\n");
+    const codexInferred = inferRunMetricsFromRawLog(codexLog);
+    expect(codexInferred.usage?.totalTokens).toBe(69615);
+    expect(codexInferred.estimated).toBe(true);
+
+    const enrichedCodex = enrichAgentRunRecord(
+      {
+        id: "RUN-CODEX-1",
+        action: "design",
+        harness: "codex",
+        model: "gpt-6.1-sol",
+        status: "succeeded",
+        startedAt: 1000,
+        endedAt: 189133,
+        exitCode: 0,
+        durationMs: 188133,
+        logPath: "runs/run-RUN-CODEX-1.log",
+      },
+      codexLog,
+    );
+    expect(enrichedCodex.quotaPool).toBe("openai-codex");
+    expect(enrichedCodex.billingMode).toBe("subscription");
+    expect(enrichedCodex.usage?.totalTokens).toBe(69615);
+    expect(enrichedCodex.cost?.equivalentCostUsd).toBeGreaterThan(0);
+
+    const opencodeLog = [
+      "[workbench:agent] harness=opencode model=opencode-go/deepseek-v4.1-flash",
+      "$ opencode run --standalone --model opencode-go/deepseek-v4.1-flash",
+      "|  Read     package.json",
+      "|  Grep     src/components",
+      "Finished analyzing components and editing routes.",
+    ].join("\n");
+    const enrichedOpencode = enrichAgentRunRecord(
+      {
+        id: "RUN-OC-1",
+        action: "implement",
+        harness: "opencode",
+        model: "opencode-go/deepseek-v4.1-flash",
+        status: "running",
+        startedAt: Date.now() - 10_000,
+        endedAt: null,
+        exitCode: null,
+        durationMs: 0,
+        logPath: "runs/run-RUN-OC-1.log",
+      },
+      opencodeLog,
+    );
+    expect(enrichedOpencode.quotaPool).toBe("opencode-go");
+    expect(enrichedOpencode.toolCallsCount).toBe(2);
+    expect(enrichedOpencode.turnsCount).toBe(3);
+    expect(enrichedOpencode.usage?.totalTokens).toBeGreaterThan(0);
+    expect(enrichedOpencode.cost?.equivalentCostUsd).toBeGreaterThan(0);
   });
 });

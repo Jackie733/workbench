@@ -83,6 +83,15 @@ export interface RunExecutorEvent {
   action?: AgentAction;
   harness?: string;
   model?: string;
+  reasoningEffort?: ModelTarget["reasoningEffort"];
+  quotaPool?: string;
+  billingMode?: RunBillingMode;
+  dispatchReason?: RunDispatchReason;
+  handoffMode?: RunHandoffMode;
+  parentRunId?: string;
+  contextWindow?: number;
+  tracePath?: string;
+  contextPath?: string;
   effectiveModel?: string;
   modelFallback?: boolean;
   chunk?: string;
@@ -1178,6 +1187,28 @@ export class HubExecutor {
       },
     });
     this.traceCollectors.set(runId, collector);
+    // Emit agent.run.started before run.init/handoff.snapshot so live UI subscribers always have the active run row ready.
+    this.emit({
+      type: "agent.run.started",
+      root: base,
+      requirementId: id,
+      runId,
+      action: input.action,
+      harness: target.harness,
+      model: target.model,
+      ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+      quotaPool: poolInfo.quotaPool,
+      billingMode: poolInfo.billingMode,
+      dispatchReason,
+      handoffMode,
+      ...(parentRunId ? { parentRunId } : {}),
+      contextWindow: modelSpec.contextWindow,
+      tracePath: traceRelPath,
+      contextPath: contextRelPath,
+      metrics: collector.snapshotMetrics(),
+      status: "running",
+      at: startedAt,
+    });
     collector.append({
       type: "run.init",
       action: input.action,
@@ -1260,18 +1291,6 @@ export class HubExecutor {
     };
     this.activeJobs.set(runId, job);
     globalActiveRunIds.add(runId);
-
-    this.emit({
-      type: "agent.run.started",
-      root: base,
-      requirementId: id,
-      runId,
-      action: input.action,
-      harness: target.harness,
-      model: target.model,
-      status: "running",
-      at: startedAt,
-    });
 
     const { idleTimeoutMs, maxDurationMs } = resolveRunTimeouts(input.action, {
       timeoutMs: input.timeoutMs,

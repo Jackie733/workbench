@@ -53,7 +53,7 @@ import { HubExecutor } from "../hub/executor.ts";
 import { appendRunLedger, queryHubInsights, type InsightsQueryFilter, type RunLedgerEntry } from "../hub/ledger.ts";
 import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
 import { NodeUpdates } from "../hub/node_updates.ts";
-import { QUOTA_POOL_LABELS } from "../hub/pricing.ts";
+import { enrichAgentRunRecord, QUOTA_POOL_LABELS } from "../hub/pricing.ts";
 import {
   applyHubRoutingPreset,
   browseDirectory,
@@ -461,9 +461,10 @@ export async function startWorkbenchServer(options: {
     const enrichRuns = (
       runs: Array<AgentRunRecord & { requirementId: string; root?: string; projectId?: string }>,
       nid: string,
+      harnesses: HarnessInfo[],
     ) =>
       runs.map((r) => ({
-        ...r,
+        ...enrichAgentRunRecord(r, undefined, { harnesses, observability: cfg.observability }),
         projectId: r.projectId ?? (r.root ? findProjectId(cfg, nid, r.root) : undefined),
       }));
 
@@ -477,14 +478,14 @@ export async function startWorkbenchServer(options: {
       connectedAt: serverStartedAt,
       lastSeenAt: Date.now(),
       harnesses: localHarnesses,
-      activeRuns: enrichRuns(executor.getActiveRuns(), LOCAL_NODE_ID),
+      activeRuns: enrichRuns(executor.getActiveRuns(), LOCAL_NODE_ID, localHarnesses),
       workbenchVersion: packageInfo.version,
       revision,
     };
 
     const connected = nodeRegistry.listConnectedNodes().map((n) => ({
       ...n,
-      activeRuns: enrichRuns(n.activeRuns, n.nodeId),
+      activeRuns: enrichRuns(n.activeRuns, n.nodeId, n.harnesses),
       update: nodeUpdates.get(n.nodeId),
     }));
     const seenIds = new Set<string>([LOCAL_NODE_ID, ...connected.map((n) => n.nodeId)]);
@@ -1109,16 +1110,190 @@ export async function startWorkbenchServer(options: {
     const target = resolveRequestTarget(req, url)!;
     if (!isLocalNodeId(target.nodeId)) {
       const cfg = readHubConfig();
-      return nodeRegistry.forwardProjectHttp(
+      const giteeToken = resolveEffectiveGiteeToken(cfg);
+      const outputLanguage = cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
+      const res = await nodeRegistry.forwardProjectHttp(
         target.nodeId,
         target.root,
         req,
         url,
         cfg.routing,
-        cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
-        resolveEffectiveGiteeToken(cfg),
+        outputLanguage,
+        giteeToken,
         cfg.observability,
       );
+      if (method !== "GET") return res;
+
+      const reqMatch = /^\/api\/requirements\/(REQ-\d{3,})(?:\/(.*))?$/.exec(pathname);
+      if (!reqMatch) return res;
+      const reqId = reqMatch[1]!;
+      const sub = reqMatch[2] ?? "";
+      const remoteNode = nodeRegistry.listConnectedNodes().find((n) => n.nodeId === target.nodeId);
+      const remoteHarnesses = remoteNode?.harnesses ?? [];
+      const activeForReq = (remoteNode?.activeRuns ?? []).filter(
+        (r) => r.requirementId === reqId && (!r.root || r.root === target.root),
+      );
+
+      const fetchRemoteJson = async (remotePath: string): Promise<Record<string, unknown> | null> => {
+        try {
+          const rpcRes = await nodeRegistry.rpc(
+            target.nodeId,
+            {
+              kind: "project_http",
+              method: "GET",
+              pathname: remotePath,
+              search: "",
+              projectRoot: target.root,
+              routing: cfg.routing,
+              outputLanguage,
+              ...(giteeToken !== undefined ? { giteeAccessToken: giteeToken } : {}),
+              ...(cfg.observability !== undefined ? { observability: cfg.observability } : {}),
+            },
+            15_000,
+          );
+          if (rpcRes.status >= 200 && rpcRes.status < 300 && isRecord(rpcRes.bodyJson)) {
+            return rpcRes.bodyJson as Record<string, unknown>;
+          }
+        } catch {
+          // Best-effort remote fallback for older nodes.
+        }
+        return null;
+      };
+
+      const enrichRemoteRuns = async (runs: AgentRunRecord[]): Promise<AgentRunRecord[]> => {
+        const mergedMap = new Map<string, AgentRunRecord>();
+        for (const r of runs) mergedMap.set(r.id, r);
+        for (const active of activeForReq) {
+          const existing = mergedMap.get(active.id);
+          mergedMap.set(active.id, existing ? { ...existing, ...active } : active);
+        }
+        const merged = Array.from(mergedMap.values()).sort(
+          (a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id),
+        );
+        // Fetch raw logs only for the most recent runs missing structured usage (running first, up to 8 runs).
+        const needLog = merged
+          .filter((r) => !r.usage)
+          .sort((a, b) => (a.status === "running" ? -1 : 1) - (b.status === "running" ? -1 : 1) || b.startedAt - a.startedAt)
+          .slice(0, 8);
+        const logMap = new Map<string, string>();
+        await Promise.all(
+          needLog.map(async (r) => {
+            const detail = await fetchRemoteJson(`/api/requirements/${reqId}/runs/${encodeURIComponent(r.id)}`);
+            if (detail && typeof detail.log === "string") {
+              logMap.set(r.id, detail.log);
+            }
+          }),
+        );
+        return merged.map((r) =>
+          enrichAgentRunRecord(r, logMap.get(r.id), {
+            harnesses: remoteHarnesses,
+            observability: cfg.observability,
+          }),
+        );
+      };
+
+      if (sub === "" && res.ok) {
+        const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (body && isRecord(body.detail) && isRecord((body.detail as { state?: unknown }).state)) {
+          const detailObj = body.detail as unknown as RequirementDetail;
+          const enrichedRuns = await enrichRemoteRuns(detailObj.state.agentRuns ?? []);
+          return jsonResponse({
+            ...body,
+            detail: {
+              ...detailObj,
+              state: {
+                ...detailObj.state,
+                agentRuns: enrichedRuns,
+              },
+            },
+          });
+        }
+        return jsonResponse(body ?? {});
+      }
+
+      if (sub === "runs") {
+        if (res.ok) {
+          const body = (await res.json().catch(() => null)) as { runs?: AgentRunRecord[] } | null;
+          const runs = Array.isArray(body?.runs) ? body.runs : [];
+          return jsonResponse({ runs: await enrichRemoteRuns(runs) });
+        }
+        if (res.status === 404) {
+          const detailBody = await fetchRemoteJson(`/api/requirements/${reqId}`);
+          const detailObj =
+            detailBody && isRecord(detailBody.detail) ? (detailBody.detail as unknown as RequirementDetail) : null;
+          const baseRuns = Array.isArray(detailObj?.state?.agentRuns) ? detailObj.state.agentRuns : [];
+          return jsonResponse({ runs: await enrichRemoteRuns(baseRuns) });
+        }
+      }
+
+      const traceMatch = /^runs\/([^/]+)\/trace$/.exec(sub);
+      if (traceMatch) {
+        const runId = decodeURIComponent(traceMatch[1]!);
+        if (res.ok) {
+          const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+          if (body && isRecord(body.record)) {
+            const rec = body.record as unknown as AgentRunRecord;
+            const log = !rec.usage
+              ? ((await fetchRemoteJson(`/api/requirements/${reqId}/runs/${encodeURIComponent(runId)}`))?.log as
+                  | string
+                  | undefined)
+              : undefined;
+            return jsonResponse({
+              ...body,
+              record: enrichAgentRunRecord(rec, log, { harnesses: remoteHarnesses, observability: cfg.observability }),
+            });
+          }
+          return jsonResponse(body ?? {});
+        }
+        if (res.status === 404) {
+          const detailBody = await fetchRemoteJson(`/api/requirements/${reqId}`);
+          const detailObj =
+            detailBody && isRecord(detailBody.detail) ? (detailBody.detail as unknown as RequirementDetail) : null;
+          const baseRun =
+            detailObj?.state?.agentRuns?.find((r) => r.id === runId) ??
+            activeForReq.find((r) => r.id === runId) ??
+            null;
+          const runDetail = await fetchRemoteJson(`/api/requirements/${reqId}/runs/${encodeURIComponent(runId)}`);
+          const log = typeof runDetail?.log === "string" ? runDetail.log : undefined;
+          const rawRecord = (baseRun ?? (isRecord(runDetail?.record) ? (runDetail.record as unknown as AgentRunRecord) : null));
+          const record = rawRecord
+            ? enrichAgentRunRecord(rawRecord, log, { harnesses: remoteHarnesses, observability: cfg.observability })
+            : null;
+          return jsonResponse({
+            runId,
+            live: record?.status === "running",
+            hasTrace: false,
+            record,
+            events: [],
+            nextSeq: 0,
+            totalEvents: 0,
+            hasMore: false,
+          });
+        }
+      }
+
+      const contextMatch = /^runs\/([^/]+)\/context$/.exec(sub);
+      if (contextMatch && res.status === 404) {
+        const runId = decodeURIComponent(contextMatch[1]!);
+        return jsonResponse({ runId, hasContext: false, context: null });
+      }
+
+      const runDetailMatch = /^runs\/([^/]+)$/.exec(sub);
+      if (runDetailMatch && res.ok) {
+        const body = (await res.json().catch(() => null)) as { record?: AgentRunRecord; log?: string } | null;
+        if (body && isRecord(body.record)) {
+          return jsonResponse({
+            record: enrichAgentRunRecord(body.record, body.record.usage ? undefined : body.log, {
+              harnesses: remoteHarnesses,
+              observability: cfg.observability,
+            }),
+            log: body.log ?? "",
+          });
+        }
+        return jsonResponse(body ?? {});
+      }
+
+      return res;
     }
 
     const handled = await handleProjectApi(req, url, target.root);

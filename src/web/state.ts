@@ -37,7 +37,7 @@ import {
 
 export type Scope = "active" | "decisions" | "sandboxes" | "done" | "cancelled" | "all";
 export type MainView = "workspace" | "insights";
-export type WorkspaceTab = "spec" | "diff" | "changes" | "timeline";
+export type WorkspaceTab = "spec" | "diff" | "changes" | "timeline" | "audit";
 export type DrawerTab = "discuss" | "console" | "diff";
 export type ProjectSortMode = "attention" | "recent" | "name" | "added";
 export type ProjectGroupMode = "none" | "node" | "status" | "category";
@@ -1106,4 +1106,212 @@ export function formatBytes(bytes: number | undefined | null): string {
   if (bytes < 1024) return `${Math.round(bytes)} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function estimateClientTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (
+      (code >= 0x4e00 && code <= 0x9fff) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0x3040 && code <= 0x30ff) ||
+      (code >= 0xac00 && code <= 0xd7af)
+    ) {
+      cjk++;
+    }
+  }
+  return Math.max(1, Math.ceil(cjk * 0.72 + (text.length - cjk) * 0.26));
+}
+
+function resolveClientPoolAndRates(harness: string, model: string): {
+  quotaPool: string;
+  billingMode: AgentRunRecord["billingMode"];
+  inputRate: number;
+  outputRate: number;
+  cacheReadRate: number;
+  contextWindow: number;
+} {
+  const m = model.toLowerCase();
+  const h = harness.toLowerCase();
+  let quotaPool = h || "unknown";
+  let billingMode: AgentRunRecord["billingMode"] = "subscription";
+
+  if (m.startsWith("opencode-go/")) {
+    quotaPool = "opencode-go";
+    billingMode = "subscription";
+  } else if (m.startsWith("opencode/") || m.endsWith("-free")) {
+    quotaPool = "opencode-free";
+    billingMode = "free";
+  } else if (h === "codex" || m.startsWith("openai-codex/")) {
+    quotaPool = "openai-codex";
+    billingMode = "subscription";
+  } else if (h === "qoder" || h === "qodercn" || m.startsWith("qoder-cn/")) {
+    quotaPool = "qoder-cn";
+    billingMode = "subscription";
+  } else if (h === "agy" || m.startsWith("google-antigravity/")) {
+    quotaPool = "google-antigravity";
+    billingMode = "subscription";
+  } else if (m.includes("/")) {
+    quotaPool = m.split("/")[0] || quotaPool;
+    billingMode = "api";
+  }
+
+  let inputRate = 1.0;
+  let outputRate = 4.0;
+  let cacheReadRate = 0.1;
+  let contextWindow = 128_000;
+  if (/gpt-6\.2-astra|gpt-6-astra/i.test(m)) {
+    inputRate = 2.5; outputRate = 15.0; cacheReadRate = 0.25; contextWindow = 400_000;
+  } else if (/gpt-6\.2-sol|gpt-6\.1-sol|gpt-6-sol|gpt-5\.4/i.test(m)) {
+    inputRate = 1.75; outputRate = 14.0; cacheReadRate = 0.175; contextWindow = 400_000;
+  } else if (/claude-opus/i.test(m)) {
+    inputRate = 15.0; outputRate = 75.0; cacheReadRate = 1.5; contextWindow = 200_000;
+  } else if (/claude-sonnet/i.test(m)) {
+    inputRate = 3.0; outputRate = 15.0; cacheReadRate = 0.3; contextWindow = 200_000;
+  } else if (/gemini-.*flash/i.test(m)) {
+    inputRate = 0.15; outputRate = 0.6; cacheReadRate = 0.015; contextWindow = 1_000_000;
+  } else if (/gemini/i.test(m)) {
+    inputRate = 1.25; outputRate = 10.0; cacheReadRate = 0.125; contextWindow = 1_000_000;
+  } else if (/deepseek-v4-pro|deepseek-r/i.test(m)) {
+    inputRate = 0.55; outputRate = 2.19; cacheReadRate = 0.055; contextWindow = 128_000;
+  } else if (/deepseek/i.test(m)) {
+    inputRate = 0.27; outputRate = 1.1; cacheReadRate = 0.027; contextWindow = 128_000;
+  } else if (/glm-5/i.test(m)) {
+    inputRate = 0.5; outputRate = 2.0; cacheReadRate = 0.05; contextWindow = 200_000;
+  } else if (/qwen/i.test(m)) {
+    inputRate = 0.6; outputRate = 2.4; cacheReadRate = 0.06; contextWindow = 256_000;
+  }
+
+  return { quotaPool, billingMode, inputRate, outputRate, cacheReadRate, contextWindow };
+}
+
+/** Fill missing telemetry (pool, cost, raw log estimation) for display without mutating server records. */
+export function enrichRunForDisplay(run: AgentRunRecord, rawLog?: string): AgentRunRecord {
+  const { quotaPool, billingMode, inputRate, outputRate, cacheReadRate, contextWindow } =
+    resolveClientPoolAndRates(run.harness, run.model);
+  let usage = run.usage;
+  let toolCallsCount = run.toolCallsCount;
+  let turnsCount = run.turnsCount;
+
+  if (!usage && rawLog && rawLog.trim()) {
+    const cleaned = rawLog.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+    let codexTotal = 0;
+    for (const match of cleaned.matchAll(/tokens used\s*[\r\n]+\s*([\d,]+)/gi)) {
+      const parsed = Number(String(match[1] ?? "").replace(/,/g, ""));
+      if (Number.isFinite(parsed) && parsed > 0) codexTotal = parsed;
+    }
+    const lines = cleaned.split(/\r?\n/);
+    let tools = 0;
+    let steps = 0;
+    let thinkings = 0;
+    let inHeader = true;
+    let seenLauncher = false;
+    for (let idx = 0; idx < lines.length; idx++) {
+      const tr = (lines[idx] ?? "").trim();
+      if (!tr) continue;
+      if (tr.startsWith("[workbench:")) {
+        inHeader = true;
+        continue;
+      }
+      if (/^>\s+\S+\s+·\s+\S+\s*$/.test(tr)) {
+        inHeader = false;
+        steps++;
+      } else if (tr === "thinking" || /^Thinking:/i.test(tr)) {
+        inHeader = false;
+        thinkings++;
+      } else if (/^\$\s+\S+/.test(tr)) {
+        if (!seenLauncher && inHeader) {
+          seenLauncher = true;
+          continue;
+        }
+        seenLauncher = true;
+        inHeader = false;
+        tools++;
+      } else if (
+        /^(?:\u2192|\u2190|\u2731|\|)\s+[A-Z][A-Za-z0-9_-]*\b/.test(tr) ||
+        tr === "exec" ||
+        tr.startsWith("\ud83d\udd27")
+      ) {
+        inHeader = false;
+        tools++;
+      }
+    }
+    const inferredTurns = steps > 0 ? steps : thinkings > 0 ? thinkings : Math.max(1, tools > 0 ? Math.min(tools + 1, 200) : 1);
+    if (codexTotal > 0) {
+      const inputTokens = Math.round(codexTotal * 0.82);
+      const outputTokens = Math.max(0, codexTotal - inputTokens);
+      usage = {
+        inputTokens,
+        uncachedInputTokens: inputTokens,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens,
+        reasoningTokens: 0,
+        totalTokens: codexTotal,
+      };
+      toolCallsCount = toolCallsCount ?? tools;
+      turnsCount = turnsCount ?? inferredTurns;
+    } else {
+      const body = lines.filter((l) => l.trim() && !l.trim().startsWith("[workbench:")).join("\n");
+      if (body.length > 0) {
+        const bodyTokens = Math.max(1, estimateClientTokens(body));
+        const estOut = Math.max(1, Math.round(bodyTokens * 0.28));
+        const estIn = Math.max(bodyTokens - estOut, tools * 350, 1);
+        usage = {
+          inputTokens: estIn,
+          uncachedInputTokens: estIn,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: estOut,
+          reasoningTokens: 0,
+          totalTokens: estIn + estOut,
+        };
+        toolCallsCount = toolCallsCount ?? tools;
+        turnsCount = turnsCount ?? inferredTurns;
+      }
+    }
+  }
+
+  const effPool = run.quotaPool || quotaPool;
+  const effMode = run.billingMode || billingMode;
+  let cost = run.cost;
+  if ((!cost || cost.costSource === "unknown") && usage && usage.totalTokens > 0) {
+    if (effMode === "free") {
+      cost = { apiCostUsd: 0, equivalentCostUsd: 0, billingMode: effMode, costSource: "free", quotaPool: effPool, currency: "USD" };
+    } else {
+      const raw =
+        (Math.max(0, usage.uncachedInputTokens) * inputRate +
+          Math.max(0, usage.cacheReadTokens) * cacheReadRate +
+          Math.max(0, usage.outputTokens + usage.reasoningTokens) * outputRate) /
+        1_000_000;
+      const rounded = Math.round(raw * 1_000_000) / 1_000_000;
+      cost = {
+        apiCostUsd: effMode === "api" ? rounded : 0,
+        equivalentCostUsd: rounded,
+        billingMode: effMode ?? "subscription",
+        costSource: "estimated",
+        quotaPool: effPool,
+        currency: "USD",
+      };
+    }
+  }
+
+  const durationMs =
+    run.status === "running" && (!run.durationMs || run.durationMs <= 0)
+      ? Math.max(0, Date.now() - run.startedAt)
+      : run.durationMs;
+
+  return {
+    ...run,
+    quotaPool: effPool,
+    billingMode: effMode,
+    contextWindow: run.contextWindow ?? contextWindow,
+    durationMs,
+    ...(usage ? { usage } : {}),
+    ...(cost ? { cost } : {}),
+    ...(typeof turnsCount === "number" ? { turnsCount } : {}),
+    ...(typeof toolCallsCount === "number" ? { toolCallsCount } : {}),
+  };
 }

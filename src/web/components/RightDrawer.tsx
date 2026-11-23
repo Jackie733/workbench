@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AlertTriangle, Check, ExternalLink, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
+import { AlertTriangle, Check, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
 import { api } from "../api.ts";
 import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
@@ -9,7 +9,6 @@ import {
   hydrateRunLog,
   hydrateRunTrace,
   openHandoff,
-  openRunAudit,
   openRunConsole,
   runAskFromDrawer,
   runRefineFromDrawer,
@@ -19,6 +18,7 @@ import {
 } from "../queries.ts";
 import {
   AGENT_RUN_TONE,
+  enrichRunForDisplay,
   formatDateTime,
   formatDurationHuman,
   formatPercent,
@@ -218,9 +218,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
         : runs.find((r) => r.id === currentRunId) ?? null
       : null;
   const currentLiveMetrics = currentRunId ? liveRunMetrics[currentRunId] : undefined;
-  const currentRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
+  const rawBaseRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
 
-  const liveText = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] ?? "" : ""));
+  const liveText = useStreamStore((s) => (rawBaseRun ? s.liveRunLogs[rawBaseRun.id] ?? "" : ""));
+  const currentRun = rawBaseRun ? enrichRunForDisplay(rawBaseRun, liveText) : null;
   const isLogHydrated = useStreamStore((s) => (currentRun ? Boolean(s.logHydrated[currentRun.id]) : false));
   const traceState = currentRun ? runTraces[currentRun.id] : undefined;
   const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
@@ -561,14 +562,6 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           )}
                         </div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          <button
-                            className="btn ghost xs"
-                            type="button"
-                            data-testid="open-run-audit-btn"
-                            onClick={() => void openRunAudit(d.state.id, currentRun.id)}
-                          >
-                            <Icon icon={ExternalLink} size={14} /> {t(language, "drawer.deepAudit")}
-                          </button>
                           {currentRun.status === "running" ? (
                             <button
                               className="btn danger xs"

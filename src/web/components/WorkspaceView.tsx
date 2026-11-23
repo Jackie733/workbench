@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   ArrowUp,
   Ban,
+  BarChart3,
   Bug,
   Check,
   CheckCircle2,
@@ -1958,8 +1959,8 @@ function ChangesVerifyTab({
   );
 }
 
-import { TimelineRunsTab } from "./ExecutionAuditTab.tsx";
-export { TimelineRunsTab };
+import { ExecutionAuditTab, TimelineRunsTab } from "./ExecutionAuditTab.tsx";
+export { ExecutionAuditTab, TimelineRunsTab };
 
 export function WorkspaceView() {
   const language = useUiStore((s) => s.language);
@@ -2687,6 +2688,14 @@ export function WorkspaceView() {
         >
           <Icon icon={History} size={14} /> {t(language, "ws.tab.timeline")}
         </button>
+        <button
+          className={`tab ${workspaceTab === "audit" ? "active" : ""}`}
+          type="button"
+          data-testid="tab-audit"
+          onClick={() => setWorkspaceTab("audit")}
+        >
+          <Icon icon={BarChart3} size={14} /> {t(language, "ws.tab.audit")}
+        </button>
       </div>
 
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
@@ -2696,6 +2705,8 @@ export function WorkspaceView() {
           <DiffViewerPanel d={d} />
         ) : workspaceTab === "changes" ? (
           <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} runLocked={runningThis} />
+        ) : workspaceTab === "audit" ? (
+          <ExecutionAuditTab d={d} />
         ) : (
           <TimelineRunsTab d={d} />
         )}

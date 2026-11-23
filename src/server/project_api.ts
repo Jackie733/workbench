@@ -39,6 +39,7 @@ import {
   type SpawnSubRequirementItem,
 } from "../core/engine.ts";
 import { discoverProjectContext } from "../core/context.ts";
+import { resolveSafePath } from "../core/fs.ts";
 import {
   normalizeAttachments,
   readAttachmentForServe,
@@ -77,7 +78,9 @@ import { captureRequirementScreenshots } from "../core/screenshots.ts";
 import { isProjectInitialized, readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
+  WORKBENCH_DIR,
   type AgentAction,
+  type AgentRunRecord,
   type CriterionInput,
   type OutputLanguage,
   type ProjectGiteeConfig,
@@ -101,6 +104,8 @@ import {
 } from "../hub/evolution.ts";
 import type { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
+import { enrichAgentRunRecord } from "../hub/pricing.ts";
+import { readHubConfig } from "../hub/registry.ts";
 import { REASONING_EFFORTS, type ReasoningEffort } from "../hub/types.ts";
 import { buildAgentPrompt, type DispatchAction } from "./prompts.ts";
 
@@ -962,6 +967,47 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           }
         }
         const sandboxDrift = sandbox ? await inspectRsiSandboxDrift(base, id).catch(() => null) : null;
+        const obs = readHubConfig().observability;
+        const activeById = new Map(
+          deps.executor
+            .getActiveRuns(base)
+            .filter((r) => r.requirementId === id)
+            .map((r) => [r.id, r]),
+        );
+        const readLogSafe = (runId: string): string | undefined => {
+          const live = deps.executor.getLiveLog(runId);
+          if (live !== null) return live;
+          try {
+            const p = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${path.basename(runId)}.log`);
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+          } catch {
+            // ignore missing or unsafe log path
+          }
+          return undefined;
+        };
+        const mergedRuns = (detail.state.agentRuns ?? []).map((r) => {
+          const active = activeById.get(r.id);
+          const candidate: AgentRunRecord = active ? { ...r, ...active } : r;
+          return enrichAgentRunRecord(candidate, candidate.usage ? undefined : readLogSafe(candidate.id), {
+            observability: obs,
+          });
+        });
+        for (const active of activeById.values()) {
+          if (!mergedRuns.some((r) => r.id === active.id)) {
+            mergedRuns.push(
+              enrichAgentRunRecord(active, active.usage ? undefined : readLogSafe(active.id), {
+                observability: obs,
+              }),
+            );
+          }
+        }
+        detail = {
+          ...detail,
+          state: {
+            ...detail.state,
+            agentRuns: mergedRuns,
+          },
+        };
         return jsonResponse({
           detail,
           bridge: bridgeStatus,
@@ -1252,6 +1298,18 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       if (method === "GET" && sub === "runs") {
+        const obs = readHubConfig().observability;
+        const readLogSafe = (runId: string): string | undefined => {
+          const live = deps.executor.getLiveLog(runId);
+          if (live !== null) return live;
+          try {
+            const p = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${path.basename(runId)}.log`);
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+          } catch {
+            // ignore missing or unsafe log path
+          }
+          return undefined;
+        };
         const diskRuns = listRequirementAgentRuns(base, id);
         const activeMap = new Map(
           deps.executor
@@ -1259,9 +1317,20 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             .filter((r) => r.requirementId === id)
             .map((r) => [r.id, r]),
         );
-        const merged = diskRuns.map((r) => activeMap.get(r.id) ?? r);
+        const merged = diskRuns.map((r) => {
+          const candidate = activeMap.get(r.id) ?? r;
+          return enrichAgentRunRecord(candidate, candidate.usage ? undefined : readLogSafe(candidate.id), {
+            observability: obs,
+          });
+        });
         for (const active of activeMap.values()) {
-          if (!merged.some((r) => r.id === active.id)) merged.push(active);
+          if (!merged.some((r) => r.id === active.id)) {
+            merged.push(
+              enrichAgentRunRecord(active, active.usage ? undefined : readLogSafe(active.id), {
+                observability: obs,
+              }),
+            );
+          }
         }
         merged.sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
         return jsonResponse({ runs: merged });
@@ -1277,6 +1346,18 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const runTraceMatch = /^runs\/([^/]+)\/trace$/.exec(sub);
       if (method === "GET" && runTraceMatch) {
         const runId = decodeURIComponent(runTraceMatch[1]!);
+        const obs = readHubConfig().observability;
+        const readLogSafe = (): string | undefined => {
+          const live = deps.executor.getLiveLog(runId);
+          if (live !== null) return live;
+          try {
+            const p = resolveSafePath(base, `${WORKBENCH_DIR}/items/${id}/runs/run-${path.basename(runId)}.log`);
+            if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+          } catch {
+            // ignore missing or unsafe log path
+          }
+          return undefined;
+        };
         const afterSeqRaw = Number(url.searchParams.get("afterSeq") ?? "0");
         const limitRaw = Number(url.searchParams.get("limit") ?? "2000");
         const afterSeq = Number.isFinite(afterSeqRaw) ? Math.max(0, Math.floor(afterSeqRaw)) : 0;
@@ -1289,7 +1370,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
               runId,
               live: true,
               hasTrace: true,
-              record: active,
+              record: enrichAgentRunRecord(active, active.usage ? undefined : readLogSafe(), { observability: obs }),
               ...liveTrace,
             });
           }
@@ -1299,7 +1380,11 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           runId,
           live: false,
           hasTrace: diskTrace.traceAvailable,
-          record: diskTrace.record,
+          record: diskTrace.record
+            ? enrichAgentRunRecord(diskTrace.record, diskTrace.record.usage ? undefined : readLogSafe(), {
+                observability: obs,
+              })
+            : null,
           events: diskTrace.events,
           nextSeq: diskTrace.nextSeq,
           totalEvents: diskTrace.totalEvents,
@@ -1317,12 +1402,24 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const runDetailMatch = /^runs\/([^/]+)$/.exec(sub);
       if (method === "GET" && runDetailMatch) {
         const runId = decodeURIComponent(runDetailMatch[1]!);
+        const obs = readHubConfig().observability;
         const liveLog = deps.executor.getLiveLog(runId);
         if (liveLog !== null) {
           const active = deps.executor.getActiveRuns(base).find((r) => r.id === runId);
-          if (active) return jsonResponse({ record: active, log: liveLog });
+          if (active) {
+            return jsonResponse({
+              record: enrichAgentRunRecord(active, active.usage ? undefined : liveLog, { observability: obs }),
+              log: liveLog,
+            });
+          }
         }
-        return jsonResponse(getAgentRunDetail(base, id, runId));
+        const detail = getAgentRunDetail(base, id, runId);
+        return jsonResponse({
+          record: enrichAgentRunRecord(detail.record, detail.record.usage ? undefined : detail.log, {
+            observability: obs,
+          }),
+          log: detail.log,
+        });
       }
 
       if (method === "POST" && sub === "approve") {

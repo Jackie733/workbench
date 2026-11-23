@@ -312,19 +312,40 @@ suite("Agent Observability E2E (Chromium)", () => {
     fs.writeFileSync(releaseRun2Flag, "go");
     await run2Done;
 
-    // 3. Execution Audit tab: summary strip + 4 inspector tabs including Context diff vs parent
+    // 3. Timeline tab stays clean (no stacked audit summary/inspector), and right drawer has no redundant deep audit button
+    expect(
+      await page.evaluate(() => document.querySelector('[data-testid="open-run-audit-btn"]')),
+    ).toBeNull();
     await clickReady(page, '[data-testid="tab-timeline"]');
+    await page.waitForSelector('[data-testid="timeline-run-row-' + run2Started.run.id + '"]', { timeout: 5000 });
+    expect(
+      await page.evaluate(() => document.querySelector('[data-testid="req-audit-summary"]')),
+    ).toBeNull();
+    expect(
+      await page.evaluate(() => document.querySelector('[data-testid="run-inspector-panel"]')),
+    ).toBeNull();
+
+    // 3b. Dedicated Stats & Audit tab: no duplicate terminal tabs (trace/raw), visual dsh-context composition + activity + context diff
+    await clickReady(page, '[data-testid="tab-audit"]');
     await page.waitForSelector('[data-testid="req-audit-summary"]', { timeout: 5000 });
     await page.waitForSelector('[data-testid="run-inspector-panel"]', { timeout: 5000 });
+    expect(
+      await page.evaluate(() => document.querySelector('[data-testid="inspector-tab-trace"]')),
+    ).toBeNull();
+    expect(
+      await page.evaluate(() => document.querySelector('[data-testid="inspector-tab-raw"]')),
+    ).toBeNull();
     await clickReady(page, `[data-testid="inspect-run-btn-${run2Started.run.id}"]`);
+    await page.waitForSelector('[data-testid="inspector-pane-usage"]', { timeout: 5000 });
+    await page.waitForSelector('[data-testid="context-composition-grid"]', { timeout: 5000 });
+    await clickReady(page, '[data-testid="inspector-tab-activity"]');
+    await page.waitForSelector('[data-testid="inspector-pane-activity"]', { timeout: 5000 });
+    await page.waitForSelector('[data-testid="audit-tool-distribution"]', { timeout: 5000 });
+    await page.waitForSelector('[data-testid="audit-file-activity"]', { timeout: 5000 });
     await clickReady(page, '[data-testid="inspector-tab-context"]');
     await page.waitForSelector('[data-testid="context-handoff-md"]', { timeout: 5000 });
     await clickReady(page, '[data-testid="handoff-diff-btn"]');
     await page.waitForSelector('[data-testid="context-handoff-diff"]', { timeout: 5000 });
-    await clickReady(page, '[data-testid="inspector-tab-usage"]');
-    await page.waitForSelector('[data-testid="inspector-pane-usage"]', { timeout: 5000 });
-    await clickReady(page, '[data-testid="inspector-tab-raw"]');
-    await page.waitForSelector('[data-testid="inspector-pane-raw"]', { timeout: 5000 });
 
     // 4. Option A Global Insights view: topbar entry hides drawer, sets URL view=insights, and rolls up omp into opencode-go
     await clickReady(page, '[data-testid="topbar-insights-btn"]');
@@ -342,7 +363,7 @@ suite("Agent Observability E2E (Chromium)", () => {
 
     // Jump back from Insights into REQ-001 workspace
     await clickReady(page, '[data-testid="insights-jump-req-REQ-001"]');
-    await page.waitForSelector('[data-testid="tab-timeline"]', { timeout: 6000 });
+    await page.waitForSelector('[data-testid="tab-audit"]', { timeout: 6000 });
 
     expect(pageErrors).toEqual([]);
     expect(httpErrors).toEqual([]);

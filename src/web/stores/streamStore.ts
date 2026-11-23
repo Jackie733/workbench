@@ -67,7 +67,8 @@ export const useStreamStore = create<StreamStoreState>((set) => ({
       for (const r of runs) {
         // 旧快照可能仍包含已经结束的运行，结束标记优先于快照。
         if (s.finishedRuns[r.id]) continue;
-        nextActive[r.id] = r;
+        const liveMetrics = s.liveRunMetrics[r.id];
+        nextActive[r.id] = liveMetrics ? { ...r, ...liveMetrics } : r;
       }
       const nextLocallyStarted: Record<string, number> = {};
       for (const [id, run] of Object.entries(s.activeRuns)) {

@@ -1,4 +1,4 @@
-import type { RunBillingMode, RunCostSummary, RunTokenUsage } from "../core/types.ts";
+import type { AgentRunRecord, RunBillingMode, RunCostSummary, RunTokenUsage } from "../core/types.ts";
 import type { HarnessInfo, HubObservabilityConfig, ModelPriceOverride } from "./types.ts";
 
 export interface QuotaPoolResolution {
@@ -96,15 +96,15 @@ function defaultBillingForPool(pool: string, model: string, isFreeHint?: boolean
  * - `omp` never acts as a provider pool; it always delegates to the underlying `<provider>` prefix.
  */
 export function resolveQuotaPool(
-  harness: string,
-  model: string,
+  harness = "",
+  model = "",
   options: {
     billingOverrides?: Record<string, RunBillingMode>;
     isFreeHint?: boolean;
   } = {},
 ): QuotaPoolResolution {
-  const h = harness.trim().toLowerCase();
-  const m = model.trim();
+  const h = (typeof harness === "string" ? harness : "").trim().toLowerCase();
+  const m = (typeof model === "string" ? model : "").trim();
   const slashIdx = m.indexOf("/");
   const prefix = slashIdx > 0 ? m.slice(0, slashIdx) : "";
   const isFreeModel = Boolean(options.isFreeHint) || /-free(?::|$)/i.test(m) || m === "opencode/big-pickle";
@@ -172,15 +172,17 @@ function findPricingOverride(
 }
 
 export function resolveModelSpec(
-  harness: string,
-  model: string,
+  harness = "",
+  model = "",
   harnessesCatalog: HarnessInfo[] = [],
   observability?: HubObservabilityConfig,
 ): ResolvedModelPriceSpec {
-  const { quotaPool, billingMode } = resolveQuotaPool(harness, model, {
+  const safeHarness = typeof harness === "string" ? harness : "";
+  const safeModel = typeof model === "string" ? model : "";
+  const { quotaPool, billingMode } = resolveQuotaPool(safeHarness, safeModel, {
     billingOverrides: observability?.billingOverrides,
   });
-  const override = findPricingOverride(harness, model, quotaPool, observability?.pricingOverrides);
+  const override = findPricingOverride(safeHarness, safeModel, quotaPool, observability?.pricingOverrides);
   if (override) {
     return {
       input: override.input,
@@ -192,12 +194,12 @@ export function resolveModelSpec(
     };
   }
 
-  const hInfo = harnessesCatalog.find((h) => h.id === harness);
+  const hInfo = harnessesCatalog.find((h) => h.id === safeHarness);
   const mInfo =
-    hInfo?.models.find((m) => m.id === model) ??
-    hInfo?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(model));
+    hInfo?.models.find((m) => m.id === safeModel) ??
+    hInfo?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(safeModel));
 
-  const builtin = BUILTIN_MODEL_PRICING.find((r) => r.match.test(model));
+  const builtin = BUILTIN_MODEL_PRICING.find((r) => r.match.test(safeModel));
 
   if (mInfo?.cost && (mInfo.cost.input > 0 || mInfo.cost.output > 0)) {
     return {
@@ -306,4 +308,205 @@ export function estimateTokens(text: string): number {
   }
   const nonCjk = text.length - cjk;
   return Math.max(1, Math.ceil(cjk * 0.72 + nonCjk * 0.26));
+}
+
+export interface InferredLogMetrics {
+  usage?: RunTokenUsage;
+  turnsCount?: number;
+  toolCallsCount?: number;
+  toolErrorCount?: number;
+  estimated?: boolean;
+}
+
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+const OPENCODE_STEP_LINE_RE = /^>\s+\S+\s+·\s+\S+\s*$/;
+const OPENCODE_TOOL_LINE_RE = /^(?:\u2192|\u2190|\u2731|\|)\s+([A-Z][A-Za-z0-9_-]*)\b(.*)$/;
+const SHELL_CMD_LINE_RE = /^\$\s+\S+/;
+
+/** Infer token usage and tool activity from raw harness stdout logs when structured telemetry is unavailable. */
+export function inferRunMetricsFromRawLog(rawLog: string): InferredLogMetrics {
+  if (!rawLog || !rawLog.trim()) return {};
+  const cleaned = rawLog.replace(ANSI_ESCAPE_RE, "");
+
+  let codexReportedTotal = 0;
+  const codexMatches = cleaned.matchAll(/tokens used\s*[\r\n]+\s*([\d,]+)/gi);
+  for (const m of codexMatches) {
+    const parsed = Number(String(m[1] ?? "").replace(/,/g, ""));
+    if (Number.isFinite(parsed) && parsed > 0) codexReportedTotal = parsed;
+  }
+
+  let stepCount = 0;
+  let thinkingCount = 0;
+  let toolCallsCount = 0;
+  let toolErrorCount = 0;
+  let assistantTextChars = 0;
+  let inWorkbenchHeader = true;
+  let seenLauncherCmd = false;
+
+  const lines = cleaned.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.startsWith("[workbench:")) {
+      inWorkbenchHeader = true;
+      continue;
+    }
+
+    if (OPENCODE_STEP_LINE_RE.test(trimmed)) {
+      inWorkbenchHeader = false;
+      stepCount++;
+      continue;
+    }
+
+    if (trimmed === "thinking" || /^Thinking:/i.test(trimmed)) {
+      inWorkbenchHeader = false;
+      thinkingCount++;
+      continue;
+    }
+
+    const ocTool = trimmed.match(OPENCODE_TOOL_LINE_RE);
+    if (ocTool) {
+      inWorkbenchHeader = false;
+      toolCallsCount++;
+      if (/\b(error|failed|enoent|exit\s+[1-9])\b/i.test(ocTool[2] ?? "")) {
+        toolErrorCount++;
+      }
+      continue;
+    }
+
+    if (SHELL_CMD_LINE_RE.test(trimmed)) {
+      if (!seenLauncherCmd && inWorkbenchHeader) {
+        seenLauncherCmd = true;
+        continue;
+      }
+      seenLauncherCmd = true;
+      inWorkbenchHeader = false;
+      toolCallsCount++;
+      continue;
+    }
+
+    if (trimmed === "exec" || trimmed.startsWith("\ud83d\udd27")) {
+      inWorkbenchHeader = false;
+      toolCallsCount++;
+      continue;
+    }
+
+    if (/^(Error|Tool error|Failed to)\b/i.test(trimmed)) {
+      toolErrorCount++;
+    }
+
+    if (!inWorkbenchHeader) {
+      assistantTextChars += trimmed.length;
+    }
+    if (trimmed.startsWith("> ") || trimmed.startsWith("assistant:")) {
+      inWorkbenchHeader = false;
+    }
+  }
+
+  const turnsCount =
+    stepCount > 0
+      ? stepCount
+      : thinkingCount > 0
+        ? thinkingCount
+        : toolCallsCount > 0
+          ? Math.min(toolCallsCount + 1, 200)
+          : assistantTextChars > 0
+            ? 1
+            : 0;
+
+  if (codexReportedTotal > 0) {
+    const inputTokens = Math.round(codexReportedTotal * 0.82);
+    const outputTokens = Math.max(0, codexReportedTotal - inputTokens);
+    return {
+      usage: {
+        inputTokens,
+        uncachedInputTokens: inputTokens,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens,
+        reasoningTokens: 0,
+        totalTokens: codexReportedTotal,
+      },
+      turnsCount: Math.max(turnsCount, 1),
+      toolCallsCount,
+      toolErrorCount,
+      estimated: true,
+    };
+  }
+
+  // Filter out header-only logs with no model activity yet.
+  const bodyLines = lines.filter((l) => l.trim() && !l.trim().startsWith("[workbench:"));
+  if (bodyLines.length === 0) return {};
+
+  const bodyText = bodyLines.join("\n");
+  const bodyTokens = Math.max(1, estimateTokens(bodyText));
+  const estimatedOutput = Math.max(1, Math.round(bodyTokens * 0.28));
+  const estimatedInput = Math.max(bodyTokens - estimatedOutput, toolCallsCount * 350, 1);
+  const totalTokens = estimatedInput + estimatedOutput;
+  if (totalTokens <= 0) return {};
+
+  return {
+    usage: {
+      inputTokens: estimatedInput,
+      uncachedInputTokens: estimatedInput,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: estimatedOutput,
+      reasoningTokens: 0,
+      totalTokens,
+    },
+    turnsCount: Math.max(turnsCount, 1),
+    toolCallsCount,
+    toolErrorCount,
+    estimated: true,
+  };
+}
+
+/** Backfill quota pool, billing mode, context window, estimated log usage, and cost on any run record. */
+export function enrichAgentRunRecord<T extends AgentRunRecord>(
+  run: T,
+  rawLog?: string,
+  options?: {
+    harnesses?: HarnessInfo[];
+    observability?: HubObservabilityConfig;
+  },
+): T & AgentRunRecord {
+  if (!run || typeof run !== "object") return run;
+  const harness = typeof run.harness === "string" ? run.harness : "";
+  const model = typeof run.model === "string" ? run.model : "";
+  if (!harness && !model) return run;
+
+  const obs = options?.observability;
+  const pool = resolveQuotaPool(harness, model, { billingOverrides: obs?.billingOverrides });
+  const spec = resolveModelSpec(harness, model, options?.harnesses, obs);
+  const inferred = !run.usage && rawLog ? inferRunMetricsFromRawLog(rawLog) : {};
+
+  const usage = run.usage ?? inferred.usage;
+  const quotaPool = run.quotaPool || pool.quotaPool;
+  const billingMode = run.billingMode || pool.billingMode;
+  const contextWindow = run.contextWindow ?? spec.contextWindow;
+  const turnsCount = run.turnsCount ?? inferred.turnsCount;
+  const toolCallsCount = run.toolCallsCount ?? inferred.toolCallsCount;
+  const toolErrorCount = run.toolErrorCount ?? inferred.toolErrorCount;
+
+  const cost =
+    run.cost && run.cost.costSource !== "unknown"
+      ? run.cost
+      : usage && usage.totalTokens > 0
+        ? computeRunCost(usage, spec, billingMode, quotaPool)
+        : run.cost;
+
+  return {
+    ...run,
+    quotaPool,
+    billingMode,
+    contextWindow,
+    ...(usage ? { usage } : {}),
+    ...(cost ? { cost } : {}),
+    ...(typeof turnsCount === "number" ? { turnsCount } : {}),
+    ...(typeof toolCallsCount === "number" ? { toolCallsCount } : {}),
+    ...(typeof toolErrorCount === "number" ? { toolErrorCount } : {}),
+  };
 }

@@ -1372,8 +1372,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(before.windowScrollY).toBe(0);
       expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
 
-      // Tabs 栏不能被内容区挤压成细条，四个按钮必须完整位于栏内且仍可点击。
-      expect(before.buttons.map((b) => b.text)).toEqual(["规范与方案", "代码变更", "验证与截图", "时间线与运行"]);
+      // Tabs 栏不能被内容区挤压成细条，五个按钮必须完整位于栏内且仍可点击。
+      expect(before.buttons.map((b) => b.text)).toEqual([
+        "规范与方案",
+        "代码变更",
+        "验证与截图",
+        "时间线与运行",
+        "统计与审计",
+      ]);
       expect(before.tabsHeight).toBeGreaterThan(30);
       for (const button of before.buttons) {
         expect(button.height).toBeGreaterThan(30);
@@ -1384,7 +1390,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       // Tabs 栏与下方滚动内容不重叠，滚动条出现在内容区而不是覆盖按钮。
       expect(before.tabsBottom).toBeLessThanOrEqual(before.scrollTop + 0.5);
 
-      for (const tab of ["tab-diff", "tab-changes", "tab-timeline", "tab-spec"] as const) {
+      for (const tab of ["tab-diff", "tab-changes", "tab-timeline", "tab-audit", "tab-spec"] as const) {
         await page.click(`[data-testid="${tab}"]`);
         await new Promise((r) => setTimeout(r, 100));
         const after = await readTabs();

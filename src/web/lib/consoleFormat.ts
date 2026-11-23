@@ -64,6 +64,10 @@ const ERROR_LINE_RE =
   /^(?:\[(?:spawn error|timeout|error)\]|(?:API error|FATAL|Unhandled(?:Rejection| Exception)?|SyntaxError|TypeError|ReferenceError|RangeError|ERROR|Error)\s*:|.*(?:RESOURCE_EXHAUSTED|You've hit your usage limit|\b429\s+Too Many Requests\b|(?:HTTP|status|code)\s*[:=]\s*429\b))/i;
 
 const EXEC_RESULT_RE = /^(.+?)\s+(?:in\s+.+?\s+)?(succeeded|exited\s+(-?\d+))\s+in\s+([^\s:]+):?$/;
+const OPENCODE_STEP_RE = /^>\s+\S+\s+·\s+\S+\s*$/;
+const OPENCODE_THINK_RE = /^Thinking:\s*(.*)$/;
+const OPENCODE_TOOL_ARROW_RE = /^(?:\u2192|\u2190|\u2731|\|)\s+([A-Z][A-Za-z0-9_-]*)\b(.*)$/;
+const SHELL_CMD_LINE_RE = /^\$\s+(.+)$/;
 
 /** Strips ANSI CSI/OSC/ESC control sequences and normalizes line endings. */
 export function stripAnsi(text: string): string {
@@ -103,11 +107,22 @@ function isErrorStart(trimmed: string): boolean {
   return false;
 }
 
+function isLauncherCmdLine(lines: string[], idx: number): boolean {
+  const trimmed = (lines[idx] ?? "").trim();
+  if (!SHELL_CMD_LINE_RE.test(trimmed)) return false;
+  if (idx === 0) return true;
+  for (let k = 0; k < idx; k++) {
+    const prev = (lines[k] ?? "").trim();
+    if (prev && !prev.startsWith("[workbench:")) return false;
+  }
+  return true;
+}
+
 function isStructuralBoundary(lines: string[], idx: number): boolean {
   const line = lines[idx] ?? "";
   const trimmed = line.trim();
   if (!trimmed) return false;
-  if (idx === 0 && trimmed.startsWith("$ ")) return true;
+  if (isLauncherCmdLine(lines, idx)) return true;
   if (
     trimmed === "user" ||
     trimmed === "user:" ||
@@ -129,6 +144,8 @@ function isStructuralBoundary(lines: string[], idx: number): boolean {
     return true;
   }
   if (CODEX_BANNER_RE.test(trimmed) || STDIN_LINE_RE.test(trimmed)) return true;
+  if (OPENCODE_STEP_RE.test(trimmed) || OPENCODE_THINK_RE.test(trimmed) || OPENCODE_TOOL_ARROW_RE.test(trimmed)) return true;
+  if (SHELL_CMD_LINE_RE.test(trimmed) && !isLauncherCmdLine(lines, idx)) return true;
   if (isNoiseLine(trimmed)) return true;
   if (/^\[(?:spawn error|timeout)\]/i.test(trimmed)) return true;
   if (PROMPT_START_PATTERNS.some((re) => re.test(trimmed))) return true;
@@ -253,7 +270,7 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
 
     // 1. Startup command & CLI session environment banner
     if (
-      (i === 0 && trimmed.startsWith("$ ")) ||
+      isLauncherCmdLine(lines, i) ||
       STDIN_LINE_RE.test(trimmed) ||
       CODEX_BANNER_RE.test(trimmed) ||
       (DASH_RULE_RE.test(trimmed) && i + 1 < lines.length && ENV_KV_RE.test(lines[i + 1]!.trim()))
@@ -442,8 +459,15 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
       }
     }
 
-    // 5. Thinking blocks (Qoder 💭 or Codex `thinking`)
-    if (trimmed.startsWith(QODER_THINK_PREFIX) || trimmed === "thinking") {
+    // 4b. OpenCode step divider (`> build · deepseek-v4.1-flash`)
+    if (OPENCODE_STEP_RE.test(trimmed)) {
+      i++;
+      continue;
+    }
+
+    // 5. Thinking blocks (Qoder 💭, Codex `thinking`, or OpenCode `Thinking:`)
+    const openCodeThink = OPENCODE_THINK_RE.exec(trimmed);
+    if (trimmed.startsWith(QODER_THINK_PREFIX) || trimmed === "thinking" || openCodeThink) {
       const buf: string[] = [];
       if (trimmed.startsWith(QODER_THINK_PREFIX)) {
         const first = trimmed.slice(QODER_THINK_PREFIX.length).trim();
@@ -459,6 +483,17 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
             continue;
           }
           break;
+        }
+      } else if (openCodeThink) {
+        if (openCodeThink[1]?.trim()) buf.push(openCodeThink[1].trim());
+        i++;
+        while (i < lines.length) {
+          const cur = lines[i]!;
+          const t = cur.trim();
+          if (!t) break;
+          if (isStructuralBoundary(lines, i)) break;
+          buf.push(cur);
+          i++;
         }
       } else {
         i++;
@@ -487,7 +522,87 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
       continue;
     }
 
-    // 6. Tool calls (Qoder 🔧 or Codex `exec`)
+    // 6. Tool calls (Qoder 🔧, OpenCode →/←/✱/|, shell `$ cmd`, or Codex `exec`)
+    const openCodeTool = OPENCODE_TOOL_ARROW_RE.exec(trimmed);
+    if (openCodeTool) {
+      const toolName = openCodeTool[1]!;
+      const toolArg = (openCodeTool[2] ?? "").trim();
+      const bodyBuf: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const cur = lines[i]!;
+        const curTrim = cur.trim();
+        if (!curTrim) {
+          if (i + 1 < lines.length && isStructuralBoundary(lines, i + 1)) {
+            break;
+          }
+          if (bodyBuf.length === 0) {
+            break;
+          }
+          bodyBuf.push(cur);
+          i++;
+          continue;
+        }
+        if (isStructuralBoundary(lines, i)) break;
+        // Stop collecting tool output when regular unindented assistant prose starts after a diff/diagnostic block
+        if (
+          bodyBuf.length > 0 &&
+          !cur.startsWith(" ") &&
+          !cur.startsWith("\t") &&
+          !/^(?:Index:|===|---|\+\+\+|@@|\+|-|\\|<\/?diagnostics|ERROR\b)/.test(curTrim)
+        ) {
+          break;
+        }
+        bodyBuf.push(cur);
+        i++;
+      }
+      const bodyClean = trimBlankEdges(bodyBuf);
+      const fullContent = [rawLine, ...bodyClean].join("\n");
+      const hasError = /\b(?:error|failed|enoent)\b/i.test(toolArg) || bodyClean.some((l) => /^ERROR\s+\[/i.test(l.trim()));
+      const compactArg = toolArg.length > 76 ? `${toolArg.slice(0, 73)}...` : toolArg;
+      const countTag = bodyClean.length > 0 ? t(language, "console.block.execOutputLines", { count: bodyClean.length }) : "";
+      pushBlock({
+        kind: "tool_call",
+        title: toolName,
+        summary: `${compactArg || toolName}${countTag}`,
+        content: fullContent,
+        defaultCollapsed: bodyClean.length > 0,
+        collapsible: bodyClean.length > 0,
+        tone: hasError ? "danger" : "info",
+        meta: { toolName, ...(toolArg ? { command: toolArg } : {}) },
+      });
+      continue;
+    }
+
+    const shellCmd = !isLauncherCmdLine(lines, i) ? SHELL_CMD_LINE_RE.exec(trimmed) : null;
+    if (shellCmd) {
+      const cmdText = shellCmd[1]!.trim();
+      const bodyBuf: string[] = [];
+      i++;
+      while (i < lines.length) {
+        const cur = lines[i]!;
+        const curTrim = cur.trim();
+        if (curTrim && isStructuralBoundary(lines, i)) break;
+        bodyBuf.push(cur);
+        i++;
+      }
+      const bodyClean = trimBlankEdges(bodyBuf);
+      const bodyText = bodyClean.join("\n");
+      const compactCmd = cmdText.length > 68 ? `${cmdText.slice(0, 65)}...` : cmdText;
+      const countTag = bodyClean.length > 0 ? t(language, "console.block.execOutputLines", { count: bodyClean.length }) : "";
+      pushBlock({
+        kind: "tool_call",
+        title: t(language, "console.block.execOk"),
+        summary: `${compactCmd}${countTag}`,
+        content: [cmdText, ...bodyClean].join("\n"),
+        defaultCollapsed: bodyClean.length > 6 || bodyText.length > 400,
+        collapsible: bodyClean.length > 0,
+        tone: "info",
+        meta: { toolName: "Bash", command: cmdText },
+      });
+      continue;
+    }
+
     if (trimmed.startsWith(QODER_TOOL_PREFIX)) {
       const toolText = trimmed.slice(QODER_TOOL_PREFIX.length).replace(/^调用工具:\s*/, "").trim();
       pushBlock({

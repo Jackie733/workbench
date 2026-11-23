@@ -524,6 +524,7 @@ class QoderStreamAdapter implements HarnessStreamAdapter {
 
 class CodexStreamAdapter implements HarnessStreamAdapter {
   private turnIndex = 0;
+  private toolsInTurn = 0;
   private itemStarts = new Map<string, number>();
 
   feedLine(rawLine: string): AdapterLineResult {
@@ -571,6 +572,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
 
     if (type === "turn.started") {
       this.turnIndex++;
+      this.toolsInTurn = 0;
       return {
         events: [{ type: "turn.start", turnIndex: this.turnIndex }],
         displayText: "",
@@ -584,6 +586,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       this.itemStarts.set(callId, Date.now());
       const itemType = String(item.type ?? "");
       if (itemType === "command_execution") {
+        this.toolsInTurn += 1;
         const command = typeof item.command === "string" ? item.command : "";
         const wbCommand = extractWbCommand("bash", { command });
         const cat = wbCommand ? "wb_cli" : "bash";
@@ -607,6 +610,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
         };
       }
       if (itemType === "mcp_tool_call") {
+        this.toolsInTurn += 1;
         const toolName = typeof item.tool === "string" ? item.tool : typeof item.name === "string" ? item.name : "mcp_tool";
         const inp = formatToolInputBounded(item.arguments ?? item.input);
         const wbCommand = extractWbCommand(toolName, item.arguments ?? item.input);
@@ -660,6 +664,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       }
 
       if (itemType === "command_execution") {
+        if (startedAt === undefined) this.toolsInTurn += 1;
         const command = typeof item.command === "string" ? item.command : "";
         const rawOut = typeof item.aggregated_output === "string" ? item.aggregated_output : typeof item.output === "string" ? item.output : "";
         const exitCode = typeof item.exit_code === "number" ? item.exit_code : null;
@@ -741,6 +746,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       }
 
       if (itemType === "mcp_tool_call") {
+        if (startedAt === undefined) this.toolsInTurn += 1;
         const toolName = typeof item.tool === "string" ? item.tool : typeof item.name === "string" ? item.name : "mcp_tool";
         const wbCommand = extractWbCommand(toolName, item.arguments ?? item.input);
         const files = extractTouchedFiles(toolName, item.arguments ?? item.input).all;
@@ -770,6 +776,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       }
 
       if (itemType === "web_search") {
+        this.toolsInTurn += 1;
         const query = typeof item.query === "string" ? item.query : "";
         return {
           events: [
@@ -824,7 +831,7 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
           {
             type: "turn.end",
             turnIndex: turn,
-            contextTokens: usage?.inputTokens,
+            contextTokens: this.toolsInTurn <= 1 ? usage?.inputTokens : undefined,
             usage,
           },
         ],

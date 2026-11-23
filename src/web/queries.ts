@@ -1210,7 +1210,7 @@ export async function openRunAudit(reqId: string, runId: string): Promise<void> 
   }
   const latestUi = useUiStore.getState();
   latestUi.setMainView("workspace");
-  latestUi.setWorkspaceTab("timeline");
+  latestUi.setWorkspaceTab("audit");
   latestUi.setInspectedRunId(runId);
   void hydrateRunTrace(reqId, runId, false);
   void hydrateRunLog(reqId, runId, false);

@@ -617,7 +617,7 @@ describe("REQ-010 icon coverage across home and workspace", () => {
           (tab) => tab.querySelectorAll("svg.ui-icon").length,
         ),
       );
-      expect(tabIcons).toEqual([1, 1, 1, 1]);
+      expect(tabIcons).toEqual([1, 1, 1, 1, 1]);
 
       // Spec tab: edit affordances carry icons.
       expect(
