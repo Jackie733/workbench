@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Content as DropdownContent,
   Item as DropdownItem,
@@ -2044,6 +2044,7 @@ export function WorkspaceView() {
   const workspaceTab = useUiStore((s) => s.workspaceTab);
   const busy = useUiStore((s) => s.busy);
   const moreMenuOpen = useUiStore((s) => s.moreMenuOpen);
+  const moreMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
   const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
   const setModal = useUiStore((s) => s.setModal);
@@ -2193,13 +2194,28 @@ export function WorkspaceView() {
         </span>
         <div className="more-wrap">
           <DropdownRoot open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
+            {/*
+             * 「更多」菜单的锚点固定在包装节点上，内部按钮重渲染不再重新登记
+             * PopperAnchor 节点；关闭时显式把焦点还给按钮，保留原有键盘行为。
+             */}
             <DropdownTrigger asChild>
-              <button className="btn xs" type="button" data-testid="more-menu-btn">
-                <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
-              </button>
+              <span className="inline-flex shrink-0" data-testid="more-menu-anchor">
+                <button ref={moreMenuButtonRef} className="btn xs" type="button" data-testid="more-menu-btn">
+                  <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
+                </button>
+              </span>
             </DropdownTrigger>
             <DropdownPortal>
-              <DropdownContent className="more-menu" data-testid="more-menu" align="end" sideOffset={6}>
+              <DropdownContent
+                className="more-menu"
+                data-testid="more-menu"
+                align="end"
+                sideOffset={6}
+                onCloseAutoFocus={(event) => {
+                  event.preventDefault();
+                  moreMenuButtonRef.current?.focus();
+                }}
+              >
                 {runningThis && (
                   <div className="xs muted" data-testid="more-menu-lock-hint" style={{ padding: "6px 8px", maxWidth: 280 }}>
                     {t(language, "ws.runLockMenuHint")}

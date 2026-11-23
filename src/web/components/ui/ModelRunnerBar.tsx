@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import {
+  Anchor as PopoverAnchor,
   Content as PopoverContent,
   Portal as PopoverPortal,
   Root as PopoverRoot,
@@ -42,6 +43,7 @@ export function ModelRunnerBar({
   const setSelectedEffort = useDraftStore((s) => s.setSelectedEffort);
 
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
 
   const modelOptions = useMemo(() => collectModelOptions(harnesses), [harnesses]);
   const choice = activeRunnerChoice(selectedRunnerKey, routing, stageAction, selectedEffort);
@@ -130,23 +132,37 @@ export function ModelRunnerBar({
       </select>
 
       <PopoverRoot open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
-          <button
-            type="button"
-            className="btn xs model-runner-trigger inline-flex items-center gap-1.5 max-w-[235px]"
-            data-testid={`${testId}-trigger`}
-            title={t(language, "runner.current", { model: currentDisplay })}
-          >
-            <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
-            <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
-            <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
-          </button>
-        </PopoverTrigger>
+        {/*
+         * 引用稳定：锚点放在独立的 span 上，交互按钮只承载触发与焦点。
+         * 这样按钮在无关重新渲染或局部替换时不会反复触发 PopperAnchor 的
+         * onAnchorChange(node)，避免组合引用回调形成嵌套 setState 循环。
+         */}
+        <PopoverAnchor asChild>
+          <span className="inline-flex min-w-0 max-w-full" data-testid={`${testId}-anchor`}>
+            <PopoverTrigger asChild>
+              <button
+                ref={triggerRef}
+                type="button"
+                className="btn xs model-runner-trigger inline-flex items-center gap-1.5 max-w-[235px]"
+                data-testid={`${testId}-trigger`}
+                title={t(language, "runner.current", { model: currentDisplay })}
+              >
+                <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
+                <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
+                <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
+              </button>
+            </PopoverTrigger>
+          </span>
+        </PopoverAnchor>
         <PopoverPortal>
           <PopoverContent
             align="end"
             sideOffset={6}
             className="z-[80] w-[340px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              triggerRef.current?.focus();
+            }}
           >
             <ModelPickerMenu
               options={modelOptions}

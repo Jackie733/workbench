@@ -990,6 +990,166 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 30_000);
 
+  test("REQ-014: 浮层锚点在重新渲染与反复退出重入期间保持稳定且页面可继续操作", async () => {
+    const repo = initGitRepo();
+    await initProject(repo, { name: "AnchorStabilityRepo", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "浮层触发节点在无关重新渲染期间保持引用稳定",
+      criteria: [{ id: "AC-1", description: "交互可完成", required: true, command: "echo ok" }],
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+    page.on("console", (msg: { type: () => string; text: () => string }) => {
+      if (msg.type() === "error") consoleErrors.push(msg.text());
+    });
+
+    const anchorContains = (anchorSel: string, childSel: string) =>
+      page.evaluate(
+        (anchor: string, child: string) => {
+          const a = document.querySelector(anchor);
+          const c = document.querySelector(child);
+          return Boolean(a && c && a.contains(c));
+        },
+        anchorSel,
+        childSel,
+      );
+    const rememberAnchor = (anchorSel: string) =>
+      page.evaluate((sel: string) => {
+        const el = document.querySelector(sel);
+        (window as unknown as { __req014Anchor?: Element | null }).__req014Anchor = el;
+        return Boolean(el);
+      }, anchorSel);
+    const anchorStillSame = (anchorSel: string) =>
+      page.evaluate((sel: string) => {
+        const remembered = (window as unknown as { __req014Anchor?: Element | null }).__req014Anchor;
+        return Boolean(remembered && document.querySelector(sel) === remembered);
+      }, anchorSel);
+    const waitAnchorPlaced = (anchorSel: string) =>
+      page.waitForFunction(
+        (sel: unknown) => document.querySelector(String(sel))?.hasAttribute("data-radix-popper-side") === true,
+        { timeout: 5000 },
+        anchorSel,
+      );
+
+    try {
+      // 与上报现场一致：浅色主题、2514×1348 视口。
+      await page.setViewport({ width: 2514, height: 1348 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="banner-runner-select-trigger"]', { timeout: 5000 });
+
+      // 1. 「更多」菜单：锚点是按钮的稳定包装节点，外部状态更新不重建锚点。
+      await clickReady(page, '[data-testid="more-menu-btn"]');
+      await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+      await waitAnchorPlaced('[data-testid="more-menu-anchor"]');
+      expect(await anchorContains('[data-testid="more-menu-anchor"]', '[data-testid="more-menu-btn"]')).toBe(true);
+      expect(await rememberAnchor('[data-testid="more-menu-anchor"]')).toBe(true);
+      await page.select('[data-testid="banner-runner-select"]', "manual_copy");
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === "manual_copy",
+        { timeout: 5000 },
+      );
+      expect(await anchorStillSame('[data-testid="more-menu-anchor"]')).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="more-menu"]')))).toBe(true);
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("data-testid") === "more-menu-btn",
+        { timeout: 5000 },
+      );
+
+      // 反复开合仍可操作，且恢复到同一锚点。
+      for (let i = 0; i < 3; i += 1) {
+        await clickReady(page, '[data-testid="more-menu-btn"]');
+        await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
+        expect(await anchorStillSame('[data-testid="more-menu-anchor"]')).toBe(true);
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => !document.querySelector('[data-testid="more-menu"]'), { timeout: 5000 });
+      }
+
+      // 2. 工作台模型选择器：无关状态更新期间锚点与浮层保持稳定，退出后焦点回到按钮。
+      await page.select('[data-testid="banner-runner-select"]', "");
+      await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
+      await page.waitForSelector('[data-testid="banner-runner-select-search"]', { timeout: 5000 });
+      await waitAnchorPlaced('[data-testid="banner-runner-select-anchor"]');
+      expect(
+        await anchorContains('[data-testid="banner-runner-select-anchor"]', '[data-testid="banner-runner-select-trigger"]'),
+      ).toBe(true);
+      expect(await rememberAnchor('[data-testid="banner-runner-select-anchor"]')).toBe(true);
+      await page.select('[data-testid="banner-runner-select"]', "manual_copy");
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === "manual_copy",
+        { timeout: 5000 },
+      );
+      expect(await anchorStillSame('[data-testid="banner-runner-select-anchor"]')).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="banner-runner-select-search"]')))).toBe(
+        true,
+      );
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="banner-runner-select-search"]'),
+        { timeout: 5000 },
+      );
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("data-testid") === "banner-runner-select-trigger",
+        { timeout: 5000 },
+      );
+      await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
+      await page.waitForSelector('[data-testid="banner-runner-select-search"]', { timeout: 5000 });
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="banner-runner-select-search"]'),
+        { timeout: 5000 },
+      );
+
+      // 3. 配置弹窗中的模型选择器：四个阶段的锚点互不干扰，切换其他阶段不重建当前锚点。
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="route-select-design-trigger"]');
+      await page.waitForSelector('[data-testid="route-select-design-search"]', { timeout: 5000 });
+      await waitAnchorPlaced('[data-testid="route-select-design-anchor"]');
+      expect(await rememberAnchor('[data-testid="route-select-design-anchor"]')).toBe(true);
+      const nextImplementValue = await page.evaluate(() => {
+        const select = document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement | null;
+        if (!select) return null;
+        const current = select.value;
+        const candidate = Array.from(select.options)
+          .map((option) => option.value)
+          .find((value) => value && value !== current);
+        if (candidate) {
+          select.value = candidate;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return candidate;
+      });
+      expect(nextImplementValue).not.toBeNull();
+      expect(await anchorStillSame('[data-testid="route-select-design-anchor"]')).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="route-select-design-search"]')))).toBe(
+        true,
+      );
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="route-select-design-search"]'),
+        { timeout: 5000 },
+      );
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="routing-modal"]')))).toBe(true);
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
+
+      expect(pageErrors).toEqual([]);
+      expect(consoleErrors.filter((line) => line.includes("Maximum update depth exceeded"))).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   test("REQ-004: 执行终端适配亮暗主题、折叠次要上下文、切换结构/原始视图并自动加载历史 Run 日志", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-console-hub-"));
     tempDirs.push(hubDir);
