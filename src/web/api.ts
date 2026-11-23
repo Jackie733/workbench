@@ -789,7 +789,10 @@ export const api = {
 
 export function connectUiWebSocket(
   onEvent: (event: Record<string, unknown>) => void,
-  options?: { onReconnect?: () => void },
+  options?: {
+    onReconnect?: () => void;
+    onConnected?: (info: { reconnected: boolean }) => void;
+  },
 ): () => void {
   let closed = false;
   let hasOpenedOnce = false;
@@ -801,10 +804,13 @@ export function connectUiWebSocket(
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/ws?role=ui`);
     ws.addEventListener("open", () => {
-      if (hasOpenedOnce) {
+      // 首次连接也可能落在初始快照与事件之间；两种连接都通知上层补拉权威运行快照。
+      const reconnected = hasOpenedOnce;
+      hasOpenedOnce = true;
+      options?.onConnected?.({ reconnected });
+      if (reconnected) {
         options?.onReconnect?.();
       }
-      hasOpenedOnce = true;
     });
     ws.addEventListener("message", (ev) => {
       try {

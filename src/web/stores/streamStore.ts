@@ -13,14 +13,20 @@ export interface RunTraceState {
 
 export interface StreamStoreState {
   activeRuns: Record<string, ActiveRunItem>;
+  /** 已结束的运行编号；用于防止迟到的启动响应或旧 Hub 快照重新加锁。 */
+  finishedRuns: Record<string, true>;
+  /** 运行事件到达本地的时间；快照请求发出后才到达的事件不受旧快照影响。 */
+  locallyStartedRuns: Record<string, number>;
+  /** 已应用的最新快照请求时间；更早发出的快照不得回滚更新的状态。 */
+  lastSnapshotStartedAt: number;
   liveRunLogs: Record<string, string>;
   logHydrated: Record<string, boolean>;
   runTraces: Record<string, RunTraceState>;
   liveRunMetrics: Record<string, Partial<AgentRunRecord>>;
   selectedRunByReq: Record<string, string | null>;
 
-  syncActiveRuns: (runs: ActiveRunItem[]) => void;
-  setRunStarted: (run: ActiveRunItem) => void;
+  syncActiveRuns: (runs: ActiveRunItem[], snapshotStartedAt?: number) => void;
+  setRunStarted: (run: ActiveRunItem, requestStartedAt?: number) => void;
   appendRunLog: (runId: string, chunk: string) => void;
   setRunLogFull: (runId: string, log: string, hydrated?: boolean) => void;
   applyTraceSnapshot: (
@@ -44,29 +50,61 @@ function mergeEventsSorted(existing: RunTraceEvent[], incoming: RunTraceEvent[])
 
 export const useStreamStore = create<StreamStoreState>((set) => ({
   activeRuns: {},
+  finishedRuns: {},
+  locallyStartedRuns: {},
+  lastSnapshotStartedAt: 0,
   liveRunLogs: {},
   logHydrated: {},
   runTraces: {},
   liveRunMetrics: {},
   selectedRunByReq: {},
 
-  syncActiveRuns: (runs) =>
-    set(() => {
+  syncActiveRuns: (runs, snapshotStartedAt = Date.now()) =>
+    set((s) => {
+      // 更早发出的快照可能晚到；不得用它回滚已经应用的新快照。
+      if (snapshotStartedAt < s.lastSnapshotStartedAt) return s;
       const nextActive: Record<string, ActiveRunItem> = {};
-      for (const r of runs) nextActive[r.id] = r;
-      return { activeRuns: nextActive };
+      for (const r of runs) {
+        // 旧快照可能仍包含已经结束的运行，结束标记优先于快照。
+        if (s.finishedRuns[r.id]) continue;
+        nextActive[r.id] = r;
+      }
+      const nextLocallyStarted: Record<string, number> = {};
+      for (const [id, run] of Object.entries(s.activeRuns)) {
+        if (nextActive[id] || s.finishedRuns[id]) continue;
+        const receivedAt = s.locallyStartedRuns[id];
+        // 快照请求发出后才观察到的运行事件不被该快照回滚。
+        if (receivedAt !== undefined && receivedAt >= snapshotStartedAt) {
+          nextActive[id] = run;
+          nextLocallyStarted[id] = receivedAt;
+        }
+      }
+      return {
+        activeRuns: nextActive,
+        locallyStartedRuns: nextLocallyStarted,
+        lastSnapshotStartedAt: snapshotStartedAt,
+      };
     }),
 
-  setRunStarted: (run) =>
-    set((s) => ({
-      activeRuns: { ...s.activeRuns, [run.id]: run },
-      liveRunLogs: { ...s.liveRunLogs, [run.id]: s.liveRunLogs[run.id] ?? "" },
-      runTraces: {
-        ...s.runTraces,
-        [run.id]: s.runTraces[run.id] ?? { events: [], lastSeq: 0, hydrated: false, hasTrace: true },
-      },
-      selectedRunByReq: { ...s.selectedRunByReq, [run.requirementId]: run.id },
-    })),
+  setRunStarted: (run, requestStartedAt) =>
+    set((s) => {
+      // HTTP 调度响应可能晚于 WebSocket 结束事件；已结束的运行不再加锁。
+      if (s.finishedRuns[run.id]) return s;
+      // 调度请求之后发出并已应用的新快照不含该运行：迟到的响应不得重新加锁。
+      if (requestStartedAt !== undefined && requestStartedAt < s.lastSnapshotStartedAt && !s.activeRuns[run.id]) {
+        return s;
+      }
+      return {
+        activeRuns: { ...s.activeRuns, [run.id]: run },
+        locallyStartedRuns: { ...s.locallyStartedRuns, [run.id]: Date.now() },
+        liveRunLogs: { ...s.liveRunLogs, [run.id]: s.liveRunLogs[run.id] ?? "" },
+        runTraces: {
+          ...s.runTraces,
+          [run.id]: s.runTraces[run.id] ?? { events: [], lastSeq: 0, hydrated: false, hasTrace: true },
+        },
+        selectedRunByReq: { ...s.selectedRunByReq, [run.requirementId]: run.id },
+      };
+    }),
 
   appendRunLog: (runId, chunk) =>
     set((s) => ({
@@ -147,7 +185,13 @@ export const useStreamStore = create<StreamStoreState>((set) => ({
     set((s) => {
       const nextActive = { ...s.activeRuns };
       delete nextActive[runId];
-      return { activeRuns: nextActive };
+      const nextLocallyStarted = { ...s.locallyStartedRuns };
+      delete nextLocallyStarted[runId];
+      return {
+        activeRuns: nextActive,
+        finishedRuns: { ...s.finishedRuns, [runId]: true },
+        locallyStartedRuns: nextLocallyStarted,
+      };
     }),
 
   setSelectedRunForReq: (reqId, runId) =>

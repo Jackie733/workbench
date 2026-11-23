@@ -77,6 +77,7 @@ import {
   dispatchFixFromReview,
   dispatchSyncBaseWithAgent,
   executeVerify,
+  guardRequirementRunLock,
   handleBannerAction,
   invalidateAllWorkbenchQueries,
   notifyCascadeSyncResults,
@@ -103,6 +104,7 @@ import {
   defaultActionForRequirement,
   describeEvidenceContext,
   EVIDENCE_META,
+  findLockingRequirementRun,
   formatDateTime,
   STAGE_META,
   TASK_META,
@@ -245,6 +247,10 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
           {latestLine}
         </code>
       </div>
+      <div className="live-preview-row" data-testid="run-lock-hint" role="status">
+        <Icon icon={Lock} size={14} />
+        <span className="muted xs">{t(language, "ws.runLockHint")}</span>
+      </div>
     </section>
   );
 }
@@ -289,7 +295,15 @@ function buildSpawnDrafts(d: RequirementDetail): Array<{ title: string; goal: st
   return out.length > 0 ? out.slice(0, 12) : [{ title: "", goal: "" }];
 }
 
-function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
+function SpecDesignTab({
+  d,
+  bridgeConnected,
+  runLocked,
+}: {
+  d: RequirementDetail;
+  bridgeConnected: boolean;
+  runLocked: boolean;
+}) {
   const language = useUiStore((s) => s.language);
   const busy = useUiStore((s) => s.busy);
   const designViewVersion = useUiStore((s) => s.designViewVersion);
@@ -348,6 +362,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
 
   const addAttachments = async (metas: Array<{ id: string }>) => {
     if (metas.length === 0) return;
+    if (guardRequirementRunLock(s.id)) return;
     const res = await runBusy(async () => {
       const out = await api.addRequirementAttachments(s.id, {
         attachmentIds: metas.map((m) => m.id),
@@ -365,6 +380,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   };
 
   const deleteAttachment = async (attId: string) => {
+    if (guardRequirementRunLock(s.id)) return;
     if (typeof window !== "undefined" && !window.confirm(t(useUiStore.getState().language, "spec.confirmDeleteAttachment"))) {
       return;
     }
@@ -377,6 +393,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   };
 
   const saveSpec = async () => {
+    if (guardRequirementRunLock(s.id)) return;
     const criteria = specDraftCriteria
       .filter((c) => c.description.trim().length > 0)
       .map((c) => ({
@@ -400,6 +417,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
   };
 
   const saveDesign = async () => {
+    if (guardRequirementRunLock(s.id)) return;
     const res = await runBusy(async () => {
       const out = await api.updateDesign(s.id, {
         designMarkdown: designDraftBody,
@@ -458,7 +476,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     className={isReviewCurrent ? "btn primary xs" : "btn xs"}
                     type="button"
                     data-testid="review-fix-btn"
-                    disabled={busy}
+                    disabled={busy || runLocked}
                     onClick={() =>
                       void dispatchFixFromReview(d, bridgeConnected, {
                         selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
@@ -476,7 +494,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     className="btn xs"
                     type="button"
                     data-testid="review-reject-btn"
-                    disabled={busy}
+                    disabled={busy || runLocked}
                     onClick={() => void handleBannerAction(d, "request_changes", bridgeConnected)}
                   >
                     <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
@@ -486,7 +504,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                       className="btn xs"
                       type="button"
                       data-testid="review-override-accept-btn"
-                      disabled={busy}
+                      disabled={busy || runLocked}
                       onClick={() => void handleBannerAction(d, "accept", bridgeConnected)}
                     >
                       <Icon icon={Check} size={14} />{" "}
@@ -501,7 +519,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 className={!isReviewCurrent ? "btn primary xs" : "btn xs"}
                 type="button"
                 data-testid="review-rerun-btn"
-                disabled={busy}
+                disabled={busy || runLocked}
                 onClick={() => void triggerActiveRun(s.id, "review")}
               >
                 <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
@@ -595,7 +613,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 className="btn primary xs"
                 type="button"
                 data-testid="save-spec-btn"
-                disabled={busy}
+                disabled={busy || runLocked}
                 onClick={() => void saveSpec()}
               >
                 <Icon icon={Save} size={14} /> {t(language, "spec.save")}
@@ -609,6 +627,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 className="btn xs"
                 type="button"
                 data-action="start-edit-spec"
+                disabled={runLocked}
                 onClick={() => {
                   setMoreMenuOpen(false);
                   startEditSpec(
@@ -745,14 +764,14 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
         <AttachmentGallery
           attachments={attachments}
           urlFor={(attId) => requirementAttachmentUrl(s.id, attId)}
-          onDelete={canEditAttachments ? (attId) => void deleteAttachment(attId) : undefined}
+          onDelete={canEditAttachments && !runLocked ? (attId) => void deleteAttachment(attId) : undefined}
           emptyText={
             canEditAttachments ? t(language, "spec.attachmentsEmpty") : t(language, "spec.attachmentsEmptyReadonly")
           }
         />
         {canEditAttachments && (
           <div style={{ marginTop: 10 }}>
-            <AttachmentPicker value={[]} onChange={(metas) => void addAttachments(metas)} disabled={busy} />
+            <AttachmentPicker value={[]} onChange={(metas) => void addAttachments(metas)} disabled={busy || runLocked} />
           </div>
         )}
       </div>
@@ -852,7 +871,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                     <button
                       className="btn xs"
                       type="button"
-                      disabled={busy}
+                      disabled={busy || runLocked}
                       onClick={() =>
                         void executeVerify(s.id, {
                           command: item.criterion.command!,
@@ -891,6 +910,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                 className="btn xs"
                 type="button"
                 data-testid="spawn-children-btn"
+                disabled={runLocked}
                 onClick={() =>
                   setModal({
                     kind: "spawn_children",
@@ -929,7 +949,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   className="btn primary xs"
                   type="button"
                   data-testid="save-design-btn"
-                  disabled={busy}
+                  disabled={busy || runLocked}
                   onClick={() => void saveDesign()}
                 >
                   <Icon icon={Save} size={14} /> {t(language, "spec.saveDesign")}
@@ -943,6 +963,7 @@ function SpecDesignTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeCon
                   className="btn xs"
                   type="button"
                   data-testid="start-edit-design-btn"
+                  disabled={runLocked}
                   onClick={() => {
                     setMoreMenuOpen(false);
                     startEditDesign(d.designMarkdown);
@@ -1037,7 +1058,7 @@ const SCREENSHOT_REASON_KEYS: Record<ScreenshotSkipReasonCode, MessageKey> = {
   no_shots: "shot.reason.no_shots",
 };
 
-function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
+function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; runLocked: boolean }) {
   const language = useUiStore((s) => s.language);
   const showToastKey = useUiStore((s) => s.showToastKey);
   const [capturing, setCapturing] = useState(false);
@@ -1071,6 +1092,7 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
 
   const recapture = async () => {
     if (capturing) return;
+    if (guardRequirementRunLock(d.state.id)) return;
     setCapturing(true);
     try {
       const res = await captureUiScreenshots(d.state.id);
@@ -1111,7 +1133,7 @@ function ScreenshotEvidenceSection({ d }: { d: RequirementDetail }) {
             className="btn xs"
             type="button"
             data-testid="screenshot-recapture"
-            disabled={capturing}
+            disabled={capturing || runLocked}
             onClick={() => void recapture()}
           >
             <Icon icon={RefreshCw} size={14} />{" "}
@@ -1645,7 +1667,15 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
   );
 }
 
-function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridgeConnected: boolean }) {
+function ChangesVerifyTab({
+  d,
+  bridgeConnected,
+  runLocked,
+}: {
+  d: RequirementDetail;
+  bridgeConnected: boolean;
+  runLocked: boolean;
+}) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const busy = useUiStore((s) => s.busy);
@@ -1720,7 +1750,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               <button
                 className="btn primary xs"
                 type="button"
-                disabled={busy}
+                disabled={busy || runLocked}
                 onClick={() => void dispatchFixFromReview(d, bridgeConnected)}
               >
                 <Icon icon={Wrench} size={14} /> {t(language, "core.action.fixPerReview")}
@@ -1776,7 +1806,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
             <button
               className="btn primary xs"
               type="button"
-              disabled={busy}
+              disabled={busy || runLocked}
               onClick={() => void handleBannerAction(d, "run_all_verifications", bridgeConnected)}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runAll")}
@@ -1825,7 +1855,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
                       <button
                         className="btn xs"
                         type="button"
-                        disabled={busy}
+                        disabled={busy || runLocked}
                         onClick={() =>
                           void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
                             if (res) {
@@ -1876,7 +1906,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
               className="btn"
               type="button"
               data-testid="manual-verify-btn"
-              disabled={busy}
+              disabled={busy || runLocked}
               onClick={() => void runManualVerify()}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runVerify")}
@@ -1885,7 +1915,7 @@ function ChangesVerifyTab({ d, bridgeConnected }: { d: RequirementDetail; bridge
         )}
       </div>
 
-      <ScreenshotEvidenceSection d={d} />
+      <ScreenshotEvidenceSection d={d} runLocked={runLocked} />
 
       <div className="card" data-testid="verify-diff-shortcut-card">
         <div className="card-head" style={{ marginBottom: 0 }}>
@@ -1969,6 +1999,7 @@ export function WorkspaceView() {
   const prPlatformLabel = isGiteeProject ? "Gitee" : "GitHub";
 
   const openDeliverModal = (preferPr?: boolean) => {
+    if (guardRequirementRunLock(s.id)) return;
     const candidates = deliveryPreview?.candidates ?? [];
     const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
     const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
@@ -1987,6 +2018,7 @@ export function WorkspaceView() {
   };
 
   const syncPrStatus = async () => {
+    if (guardRequirementRunLock(s.id)) return;
     const res = await runBusy(() => api.syncRequirementPr(s.id));
     if (res) {
       await invalidateAllWorkbenchQueries();
@@ -2014,12 +2046,11 @@ export function WorkspaceView() {
   const modelOptions = collectModelOptions(harnesses);
   const defaultAct = defaultActionForRequirement(d);
   const activeRun =
-    Object.values(activeRuns).find(
-      (r) =>
-        r.requirementId === s.id &&
-        r.status === "running" &&
-        (!r.projectId || r.projectId === activeProjectId),
-    ) ?? null;
+    findLockingRequirementRun(Object.values(activeRuns), s.id, {
+      projectId: activeProjectId ?? hub?.activeProjectId ?? null,
+      projectRoot: project?.root ?? null,
+      projects: hub?.projects ?? [],
+    }) ?? null;
   const runningThis = Boolean(activeRun);
   const canRunModel =
     s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && modelOptions.length > 0;
@@ -2093,9 +2124,16 @@ export function WorkspaceView() {
             </DropdownTrigger>
             <DropdownPortal>
               <DropdownContent className="more-menu" data-testid="more-menu" align="end" sideOffset={6}>
-                <DropdownItem asChild>
+                {runningThis && (
+                  <div className="xs muted" data-testid="more-menu-lock-hint" style={{ padding: "6px 8px", maxWidth: 280 }}>
+                    {t(language, "ws.runLockMenuHint")}
+                  </div>
+                )}
+                <DropdownItem asChild disabled={runningThis}>
                   <button
                     type="button"
+                    data-testid="menu-edit-req-btn"
+                    disabled={runningThis}
                     onClick={() => {
                       startEditSpec(
                         s.title,
@@ -2112,8 +2150,13 @@ export function WorkspaceView() {
                     <Icon icon={Pencil} size={14} /> {t(language, "ws.menu.editReq")}
                   </button>
                 </DropdownItem>
-                <DropdownItem asChild>
-                  <button type="button" onClick={() => startEditDesign(d.designMarkdown)}>
+                <DropdownItem asChild disabled={runningThis}>
+                  <button
+                    type="button"
+                    data-testid="menu-edit-design-btn"
+                    disabled={runningThis}
+                    onClick={() => startEditDesign(d.designMarkdown)}
+                  >
                     <Icon icon={FileEdit} size={14} /> {t(language, "ws.menu.editDesign")}
                   </button>
                 </DropdownItem>
@@ -2126,11 +2169,13 @@ export function WorkspaceView() {
                   project?.git?.isGitRepo &&
                   s.stage !== "done" &&
                   s.stage !== "cancelled" && (
-                    <DropdownItem asChild>
+                    <DropdownItem asChild disabled={runningThis}>
                       <button
                         type="button"
                         data-testid="menu-enable-sandbox-btn"
+                        disabled={runningThis}
                         onClick={async () => {
+                          if (guardRequirementRunLock(s.id)) return;
                           const out = await runBusy(() => api.createRequirementSandbox(s.id));
                           if (out) {
                             await invalidateAllWorkbenchQueries();
@@ -2146,10 +2191,11 @@ export function WorkspaceView() {
                     </DropdownItem>
                   )}
                 {!s.github?.issue ? (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
                       data-testid="menu-link-issue-btn"
+                      disabled={runningThis}
                       onClick={() => {
                         setModal({
                           kind: "link_issue",
@@ -2164,11 +2210,13 @@ export function WorkspaceView() {
                     </button>
                   </DropdownItem>
                 ) : s.github.provider !== "gitee" ? (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
                       data-testid="menu-sync-issue-btn"
+                      disabled={runningThis}
                       onClick={async () => {
+                        if (guardRequirementRunLock(s.id)) return;
                         const out = await runBusy(() => api.syncRequirementIssue(s.id));
                         if (out) {
                           await invalidateAllWorkbenchQueries();
@@ -2181,9 +2229,11 @@ export function WorkspaceView() {
                   </DropdownItem>
                 ) : null}
                 {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
+                      data-testid="menu-fast-track-btn"
+                      disabled={runningThis}
                       onClick={() => {
                         void handleBannerAction(d, "fast_track", bridgeConnected);
                       }}
@@ -2193,9 +2243,11 @@ export function WorkspaceView() {
                   </DropdownItem>
                 )}
                 {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
+                      data-testid="menu-block-btn"
+                      disabled={runningThis}
                       onClick={() => {
                         setModal({ kind: "lifecycle", action: "block", reason: "" });
                       }}
@@ -2205,9 +2257,11 @@ export function WorkspaceView() {
                   </DropdownItem>
                 )}
                 {s.stage !== "done" && s.stage !== "cancelled" && (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
+                      data-testid="menu-cancel-btn"
+                      disabled={runningThis}
                       onClick={() => {
                         setModal({ kind: "lifecycle", action: "cancel", reason: "" });
                       }}
@@ -2217,9 +2271,11 @@ export function WorkspaceView() {
                   </DropdownItem>
                 )}
                 {(s.stage === "done" || s.stage === "cancelled") && (
-                  <DropdownItem asChild>
+                  <DropdownItem asChild disabled={runningThis}>
                     <button
                       type="button"
+                      data-testid="menu-reopen-btn"
+                      disabled={runningThis}
                       onClick={() => {
                         setModal({
                           kind: "lifecycle",
@@ -2507,7 +2563,7 @@ export function WorkspaceView() {
               className="btn primary"
               type="button"
               data-testid={`action-${banner.primaryAction.id}`}
-              disabled={busy}
+              disabled={busy || runningThis}
               onClick={() => void handleBannerAction(d, banner.primaryAction!.id, bridgeConnected)}
             >
               <Icon icon={BANNER_ACTION_ICONS[banner.primaryAction.id]} size={14} />{" "}
@@ -2525,7 +2581,7 @@ export function WorkspaceView() {
               className="btn"
               type="button"
               data-testid={`action-${sec.id}`}
-              disabled={busy}
+              disabled={busy || runningThis}
               onClick={() => void handleBannerAction(d, sec.id, bridgeConnected)}
             >
               <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
@@ -2537,7 +2593,7 @@ export function WorkspaceView() {
               className={s.delivery ? "btn" : "btn primary"}
               type="button"
               data-testid="open-deliver-btn"
-              disabled={busy}
+              disabled={busy || runningThis}
               onClick={() => openDeliverModal(Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr))}
             >
               <Icon
@@ -2558,7 +2614,7 @@ export function WorkspaceView() {
               className="btn"
               type="button"
               data-testid="sync-pr-btn"
-              disabled={busy}
+              disabled={busy || runningThis}
               onClick={() => void syncPrStatus()}
             >
               <Icon icon={RefreshCw} size={14} />{" "}
@@ -2570,8 +2626,9 @@ export function WorkspaceView() {
               className="btn"
               type="button"
               data-testid="apply-sandbox-btn"
-              disabled={busy}
+              disabled={busy || runningThis}
               onClick={async () => {
+                if (guardRequirementRunLock(s.id)) return;
                 const res = await runBusy(() => api.applySandbox(s.id));
                 if (res) {
                   await invalidateAllWorkbenchQueries();
@@ -2634,11 +2691,11 @@ export function WorkspaceView() {
 
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (
-          <SpecDesignTab d={d} bridgeConnected={bridgeConnected} />
+          <SpecDesignTab d={d} bridgeConnected={bridgeConnected} runLocked={runningThis} />
         ) : workspaceTab === "diff" ? (
           <DiffViewerPanel d={d} />
         ) : workspaceTab === "changes" ? (
-          <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} />
+          <ChangesVerifyTab d={d} bridgeConnected={bridgeConnected} runLocked={runningThis} />
         ) : (
           <TimelineRunsTab d={d} />
         )}

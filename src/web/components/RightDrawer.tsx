@@ -15,6 +15,7 @@ import {
   runRefineFromDrawer,
   triggerActiveRun,
   useRequirementQuery,
+  useRequirementRunLock,
 } from "../queries.ts";
 import {
   AGENT_RUN_TONE,
@@ -63,7 +64,6 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const removePendingAnnotation = useDraftStore((s) => s.removePendingAnnotation);
   const clearPendingAnnotations = useDraftStore((s) => s.clearPendingAnnotations);
 
-  const activeRuns = useStreamStore((s) => s.activeRuns);
   const selectedRunByReq = useStreamStore((s) => s.selectedRunByReq);
   const logHydratedMap = useStreamStore((s) => s.logHydrated);
   const runTraces = useStreamStore((s) => s.runTraces);
@@ -71,6 +71,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const d = reqData?.detail ?? null;
+  const activeRun = useRequirementRunLock(d?.state.id ?? null);
 
   const phase = useCollapsePhase(drawerOpen, 245, 195);
   const openCls =
@@ -202,11 +203,6 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   };
 
   const reqId = d?.state.id ?? "";
-  const activeRun = d
-    ? Object.values(activeRuns).find(
-        (r) => r.requirementId === reqId && (!r.projectId || r.projectId === activeProjectId),
-      ) ?? null
-    : null;
   const runs = d ? [...(d.state.agentRuns ?? [])].reverse() : [];
   const explicitSelectedId = reqId ? (selectedRunByReq[reqId] ?? null) : null;
   const validSelectedId =
@@ -403,6 +399,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 className="btn ghost xs"
                                 type="button"
                                 data-testid="adopt-discussion-btn"
+                                disabled={Boolean(activeRun)}
                                 onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                               >
                                 <Icon icon={Check} size={14} />{" "}
@@ -433,6 +430,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                   </div>
 
                   <div className="drawer-composer">
+                    {activeRun && (
+                      <div className="xs muted" data-testid="drawer-run-lock-hint" style={{ marginBottom: 6 }}>
+                        {t(language, "ws.runLockHint")}
+                      </div>
+                    )}
                     {discussAnchor && (
                       <div className="xs muted" style={{ marginBottom: 4 }}>
                         {t(language, "drawer.anchor", { anchor: discussAnchor })}{" "}

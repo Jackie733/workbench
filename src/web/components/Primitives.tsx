@@ -1,6 +1,6 @@
 import React from "react";
 import { Content, Overlay, Portal, Root, Title } from "@radix-ui/react-dialog";
-import { MessageSquare } from "lucide-react";
+import { Lock, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentAction } from "../../core/types.ts";
@@ -24,6 +24,16 @@ export function UiLanguageSelect({ className = "" }: { className?: string }) {
       <option value="zh-CN">简体中文</option>
       <option value="en">English</option>
     </select>
+  );
+}
+
+export function RunLockNotice({ testId = "run-lock-notice" }: { testId?: string }) {
+  const language = useUiStore((s) => s.language);
+  return (
+    <div className="callout warning xs" data-testid={testId} style={{ marginBottom: 10 }}>
+      <Icon icon={Lock} size={14} />
+      <span>{t(language, "runLock.notice")}</span>
+    </div>
   );
 }
 

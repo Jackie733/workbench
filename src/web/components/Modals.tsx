@@ -64,6 +64,7 @@ import {
 import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse } from "../api.ts";
 import {
   dispatchSyncBaseWithAgent,
+  guardRequirementRunLock,
   invalidateAllWorkbenchQueries,
   notifyCascadeSyncResults,
   openRequirement,
@@ -89,6 +90,7 @@ import {
   useProjectQuery,
   useProjectSandboxesQuery,
   useRequirementQuery,
+  useRequirementRunLock,
 } from "../queries.ts";
 import {
   describeClientError,
@@ -116,7 +118,7 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
-import { MarkdownView, ModalShell } from "./Primitives.tsx";
+import { MarkdownView, ModalShell, RunLockNotice } from "./Primitives.tsx";
 import { RoutingModelPicker } from "./ui/RoutingModelPicker.tsx";
 
 const STAGE_LABEL_KEYS: Record<RoutingStage, MessageKey> = {
@@ -389,6 +391,8 @@ export function Modals() {
     Boolean(!noHubProject && project?.initialized && m?.kind === "new_req"),
   );
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const modalRequirementId = m?.kind === "link_issue" ? m.requirementId : selectedId;
+  const runLock = useRequirementRunLock(modalRequirementId);
   const { data: evolutionData } = useEvolutionQuery(m?.kind === "evolution");
   const { data: playbookData } = usePlaybookQuery(
     activeProjectId,
@@ -437,6 +441,7 @@ export function Modals() {
   if (!m) return null;
 
   const close = () => setModal(null);
+  const runLocked = runLock !== null;
   const bridgeConnected = Boolean(project?.bridge.connected);
   const harnesses = hub?.harnesses ?? [];
   const routing = hub?.routing ?? null;
@@ -1942,6 +1947,7 @@ export function Modals() {
         <div className="xs muted" style={{ marginBottom: 8 }}>
           {t(language, "annotate.anchor", { anchor: m.anchor })}
         </div>
+        {runLocked && <RunLockNotice />}
         <textarea
           className="textarea"
           id="annotate-msg"
@@ -1963,6 +1969,7 @@ export function Modals() {
             className="btn"
             type="button"
             data-testid="annotate-ask-btn"
+            disabled={runLocked}
             onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "ask")}
           >
             <Icon icon={Lightbulb} size={14} /> {t(language, "annotate.ask")}
@@ -2017,6 +2024,7 @@ export function Modals() {
         <p className="xs muted" style={{ margin: "0 0 8px" }}>
           {isDesignStage ? t(language, "feedback.descDesign") : t(language, "feedback.descFix")}
         </p>
+        {runLocked && <RunLockNotice />}
         {!isDesignStage && reviewReport && (
           <div style={{ marginBottom: 8 }}>
             <button
@@ -2067,7 +2075,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="feedback-submit-btn"
-            disabled={busy}
+            disabled={busy || runLocked}
             onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
           >
             <Icon icon={Send} size={14} />{" "}
@@ -2091,6 +2099,7 @@ export function Modals() {
           <Icon icon={AlertTriangle} size={20} />
           <h3 style={{ margin: 0 }}>{title}</h3>
         </div>
+        {runLocked && <RunLockNotice />}
         <div className={`callout ${isBlock ? "danger" : "warning"} xs`} style={{ marginBottom: 10 }}>
           <div>
             <strong>{t(language, "acceptOverride.summary")}</strong>
@@ -2129,7 +2138,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="confirm-accept-override-btn"
-            disabled={busy || (isBlock && !m.reason.trim())}
+            disabled={busy || runLocked || (isBlock && !m.reason.trim())}
             onClick={() => detail && void submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks)}
           >
             <Icon icon={Check} size={14} /> {t(language, "acceptOverride.confirm")}
@@ -2157,6 +2166,7 @@ export function Modals() {
           />
           <span>{title}</span>
         </h3>
+        {runLocked && <RunLockNotice />}
         {canPreserveApproval && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
             <label
@@ -2209,7 +2219,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="lifecycle-confirm-btn"
-            disabled={busy}
+            disabled={busy || runLocked}
             onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
           >
             <Icon icon={Check} size={14} /> {t(language, "common.confirm")}
@@ -2963,6 +2973,7 @@ export function Modals() {
         : null;
 
     const submitLinkIssue = async () => {
+      if (guardRequirementRunLock(m.requirementId)) return;
       if ((isGiteeLink || m.mode === "link") && !m.issueRef.trim()) {
         showToastKey(isGiteeLink ? "gitee.linkNeedRef" : "linkIssue.needRef", undefined, true);
         return;
@@ -3047,6 +3058,7 @@ export function Modals() {
             <Icon icon={AlertTriangle} size={14} /> {remoteReason}
           </div>
         )}
+        {runLocked && <RunLockNotice />}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
@@ -3055,7 +3067,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="submit-link-issue-btn"
-            disabled={busy || remoteReady === false}
+            disabled={busy || runLocked || remoteReady === false}
             onClick={() => void submitLinkIssue()}
           >
             <Icon icon={Link2} size={14} />{" "}
@@ -3102,6 +3114,7 @@ export function Modals() {
       setModal((prev) => (prev?.kind === "deliver" ? { ...prev, selectedFiles: files } : prev));
     };
     const submitDeliver = async () => {
+      if (guardRequirementRunLock(detail.state.id)) return;
       const files = m.selectedFiles.filter((f) => candidates.some((c) => c.path === f));
       if (files.length === 0 && !canSubmitExistingCommits) {
         showToastKey("deliver.needFiles", undefined, true);
@@ -3440,6 +3453,7 @@ export function Modals() {
             setModal((prev) => (prev?.kind === "deliver" ? { ...prev, note: e.target.value } : prev))
           }
         />
+        {runLocked && <RunLockNotice />}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
@@ -3448,7 +3462,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="submit-deliver-btn"
-            disabled={busy || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
+            disabled={busy || runLocked || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onClick={() => void submitDeliver()}
           >
             <Icon icon={createPr ? GitPullRequest : GitCommit} size={14} />{" "}
@@ -3464,6 +3478,7 @@ export function Modals() {
   if (m.kind === "spawn_children") {
     const validItems = m.items.filter((it) => it.title.trim().length > 0);
     const submitSpawn = async () => {
+      if (guardRequirementRunLock(m.parentId)) return;
       if (validItems.length === 0) {
         showToastKey("spawn.emptyError", undefined, true);
         return;
@@ -3582,6 +3597,7 @@ export function Modals() {
             </div>
           ))}
         </div>
+        {runLocked && <RunLockNotice />}
         <div className="modal-actions">
           <button className="btn" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
@@ -3590,7 +3606,7 @@ export function Modals() {
             className="btn primary"
             type="button"
             data-testid="spawn-submit-btn"
-            disabled={busy || validItems.length === 0}
+            disabled={busy || runLocked || validItems.length === 0}
             onClick={() => void submitSpawn()}
           >
             <Icon icon={GitFork} size={14} /> {t(language, "spawn.submit", { count: validItems.length })}

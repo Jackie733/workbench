@@ -507,6 +507,65 @@ export function findActiveRequirementRun(
   return undefined;
 }
 
+export interface RequirementRunScope {
+  projectId: string | null;
+  projectRoot?: string | null;
+  projects?: ReadonlyArray<{ id: string; root: string; nodeId?: string }>;
+}
+
+export interface RequirementRunScopeInput {
+  activeProjectId: string | null;
+  hubActiveProjectId?: string | null;
+  projectRoot?: string | null;
+  projects?: RequirementRunScope["projects"];
+}
+
+/** 界面订阅与命令式守卫共用的作用域解析规则。 */
+export function resolveRequirementRunScope(input: RequirementRunScopeInput): RequirementRunScope {
+  return {
+    projectId: input.activeProjectId ?? input.hubActiveProjectId ?? null,
+    projectRoot: input.projectRoot ?? null,
+    projects: input.projects ?? [],
+  };
+}
+
+export type ScopedRequirementRun = RequirementRunLike & { projectId?: string; root?: string };
+
+function runBelongsToScope(run: ScopedRequirementRun, scope: RequirementRunScope): boolean {
+  if (scope.projectId === null) {
+    // 单项目模式：快照可能已附带 Hub 项目编号，但页面没有项目作用域；按本机当前根目录匹配。
+    // 根目录尚未返回时无法判断归属，先等待查询结果，避免误锁其他项目的同号需求。
+    if (!scope.projectRoot) return false;
+    if (run.root) return run.root === scope.projectRoot;
+    if (run.projectId && scope.projects?.length) {
+      const owner = scope.projects.find((p) => p.id === run.projectId);
+      return Boolean(owner && owner.root === scope.projectRoot);
+    }
+    return false;
+  }
+  if (run.projectId) return run.projectId === scope.projectId;
+  // 缺少 projectId 时按根目录解析；无法确定归属的记录等待 Hub 快照校正。
+  if (!run.root) return false;
+  const owner = scope.projects?.find((p) => p.root === run.root);
+  return Boolean(owner && owner.id === scope.projectId);
+}
+
+/**
+ * 需求详情运行期限制的判定入口：`ask` 同样占用同需求调度名额，因此不排除。
+ * 首页待决策列表继续使用 {@link findActiveRequirementRun} 的既有语义。
+ */
+export function findLockingRequirementRun<T extends ScopedRequirementRun>(
+  runs: Iterable<T>,
+  requirementId: string,
+  scope: RequirementRunScope,
+): T | undefined {
+  for (const run of runs) {
+    if (run.requirementId !== requirementId || run.status !== "running") continue;
+    if (runBelongsToScope(run, scope)) return run;
+  }
+  return undefined;
+}
+
 export function partitionPendingDecisions(
   items: RequirementSummary[],
   runs: Iterable<RequirementRunLike>,

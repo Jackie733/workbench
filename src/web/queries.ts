@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import type { GiteeIssueItem } from "../core/gitee.ts";
 import type {
@@ -18,11 +18,20 @@ import {
   setApiProjectScope,
   type HubStateResponse,
   type InsightsQueryFilter,
+  type ProjectInfoResponse,
 } from "./api.ts";
 import { resolveWarningParam, type MessageKey } from "./i18n.ts";
-import { activeRunnerChoice, formatReviewFixFeedback, getModelEffortCapability, type Scope } from "./state.ts";
+import {
+  activeRunnerChoice,
+  findLockingRequirementRun,
+  formatReviewFixFeedback,
+  getModelEffortCapability,
+  resolveRequirementRunScope,
+  type RequirementRunScope,
+  type Scope,
+} from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
-import { useStreamStore } from "./stores/streamStore.ts";
+import { useStreamStore, type ActiveRunItem } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
 
 export const queryClient = new QueryClient({
@@ -56,6 +65,56 @@ export const queryKeys = {
   diff: (projectId: string | null, id: string | null, live = false) => ["diff", projectId, id, live ? "live" : "default"] as const,
   delivery: (projectId: string | null, id: string | null) => ["delivery", projectId, id] as const,
 };
+
+function resolveRunScope(): RequirementRunScope {
+  const ui = useUiStore.getState();
+  const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+  const projectId = ui.activeProjectId ?? hub?.activeProjectId ?? null;
+  const project = queryClient.getQueryData<ProjectInfoResponse>(queryKeys.project(projectId));
+  return resolveRequirementRunScope({
+    activeProjectId: ui.activeProjectId,
+    hubActiveProjectId: hub?.activeProjectId,
+    projectRoot: project?.root,
+    projects: hub?.projects,
+  });
+}
+
+/** 命令式读取最新运行状态，用于请求与组合流程在产生副作用前复查。 */
+export function findRequirementLockingRun(requirementId: string): ActiveRunItem | null {
+  return (
+    findLockingRequirementRun(Object.values(useStreamStore.getState().activeRuns), requirementId, resolveRunScope()) ??
+    null
+  );
+}
+
+export function guardRequirementRunLock(requirementId: string): boolean {
+  if (!findRequirementLockingRun(requirementId)) return false;
+  useUiStore.getState().showToastKey("toast.agentRunning", undefined, true);
+  return true;
+}
+
+/** 详情页及其弹窗共用的响应式运行期限制判定。 */
+export function useRequirementRunLock(requirementId: string | null): ActiveRunItem | null {
+  const activeRuns = useStreamStore((s) => s.activeRuns);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const { data: hub } = useHubStateQuery();
+  const projectKey = activeProjectId ?? hub?.activeProjectId ?? null;
+  const { data: project } = useProjectQuery(projectKey);
+  const scope = useMemo(
+    () =>
+      resolveRequirementRunScope({
+        activeProjectId,
+        hubActiveProjectId: hub?.activeProjectId,
+        projectRoot: project?.root,
+        projects: hub?.projects,
+      }),
+    [activeProjectId, hub?.activeProjectId, hub?.projects, project?.root],
+  );
+  return useMemo(() => {
+    if (!requirementId) return null;
+    return findLockingRequirementRun(Object.values(activeRuns), requirementId, scope) ?? null;
+  }, [activeRuns, requirementId, scope]);
+}
 
 export function useAuthStatusQuery() {
   return useQuery({
@@ -213,23 +272,42 @@ export function usePlaybookQuery(activeProjectId: string | null, enabled: boolea
   });
 }
 
+function applyHubState(hub: HubStateResponse, snapshotStartedAt: number): void {
+  useStreamStore.getState().syncActiveRuns(hub.activeRuns, snapshotStartedAt);
+  const ui = useUiStore.getState();
+  if (hub.hubMode) {
+    const currentValid = Boolean(ui.activeProjectId && hub.projects.some((p) => p.id === ui.activeProjectId));
+    if (!currentValid) {
+      const nextId = hub.activeProjectId ?? hub.projects[0]?.id ?? null;
+      if (ui.activeProjectId !== nextId) {
+        setApiProjectScope(nextId);
+        ui.setActiveProjectId(nextId);
+      }
+    }
+  }
+}
+
+/**
+ * 连接建立后强制拉取一次权威 Hub 快照。
+ * react-query 在缓存尚无数据时会复用在途请求（cancelRefetch 也不会中断），
+ * 因此不能依赖 refetchQueries，必须真实发出新请求并清理旧的在途查询。
+ */
+export async function refreshHubStateAfterConnect(): Promise<void> {
+  await queryClient.cancelQueries({ queryKey: queryKeys.hubState }, { revert: false });
+  const snapshotStartedAt = Date.now();
+  const hub = await api.getHubState();
+  applyHubState(hub, snapshotStartedAt);
+  queryClient.setQueryData(queryKeys.hubState, hub);
+}
+
 export function useHubStateQuery(enabled = true) {
   return useQuery({
     queryKey: queryKeys.hubState,
     queryFn: async () => {
+      // 记录请求发出时间：比它更晚到达的运行事件不能被这份快照回滚。
+      const snapshotStartedAt = Date.now();
       const hub = await api.getHubState();
-      useStreamStore.getState().syncActiveRuns(hub.activeRuns);
-      const ui = useUiStore.getState();
-      if (hub.hubMode) {
-        const currentValid = Boolean(ui.activeProjectId && hub.projects.some((p) => p.id === ui.activeProjectId));
-        if (!currentValid) {
-          const nextId = hub.activeProjectId ?? hub.projects[0]?.id ?? null;
-          if (ui.activeProjectId !== nextId) {
-            setApiProjectScope(nextId);
-            ui.setActiveProjectId(nextId);
-          }
-        }
-      }
+      applyHubState(hub, snapshotStartedAt);
       return hub;
     },
     refetchInterval: (query) => query.state.data?.nodes?.some((node) => node.update?.phase === "running") ? 3_000 : false,
@@ -490,6 +568,14 @@ export function useWorkbenchWsSync(enabled = true): void {
         }
       },
       {
+        onConnected: () => {
+          // 首次连接与重连都补拉运行快照；初始请求在途时也必须真实发出新请求。
+          void refreshHubStateAfterConnect().catch(() => {
+            void queryClient.refetchQueries({ queryKey: queryKeys.hubState, type: "active" }, { cancelRefetch: true });
+          });
+          void queryClient.refetchQueries({ queryKey: ["requirement"], type: "active" }, { cancelRefetch: true });
+          void queryClient.refetchQueries({ queryKey: ["requirements"], type: "active" }, { cancelRefetch: true });
+        },
         onReconnect: () => {
           void queryClient.invalidateQueries();
           const ui = useUiStore.getState();
@@ -667,6 +753,8 @@ export async function triggerActiveRun(
     runnerActionKey?: AgentAction;
   },
 ): Promise<void> {
+  if (guardRequirementRunLock(reqId)) return;
+  const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const drafts = useDraftStore.getState().runnerOverrides;
   const override =
@@ -683,7 +771,11 @@ export async function triggerActiveRun(
       : undefined;
   const ui = useUiStore.getState();
 
+  let requestStartedAt = 0;
   const res = await runBusy(async () => {
+    // 产生请求副作用前读取最新运行状态，防住延迟回调与并发入口。
+    if (guardRequirementRunLock(reqId)) return null;
+    requestStartedAt = Date.now();
     return api.startAgentRun(reqId, {
       action,
       harness: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
@@ -698,7 +790,13 @@ export async function triggerActiveRun(
   });
 
   if (res) {
-    useStreamStore.getState().setRunStarted({ ...res.run, requirementId: reqId });
+    useStreamStore.getState().setRunStarted({
+      ...res.run,
+      requirementId: reqId,
+      // 使用发起请求时的项目作用域，避免响应到达前切换项目导致归属漂移。
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+      ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+    }, requestStartedAt);
     ui.setDrawerOpen(true);
     ui.setDrawerTab(action === "ask" ? "discuss" : "console");
     ui.showToastKey("toast.runStarted", {
@@ -711,7 +809,9 @@ export async function triggerActiveRun(
 }
 
 export async function executeVerify(id: string, body: Parameters<typeof api.verify>[1]) {
+  if (guardRequirementRunLock(id)) return null;
   return runBusy(async () => {
+    if (guardRequirementRunLock(id)) return null;
     const out = await api.verify(id, body);
     await queryClient.invalidateQueries({ queryKey: ["requirement"] });
     await queryClient.invalidateQueries({ queryKey: ["requirements"] });
@@ -720,7 +820,9 @@ export async function executeVerify(id: string, body: Parameters<typeof api.veri
 }
 
 export async function captureUiScreenshots(id: string, label?: string) {
+  if (guardRequirementRunLock(id)) return null;
   return runBusy(async () => {
+    if (guardRequirementRunLock(id)) return null;
     const out = await api.captureScreenshots(id, label);
     await queryClient.invalidateQueries({ queryKey: ["requirement"] });
     await queryClient.invalidateQueries({ queryKey: ["requirements"] });
@@ -734,6 +836,7 @@ export async function dispatchFixFromReview(
   opts?: { selectedFindingIds?: string[] },
 ): Promise<void> {
   const id = detail.state.id;
+  if (guardRequirementRunLock(id)) return;
   const report = detail.state.reviewReport;
   const feedback = report
     ? formatReviewFixFeedback(report, opts?.selectedFindingIds)
@@ -773,6 +876,7 @@ export async function syncSandboxBaseAction(
   reqId: string,
   options: { fetchRemote?: boolean; useEvolutionHub?: boolean } = {},
 ): Promise<boolean> {
+  if (guardRequirementRunLock(reqId)) return false;
   const ui = useUiStore.getState();
   const res = await runBusy(() =>
     options.useEvolutionHub
@@ -821,6 +925,7 @@ export async function dispatchSyncBaseWithAgent(
   bridgeConnected: boolean,
 ): Promise<void> {
   const id = detail.state.id;
+  if (guardRequirementRunLock(id)) return;
   const ui = useUiStore.getState();
   const conflicts = drift.conflictFiles.slice(0, 8).join(", ");
   const targetLabel = drift.targetRef ?? drift.mainHead.slice(0, 7);
@@ -832,6 +937,7 @@ export async function dispatchSyncBaseWithAgent(
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
     `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
   const useCli = shouldUseCliRunner("fix");
+  const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const drafts = useDraftStore.getState().runnerOverrides;
   const override = drafts.fix;
@@ -846,8 +952,10 @@ export async function dispatchSyncBaseWithAgent(
         : undefined
       : undefined;
 
-  const res = await runBusy(() =>
-    api.syncResolveSandbox(id, {
+  let requestStartedAt = 0;
+  const res = await runBusy(() => {
+    requestStartedAt = Date.now();
+    return api.syncResolveSandbox(id, {
       approveFirst: detail.state.stage === "awaiting_approval",
       expectedRevision: detail.state.revision,
       useCli,
@@ -856,11 +964,16 @@ export async function dispatchSyncBaseWithAgent(
       model: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
       reasoningEffort: useCli ? effectiveEffort : undefined,
       message: msg,
-    }),
-  );
+    });
+  });
   if (!res) return;
   if (res.run && res.target) {
-    useStreamStore.getState().setRunStarted({ ...res.run, requirementId: id });
+    useStreamStore.getState().setRunStarted({
+      ...res.run,
+      requirementId: id,
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
+      ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+    }, requestStartedAt);
     ui.setDrawerOpen(true);
     ui.setDrawerTab("console");
     ui.showToastKey("toast.runStarted", {
@@ -875,6 +988,7 @@ export async function dispatchSyncBaseWithAgent(
 
 export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
   const id = detail.state.id;
+  if (guardRequirementRunLock(id)) return;
   const rev = detail.state.revision;
   const ui = useUiStore.getState();
 
@@ -1286,6 +1400,7 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     ui.showToastKey("toast.needFeedback", undefined, true);
     return;
   }
+  if (guardRequirementRunLock(detail.state.id)) return;
   const targetAction: AgentAction =
     detail.state.stage === "awaiting_approval" || detail.state.stage === "draft" || detail.state.stage === "designing"
       ? "design"
@@ -1328,6 +1443,7 @@ export async function submitAcceptOverride(
     ui.showToastKey("toast.acceptOverrideReasonRequired", undefined, true);
     return;
   }
+  if (guardRequirementRunLock(detail.state.id)) return;
   const res = await runBusy(() =>
     api.accept(detail.state.id, {
       expectedRevision: detail.state.revision,
@@ -1354,6 +1470,7 @@ export async function submitLifecycle(
     ui.showToastKey("toast.needReason", undefined, true);
     return;
   }
+  if (guardRequirementRunLock(detail.state.id)) return;
   const res = await runBusy(async () => {
     if (action === "block") return api.block(detail.state.id, { reason, expectedRevision: detail.state.revision });
     if (action === "cancel") return api.cancel(detail.state.id, { reason, expectedRevision: detail.state.revision });
@@ -1384,6 +1501,8 @@ export async function submitAnnotation(
     return;
   }
   if (mode === "ask") {
+    // 触发现有执行器的同需求调度名额，运行期间暂停并保留弹窗输入。
+    if (guardRequirementRunLock(reqId)) return;
     ui.setModal(null);
     ui.setDrawerOpen(true);
     ui.setDrawerTab("discuss");
@@ -1409,6 +1528,8 @@ export async function runAskFromDrawer(reqId: string): Promise<void> {
     ui.showToastKey("toast.needQuestion", undefined, true);
     return;
   }
+  // 先复查运行状态，避免拦截时清空用户草稿。
+  if (guardRequirementRunLock(reqId)) return;
   const anchor = draft.discussAnchor ?? undefined;
   draft.setDiscussDraft("");
   draft.setDiscussAnchor(null);
@@ -1455,6 +1576,8 @@ export async function runRefineFromDrawer(reqId: string): Promise<void> {
     ui.showToastKey("toast.needRefine", undefined, true);
     return;
   }
+  // 先复查运行状态，避免拦截时清空讨论草稿与排队批注。
+  if (guardRequirementRunLock(reqId)) return;
   draft.setDiscussDraft("");
   draft.setDiscussAnchor(null);
   draft.clearPendingAnnotations();
@@ -1469,6 +1592,7 @@ export async function adoptDiscussion(reqId: string, discId: string, message: st
     ui.showToastKey("drawer.stageReadonly", undefined, true);
     return;
   }
+  if (guardRequirementRunLock(reqId)) return;
   await triggerActiveRun(reqId, targetAction, {
     message:
       targetAction === "fix"
