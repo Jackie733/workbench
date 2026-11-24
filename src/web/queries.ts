@@ -364,6 +364,10 @@ export function useRequirementsQuery(activeProjectId: string | null, scope: Scop
   });
 }
 
+export function isRequirementNotFoundError(error: unknown): boolean {
+  return error instanceof ApiClientError && error.code === "not_found";
+}
+
 export function useRequirementQuery(activeProjectId: string | null, id: string | null) {
   return useQuery({
     queryKey: queryKeys.requirement(activeProjectId, id),

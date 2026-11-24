@@ -14,6 +14,7 @@ import { Topbar } from "./components/Topbar.tsx";
 import { WorkspaceView } from "./components/WorkspaceView.tsx";
 import { InsightsView } from "./components/InsightsView.tsx";
 import {
+  isRequirementNotFoundError,
   queryClient,
   queryKeys,
   useAuthStatusQuery,
@@ -424,16 +425,25 @@ function WorkbenchShell() {
   const showDrawer = Boolean(selectedId) && drawerOpen && !remoteOffline;
 
   const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", projectReady);
-  const { isError: selectedReqError } = useRequirementQuery(activeProjectId, projectReady ? selectedId : null);
+  const { isError: selectedReqIsError, error: selectedReqError } = useRequirementQuery(
+    activeProjectId,
+    projectReady ? selectedId : null,
+  );
+  const selectedReqNotFound = selectedReqIsError && isRequirementNotFoundError(selectedReqError);
 
   useEffect(() => {
-    if (!projectReady || !selectedId || !selectedReqError) return;
+    if (!projectReady || !selectedId || !selectedReqNotFound) return;
     useUiStore.getState().setSelectedId(null);
-  }, [projectReady, selectedId, selectedReqError]);
+  }, [projectReady, selectedId, selectedReqNotFound]);
 
   useEffect(() => {
     if (!projectReady || selectedId !== null || !allReqList) return;
-    const allItems = allReqList.items;
+    const allItems = allReqList.items.filter(
+      (item) =>
+        !isRequirementNotFoundError(
+          queryClient.getQueryState(queryKeys.requirement(activeProjectId, item.id))?.error,
+        ),
+    );
     if (allItems.length === 0) return;
     const runsList = Object.values(activeRuns);
     const activeItems = filterRequirementsByScope(allItems, "active");
