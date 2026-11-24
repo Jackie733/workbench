@@ -5,6 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { NodeServiceInstallation } from "../../src/cli/node_service.ts";
 import { applyNodeUpdate, nodeUpdateBlocksWork, readNodeUpdate } from "../../src/cli/node_update.ts";
+import { isSourceRevisionPublished } from "../../src/core/revision.ts";
+import { NodeUpdates } from "../../src/hub/node_updates.ts";
+import type { RemoteNodeRegistry } from "../../src/hub/node_bridge.ts";
+import type { RemoteNodeInfo } from "../../src/hub/types.ts";
 
 const temp: string[] = [];
 afterEach(() => { for (const dir of temp.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -85,4 +89,82 @@ test("dependency failure keeps new work paused and a retry reinstalls before res
   fs.unlinkSync(f.fail);
   await applyNodeUpdate(f.installation, crypto.randomUUID(), f.revision, f.previous);
   expect(fs.readFileSync(f.log, "utf8")).toBe("install --production --frozen-lockfile\ninstall --production --frozen-lockfile\n--user restart workbench-node-test.service\n");
+});
+
+test("surfaces actionable validation errors in status message and recovers when checkout is already at target or continuing an interrupted update", async () => {
+  const f = fixture();
+  // Create a newer release commit on origin/main
+  fs.writeFileSync(path.join(f.origin, "release2.txt"), "newer code\n");
+  git(f.origin, "add", ".");
+  git(f.origin, "commit", "-qm", "release 2");
+  const revision2 = git(f.origin, "rev-parse", "HEAD");
+
+  // 1) Interrupted update at f.revision (bun install fails), then user updates directly to revision2
+  fs.writeFileSync(f.fail, "");
+  await expect(applyNodeUpdate(f.installation, crypto.randomUUID(), f.revision, f.previous)).rejects.toThrow();
+  expect(readNodeUpdate(f.hubDir)?.message).toContain("Install frozen production dependencies (installed Bun failed (1))");
+  expect(readNodeUpdate(f.hubDir)?.checkoutRevision).toBe(f.revision);
+
+  fs.unlinkSync(f.fail);
+  await applyNodeUpdate(f.installation, crypto.randomUUID(), revision2, f.previous);
+  expect(git(f.root, "rev-parse", "HEAD")).toBe(revision2);
+  expect(readNodeUpdate(f.hubDir)?.phase).toBe("restarting");
+
+  // 2) Manually pulled checkout already at target revision (runningRevision is still f.previous)
+  const f2 = fixture();
+  git(f2.root, "pull", "--ff-only", "-q", "origin", "main");
+  expect(git(f2.root, "rev-parse", "HEAD")).toBe(f2.revision);
+  await applyNodeUpdate(f2.installation, crypto.randomUUID(), f2.revision, f2.previous);
+  expect(fs.readFileSync(f2.log, "utf8")).toBe("install --production --frozen-lockfile\n--user restart workbench-node-test.service\n");
+
+  // 3) Dirty checkout surfaces clear reason in status message
+  const f3 = fixture();
+  fs.writeFileSync(path.join(f3.root, "dirty.txt"), "x");
+  await expect(applyNodeUpdate(f3.installation, crypto.randomUUID(), f3.revision, f3.previous)).rejects.toThrow("dirty");
+  expect(readNodeUpdate(f3.hubDir)?.message).toBe("Validate installed checkout: Git checkout is dirty");
+});
+
+test("isSourceRevisionPublished detects pushed vs unpushed commits and ignores repos without origin refs", () => {
+  const f = fixture();
+  // In f.root (cloned from origin), f.previous is on origin/main
+  expect(isSourceRevisionPublished(f.previous, f.root)).toBe(true);
+  // Create a local unpushed commit in f.root
+  fs.writeFileSync(path.join(f.root, "local.txt"), "unpushed\n");
+  git(f.root, "add", ".");
+  git(f.root, "commit", "-qm", "local only");
+  const unpushed = git(f.root, "rev-parse", "HEAD");
+  expect(isSourceRevisionPublished(unpushed, f.root)).toBe(false);
+  // In f.origin (no refs/remotes/origin/*), returns undefined
+  expect(isSourceRevisionPublished(f.revision, f.origin)).toBeUndefined();
+});
+
+test("NodeUpdates clears stale failed status once the node reconnects on the target or a newer revision", async () => {
+  let currentNode: RemoteNodeInfo = {
+    nodeId: "wsl-work",
+    name: "Windows WSL2",
+    isLocal: false,
+    hostname: "WORK-PC",
+    platform: "linux",
+    connected: true,
+    connectedAt: 1000,
+    lastSeenAt: 1000,
+    harnesses: [],
+    activeRuns: [],
+    revision: "a".repeat(40),
+    updateEnabled: true,
+  };
+  const registry = {
+    getNode: (id: string) => (id === "wsl-work" ? currentNode : undefined),
+    rpc: async () => ({ type: "node.rpc.response" as const, reqId: "1", status: 500, bodyJson: { error: { message: "boom" } } }),
+  } as unknown as RemoteNodeRegistry;
+
+  const updates = new NodeUpdates(registry, () => {});
+  const target = "b".repeat(40);
+  await expect(updates.start("wsl-work", target)).rejects.toThrow("boom");
+  expect(updates.get("wsl-work")).toEqual({ revision: target, phase: "failed", message: "boom" });
+
+  // Node restarts locally and reconnects with the target revision -> stale failure clears
+  currentNode = { ...currentNode, revision: target, connectedAt: 2000 };
+  expect(updates.get("wsl-work")).toBeUndefined();
+  updates.stop();
 });

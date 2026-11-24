@@ -77,7 +77,7 @@ import {
   writeDaemonInfo,
 } from "../hub/registry.ts";
 import { buildPresetRouting, normalizeRoutingConfig } from "../hub/routing.ts";
-import { readSourceRevision } from "../core/revision.ts";
+import { isSourceRevisionPublished, readSourceRevision } from "../core/revision.ts";
 import { clearModelCooldown, readModelTelemetry, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
   ROUTING_PRESETS,
@@ -640,6 +640,12 @@ export async function startWorkbenchServer(options: {
       }
       const body = await readBody(req);
       if (body.revision !== revision) throw new WorkbenchError("revision_conflict", "Hub revision changed; reload before updating the node");
+      if (isSourceRevisionPublished(revision) === false) {
+        throw new WorkbenchError(
+          "revision_conflict",
+          `Hub commit ${revision.slice(0, 7)} has not been pushed to origin yet; run git push first`,
+        );
+      }
       return jsonResponse(await nodeUpdates.start(updateNode[1], revision), 202);
     }
     if (method === "GET" && pathname === "/api/hub/state") {

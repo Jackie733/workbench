@@ -13,7 +13,16 @@ export class NodeUpdates {
   constructor(private readonly nodes: RemoteNodeRegistry, private readonly changed: () => void) {}
 
   get(nodeId: string): NodeUpdateStatus | undefined {
-    return this.jobs.get(nodeId)?.status;
+    const job = this.jobs.get(nodeId);
+    if (!job) return undefined;
+    if (job.status.phase === "failed") {
+      const node = this.nodes.getNode(nodeId);
+      if (node?.connected && node.revision && (node.revision === job.status.revision || node.revision !== job.node.revision)) {
+        this.jobs.delete(nodeId);
+        return undefined;
+      }
+    }
+    return job.status;
   }
 
   offlineNodes(): RemoteNodeInfo[] {

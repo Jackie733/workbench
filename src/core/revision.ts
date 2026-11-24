@@ -21,3 +21,25 @@ export function readSourceRevision(): string | undefined {
     // Git and repository metadata are optional for runtime installations.
   }
 }
+
+export function isSourceRevisionPublished(
+  revision: string,
+  sourceRoot: string = path.resolve(import.meta.dir, "../.."),
+): boolean | undefined {
+  if (!isGitRevision(revision)) return undefined;
+  const env = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  try {
+    const hasOrigin = execFileSync("git", ["for-each-ref", "--count=1", "refs/remotes/origin/"], {
+      cwd: sourceRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2_000,
+    }).trim();
+    if (!hasOrigin) return undefined;
+    const matched = execFileSync("git", ["for-each-ref", "--count=1", "--contains", revision, "refs/remotes/origin/"], {
+      cwd: sourceRoot, env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2_000,
+    }).trim();
+    return matched.length > 0;
+  } catch {
+    return undefined;
+  }
+}

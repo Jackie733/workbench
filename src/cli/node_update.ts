@@ -13,9 +13,27 @@ export type NodeUpdateReport = {
   phase: "preparing" | "restarting" | "failed";
   startedAt: number;
   checkoutChanged: boolean;
+  checkoutRevision?: string;
   root?: string;
   message?: string;
 };
+
+class NodeUpdateValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NodeUpdateValidationError";
+  }
+}
+
+export function formatNodeUpdateFailure(stage: string, error: unknown): string {
+  if (error instanceof NodeUpdateValidationError) {
+    return `${stage}: ${error.message}`;
+  }
+  if (error instanceof Error && /^[^\r\n]+ failed \((?:timeout|\d+|unknown)\)$/.test(error.message)) {
+    return `${stage} (${error.message}). Inspect the node updater journal for details.`;
+  }
+  return `${stage}. Inspect the node updater journal for details.`;
+}
 
 export function isNodeUpdateId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
@@ -69,50 +87,86 @@ export async function applyNodeUpdate(installation: NodeServiceInstallation, id:
   revision = revision.toLowerCase();
   const statusFile = path.join(installation.hubDir, "node-update-status.json");
   const prior = readNodeUpdate(installation.hubDir);
-  const state: NodeUpdateReport = { id, revision, startedAt: Date.now(), phase: "preparing",
-    checkoutChanged: Boolean(prior?.checkoutChanged && prior.revision !== runningRevision) };
+  const priorCheckoutRevision = prior?.checkoutChanged && prior.revision !== runningRevision
+    ? (prior.checkoutRevision ?? prior.revision)
+    : undefined;
+  const state: NodeUpdateReport = {
+    id,
+    revision,
+    startedAt: Date.now(),
+    phase: "preparing",
+    checkoutChanged: Boolean(priorCheckoutRevision),
+    ...(priorCheckoutRevision ? { checkoutRevision: priorCheckoutRevision } : {}),
+  };
   let stage = "Validate installed checkout";
   try {
     atomicWriteJson(statusFile, state, 0o600);
     const branch = readUpdateBranch(installation.hubDir);
-    if (!branch) throw new Error("Node updates are not enabled");
+    if (!branch) throw new NodeUpdateValidationError("Node updates are not enabled");
     const root = fs.realpathSync(path.resolve(path.dirname(installation.cliPath), "../.."));
-    if (fs.realpathSync(installation.cliPath) !== path.join(root, "src/cli/index.ts")) throw new Error("Installed CLI is outside the source checkout");
+    if (fs.realpathSync(installation.cliPath) !== path.join(root, "src/cli/index.ts")) {
+      throw new NodeUpdateValidationError("Installed CLI is outside the source checkout");
+    }
     state.root = root;
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !/^(https?|all|no)_proxy$/i.test(key)));
     Object.assign(env, installation.proxyEnv, { PATH: installation.path, HOME: installation.workingDirectory, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
     const git = (...args: string[]) => run("git", args, { cwd: root, env, timeout: 120_000 });
     const checkout = async () => {
-      if (fs.realpathSync((await git("rev-parse", "--show-toplevel")).trimEnd()) !== root) throw new Error("Installed CLI is not in the root Git checkout");
-      for (const name of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"]) {
-        if (fs.existsSync(path.resolve(root, (await git("rev-parse", "--git-path", name)).trimEnd()))) throw new Error(`Git operation in progress: ${name}`);
+      if (fs.realpathSync((await git("rev-parse", "--show-toplevel")).trimEnd()) !== root) {
+        throw new NodeUpdateValidationError("Installed CLI is not in the root Git checkout");
       }
-      if (await git("status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")) throw new Error("Git checkout is dirty");
+      for (const name of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"]) {
+        if (fs.existsSync(path.resolve(root, (await git("rev-parse", "--git-path", name)).trimEnd()))) {
+          throw new NodeUpdateValidationError(`Git operation in progress: ${name}`);
+        }
+      }
+      if (await git("status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")) {
+        throw new NodeUpdateValidationError("Git checkout is dirty");
+      }
       return (await git("rev-parse", "--verify", "HEAD")).trim();
     };
     const previous = await checkout();
-    if (previous !== runningRevision && !(state.checkoutChanged && previous === prior?.revision && previous === revision)) {
-      throw new Error("Checkout differs from running source; finish the previous update or restart the installed node locally");
+    const canContinue =
+      previous === runningRevision
+      || previous === revision
+      || (priorCheckoutRevision !== undefined && previous === priorCheckoutRevision);
+    if (!canContinue) {
+      throw new NodeUpdateValidationError(
+        `Checkout (${previous.slice(0, 7)}) differs from running source (${runningRevision.slice(0, 7)}); restart the installed node locally`,
+      );
     }
     stage = "Fetch configured origin branch without prompts";
     await git("check-ref-format", `refs/heads/${branch}`);
     await git("fetch", "--no-tags", "--no-recurse-submodules", "--refmap=", "origin", `refs/heads/${branch}`);
     const published = (await git("rev-parse", "--verify", "FETCH_HEAD")).trim();
     stage = "Verify target is a published fast-forward";
-    if ((await git("rev-parse", "--verify", `${revision}^{commit}`)).trim() !== revision) throw new Error("Requested commit is not available by exact object ID");
-    if ((await git("rev-parse", "--is-shallow-repository")).trim() === "true" && previous !== revision) throw new Error("Shallow checkout cannot prove ancestry");
-    await git("merge-base", "--is-ancestor", revision, published);
-    await git("merge-base", "--is-ancestor", previous, revision);
-    if (await checkout() !== previous) throw new Error("HEAD changed during update preparation");
+    if ((await git("rev-parse", "--verify", `${revision}^{commit}`)).trim() !== revision) {
+      throw new NodeUpdateValidationError("Requested commit is not available by exact object ID");
+    }
+    if ((await git("rev-parse", "--is-shallow-repository")).trim() === "true" && previous !== revision) {
+      throw new NodeUpdateValidationError("Shallow checkout cannot prove ancestry");
+    }
+    try {
+      await git("merge-base", "--is-ancestor", revision, published);
+    } catch {
+      throw new NodeUpdateValidationError(`Requested commit ${revision.slice(0, 7)} is not published on origin/${branch}`);
+    }
+    try {
+      await git("merge-base", "--is-ancestor", previous, revision);
+    } catch {
+      throw new NodeUpdateValidationError(`Target commit ${revision.slice(0, 7)} is not a fast-forward from checkout ${previous.slice(0, 7)}`);
+    }
+    if (await checkout() !== previous) throw new NodeUpdateValidationError("HEAD changed during update preparation");
     if (previous !== revision) {
       stage = "Fast-forward without overwriting ignored files";
       await git("-c", "submodule.recurse=false", "merge", "--ff-only", "--no-overwrite-ignore", revision);
     }
     state.checkoutChanged = true;
+    state.checkoutRevision = revision;
     atomicWriteJson(statusFile, state, 0o600);
     stage = "Install frozen production dependencies";
     await run(installation.bunPath, ["install", "--production", "--frozen-lockfile"], { cwd: root, env, timeout: 420_000 });
-    if (await checkout() !== revision) throw new Error("Installed checkout no longer matches requested commit");
+    if (await checkout() !== revision) throw new NodeUpdateValidationError("Installed checkout no longer matches requested commit");
     stage = "Restart managed node";
     state.phase = "restarting";
     atomicWriteJson(statusFile, state, 0o600);
@@ -120,7 +174,7 @@ export async function applyNodeUpdate(installation: NodeServiceInstallation, id:
   } catch (error) {
     console.error(stage, error);
     state.phase = "failed";
-    state.message = `${stage}. Inspect the node updater journal for details.`;
+    state.message = formatNodeUpdateFailure(stage, error);
     atomicWriteJson(statusFile, state, 0o600);
     throw error;
   }
