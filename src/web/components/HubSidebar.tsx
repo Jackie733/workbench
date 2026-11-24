@@ -18,6 +18,10 @@ import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useUiStore
 import { BrandMark } from "./BrandMark.tsx";
 import { HomeView } from "./HomeView.tsx";
 import { Icon } from "./Icon.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Input } from "./ui/input.tsx";
+import { SimpleSelect } from "./ui/select.tsx";
 
 function computeMaxSidebarWidth(layoutEl: HTMLElement | null): number {
   const viewportW = layoutEl?.clientWidth || (typeof window !== "undefined" ? window.innerWidth : 1280);
@@ -262,30 +266,32 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
           </div>
           <div className="sb-item-badges">
             {projectGroup !== "category" && p.category && (
-              <span className="sb-badge" data-testid={`project-cat-badge-${p.id}`}>
+              <Badge size="sm" variant="secondary" className="sb-badge" data-testid={`project-cat-badge-${p.id}`}>
                 {p.category}
-              </span>
+              </Badge>
             )}
             {isRemote && (
-              <span className="sb-badge" title={t(language, "sidebar.nodeTitle", { node: p.nodeName ?? p.nodeId ?? "" })}>
+              <Badge size="sm" variant="secondary" className="sb-badge" title={t(language, "sidebar.nodeTitle", { node: p.nodeName ?? p.nodeId ?? "" })}>
                 {p.nodeName ?? p.nodeId}
-              </span>
+              </Badge>
             )}
             {p.decisionCount > 0 && (
-              <span className="sb-badge warn" title={t(language, "sidebar.decisionTitle")}>
+              <Badge size="sm" variant="warning" className="sb-badge warn" title={t(language, "sidebar.decisionTitle")}>
                 {p.decisionCount}
-              </span>
+              </Badge>
             )}
             {offline ? (
-              <span className="sb-badge muted">{t(language, "common.offline")}</span>
+              <Badge size="sm" variant="outline" className="sb-badge text-muted-foreground">{t(language, "common.offline")}</Badge>
             ) : !p.initialized ? (
-              <span className="sb-badge muted">{t(language, "sidebar.uninitialized")}</span>
+              <Badge size="sm" variant="outline" className="sb-badge text-muted-foreground">{t(language, "sidebar.uninitialized")}</Badge>
             ) : p.activeCount > 0 ? (
-              <span className="sb-badge">{p.activeCount}</span>
+              <Badge size="sm" variant="secondary" className="sb-badge">{p.activeCount}</Badge>
             ) : null}
-            <button
+            <Button
               type="button"
-              className={`btn ghost xs sb-meta-btn ${p.pinned ? "pinned" : ""}`}
+              size="icon-xs"
+              variant="ghost"
+              className={`sb-meta-btn ${p.pinned ? "pinned" : ""}`}
               data-testid={`pin-project-${p.id}`}
               title={p.pinned ? t(language, "sidebar.unpin") : t(language, "sidebar.pin")}
               aria-label={p.pinned ? t(language, "sidebar.unpin") : t(language, "sidebar.pin")}
@@ -295,10 +301,12 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
               }}
             >
               <Icon icon={Star} size={14} />
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="btn ghost xs sb-meta-btn"
+              size="icon-xs"
+              variant="ghost"
+              className="sb-meta-btn"
               data-testid={`category-project-${p.id}`}
               title={t(language, "sidebar.setCategory")}
               aria-label={t(language, "sidebar.setCategory")}
@@ -308,18 +316,17 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
               }}
             >
               <Icon icon={Folder} size={14} />
-            </button>
+            </Button>
           </div>
         </div>
         {editingCat && (
           <div
-            className="sb-cat-editor"
+            className="sb-cat-editor flex items-center gap-1 pt-1 px-1.5"
             onClick={(e) => e.stopPropagation()}
-            style={{ display: "flex", gap: 4, padding: "4px 6px 2px" }}
           >
-            <input
-              className="input xs"
-              style={{ flex: 1 }}
+            <Input
+              size="sm"
+              className="flex-1"
               data-testid={`category-input-${p.id}`}
               maxLength={32}
               autoFocus
@@ -335,14 +342,14 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                 }
               }}
             />
-            <button
+            <Button
               type="button"
-              className="btn primary xs"
+              size="icon-xs"
               data-testid={`category-save-${p.id}`}
               onClick={() => commitCategory(p.id)}
             >
               <Icon icon={Check} size={14} />
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -368,27 +375,30 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
               <BrandMark />
               <span>Workbench</span>
             </div>
-            <button
-              className="btn ghost xs sb-close-btn"
+            <Button
+              className="sb-close-btn"
+              size="icon-xs"
               type="button"
+              variant="ghost"
               title={t(language, "sidebar.collapse")}
               aria-label={t(language, "sidebar.collapse")}
               onClick={() => setSidebarOpen(false)}
             >
               <Icon icon={X} />
-            </button>
+            </Button>
           </div>
 
           {isHub && (
             <div className="sb-section sb-projects-section">
               <div className="sb-head">
-                <button
+                <Button
                   type="button"
-                  className="btn ghost xs"
+                  size="xs"
+                  variant="ghost"
                   data-testid="toggle-projects-collapse-btn"
                   aria-expanded={!projectsCollapsed}
                   title={projectsCollapsed ? t(language, "sidebar.expandProjects") : t(language, "sidebar.collapseProjects")}
-                  style={{ padding: "2px 4px", minWidth: 0 }}
+                  className="px-1 py-0.5 min-w-0"
                   onClick={() => setProjectsCollapsed(!projectsCollapsed)}
                 >
                   <Icon icon={projectsCollapsed ? ChevronRight : ChevronDown} size={14} />
@@ -397,17 +407,18 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                       count: projects.length,
                     })}
                   </span>
-                </button>
-                <button
-                  className="btn ghost xs"
+                </Button>
+                <Button
+                  size="xs"
                   type="button"
+                  variant="ghost"
                   data-action="open-add-project"
                   data-testid="add-project-btn"
                   title={t(language, "sidebar.addTitle")}
                   onClick={() => void openAddProjectModal(activeNodeId)}
                 >
                   <Icon icon={Plus} size={14} /> {t(language, "sidebar.add")}
-                </button>
+                </Button>
               </div>
 
               {projectsCollapsed ? (
@@ -433,10 +444,10 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                     </div>
                     <div className="sb-item-badges">
                       {activeSummary.decisionCount > 0 && (
-                        <span className="sb-badge warn">{activeSummary.decisionCount}</span>
+                        <Badge size="sm" variant="warning" className="sb-badge warn">{activeSummary.decisionCount}</Badge>
                       )}
                       {activeSummary.activeCount > 0 && (
-                        <span className="sb-badge">{activeSummary.activeCount}</span>
+                        <Badge size="sm" variant="secondary" className="sb-badge">{activeSummary.activeCount}</Badge>
                       )}
                     </div>
                   </div>
@@ -445,13 +456,20 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                 <>
                   {projects.length > 0 && (
                     <div className="sb-project-controls">
-                      <select
-                        className="select xs"
-                        data-testid="project-sort-select"
+                      <SimpleSelect
                         aria-label={t(language, "sidebar.sort.label")}
+                        className="w-full min-w-0 text-xs"
+                        data-testid="project-sort-select"
+                        options={[
+                          { value: "attention", label: t(language, "sidebar.sort.attention") },
+                          { value: "recent", label: t(language, "sidebar.sort.recent") },
+                          { value: "name", label: t(language, "sidebar.sort.name") },
+                          { value: "added", label: t(language, "sidebar.sort.added") },
+                        ]}
+                        size="sm"
                         value={projectSort}
-                        onChange={(e) => {
-                          const nextSort = e.target.value as ProjectSortMode;
+                        onValueChange={(next) => {
+                          const nextSort = next as ProjectSortMode;
                           if (nextSort === "recent") {
                             const refreshed = new Map<string, number>();
                             for (const proj of projects) refreshed.set(proj.id, proj.lastOpenedAt);
@@ -459,24 +477,21 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                           }
                           setProjectSort(nextSort);
                         }}
-                      >
-                        <option value="attention">{t(language, "sidebar.sort.attention")}</option>
-                        <option value="recent">{t(language, "sidebar.sort.recent")}</option>
-                        <option value="name">{t(language, "sidebar.sort.name")}</option>
-                        <option value="added">{t(language, "sidebar.sort.added")}</option>
-                      </select>
-                      <select
-                        className="select xs"
-                        data-testid="project-group-select"
+                      />
+                      <SimpleSelect
                         aria-label={t(language, "sidebar.group.label")}
+                        className="w-full min-w-0 text-xs"
+                        data-testid="project-group-select"
+                        options={[
+                          { value: "none", label: t(language, "sidebar.group.none") },
+                          { value: "node", label: t(language, "sidebar.group.node") },
+                          { value: "status", label: t(language, "sidebar.group.status") },
+                          { value: "category", label: t(language, "sidebar.group.category") },
+                        ]}
+                        size="sm"
                         value={projectGroup}
-                        onChange={(e) => setProjectGroup(e.target.value as ProjectGroupMode)}
-                      >
-                        <option value="none">{t(language, "sidebar.group.none")}</option>
-                        <option value="node">{t(language, "sidebar.group.node")}</option>
-                        <option value="status">{t(language, "sidebar.group.status")}</option>
-                        <option value="category">{t(language, "sidebar.group.category")}</option>
-                      </select>
+                        onValueChange={(next) => setProjectGroup(next as ProjectGroupMode)}
+                      />
                     </div>
                   )}
 
@@ -526,9 +541,10 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                         </div>
                         {canUpdate && !running && (
                           <>
-                            <button
-                              className="btn ghost xs"
+                            <Button
+                              size="xs"
                               type="button"
+                              variant="ghost"
                               disabled={updateNode.isPending || n.activeRuns.length > 0}
                               onClick={() => {
                                 if (window.confirm(t(language, "sidebar.nodeUpdateConfirm", { node: n.name, revision: hubRevision.slice(0, 7) }))) {
@@ -537,7 +553,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                               }}
                             >
                               {t(language, "sidebar.nodeUpdateAction", { revision: hubRevision.slice(0, 7) })}
-                            </button>
+                            </Button>
                             {n.activeRuns.length > 0 && (
                               <div className="muted xs">
                                 {t(language, "sidebar.nodeUpdateBusyHint", { revision: hubRevision.slice(0, 7) })}
@@ -562,9 +578,10 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   {t(language, "sidebar.routing")}
                   {hasMultiNode && activeNode ? ` · ${activeNode.name}` : ""}
                 </span>
-                <button
-                  className="btn ghost xs"
+                <Button
+                  size="xs"
                   type="button"
+                  variant="ghost"
                   data-action="open-routing"
                   data-testid="sidebar-routing-btn"
                   onClick={() =>
@@ -576,7 +593,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   }
                 >
                   <Icon icon={Settings} size={14} /> {t(language, "sidebar.configure")}
-                </button>
+                </Button>
               </div>
               <div
                 className="sb-preset-pill"
@@ -599,7 +616,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   }
                 }}
               >
-                <span className="badge info">{presetLabel}</span>
+                <Badge variant="info">{presetLabel}</Badge>
                 <span className="muted xs">
                   {t(language, "sidebar.harnessesReady", {
                     ready: installedHarnesses.length,
@@ -607,9 +624,11 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   })}
                 </span>
               </div>
-              <button
+              <Button
                 type="button"
-                className={`btn xs sb-insights-btn ${mainView === "insights" ? "primary" : "ghost"}`}
+                size="xs"
+                variant={mainView === "insights" ? "default" : "ghost"}
+                className="sb-insights-btn justify-start"
                 data-testid="sidebar-insights-btn"
                 onClick={() => {
                   setMainView(mainView === "insights" ? "workspace" : "insights");
@@ -617,7 +636,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                 }}
               >
                 <Icon icon={BarChart3} size={14} /> {t(language, "insights.navLabel")}
-              </button>
+              </Button>
             </div>
           )}
         </div>

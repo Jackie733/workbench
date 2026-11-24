@@ -3,6 +3,7 @@ import type { AttachmentMeta } from "../../core/types.ts";
 import { t } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { Button } from "./ui/button.tsx";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -41,14 +42,16 @@ export function AttachmentGallery({ attachments, urlFor, onDelete, emptyText }: 
                 <span className="xs muted">{formatSize(meta.size)}</span>
               </figcaption>
               {onDelete && (
-                <button
-                  className="btn ghost xs attachment-delete"
+                <Button
+                  className="attachment-delete"
+                  size="icon-xs"
                   type="button"
+                  variant="ghost"
                   aria-label={t(language, "attachment.deleteAria", { name: meta.name })}
                   onClick={() => onDelete(meta.id)}
                 >
                   <Icon icon={Trash2} size={14} />
-                </button>
+                </Button>
               )}
             </figure>
           ))}
@@ -66,23 +69,24 @@ export function AttachmentGallery({ attachments, urlFor, onDelete, emptyText }: 
                 {meta.name}
               </span>
               <span className="xs muted">{formatSize(meta.size)}</span>
-              <a
-                className="btn ghost xs"
-                href={urlFor(meta.id)}
-                download={meta.name}
+              <Button
+                render={<a href={urlFor(meta.id)} download={meta.name} />}
+                size="icon-xs"
+                variant="ghost"
                 aria-label={t(language, "attachment.downloadAria", { name: meta.name })}
               >
                 <Icon icon={Download} size={14} />
-              </a>
+              </Button>
               {onDelete && (
-                <button
-                  className="btn ghost xs"
+                <Button
+                  size="icon-xs"
                   type="button"
+                  variant="ghost"
                   aria-label={t(language, "attachment.deleteAria", { name: meta.name })}
                   onClick={() => onDelete(meta.id)}
                 >
                   <Icon icon={Trash2} size={14} />
-                </button>
+                </Button>
               )}
             </div>
           ))}

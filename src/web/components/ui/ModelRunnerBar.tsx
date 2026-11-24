@@ -13,8 +13,11 @@ import {
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { Icon } from "../Icon.tsx";
+import { Badge } from "./badge.tsx";
+import { Button } from "./button.tsx";
 import { ModelPickerMenu, type ModelPickerShortcut } from "./ModelPickerMenu.tsx";
 import { Popover, PopoverPopup, PopoverTrigger } from "./popover.tsx";
+import { SimpleSelect } from "./select.tsx";
 
 export function ModelRunnerBar({
   stageAction,
@@ -136,24 +139,26 @@ export function ModelRunnerBar({
         <span ref={anchorRef} className="inline-flex min-w-0 max-w-full" data-testid={`${testId}-anchor`}>
           <PopoverTrigger
             render={
-              <button
+              <Button
                 ref={triggerRef}
                 type="button"
-                className="btn xs model-runner-trigger inline-flex items-center gap-1.5 max-w-[235px]"
+                variant="outline"
+                size="sm"
+                className="model-runner-trigger max-w-[235px] min-w-0 shrink justify-start"
                 data-testid={`${testId}-trigger`}
                 title={t(language, "runner.current", { model: currentDisplay })}
               >
                 <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
                 <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
                 <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
-              </button>
+              </Button>
             }
           />
         </span>
         <PopoverPopup
           align="end"
           anchor={anchorRef}
-          className="w-[340px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
+          className="w-[340px] rounded-xl p-0 overflow-hidden"
           finalFocus={triggerRef}
           positionerClassName="z-[80]"
           sideOffset={6}
@@ -177,31 +182,33 @@ export function ModelRunnerBar({
       {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
       {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (
         <div className="inline-flex items-center gap-1" title={t(language, "runner.effortTitle")}>
-          <span className="hidden sm:inline-flex items-center text-[var(--muted)]">
+          <span className="hidden sm:inline-flex items-center text-muted-foreground">
             <Icon icon={Gauge} size={14} />
           </span>
-          <select
-            className="select xs font-mono"
+          <SimpleSelect
+            className="w-auto min-w-[96px] font-mono text-xs"
             data-field="effort-select"
             data-testid={`${testId}-effort`}
+            options={[
+              {
+                value: "",
+                label: `${t(language, "runner.effortDefault")}${effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}`,
+              },
+              ...efforts.map((eff) => ({
+                value: eff,
+                label: effortLabel(language, eff),
+              })),
+            ]}
+            size="sm"
             value={effortValue}
-            onChange={(e) => setSelectedEffort(e.target.value as ReasoningEffort | "", stageAction)}
-          >
-            <option value="">
-              {t(language, "runner.effortDefault")}
-              {effectiveDefaultEffort && !effortValue ? ` (${effectiveDefaultEffort})` : ""}
-            </option>
-            {efforts.map((eff) => (
-              <option key={eff} value={eff}>
-                {effortLabel(language, eff)}
-              </option>
-            ))}
-          </select>
+            onValueChange={(next) => setSelectedEffort(next as ReasoningEffort | "", stageAction)}
+          />
         </div>
       )}
       {selectedRunnerKey !== "manual_copy" && effortCap.mode === "locked" && (
-        <div
-          className="inline-flex items-center gap-1 min-h-[28px] px-2 py-0.5 rounded-md border border-[var(--border)] bg-[var(--surface-2,transparent)] text-xs font-mono text-[var(--muted)] whitespace-nowrap shrink-0"
+        <Badge
+          variant="outline"
+          className="h-7 gap-1 px-2 font-mono text-xs text-muted-foreground"
           data-testid={`${testId}-effort-locked`}
           title={t(language, "runner.effortLockedTitle")}
         >
@@ -213,7 +220,7 @@ export function ModelRunnerBar({
                 : t(language, "runner.effortBuiltin"),
             })}
           </span>
-        </div>
+        </Badge>
       )}
     </div>
   );

@@ -19,6 +19,7 @@ import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { describeEvidenceContext } from "../../src/web/state.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const browserEnv = resolveTestBrowser();
 const HAS_BROWSER = browserEnv !== null;
@@ -297,7 +298,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
     try {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 1. Live workspace diff unavailable notice shows localized English prompt & preserves short hash
@@ -312,7 +313,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       expect(liveEnText).toContain("Acceptance baseline deadbeef1234 is unavailable");
       expect(/[\u4e00-\u9fff]/.test(liveEnText)).toBe(false);
 
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
@@ -322,7 +323,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       );
 
       // 2. Post-acceptance live comparison unavailable shows localized English & Chinese reasons
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
       await page.click('[data-testid="back-home-btn"]');
       await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
@@ -346,7 +347,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       );
       expect(/[\u4e00-\u9fff]/.test(compareEnText)).toBe(false);
 
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes(
@@ -386,7 +387,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
         "{broken json",
       );
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
       await page.click('[data-testid="back-home-btn"]');
       await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
@@ -409,7 +410,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
         () => document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "",
       );
       expect(/[\u4e00-\u9fff]/.test(missEn)).toBe(false);
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-testid="diff-unavailable-notice"]')?.textContent ?? "").includes(
@@ -419,7 +420,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       );
 
       // Corrupt snapshot artifact in EN then ZH
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
       await page.click('[data-testid="back-home-btn"]');
       await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });

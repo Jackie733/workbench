@@ -121,7 +121,26 @@ import {
   VERDICT_ICONS,
 } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, ModalShell, RunnerSelect } from "./Primitives.tsx";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu.tsx";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { Checkbox } from "./ui/checkbox.tsx";
+import { DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogTitle } from "./ui/dialog.tsx";
+import { Input } from "./ui/input.tsx";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "./ui/input-group.tsx";
+import { Label } from "./ui/label.tsx";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./ui/menu.tsx";
+import { RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
+import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
+import { Tabs, TabsList, TabsTab } from "./ui/tabs.tsx";
+import { Textarea } from "./ui/textarea.tsx";
+
+function mapTone(tone: string) {
+  if (tone === "danger") return "error" as const;
+  if (tone === "neutral") return "secondary" as const;
+  return tone as "info" | "success" | "warning" | "error" | "secondary";
+}
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
   const language = useUiStore((s) => s.language);
@@ -204,17 +223,18 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
         <div className="live-agent-title">
           <span className="pulse-dot" />
           <strong>{t(language, "live.heading", { action: actionLabels[run.action] ?? run.action })}</strong>
-          <span className="badge info">
+          <Badge variant="info">
             {run.harness}/{run.model}
-          </span>
+          </Badge>
           {run.modelFallback && run.effectiveModel && (
-            <span className="badge warning">{t(language, "live.fallback", { model: run.effectiveModel })}</span>
+            <Badge variant="warning">{t(language, "live.fallback", { model: run.effectiveModel })}</Badge>
           )}
         </div>
         <div className="live-agent-controls">
           <LiveTimer startedAt={run.startedAt} />
-          <button
-            className="btn xs"
+          <Button
+            size="xs"
+            variant="outline"
             type="button"
             data-testid="open-console-tab-btn"
             onClick={() => {
@@ -223,14 +243,15 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
             }}
           >
             <Icon icon={Terminal} size={14} /> {t(language, "live.viewTerminal")}
-          </button>
-          <button
-            className="btn danger xs"
+          </Button>
+          <Button
+            size="xs"
+            variant="destructive"
             type="button"
             onClick={() => selectedId && void cancelRun(selectedId, run.id)}
           >
             <Icon icon={Square} size={14} /> {t(language, "live.stop")}
-          </button>
+          </Button>
         </div>
       </div>
       <div className="live-progress-track" aria-hidden="true">
@@ -447,26 +468,26 @@ function SpecDesignTab({
   return (
     <>
       {review && (
-        <div className={`card review-card ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
+        <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
           <div className="card-head">
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <h3>{t(language, "review.title")}</h3>
               {typeof review.round === "number" && (
-                <span className="badge neutral" data-testid="review-round-badge">
+                <Badge variant="secondary" data-testid="review-round-badge">
                   {t(language, review.reviewMode === "full" || review.round === 1 ? "review.roundFull" : "review.roundDelta", {
                     round: review.round,
                   })}
-                </span>
+                </Badge>
               )}
-              <span className={`badge ${VERDICT_META[review.verdict].tone}`}>
+              <Badge variant={mapTone(VERDICT_META[review.verdict].tone)}>
                 <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
                 {VERDICT_META[review.verdict].labels[language]}
-              </span>
-              <span className={`badge ${revValid.effectiveState === "current" ? "info" : "warning"}`}>
+              </Badge>
+              <Badge variant={revValid.effectiveState === "current" ? "info" : "warning"}>
                 {revValid.effectiveState === "current"
                   ? t(language, "review.currentValid")
                   : translateRef(language, revValid.reasonKey, t(language, "review.stale"))}
-              </span>
+              </Badge>
               <span className="muted xs">
                 {review.reviewerHarness} · {review.reviewerModel}
               </span>
@@ -474,8 +495,9 @@ function SpecDesignTab({
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {s.stage !== "done" && s.stage !== "cancelled" && s.stage !== "blocked" && review.verdict !== "pass" && (
                 <>
-                  <button
-                    className={isReviewCurrent ? "btn primary xs" : "btn xs"}
+                  <Button
+                    size="xs"
+                    variant={isReviewCurrent ? "default" : "outline"}
                     type="button"
                     data-testid="review-fix-btn"
                     disabled={busy || runLocked}
@@ -491,19 +513,21 @@ function SpecDesignTab({
                         ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
                         : t(language, "core.action.fixPerReview")
                       : t(language, "review.fixStale")}
-                  </button>
-                  <button
-                    className="btn xs"
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
                     type="button"
                     data-testid="review-reject-btn"
                     disabled={busy || runLocked}
                     onClick={() => void handleBannerAction(d, "request_changes", bridgeConnected)}
                   >
                     <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
-                  </button>
+                  </Button>
                   {isReviewCurrent && validity.acceptanceGate.ok && (
-                    <button
-                      className="btn xs"
+                    <Button
+                      size="xs"
+                      variant="outline"
                       type="button"
                       data-testid="review-override-accept-btn"
                       disabled={busy || runLocked}
@@ -513,11 +537,12 @@ function SpecDesignTab({
                       {review.verdict === "block"
                         ? t(language, "core.action.ignoreBlockAccept")
                         : t(language, "core.action.acceptRisk")}
-                    </button>
+                    </Button>
                   )}
                   {findings.length > 0 && (
-                    <button
-                      className="btn xs"
+                    <Button
+                      size="xs"
+                      variant="outline"
                       type="button"
                       data-testid="review-to-pain-point-btn"
                       disabled={busy}
@@ -542,21 +567,23 @@ function SpecDesignTab({
                       }}
                     >
                       <Icon icon={Bug} size={14} /> {t(language, "review.toPainPoint")}
-                    </button>
+                    </Button>
                   )}
                 </>
               )}
-              <button
-                className={!isReviewCurrent ? "btn primary xs" : "btn xs"}
+              <Button
+                size="xs"
+                variant={!isReviewCurrent ? "default" : "outline"}
                 type="button"
                 data-testid="review-rerun-btn"
                 disabled={busy || runLocked}
                 onClick={() => void triggerActiveRun(s.id, "review")}
               >
                 <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
-              </button>
-              <button
-                className="btn xs"
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-testid="review-compare-diff-btn"
                 onClick={() => {
@@ -565,7 +592,7 @@ function SpecDesignTab({
                 }}
               >
                 <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
-              </button>
+              </Button>
             </div>
           </div>
           <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
@@ -574,7 +601,7 @@ function SpecDesignTab({
             <div className="review-findings-list" data-testid="review-findings-list">
               {findings.map((f) => {
                 const checked = selectedFindingIds.includes(f.id);
-                const sevTone = f.severity === "high" ? "danger" : f.severity === "medium" ? "warning" : "neutral";
+                const sevTone = f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary";
                 const sevLabel =
                   f.severity === "high"
                     ? t(language, "review.severity.high")
@@ -582,21 +609,21 @@ function SpecDesignTab({
                       ? t(language, "review.severity.medium")
                       : t(language, "review.severity.low");
                 return (
-                  <label key={f.id} className="review-finding-item">
+                  <Label key={f.id} className="review-finding-item w-full font-normal items-start">
                     {s.stage !== "done" && review.verdict !== "pass" && (
-                      <input
-                        type="checkbox"
+                      <Checkbox
+                        className="mt-0.5"
                         checked={checked}
-                        onChange={() => toggleFinding(f.id)}
+                        onCheckedChange={() => toggleFinding(f.id)}
                       />
                     )}
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <span className={`badge ${sevTone}`}>{sevLabel}</span>
+                        <Badge variant={sevTone}>{sevLabel}</Badge>
                         <code className="xs">{f.id}</code>
                         <strong style={{ fontSize: 13 }}>{f.title}</strong>
                         {f.criterionIds && f.criterionIds.length > 0 && (
-                          <span className="badge info">{f.criterionIds.join(", ")}</span>
+                          <Badge variant="info">{f.criterionIds.join(", ")}</Badge>
                         )}
                       </div>
                       {f.files && f.files.length > 0 && (
@@ -612,7 +639,7 @@ function SpecDesignTab({
                         </div>
                       )}
                     </div>
-                  </label>
+                  </Label>
                 );
               })}
             </div>
@@ -642,9 +669,9 @@ function SpecDesignTab({
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <span className={`badge ${VERDICT_META[item.verdict].tone}`}>
+                      <Badge variant={mapTone(VERDICT_META[item.verdict].tone)}>
                         {VERDICT_META[item.verdict].labels[language]}
-                      </span>
+                      </Badge>
                       <strong>
                         {t(language, item.reviewMode === "full" || item.round === 1 ? "review.roundFull" : "review.roundDelta", {
                           round: item.round ?? 1,
@@ -663,38 +690,40 @@ function SpecDesignTab({
               </div>
             </details>
           )}
-        </div>
+        </Card>
       )}
 
-      <div className="card">
+      <Card className="p-4 mb-3.5">
         <div className="card-head">
           <h3>{t(language, "spec.title")}</h3>
           {editingSpec ? (
             <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-action="start-edit-spec"
                 onClick={() => cancelEditSpec()}
               >
                 <Icon icon={X} size={14} /> {t(language, "common.cancel")}
-              </button>
-              <button
-                className="btn primary xs"
+              </Button>
+              <Button
+                size="xs"
                 type="button"
                 data-testid="save-spec-btn"
                 disabled={busy || runLocked}
                 onClick={() => void saveSpec()}
               >
                 <Icon icon={Save} size={14} /> {t(language, "spec.save")}
-              </button>
+              </Button>
             </div>
           ) : (
             s.stage !== "done" &&
             s.stage !== "cancelled" &&
             s.stage !== "blocked" && (
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-action="start-edit-spec"
                 disabled={runLocked}
@@ -713,32 +742,30 @@ function SpecDesignTab({
                 }}
               >
                 <Icon icon={Pencil} size={14} /> {t(language, "spec.edit")}
-              </button>
+              </Button>
             )
           )}
         </div>
 
         {editingSpec ? (
-          <div data-testid="spec-editor">
-            <input
-              className="input"
+          <div data-testid="spec-editor" className="flex flex-col gap-2">
+            <Input
               id="spec-title-input"
               value={specDraftTitle}
               placeholder={t(language, "spec.titlePlaceholder")}
-              style={{ marginBottom: 8 }}
               onChange={(e) => setSpecDraftTitle(e.target.value)}
             />
-            <textarea
-              className="textarea"
+            <Textarea
               id="spec-body-input"
               value={specDraftBody}
               onChange={(e) => setSpecDraftBody(e.target.value)}
             />
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: 6 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                 <strong style={{ fontSize: 13 }}>{t(language, "spec.criteriaTitle")}</strong>
-                <button
-                  className="btn xs"
+                <Button
+                  size="xs"
+                  variant="outline"
                   type="button"
                   data-action="add-criterion"
                   onClick={() =>
@@ -749,12 +776,12 @@ function SpecDesignTab({
                   }
                 >
                   <Icon icon={Plus} size={14} /> {t(language, "spec.addCriterion")}
-                </button>
+                </Button>
               </div>
               {specDraftCriteria.map((c, idx) => (
                 <div key={idx} className="crit-edit-row" data-criterion-idx={idx}>
-                  <input
-                    className="input"
+                  <Input
+                    size="sm"
                     data-crit-field="id"
                     value={c.id}
                     placeholder={`AC-${idx + 1}`}
@@ -766,8 +793,8 @@ function SpecDesignTab({
                       })
                     }
                   />
-                  <input
-                    className="input"
+                  <Input
+                    size="sm"
                     data-crit-field="description"
                     value={c.description}
                     placeholder={t(language, "spec.descriptionPlaceholder")}
@@ -779,8 +806,8 @@ function SpecDesignTab({
                       })
                     }
                   />
-                  <input
-                    className="input"
+                  <Input
+                    size="sm"
                     data-crit-field="command"
                     value={c.command}
                     placeholder={t(language, "spec.commandPlaceholder")}
@@ -792,27 +819,27 @@ function SpecDesignTab({
                       })
                     }
                   />
-                  <label style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 4, whiteSpace: "nowrap" }}>
-                    <input
-                      type="checkbox"
+                  <Label className="gap-1.5 text-xs whitespace-nowrap font-normal">
+                    <Checkbox
                       checked={c.required}
-                      onChange={(e) =>
+                      onCheckedChange={(checked) =>
                         setSpecDraftCriteria((prev) => {
                           const next = [...prev];
-                          next[idx] = { ...next[idx]!, required: e.target.checked };
+                          next[idx] = { ...next[idx]!, required: Boolean(checked) };
                           return next;
                         })
                       }
-                    />{" "}
+                    />
                     {t(language, "common.required")}
-                  </label>
-                  <button
-                    className="btn ghost xs"
+                  </Label>
+                  <Button
+                    size="xs"
+                    variant="ghost"
                     type="button"
                     onClick={() => setSpecDraftCriteria((prev) => prev.filter((_, i) => i !== idx))}
                   >
                     <Icon icon={Trash2} size={14} /> {t(language, "common.delete")}
-                  </button>
+                  </Button>
                 </div>
               ))}
             </div>
@@ -820,15 +847,15 @@ function SpecDesignTab({
         ) : (
           <MarkdownView markdown={d.specMarkdown} annotatable docLabel="spec.md" onAnnotate={openAnnotate} />
         )}
-      </div>
+      </Card>
 
-      <div className="card" data-testid="requirement-attachments-card">
+      <Card className="p-4 mb-3.5" data-testid="requirement-attachments-card">
         <div className="card-head">
           <h3>{t(language, "spec.attachmentTitle", { count: attachments.length })}</h3>
           {!canEditAttachments && (
-            <span className="badge neutral">
+            <Badge variant="secondary">
               <Icon icon={Lock} size={14} /> {t(language, "spec.frozen")}
-            </span>
+            </Badge>
           )}
         </div>
         <AttachmentGallery
@@ -844,9 +871,9 @@ function SpecDesignTab({
             <AttachmentPicker value={[]} onChange={(metas) => void addAttachments(metas)} disabled={busy || runLocked} />
           </div>
         )}
-      </div>
+      </Card>
 
-      <div className="card">
+      <Card className="p-4 mb-3.5">
         <div className="card-head">
           <h3>
             {t(language, "spec.criteriaHeading", {
@@ -855,8 +882,8 @@ function SpecDesignTab({
             })}
           </h3>
           {validity.evidenceContext !== "live" && (
-            <span
-              className={`badge ${validity.evidenceContext === "accepted" ? "success" : "warning"}`}
+            <Badge
+              variant={validity.evidenceContext === "accepted" ? "success" : "warning"}
               data-testid="coverage-context-badge"
             >
               <Icon
@@ -866,31 +893,27 @@ function SpecDesignTab({
               {validity.evidenceContext === "accepted"
                 ? t(language, "spec.coverageAccepted")
                 : t(language, "spec.coverageLegacy")}
-            </span>
+            </Badge>
           )}
         </div>
         {validity.evidenceContext !== "live" && (() => {
           const evInfo = describeEvidenceContext(validity, null, language);
           return (
-            <div
-              className={`callout ${evInfo.tone}`}
+            <Alert
+              variant={mapTone(evInfo.tone) === "error" ? "error" : evInfo.tone === "success" ? "success" : evInfo.tone === "warning" ? "warning" : "info"}
               data-testid="evidence-provenance-banner"
-              style={{ marginBottom: 10, fontSize: 12.5 }}
+              className="mb-2.5 text-xs"
             >
-              <strong className="callout-lead">
-                <Icon icon={CALLOUT_TONE_ICONS[evInfo.tone]} size={14} />
-                <span>{evInfo.title}</span>
-              </strong>
-              {evInfo.acceptedAtText
-                ? t(language, "spec.evidenceAcceptedAt", { time: evInfo.acceptedAtText })
-                : ""}
-              <div className="muted" style={{ marginTop: 2 }}>
-                {evInfo.provenanceText}
-              </div>
-              {evInfo.unavailableReason && (
-                <div style={{ marginTop: 4 }}>{evInfo.unavailableReason}</div>
-              )}
-            </div>
+              <Icon icon={CALLOUT_TONE_ICONS[evInfo.tone]} size={14} />
+              <AlertTitle>{evInfo.title}</AlertTitle>
+              <AlertDescription className="text-foreground">
+                {evInfo.acceptedAtText && (
+                  <span>{t(language, "spec.evidenceAcceptedAt", { time: evInfo.acceptedAtText })}</span>
+                )}
+                <div className="text-muted-foreground">{evInfo.provenanceText}</div>
+                {evInfo.unavailableReason && <div>{evInfo.unavailableReason}</div>}
+              </AlertDescription>
+            </Alert>
           );
         })()}
         {validity.coverage.items.length === 0 ? (
@@ -902,21 +925,21 @@ function SpecDesignTab({
             const meta = COVERAGE_META[item.state];
             return (
               <div key={item.criterion.id} className="criteria-row" data-testid={`crit-${item.criterion.id}`}>
-                <span className={`badge ${meta.tone}`}>
+                <Badge variant={mapTone(meta.tone)}>
                   <Icon icon={COVERAGE_ICONS[item.state]} size={14} />
                   {meta.labels[language]}
-                </span>
+                </Badge>
                 <div>
                   <div style={{ fontSize: 13.5, fontWeight: 500 }}>
                     <span className="req-id" style={{ marginRight: 6 }}>
                       {item.criterion.id}
                     </span>
                     {item.criterion.description}
-                    <span className="badge neutral" style={{ marginLeft: 6 }}>
+                    <Badge variant="secondary" className="ms-1.5">
                       {item.criterion.required
                         ? t(language, "common.required")
                         : t(language, "common.reference")}
-                    </span>
+                    </Badge>
                   </div>
                   {item.criterion.command && <div className="crit-cmd">{item.criterion.command}</div>}
                   {(item.reason || item.reasonKey) && (
@@ -926,8 +949,9 @@ function SpecDesignTab({
                   )}
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <button
-                    className="btn ghost xs"
+                  <Button
+                    size="icon-xs"
+                    variant="ghost"
                     type="button"
                     data-action="annotate-anchor"
                     data-anchor={t(language, "spec.criterionAnchor", { id: item.criterion.id })}
@@ -936,10 +960,11 @@ function SpecDesignTab({
                     onClick={() => openAnnotate(t(language, "spec.criterionAnchor", { id: item.criterion.id }))}
                   >
                     <Icon icon={MessageSquare} size={14} />
-                  </button>
+                  </Button>
                   {item.criterion.command && s.stage !== "done" && s.stage !== "cancelled" && (
-                    <button
-                      className="btn xs"
+                    <Button
+                      size="xs"
+                      variant="outline"
                       type="button"
                       disabled={busy || runLocked}
                       onClick={() =>
@@ -958,16 +983,16 @@ function SpecDesignTab({
                       }
                     >
                       <Icon icon={Play} size={14} /> {t(language, "spec.run")}
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
             );
           })
         )}
-      </div>
+      </Card>
 
-      <div className="card">
+      <Card className="p-4 mb-3.5">
         <div className="card-head">
           <h3>
             {t(language, "spec.designTitle", {
@@ -976,8 +1001,9 @@ function SpecDesignTab({
           </h3>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             {(d.designMarkdown.trim() || s.tasks.length > 0) && s.stage !== "cancelled" && !editingDesign && (
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-testid="spawn-children-btn"
                 disabled={runLocked}
@@ -991,11 +1017,12 @@ function SpecDesignTab({
                 }
               >
                 <Icon icon={GitFork} size={14} /> {t(language, "spec.spawnBtn")}
-              </button>
+              </Button>
             )}
             {historyVers.length > 1 && (
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-action="toggle-design-diff"
                 onClick={() => void toggleDesignDiff()}
@@ -1003,34 +1030,36 @@ function SpecDesignTab({
                 {designComparePrev
                   ? <><Icon icon={X} size={14} /> {t(language, "spec.closeCompare")}</>
                   : <><Icon icon={FileDiff} size={14} /> {t(language, "spec.compare", { prev: activeVer - 1, curr: activeVer })}</>}
-              </button>
+              </Button>
             )}
             {editingDesign ? (
               <>
-                <button
-                  className="btn xs"
+                <Button
+                  size="xs"
+                  variant="outline"
                   type="button"
                   data-action="add-criterion"
                   onClick={() => cancelEditDesign()}
                 >
                   <Icon icon={X} size={14} /> {t(language, "common.cancel")}
-                </button>
-                <button
-                  className="btn primary xs"
+                </Button>
+                <Button
+                  size="xs"
                   type="button"
                   data-testid="save-design-btn"
                   disabled={busy || runLocked}
                   onClick={() => void saveDesign()}
                 >
                   <Icon icon={Save} size={14} /> {t(language, "spec.saveDesign")}
-                </button>
+                </Button>
               </>
             ) : (
               s.stage !== "done" &&
               s.stage !== "cancelled" &&
               s.stage !== "blocked" && (
-                <button
-                  className="btn xs"
+                <Button
+                  size="xs"
+                  variant="outline"
                   type="button"
                   data-testid="start-edit-design-btn"
                   disabled={runLocked}
@@ -1040,7 +1069,7 @@ function SpecDesignTab({
                   }}
                 >
                   <Icon icon={Pencil} size={14} /> {t(language, "spec.editDesign")}
-                </button>
+                </Button>
               )
             )}
           </div>
@@ -1048,11 +1077,10 @@ function SpecDesignTab({
 
         {editingDesign ? (
           <div data-testid="design-editor">
-            <textarea
-              className="textarea"
+            <Textarea
               id="design-body-input"
               data-testid="design-body-input"
-              style={{ minHeight: 220, fontFamily: "var(--mono)", fontSize: 12.5 }}
+              className="min-h-[220px] font-mono text-[12.5px]"
               value={designDraftBody}
               onChange={(e) => setDesignDraftBody(e.target.value)}
             />
@@ -1071,10 +1099,10 @@ function SpecDesignTab({
             {t(language, "spec.designEmpty")}
           </p>
         )}
-      </div>
+      </Card>
 
       {d.subRequirements && d.subRequirements.length > 0 && (
-        <div className="card" data-testid="sub-requirements-card">
+        <Card className="p-4 mb-3.5" data-testid="sub-requirements-card">
           <div className="card-head">
             <h3>
               {t(language, "spec.subReqsTitle", {
@@ -1087,12 +1115,12 @@ function SpecDesignTab({
             {d.subRequirements.map((child) => {
               const meta = STAGE_META[child.stage];
               return (
-                <button
+                <Button
                   key={child.id}
                   type="button"
-                  className="btn ghost"
+                  variant="ghost"
                   data-testid={`sub-req-link-${child.id}`}
-                  style={{ justifyContent: "space-between", textAlign: "left", padding: "6px 8px" }}
+                  className="justify-between text-left px-2 py-1.5"
                   onClick={() => void openRequirement(child.id)}
                 >
                   <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -1101,15 +1129,15 @@ function SpecDesignTab({
                       {child.title}
                     </span>
                   </span>
-                  <span className={`badge ${meta.tone}`}>
+                  <Badge variant={mapTone(meta.tone)}>
                     <Icon icon={STAGE_ICONS[child.stage]} size={14} />
                     {meta.labels[language]}
-                  </span>
-                </button>
+                  </Badge>
+                </Button>
               );
             })}
           </div>
-        </div>
+        </Card>
       )}
     </>
   );
@@ -1188,19 +1216,20 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
   };
 
   return (
-    <div className="card" data-testid="screenshot-section">
+    <Card className="p-4 mb-3.5" data-testid="screenshot-section">
       <div className="card-head">
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <h3>{t(language, "shot.title")}</h3>
           {isDone && (
-            <span className="badge success">
+            <Badge variant="success">
               <Icon icon={Lock} size={14} /> {t(language, "shot.frozen")}
-            </span>
+            </Badge>
           )}
         </div>
         {canCapture && (
-          <button
-            className="btn xs"
+          <Button
+            size="xs"
+            variant="outline"
             type="button"
             data-testid="screenshot-recapture"
             disabled={capturing || runLocked}
@@ -1208,7 +1237,7 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
           >
             <Icon icon={RefreshCw} size={14} />{" "}
             {capturing ? t(language, "shot.capturing") : t(language, "shot.captureAgain")}
-          </button>
+          </Button>
         )}
       </div>
 
@@ -1221,21 +1250,21 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
           const fingerprintMatch = Boolean(currentHash && batch.codeSnapshotHash === currentHash);
           const statusMeta =
             batch.status === "captured"
-              ? { label: t(language, "shot.status.captured"), tone: "success" }
+              ? { label: t(language, "shot.status.captured"), tone: "success" as const }
               : batch.status === "partial"
-                ? { label: t(language, "shot.status.partial"), tone: "warning" }
-                : { label: t(language, "shot.status.skipped"), tone: "warning" };
+                ? { label: t(language, "shot.status.partial"), tone: "warning" as const }
+                : { label: t(language, "shot.status.skipped"), tone: "warning" as const };
           return (
             <div key={batch.id} className="screenshot-batch" data-testid={`screenshot-batch-${batch.id}`}>
               <div className="screenshot-batch-head">
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span className={`badge ${statusMeta.tone}`}>
+                  <Badge variant={statusMeta.tone}>
                     <Icon
                       icon={batch.status === "captured" ? CheckCircle2 : AlertTriangle}
                       size={14}
                     />{" "}
                     {statusMeta.label}
-                  </span>
+                  </Badge>
                   <span className="muted" style={{ fontSize: 12.5 }}>
                     {formatDateTime(batch.createdAt, language)} ·{" "}
                     {batch.trigger === "auto_submit"
@@ -1243,10 +1272,10 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
                       : t(language, "shot.trigger.manual")}{" "}
                     · {pluralScreenshots(language, batch.shots.length)}
                   </span>
-                  <span className={`badge ${fingerprintMatch ? "success" : "warning"}`} data-testid="screenshot-fingerprint-badge">
+                  <Badge variant={fingerprintMatch ? "success" : "warning"} data-testid="screenshot-fingerprint-badge">
                     <Icon icon={fingerprintMatch ? Check : RefreshCw} size={14} />{" "}
                     {fingerprintMatch ? t(language, "shot.match") : t(language, "shot.stale")}
-                  </span>
+                  </Badge>
                 </div>
                 <span className="muted" style={{ fontSize: 11.5 }}>
                   {batch.codeSnapshotHash.slice(0, 8)}
@@ -1254,9 +1283,10 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
               </div>
 
               {batch.skipReason && (
-                <div className="callout warning" style={{ margin: "8px 0", fontSize: 12.5 }} data-testid="screenshot-skip-reason">
-                  <Icon icon={AlertTriangle} size={14} /> {batch.skipReason}
-                </div>
+                <Alert variant="warning" className="my-2 text-xs" data-testid="screenshot-skip-reason">
+                  <Icon icon={AlertTriangle} size={14} />
+                  <AlertDescription className="text-foreground">{batch.skipReason}</AlertDescription>
+                </Alert>
               )}
 
               {batch.shots.length > 0 && (
@@ -1285,60 +1315,64 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
       )}
 
       {activeBatch && activeShot && lightbox && (
-        <ModalShell wide onClose={() => setLightbox(null)} testId="screenshot-lightbox">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <h3 style={{ margin: 0, fontSize: 15 }}>{activeShot.label}</h3>
-            <span className="muted" style={{ fontSize: 12 }}>
+        <ModalShell wide hasExplicitTitle onClose={() => setLightbox(null)} testId="screenshot-lightbox">
+          <DialogHeader>
+            <DialogTitle className="text-base">{activeShot.label}</DialogTitle>
+            <DialogDescription>
               {t(language, "shot.counter", {
                 index: lightbox.index + 1,
                 total: activeBatch.shots.length,
                 viewport: activeShot.viewport,
                 theme: activeShot.theme === "dark" ? t(language, "shot.theme.dark") : t(language, "shot.theme.light"),
               })}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
-            <button
-              className="btn xs"
-              type="button"
-              data-testid="screenshot-lightbox-prev"
-              onClick={() =>
-                setLightbox((prev) =>
-                  prev
-                    ? { ...prev, index: (prev.index - 1 + activeBatch.shots.length) % activeBatch.shots.length }
-                    : prev,
-                )
-              }
-            >
-              <Icon icon={ChevronLeft} size={14} /> {t(language, "shot.prev")}
-            </button>
-            <img
-              className="screenshot-lightbox-image"
-              data-testid="screenshot-lightbox-image"
-              src={screenshotUrl(d.state.id, activeShot.id)}
-              alt={activeShot.label}
-            />
-            <button
-              className="btn xs"
-              type="button"
-              data-testid="screenshot-lightbox-next"
-              onClick={() =>
-                setLightbox((prev) =>
-                  prev ? { ...prev, index: (prev.index + 1) % activeBatch.shots.length } : prev,
-                )
-              }
-            >
-              {t(language, "shot.next")} <Icon icon={ChevronRight} size={14} />
-            </button>
-          </div>
-          <div className="modal-actions">
-            <button className="btn" type="button" onClick={() => setLightbox(null)}>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <div className="flex items-center gap-2.5">
+              <Button
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="screenshot-lightbox-prev"
+                onClick={() =>
+                  setLightbox((prev) =>
+                    prev
+                      ? { ...prev, index: (prev.index - 1 + activeBatch.shots.length) % activeBatch.shots.length }
+                      : prev,
+                  )
+                }
+              >
+                <Icon icon={ChevronLeft} size={14} /> {t(language, "shot.prev")}
+              </Button>
+              <img
+                className="screenshot-lightbox-image"
+                data-testid="screenshot-lightbox-image"
+                src={screenshotUrl(d.state.id, activeShot.id)}
+                alt={activeShot.label}
+              />
+              <Button
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="screenshot-lightbox-next"
+                onClick={() =>
+                  setLightbox((prev) =>
+                    prev ? { ...prev, index: (prev.index + 1) % activeBatch.shots.length } : prev,
+                  )
+                }
+              >
+                {t(language, "shot.next")} <Icon icon={ChevronRight} size={14} />
+              </Button>
+            </div>
+          </DialogPanel>
+          <DialogFooter>
+            <Button variant="ghost" type="button" onClick={() => setLightbox(null)}>
               <Icon icon={X} size={14} /> {t(language, "common.closeEsc")}
-            </button>
-          </div>
+            </Button>
+          </DialogFooter>
         </ModalShell>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1422,13 +1456,13 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
 
   return (
     <>
-      <div className={`card diff-panel-card ${inDrawer ? "in-drawer" : ""}`} data-testid={inDrawer ? "drawer-diff-panel" : "diff-viewer-panel"}>
+      <Card className={`diff-panel-card p-4 mb-3.5 ${inDrawer ? "in-drawer" : ""}`} data-testid={inDrawer ? "drawer-diff-panel" : "diff-viewer-panel"}>
         <div className="card-head">
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <h3>{isDone ? t(language, "changes.diffTitleDone") : t(language, "changes.diffTitleLive")}</h3>
             {isDone && (
-              <span
-                className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}
+              <Badge
+                variant={evidenceSummary.tone === "success" ? "success" : "warning"}
                 data-testid={tid("diff-context-badge")}
               >
                 <Icon
@@ -1436,50 +1470,55 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                   size={14}
                 />{" "}
                 {evidenceSummary.title}
-              </span>
+              </Badge>
             )}
             {parsedFiles.length > 0 && (
-              <span className="badge info" data-testid={tid("diff-stats-badge")}>
+              <Badge variant="info" data-testid={tid("diff-stats-badge")}>
                 {t(language, "changes.statsSummary", {
                   files: parsedFiles.length,
                   add: totalAdditions,
                   del: totalDeletions,
                 })}
-              </span>
+              </Badge>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             {parsedFiles.length > 0 && (
-              <div className="segmented" data-testid={tid("diff-view-mode-toggle")}>
-                <button
-                  type="button"
-                  className={effectiveMode === "split" ? "active" : ""}
-                  onClick={() => setDiffViewMode("split")}
-                >
+              <SegmentedControl
+                size="sm"
+                className="h-7 [&_[data-slot=segmented-control-item]]:h-6"
+                data-testid={tid("diff-view-mode-toggle")}
+                render={
+                  <RadioGroupPrimitive
+                    className="flex items-center"
+                    value={effectiveMode}
+                    onValueChange={(next) => next && setDiffViewMode(next as DiffViewMode)}
+                  />
+                }
+              >
+                <SegmentedControlItem render={<RadioPrimitive.Root value="split" />}>
                   <Icon icon={Columns2} size={14} /> {t(language, "changes.viewMode.split")}
-                </button>
-                <button
-                  type="button"
-                  className={effectiveMode === "unified" ? "active" : ""}
-                  onClick={() => setDiffViewMode("unified")}
-                >
+                </SegmentedControlItem>
+                <SegmentedControlItem render={<RadioPrimitive.Root value="unified" />}>
                   <Icon icon={FileText} size={14} /> {t(language, "changes.viewMode.unified")}
-                </button>
-              </div>
+                </SegmentedControlItem>
+              </SegmentedControl>
             )}
             {!inDrawer && parsedFiles.length > 0 && (
-              <button
-                className="btn xs"
+              <Button
+                size="sm"
+                variant="outline"
                 type="button"
                 data-testid="diff-expand-height-btn"
                 onClick={() => setDiffExpandedHeight(!diffExpandedHeight)}
               >
                 <Icon icon={diffExpandedHeight ? Minimize2 : Maximize2} size={14} />{" "}
                 {diffExpandedHeight ? t(language, "changes.collapseHeight") : t(language, "changes.expandHeight")}
-              </button>
+              </Button>
             )}
-            <button
-              className="btn xs"
+            <Button
+              size="sm"
+              variant="outline"
               type="button"
               data-testid={tid("dock-diff-to-drawer-btn")}
               onClick={() => {
@@ -1493,10 +1532,11 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
             >
               <Icon icon={PanelRightOpen} size={14} />{" "}
               {inDrawer ? t(language, "changes.openInMain") : t(language, "changes.dockToDrawer")}
-            </button>
+            </Button>
             {isDone ? (
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 data-testid={tid("toggle-live-diff-btn")}
                 onClick={() => setShowLiveComparison((prev) => !prev)}
@@ -1506,10 +1546,11 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                 ) : (
                   <><Icon icon={FileDiff} size={14} /> {t(language, "changes.compareLive")}</>
                 )}
-              </button>
+              </Button>
             ) : (
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
                 onClick={() => {
                   void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, false) });
@@ -1517,7 +1558,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                 }}
               >
                 <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshDiff")}
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -1531,26 +1572,30 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
           </div>
         )}
         {evidenceSummary.truncationFlags.length > 0 && (
-          <div className="callout warning" data-testid={tid("diff-truncation-notice")} style={{ marginBottom: 10, fontSize: 12.5 }}>
-            <Icon icon={AlertTriangle} size={14} />{" "}
-            {evidenceSummary.truncationFlags.join(t(language, "changes.truncJoin"))}
-          </div>
+          <Alert variant="warning" className="mb-2.5 text-xs" data-testid={tid("diff-truncation-notice")}>
+            <Icon icon={AlertTriangle} size={14} />
+            <AlertDescription className="text-foreground">
+              {evidenceSummary.truncationFlags.join(t(language, "changes.truncJoin"))}
+            </AlertDescription>
+          </Alert>
         )}
         {!diffRes ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             {t(language, "changes.loading")}
           </p>
         ) : diffRes.status === "unavailable" || !diffObs ? (
-          <div className="callout warning" data-testid={tid("diff-unavailable-notice")} style={{ fontSize: 13, margin: 0 }}>
-            <Icon icon={AlertTriangle} size={14} />{" "}
-            <strong>{t(language, "changes.unavailable")}</strong>：
-            {translateRef(
-              language,
-              diffRes.reasonKey,
-              evidenceSummary.unavailableReason ?? diffRes.reason ?? "",
-              diffRes.reasonParams,
-            ) || t(language, "changes.cannotLoad")}
-          </div>
+          <Alert variant="warning" className="text-xs" data-testid={tid("diff-unavailable-notice")}>
+            <Icon icon={AlertTriangle} size={14} />
+            <AlertDescription className="text-foreground">
+              <strong>{t(language, "changes.unavailable")}</strong>：
+              {translateRef(
+                language,
+                diffRes.reasonKey,
+                evidenceSummary.unavailableReason ?? diffRes.reason ?? "",
+                diffRes.reasonParams,
+              ) || t(language, "changes.cannotLoad")}
+            </AlertDescription>
+          </Alert>
         ) : !diffObs.isGitRepo ? (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             {t(language, "changes.notGit")}
@@ -1562,17 +1607,19 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
         ) : effectiveMode === "unified" ? (
           <div className={`diff-unified-list ${isExpanded ? "expanded" : ""}`} data-testid={tid("diff-unified-list")}>
             {parsedFiles.length > 3 && (
-              <div className="search-wrap" style={{ marginBottom: 4 }}>
-                <Icon icon={Search} size={14} />
-                <input
-                  className="search-box"
+              <InputGroup className="mb-1">
+                <InputGroupAddon>
+                  <Icon icon={Search} size={14} />
+                </InputGroupAddon>
+                <InputGroupInput
+                  size="sm"
                   data-testid={tid("diff-file-search")}
                   type="search"
                   value={diffFileQuery}
                   placeholder={t(language, "changes.fileSearchPlaceholder")}
                   onChange={(e) => setDiffFileQuery(e.target.value)}
                 />
-              </div>
+              </InputGroup>
             )}
             {parsedFiles.length === 0 ? (
               rawDiffHtml ? (
@@ -1590,17 +1637,20 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                 </div>
               )
             ) : visibleFiles.length === 0 ? (
-              <div className="callout" data-testid={tid("diff-empty-filter")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                <span className="muted">{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
-                <button
-                  type="button"
-                  className="btn xs"
-                  data-testid={tid("diff-clear-filter-btn")}
-                  onClick={() => setDiffFileQuery("")}
-                >
-                  <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
-                </button>
-              </div>
+              <Alert data-testid={tid("diff-empty-filter")}>
+                <AlertDescription className="flex w-full items-center justify-between gap-2 text-muted-foreground">
+                  <span>{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    data-testid={tid("diff-clear-filter-btn")}
+                    onClick={() => setDiffFileQuery("")}
+                  >
+                    <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
+                  </Button>
+                </AlertDescription>
+              </Alert>
             ) : (
               visibleFiles.map((f, idx) => (
                 <div key={`${f.path}-${idx}`} className="diff-unified-file">
@@ -1620,18 +1670,20 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
           <div className={`diff-split ${isExpanded ? "expanded" : ""} ${inDrawer ? "in-drawer" : ""}`}>
             <div className="diff-files">
               {parsedFiles.length > 3 && (
-                <div className="diff-file-search-wrap">
-                  <div className="search-wrap" style={{ border: 0, borderBottom: "1px solid var(--border)", borderRadius: 0 }}>
-                    <Icon icon={Search} size={14} />
-                    <input
-                      className="search-box"
+                <div className="diff-file-search-wrap p-1 border-b">
+                  <InputGroup>
+                    <InputGroupAddon>
+                      <Icon icon={Search} size={14} />
+                    </InputGroupAddon>
+                    <InputGroupInput
+                      size="sm"
                       data-testid={tid("diff-file-search")}
                       type="search"
                       value={diffFileQuery}
                       placeholder={t(language, "changes.fileSearchPlaceholder")}
                       onChange={(e) => setDiffFileQuery(e.target.value)}
                     />
-                  </div>
+                  </InputGroup>
                 </div>
               )}
               {visibleFiles.length === 0 && parsedFiles.length > 0 ? (
@@ -1655,17 +1707,20 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
               )}
             </div>
             {parsedFiles.length > 0 && visibleFiles.length === 0 ? (
-              <div className="callout" data-testid={tid("diff-empty-filter")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, alignSelf: "start" }}>
-                <span className="muted">{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
-                <button
-                  type="button"
-                  className="btn xs"
-                  data-testid={tid("diff-clear-filter-btn")}
-                  onClick={() => setDiffFileQuery("")}
-                >
-                  <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
-                </button>
-              </div>
+              <Alert className="self-start" data-testid={tid("diff-empty-filter")}>
+                <AlertDescription className="flex w-full items-center justify-between gap-2 text-muted-foreground">
+                  <span>{t(language, "changes.noFilterMatch", { query: diffFileQuery })}</span>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    data-testid={tid("diff-clear-filter-btn")}
+                    onClick={() => setDiffFileQuery("")}
+                  >
+                    <Icon icon={X} size={14} /> {t(language, "changes.clearFilter")}
+                  </Button>
+                </AlertDescription>
+              </Alert>
             ) : (
               <div
                 className={`diff-code ${isExpanded ? "expanded" : ""}`}
@@ -1676,17 +1731,18 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
             )}
           </div>
         )}
-      </div>
+      </Card>
 
       {isDone && showLiveComparison && (
-        <div className="card" data-testid={tid("live-diff-comparison-card")}>
+        <Card className="p-4 mb-3.5" data-testid={tid("live-diff-comparison-card")}>
           <div className="card-head">
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <h3>{t(language, "changes.liveTitle")}</h3>
-              <span className="badge info">{t(language, "changes.liveBadge")}</span>
+              <Badge variant="info">{t(language, "changes.liveBadge")}</Badge>
             </div>
-            <button
-              className="btn xs"
+            <Button
+              size="xs"
+              variant="outline"
               type="button"
               onClick={() => {
                 void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, true) });
@@ -1694,7 +1750,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
               }}
             >
               <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshCompare")}
-            </button>
+            </Button>
           </div>
           {!liveDiffRes ? (
             <p className="muted" style={{ fontSize: 13, margin: 0 }}>
@@ -1731,7 +1787,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
               />
             </div>
           )}
-        </div>
+        </Card>
       )}
     </>
   );
@@ -1794,51 +1850,54 @@ function ChangesVerifyTab({
   return (
     <>
       {review && !isDone && (review.verdict !== "pass" || revValid.effectiveState === "stale") && (
-        <div
-          className={`callout ${revValid.effectiveState === "stale" ? "warning" : VERDICT_META[review.verdict].tone}`}
+        <Alert
+          variant={revValid.effectiveState === "stale" ? "warning" : VERDICT_META[review.verdict].tone === "danger" ? "error" : VERDICT_META[review.verdict].tone === "success" ? "success" : "warning"}
           data-testid="changes-review-callout"
-          style={{ marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+          className="mb-3.5"
         >
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
-              <Icon icon={AlertTriangle} size={14} />
-              <strong>
-                {revValid.effectiveState === "stale"
-                  ? t(language, "review.calloutStale")
-                  : t(language, "review.calloutWithVerdict", {
-                      verdict: VERDICT_META[review.verdict].labels[language],
-                    })}
-              </strong>
-              <span className="xs muted">
-                {review.reviewerHarness}/{review.reviewerModel}
-              </span>
+          <Icon icon={AlertTriangle} size={14} />
+          <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2.5 text-foreground">
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+                <strong>
+                  {revValid.effectiveState === "stale"
+                    ? t(language, "review.calloutStale")
+                    : t(language, "review.calloutWithVerdict", {
+                        verdict: VERDICT_META[review.verdict].labels[language],
+                      })}
+                </strong>
+                <span className="xs muted">
+                  {review.reviewerHarness}/{review.reviewerModel}
+                </span>
+              </div>
+              <div className="xs">{review.summary}</div>
             </div>
-            <div className="xs">{review.summary}</div>
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {revValid.effectiveState === "current" && review.verdict !== "pass" && (
-              <button
-                className="btn primary xs"
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {revValid.effectiveState === "current" && review.verdict !== "pass" && (
+                <Button
+                  size="xs"
+                  type="button"
+                  disabled={busy || runLocked}
+                  onClick={() => void dispatchFixFromReview(d, bridgeConnected)}
+                >
+                  <Icon icon={Wrench} size={14} /> {t(language, "core.action.fixPerReview")}
+                </Button>
+              )}
+              <Button
+                size="xs"
+                variant="outline"
                 type="button"
-                disabled={busy || runLocked}
-                onClick={() => void dispatchFixFromReview(d, bridgeConnected)}
+                disabled={busy}
+                onClick={() => setWorkspaceTab("spec")}
               >
-                <Icon icon={Wrench} size={14} /> {t(language, "core.action.fixPerReview")}
-              </button>
-            )}
-            <button
-              className="btn xs"
-              type="button"
-              disabled={busy}
-              onClick={() => setWorkspaceTab("spec")}
-            >
-              <Icon icon={FileText} size={14} /> {t(language, "review.viewFull")}
-            </button>
-          </div>
-        </div>
+                <Icon icon={FileText} size={14} /> {t(language, "review.viewFull")}
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
       )}
 
-      <div className="card">
+      <Card className="p-4 mb-3.5">
         <div className="card-head">
           <h3>{t(language, "changes.tasks", { done: tasksDone, total: s.tasks.length })}</h3>
         </div>
@@ -1851,10 +1910,10 @@ function ChangesVerifyTab({
             const tm = TASK_META[task.status];
             return (
               <div key={task.id} className="task-row">
-                <span className={`badge ${tm.tone}`}>
+                <Badge variant={mapTone(tm.tone)}>
                   <Icon icon={TASK_ICONS[task.status]} size={14} />
                   {tm.labels[language]}
-                </span>
+                </Badge>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13.5, fontWeight: 500 }}>{task.title}</div>
                   {task.note && (
@@ -1864,12 +1923,13 @@ function ChangesVerifyTab({
                   )}
                 </div>
                 {(s.stage === "implementing" || s.stage === "awaiting_acceptance") && task.status === "blocked" && (
-                  <button
-                    className="btn xs"
+                  <Button
+                    size="xs"
+                    variant="outline"
                     type="button"
                     data-testid={`task-resolve-${task.id}`}
                     disabled={busy || runLocked}
-                    style={{ marginLeft: "auto", flexShrink: 0 }}
+                    className="ms-auto shrink-0"
                     onClick={async () => {
                       if (guardRequirementRunLock(s.id)) return;
                       const nextTasks = s.tasks.map((item) =>
@@ -1896,26 +1956,26 @@ function ChangesVerifyTab({
                     }}
                   >
                     <Icon icon={TASK_ICONS.done} size={14} /> {t(language, "changes.taskResolveBtn")}
-                  </button>
+                  </Button>
                 )}
               </div>
             );
           })
         )}
-      </div>
+      </Card>
 
-      <div className="card">
+      <Card className="p-4 mb-3.5">
         <div className="card-head">
           <h3>{t(language, "changes.evidenceTitle")}</h3>
           {s.criteria.some((c) => c.command) && s.stage !== "done" && s.stage !== "cancelled" && (
-            <button
-              className="btn primary xs"
+            <Button
+              size="xs"
               type="button"
               disabled={busy || runLocked}
               onClick={() => void handleBannerAction(d, "run_all_verifications", bridgeConnected)}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runAll")}
-            </button>
+            </Button>
           )}
         </div>
 
@@ -1931,10 +1991,10 @@ function ChangesVerifyTab({
               <div key={latest.record.id} className="evidence-card" data-testid={`ev-${latest.record.id}`}>
                 <div className="evidence-head">
                   <div className="evidence-info">
-                    <span className={`badge ${meta.tone}`}>
+                    <Badge variant={mapTone(meta.tone)}>
                       <Icon icon={EVIDENCE_ICONS[latest.effectiveState]} size={14} />{" "}
                       {meta.labels[language]}
-                    </span>
+                    </Badge>
                     <code className="evidence-command">{command}</code>
                     <span className="muted" style={{ fontSize: 12 }}>
                       {latest.record.durationMs}ms ·{" "}
@@ -1944,8 +2004,9 @@ function ChangesVerifyTab({
                     </span>
                   </div>
                   <div className="evidence-actions">
-                    <button
-                      className="btn xs"
+                    <Button
+                      size="xs"
+                      variant="outline"
                       type="button"
                       data-action="toggle-log"
                       onClick={() => void toggleVerificationLog(s.id, latest.record.id)}
@@ -1955,10 +2016,11 @@ function ChangesVerifyTab({
                       ) : (
                         <><Icon icon={Eye} size={14} /> {t(language, "changes.viewOutput")}</>
                       )}
-                    </button>
+                    </Button>
                     {!isTerminal && (
-                      <button
-                        className="btn xs"
+                      <Button
+                        size="xs"
+                        variant="outline"
                         type="button"
                         disabled={busy || runLocked}
                         onClick={() =>
@@ -1974,7 +2036,7 @@ function ChangesVerifyTab({
                         }
                       >
                         <Icon icon={RefreshCw} size={14} /> {t(language, "changes.rerun")}
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -1991,62 +2053,61 @@ function ChangesVerifyTab({
 
         {!isTerminal && (
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-            <input
-              className="input"
+            <Input
+              className="flex-[2] min-w-[180px]"
               id="manual-verify-cmd"
               placeholder={t(language, "changes.manualCmdPlaceholder")}
-              style={{ flex: 2, minWidth: 180 }}
               value={manualCmd}
               onChange={(e) => setManualCmd(e.target.value)}
             />
-            <input
-              className="input"
+            <Input
+              className="flex-1 min-w-[120px]"
               id="manual-verify-criteria"
               placeholder={t(language, "changes.manualCriteriaPlaceholder")}
-              style={{ flex: 1, minWidth: 120 }}
               value={manualCriteria}
               onChange={(e) => setManualCriteria(e.target.value)}
             />
-            <button
-              className="btn"
+            <Button
+              variant="outline"
               type="button"
               data-testid="manual-verify-btn"
               disabled={busy || runLocked}
               onClick={() => void runManualVerify()}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runVerify")}
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      </Card>
 
       <ScreenshotEvidenceSection d={d} runLocked={runLocked} />
 
-      <div className="card" data-testid="verify-diff-shortcut-card">
+      <Card className="p-4 mb-3.5" data-testid="verify-diff-shortcut-card">
         <div className="card-head" style={{ marginBottom: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <h3>{isDone ? t(language, "changes.diffTitleDone") : t(language, "changes.diffTitleLive")}</h3>
             {isDone && (
-              <span className={`badge ${evidenceSummary.tone === "success" ? "success" : "warning"}`}>
+              <Badge variant={evidenceSummary.tone === "success" ? "success" : "warning"}>
                 <Icon icon={evidenceSummary.tone === "success" ? ShieldCheck : AlertTriangle} size={14} />{" "}
                 {evidenceSummary.title}
-              </span>
+              </Badge>
             )}
             {diffObs && diffObs.files.length > 0 && (
-              <span className="badge info">{diffObs.files.length}</span>
+              <Badge variant="info">{diffObs.files.length}</Badge>
             )}
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button
-              className="btn primary xs"
+            <Button
+              size="xs"
               type="button"
               data-testid="open-diff-tab-btn"
               onClick={() => setWorkspaceTab("diff")}
             >
               <Icon icon={FileDiff} size={14} /> {t(language, "changes.openDiffTab")}
-            </button>
-            <button
-              className="btn xs"
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
               type="button"
               data-testid="verify-dock-diff-btn"
               onClick={() => {
@@ -2055,10 +2116,10 @@ function ChangesVerifyTab({
               }}
             >
               <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
-            </button>
+            </Button>
           </div>
         </div>
-      </div>
+      </Card>
     </>
   );
 }
@@ -2174,54 +2235,60 @@ export function WorkspaceView() {
           {s.id}
         </span>
         {s.parentId && (
-          <button
-            type="button"
-            className="badge info"
+          <Badge
+            render={<button type="button" onClick={() => void openRequirement(s.parentId!)} />}
+            variant="info"
             data-testid="ws-parent-link"
-            style={{ cursor: "pointer", border: "none" }}
-            onClick={() => void openRequirement(s.parentId!)}
           >
             <Icon icon={ArrowUp} size={14} /> {t(language, "ws.parentLink", { id: s.parentId })}
-          </button>
+          </Badge>
         )}
         <h1 className="ws-title">{s.title}</h1>
         {reqData?.sandbox && (
-          <span
-            className="badge info"
+          <Badge
+            variant="info"
             data-testid="sandbox-active-badge"
             title={t(language, "ws.sandboxTitle", { branch: reqData.sandbox.branch })}
           >
             <Icon icon={GitBranch} size={14} /> {t(language, "ws.sandboxActive")}
-          </span>
+          </Badge>
         )}
         {s.github?.issue && (
-          <a
-            className={`badge ${s.github.issue.state === "closed" ? "neutral" : "info"}`}
-            href={s.github.issue.url}
-            target="_blank"
-            rel="noreferrer"
+          <Badge
+            render={
+              <a
+                href={s.github.issue.url}
+                target="_blank"
+                rel="noreferrer"
+              />
+            }
+            variant={s.github.issue.state === "closed" ? "secondary" : "info"}
             data-testid="ws-github-issue-link"
             title={s.github.issue.title}
           >
             <Icon icon={Link2} size={14} /> Issue #{s.github.issue.number}
-          </a>
+          </Badge>
         )}
         {s.github?.pr && (
-          <a
-            className={`badge ${s.github.pr.state === "merged" ? "success" : s.github.pr.state === "closed" ? "neutral" : "info"}`}
-            href={s.github.pr.url}
-            target="_blank"
-            rel="noreferrer"
+          <Badge
+            render={
+              <a
+                href={s.github.pr.url}
+                target="_blank"
+                rel="noreferrer"
+              />
+            }
+            variant={s.github.pr.state === "merged" ? "success" : s.github.pr.state === "closed" ? "secondary" : "info"}
             data-testid="ws-github-pr-link"
             title={s.github.pr.title}
           >
             <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {formatPrStateLabel(language, s.github.pr.state)}
-          </a>
+          </Badge>
         )}
-        <span className={`badge ${stageMeta.tone}`} data-testid="ws-stage-badge">
+        <Badge variant={mapTone(stageMeta.tone)} data-testid="ws-stage-badge">
           <Icon icon={STAGE_ICONS[s.stage]} size={14} />
           {stageMeta.labels[language]}
-        </span>
+        </Badge>
         <div className="more-wrap">
           <Menu open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
             {/*
@@ -2231,17 +2298,16 @@ export function WorkspaceView() {
             <span ref={moreMenuAnchorRef} className="inline-flex shrink-0" data-testid="more-menu-anchor">
               <MenuTrigger
                 render={
-                  <button ref={moreMenuButtonRef} className="btn xs" type="button" data-testid="more-menu-btn">
+                  <Button ref={moreMenuButtonRef} size="sm" variant="outline" type="button" data-testid="more-menu-btn">
                     <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
-                  </button>
+                  </Button>
                 }
               />
             </span>
             <MenuPopup
               align="end"
               anchor={moreMenuAnchorRef}
-              className="more-menu"
-              contentClassName="p-0"
+              className="min-w-44"
               data-testid="more-menu"
               finalFocus={moreMenuButtonRef}
               side="bottom"
@@ -2356,21 +2422,26 @@ export function WorkspaceView() {
                 </MenuItem>
               )}
               {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
-                <MenuItem
-                  disabled={runningThis}
-                  nativeButton
-                  onClick={() => {
-                    setModal({ kind: "lifecycle", action: "block", reason: "" });
-                  }}
-                  render={<button type="button" data-testid="menu-block-btn" />}
-                >
-                  <Icon icon={Ban} size={14} /> {t(language, "ws.menu.block")}
-                </MenuItem>
+                <>
+                  <MenuSeparator />
+                  <MenuItem
+                    disabled={runningThis}
+                    nativeButton
+                    variant="destructive"
+                    onClick={() => {
+                      setModal({ kind: "lifecycle", action: "block", reason: "" });
+                    }}
+                    render={<button type="button" data-testid="menu-block-btn" />}
+                  >
+                    <Icon icon={Ban} size={14} /> {t(language, "ws.menu.block")}
+                  </MenuItem>
+                </>
               )}
               {s.stage !== "done" && s.stage !== "cancelled" && (
                 <MenuItem
                   disabled={runningThis}
                   nativeButton
+                  variant="destructive"
                   onClick={() => {
                     setModal({ kind: "lifecycle", action: "cancel", reason: "" });
                   }}
@@ -2396,6 +2467,7 @@ export function WorkspaceView() {
                   <Icon icon={RotateCcw} size={14} /> {t(language, "ws.menu.reopen")}
                 </MenuItem>
               )}
+              <MenuSeparator />
               <MenuItem
                 nativeButton
                 onClick={() => {
@@ -2427,13 +2499,11 @@ export function WorkspaceView() {
       </div>
 
       {s.lastFeedback && (
-        <div className="callout warning" style={{ marginBottom: 14 }}>
-          <strong className="callout-lead">
-            <Icon icon={AlertTriangle} size={14} />
-            <span>{t(language, "ws.lastFeedback")}</span>
-          </strong>
-          {s.lastFeedback}
-        </div>
+        <Alert variant="warning" className="mb-3.5 text-xs">
+          <Icon icon={AlertTriangle} size={14} />
+          <AlertTitle>{t(language, "ws.lastFeedback")}</AlertTitle>
+          <AlertDescription className="text-foreground">{s.lastFeedback}</AlertDescription>
+        </Alert>
       )}
 
       {reqData?.sandbox &&
@@ -2455,139 +2525,132 @@ export function WorkspaceView() {
             (s.stage === "awaiting_approval" && s.designHash !== "");
           const sep = language === "en" ? ", " : "、";
           return (
-            <div
-              className={`callout ${hasTrueConflict ? "danger" : "warning"}`}
+            <Alert
+              variant={hasTrueConflict ? "error" : "warning"}
               data-testid="sandbox-drift-callout"
-              style={{
-                marginBottom: 14,
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
+              className="mb-3.5"
             >
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <Icon icon={GitBranch} size={14} />
-                  <strong>
-                    {drift.behindCount > 0
-                      ? t(language, "ws.sandboxDrift.title", {
-                          branch: drift.branch,
-                          count: drift.behindCount,
-                        })
-                      : t(language, "ws.sandboxDrift.radarOnlyTitle", { branch: drift.branch })}
-                  </strong>
-                  {hasTrueConflict && (
-                    <span className="badge danger">
-                      <Icon icon={AlertTriangle} size={14} />
-                      {t(language, "ws.sandboxDrift.conflictBadge", {
-                        count: drift.conflictFiles.length,
+              <Icon icon={GitBranch} size={14} />
+              <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2.5 text-foreground">
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <strong>
+                      {drift.behindCount > 0
+                        ? t(language, "ws.sandboxDrift.title", {
+                            branch: drift.branch,
+                            count: drift.behindCount,
+                          })
+                        : t(language, "ws.sandboxDrift.radarOnlyTitle", { branch: drift.branch })}
+                    </strong>
+                    {hasTrueConflict && (
+                      <Badge variant="error">
+                        <Icon icon={AlertTriangle} size={14} />
+                        {t(language, "ws.sandboxDrift.conflictBadge", {
+                          count: drift.conflictFiles.length,
+                        })}
+                      </Badge>
+                    )}
+                    {isAutoMergeable && (
+                      <Badge variant="info">
+                        <Icon icon={CALLOUT_TONE_ICONS.info} size={14} />
+                        {t(language, "ws.sandboxDrift.autoMergeBadge", {
+                          count: drift.overlapFiles.length,
+                        })}
+                      </Badge>
+                    )}
+                  </div>
+                  {hasTrueConflict ? (
+                    <div className="xs" style={{ marginTop: 4 }}>
+                      {t(language, "ws.sandboxDrift.conflictDetail", {
+                        files:
+                          drift.conflictFiles.slice(0, 6).join(sep) +
+                          (drift.conflictFiles.length > 6 ? "…" : ""),
                       })}
-                    </span>
+                    </div>
+                  ) : isAutoMergeable ? (
+                    <div className="xs muted" style={{ marginTop: 4 }}>
+                      {t(language, "ws.sandboxDrift.autoMergeDetail", {
+                        files:
+                          drift.overlapFiles.slice(0, 6).join(sep) +
+                          (drift.overlapFiles.length > 6 ? "…" : ""),
+                      })}
+                    </div>
+                  ) : drift.behindCount > 0 ? (
+                    <div className="xs muted" style={{ marginTop: 4 }}>
+                      {t(language, "ws.sandboxDrift.safeDetail")}
+                    </div>
+                  ) : null}
+                  {siblingList.length > 0 && (
+                    <div
+                      className="xs"
+                      data-testid="sibling-conflict-radar"
+                      style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
+                    >
+                      <span className={hasSiblingTrueConflict ? "danger-text" : "muted"} style={{ fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <Icon icon={hasSiblingTrueConflict ? AlertTriangle : CALLOUT_TONE_ICONS.info} size={14} />
+                        {t(language, "ws.sandboxDrift.siblingTitle")}
+                      </span>
+                      {siblingList.map((sc) => {
+                        const filesText =
+                          (sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).slice(0, 3).join(sep) +
+                          ((sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).length > 3 ? "…" : "");
+                        return (
+                          <Badge
+                            key={sc.requirementId}
+                            render={<button type="button" onClick={() => void openRequirement(sc.requirementId)} />}
+                            variant={sc.conflictFiles.length > 0 ? "error" : "secondary"}
+                          >
+                            {t(
+                              language,
+                              sc.conflictFiles.length > 0
+                                ? "ws.sandboxDrift.siblingConflict"
+                                : "ws.sandboxDrift.siblingAuto",
+                              { id: sc.requirementId, files: filesText },
+                            )}
+                          </Badge>
+                        );
+                      })}
+                    </div>
                   )}
-                  {isAutoMergeable && (
-                    <span className="badge info">
-                      <Icon icon={CALLOUT_TONE_ICONS.info} size={14} />
-                      {t(language, "ws.sandboxDrift.autoMergeBadge", {
-                        count: drift.overlapFiles.length,
-                      })}
-                    </span>
+                  {hasTrueConflict && !canAgentResolveNow && (
+                    <div className="xs muted" style={{ marginTop: 4 }}>
+                      {t(language, "ws.sandboxDrift.needDesignFirst")}
+                    </div>
                   )}
                 </div>
-                {hasTrueConflict ? (
-                  <div className="xs" style={{ marginTop: 4 }}>
-                    {t(language, "ws.sandboxDrift.conflictDetail", {
-                      files:
-                        drift.conflictFiles.slice(0, 6).join(sep) +
-                        (drift.conflictFiles.length > 6 ? "…" : ""),
-                    })}
-                  </div>
-                ) : isAutoMergeable ? (
-                  <div className="xs muted" style={{ marginTop: 4 }}>
-                    {t(language, "ws.sandboxDrift.autoMergeDetail", {
-                      files:
-                        drift.overlapFiles.slice(0, 6).join(sep) +
-                        (drift.overlapFiles.length > 6 ? "…" : ""),
-                    })}
-                  </div>
-                ) : drift.behindCount > 0 ? (
-                  <div className="xs muted" style={{ marginTop: 4 }}>
-                    {t(language, "ws.sandboxDrift.safeDetail")}
-                  </div>
-                ) : null}
-                {siblingList.length > 0 && (
-                  <div
-                    className="xs"
-                    data-testid="sibling-conflict-radar"
-                    style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
-                  >
-                    <span className={hasSiblingTrueConflict ? "danger" : "muted"} style={{ fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                      <Icon icon={hasSiblingTrueConflict ? AlertTriangle : CALLOUT_TONE_ICONS.info} size={14} />
-                      {t(language, "ws.sandboxDrift.siblingTitle")}
-                    </span>
-                    {siblingList.map((sc) => {
-                      const filesText =
-                        (sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).slice(0, 3).join(sep) +
-                        ((sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).length > 3 ? "…" : "");
-                      return (
-                        <button
-                          key={sc.requirementId}
-                          type="button"
-                          className={`badge ${sc.conflictFiles.length > 0 ? "danger" : "neutral"}`}
-                          style={{ cursor: "pointer", border: "none" }}
-                          onClick={() => void openRequirement(sc.requirementId)}
-                        >
-                          {t(
-                            language,
-                            sc.conflictFiles.length > 0
-                              ? "ws.sandboxDrift.siblingConflict"
-                              : "ws.sandboxDrift.siblingAuto",
-                            { id: sc.requirementId, files: filesText },
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                {hasTrueConflict && !canAgentResolveNow && (
-                  <div className="xs muted" style={{ marginTop: 4 }}>
-                    {t(language, "ws.sandboxDrift.needDesignFirst")}
-                  </div>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {drift.canAutoSync && (
-                  <button
-                    className="btn primary xs"
-                    type="button"
-                    data-testid="sync-sandbox-base-btn"
-                    disabled={busy || runningThis}
-                    onClick={() => void syncSandboxBaseAction(s.id)}
-                  >
-                    <Icon icon={RefreshCw} size={14} />{" "}
-                    {t(language, isAutoMergeable ? "ws.sandboxDrift.syncAutoMerge" : "ws.sandboxDrift.sync")}
-                  </button>
-                )}
-                {hasTrueConflict && canAgentResolveNow && (
-                  <button
-                    className="btn primary xs"
-                    type="button"
-                    data-testid="agent-sync-sandbox-btn"
-                    disabled={busy || runningThis}
-                    onClick={() => void dispatchSyncBaseWithAgent(d, drift, bridgeConnected)}
-                  >
-                    <Icon icon={Wrench} size={14} />{" "}
-                    {t(
-                      language,
-                      s.stage === "awaiting_approval"
-                        ? "ws.sandboxDrift.approveAndSyncWithAgent"
-                        : "ws.sandboxDrift.syncWithAgent",
-                    )}
-                  </button>
-                )}
-              </div>
-            </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {drift.canAutoSync && (
+                    <Button
+                      size="xs"
+                      type="button"
+                      data-testid="sync-sandbox-base-btn"
+                      disabled={busy || runningThis}
+                      onClick={() => void syncSandboxBaseAction(s.id)}
+                    >
+                      <Icon icon={RefreshCw} size={14} />{" "}
+                      {t(language, isAutoMergeable ? "ws.sandboxDrift.syncAutoMerge" : "ws.sandboxDrift.sync")}
+                    </Button>
+                  )}
+                  {hasTrueConflict && canAgentResolveNow && (
+                    <Button
+                      size="xs"
+                      type="button"
+                      data-testid="agent-sync-sandbox-btn"
+                      disabled={busy || runningThis}
+                      onClick={() => void dispatchSyncBaseWithAgent(d, drift, bridgeConnected)}
+                    >
+                      <Icon icon={Wrench} size={14} />{" "}
+                      {t(
+                        language,
+                        s.stage === "awaiting_approval"
+                          ? "ws.sandboxDrift.approveAndSyncWithAgent"
+                          : "ws.sandboxDrift.syncWithAgent",
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </AlertDescription>
+            </Alert>
           );
         })()}
 
@@ -2633,8 +2696,9 @@ export function WorkspaceView() {
             <div className="banner-runner-row">
               <span className="xs muted">{t(language, "ws.modelDispatch")}</span>
               <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" includeManualCopy />
-              <button
-                className="btn xs"
+              <Button
+                size="sm"
+                variant="outline"
                 type="button"
                 data-testid="run-selected-model-btn"
                 disabled={busy || runningThis}
@@ -2647,25 +2711,25 @@ export function WorkspaceView() {
                     <Icon icon={Zap} size={14} /> {t(language, "ws.runBackground")}
                   </>
                 )}
-              </button>
+              </Button>
               {canReview && (
-                <button
-                  className="btn xs"
+                <Button
+                  size="sm"
+                  variant="outline"
                   type="button"
                   data-testid="run-review-btn"
                   disabled={busy || runningThis}
                   onClick={() => void triggerActiveRun(s.id, "review")}
                 >
                   <Icon icon={Search} size={14} /> {t(language, "ws.crossReview")}
-                </button>
+                </Button>
               )}
             </div>
           )}
         </div>
         <div className="banner-actions">
           {banner.primaryAction && (
-            <button
-              className="btn primary"
+            <Button
               type="button"
               data-testid={`action-${banner.primaryAction.id}`}
               disabled={busy || runningThis}
@@ -2678,12 +2742,12 @@ export function WorkspaceView() {
                 banner.primaryAction.label,
                 banner.primaryAction.labelParams,
               )}
-            </button>
+            </Button>
           )}
           {banner.secondaryActions.map((sec) => (
-            <button
+            <Button
               key={sec.id}
-              className="btn"
+              variant="outline"
               type="button"
               data-testid={`action-${sec.id}`}
               disabled={busy || runningThis}
@@ -2691,11 +2755,11 @@ export function WorkspaceView() {
             >
               <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
               {translateRef(language, sec.labelKey, sec.label, sec.labelParams)}
-            </button>
+            </Button>
           ))}
           {s.stage === "done" && (deliveryPreview?.canCommit || deliveryPreview?.canCreatePr) && (
-            <button
-              className={s.delivery ? "btn" : "btn primary"}
+            <Button
+              variant={s.delivery ? "outline" : "default"}
               type="button"
               data-testid="open-deliver-btn"
               disabled={busy || runningThis}
@@ -2712,11 +2776,11 @@ export function WorkspaceView() {
                 : s.delivery
                   ? t(language, "ws.deliverMore")
                   : t(language, "ws.deliverStart")}
-            </button>
+            </Button>
           )}
           {s.stage === "done" && s.github?.pr && (
-            <button
-              className="btn"
+            <Button
+              variant="outline"
               type="button"
               data-testid="sync-pr-btn"
               disabled={busy || runningThis}
@@ -2724,11 +2788,11 @@ export function WorkspaceView() {
             >
               <Icon icon={RefreshCw} size={14} />{" "}
               {reqData?.sandbox ? t(language, "ws.syncPrCleanup") : t(language, "ws.syncPr")}
-            </button>
+            </Button>
           )}
           {reqData?.sandbox && s.stage === "done" && (
-            <button
-              className="btn"
+            <Button
+              variant="outline"
               type="button"
               data-testid="apply-sandbox-btn"
               disabled={busy || runningThis}
@@ -2751,7 +2815,7 @@ export function WorkspaceView() {
             >
               <Icon icon={GitMerge} size={14} />{" "}
               {deliveryPreview?.canCreatePr ? t(language, "ws.applySandboxLocal") : t(language, "ws.applySandbox")}
-            </button>
+            </Button>
           )}
         </div>
       </section>
@@ -2759,48 +2823,34 @@ export function WorkspaceView() {
       {activeRun && <LiveAgentBanner run={activeRun} />}
       </div>
 
-      <div className="tabs" data-testid="workspace-tabs">
-        <button
-          className={`tab ${workspaceTab === "spec" ? "active" : ""}`}
-          type="button"
-          data-testid="tab-spec"
-          onClick={() => setWorkspaceTab("spec")}
+      <Tabs
+        className="w-full shrink-0 gap-0 mb-4 border-b border-border"
+        value={workspaceTab}
+        onValueChange={(next) => setWorkspaceTab(next as typeof workspaceTab)}
+      >
+        <TabsList
+          variant="underline"
+          size="lg"
+          data-testid="workspace-tabs"
+          className="w-full justify-start overflow-x-auto max-sm:flex-wrap"
         >
-          <Icon icon={FileText} size={14} /> {t(language, "ws.tab.spec")}
-        </button>
-        <button
-          className={`tab ${workspaceTab === "diff" ? "active" : ""}`}
-          type="button"
-          data-testid="tab-diff"
-          onClick={() => setWorkspaceTab("diff")}
-        >
-          <Icon icon={FileDiff} size={14} /> {t(language, "ws.tab.diff")}
-        </button>
-        <button
-          className={`tab ${workspaceTab === "changes" ? "active" : ""}`}
-          type="button"
-          data-testid="tab-changes"
-          onClick={() => setWorkspaceTab("changes")}
-        >
-          <Icon icon={GitBranch} size={14} /> {t(language, "ws.tab.changes")}
-        </button>
-        <button
-          className={`tab ${workspaceTab === "timeline" ? "active" : ""}`}
-          type="button"
-          data-testid="tab-timeline"
-          onClick={() => setWorkspaceTab("timeline")}
-        >
-          <Icon icon={History} size={14} /> {t(language, "ws.tab.timeline")}
-        </button>
-        <button
-          className={`tab ${workspaceTab === "audit" ? "active" : ""}`}
-          type="button"
-          data-testid="tab-audit"
-          onClick={() => setWorkspaceTab("audit")}
-        >
-          <Icon icon={BarChart3} size={14} /> {t(language, "ws.tab.audit")}
-        </button>
-      </div>
+          <TabsTab className="grow-0" value="spec" data-testid="tab-spec">
+            <Icon icon={FileText} size={14} /> {t(language, "ws.tab.spec")}
+          </TabsTab>
+          <TabsTab className="grow-0" value="diff" data-testid="tab-diff">
+            <Icon icon={FileDiff} size={14} /> {t(language, "ws.tab.diff")}
+          </TabsTab>
+          <TabsTab className="grow-0" value="changes" data-testid="tab-changes">
+            <Icon icon={GitBranch} size={14} /> {t(language, "ws.tab.changes")}
+          </TabsTab>
+          <TabsTab className="grow-0" value="timeline" data-testid="tab-timeline">
+            <Icon icon={History} size={14} /> {t(language, "ws.tab.timeline")}
+          </TabsTab>
+          <TabsTab className="grow-0" value="audit" data-testid="tab-audit">
+            <Icon icon={BarChart3} size={14} /> {t(language, "ws.tab.audit")}
+          </TabsTab>
+        </TabsList>
+      </Tabs>
 
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (

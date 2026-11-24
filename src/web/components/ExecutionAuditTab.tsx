@@ -63,6 +63,18 @@ import {
 } from "./Charts.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView } from "./Primitives.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
+import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
+
+function mapRunToneToBadge(tone: "info" | "success" | "warning" | "danger" | "neutral") {
+  if (tone === "danger") return "error" as const;
+  if (tone === "neutral") return "secondary" as const;
+  return tone;
+}
 
 type InspectorTab = "usage" | "activity" | "context";
 type TimelineFilter = "all" | "agent" | "review" | "verify" | "system";
@@ -645,43 +657,48 @@ function RunInspectorSection({
       }));
 
   return (
-    <div className="card audit-inspector-card" data-testid="run-inspector-panel">
+    <Card className="audit-inspector-card p-4" data-testid="run-inspector-panel">
       <div className="card-head" style={{ flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <h3 style={{ margin: 0 }}>
             {t(language, "audit.inspectorTitle", { runId: inspectedRun.id })}
           </h3>
-          <span className={`badge ${AGENT_RUN_TONE[inspectedRun.status]}`}>
+          <Badge variant={mapRunToneToBadge(AGENT_RUN_TONE[inspectedRun.status])}>
             {formatAgentActionLabel(language, inspectedRun.action)} · {formatAgentStatusLabel(language, inspectedRun.status)}
-          </span>
+          </Badge>
           <span className="muted xs">
             {inspectedRun.harness} / {inspectedRun.effectiveModel ?? inspectedRun.model}
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <div className="segmented" role="tablist">
+          <SegmentedControl
+            size="sm"
+            render={
+              <RadioGroupPrimitive
+                className="flex items-center"
+                value={subTab}
+                onValueChange={(next) => next && setSubTab(next as InspectorTab)}
+              />
+            }
+          >
             {(["usage", "activity", "context"] as const).map((tab) => (
-              <button
+              <SegmentedControlItem
                 key={tab}
-                type="button"
-                role="tab"
-                aria-selected={subTab === tab}
-                className={subTab === tab ? "active" : ""}
-                data-testid={`inspector-tab-${tab}`}
-                onClick={() => setSubTab(tab)}
+                render={<RadioPrimitive.Root value={tab} data-testid={`inspector-tab-${tab}`} />}
               >
                 {t(language, `audit.tab.${tab}` as MessageKey)}
-              </button>
+              </SegmentedControlItem>
             ))}
-          </div>
-          <button
+          </SegmentedControl>
+          <Button
             type="button"
-            className="btn ghost xs"
+            size="xs"
+            variant="ghost"
             data-testid="inspector-open-drawer-btn"
             onClick={() => void openRunConsole(reqId, inspectedRun.id)}
           >
             <Icon icon={Terminal} size={14} /> {t(language, "timeline.viewOutput")}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -693,7 +710,7 @@ function RunInspectorSection({
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
                     <span className="muted xs">{t(language, "audit.contextPressure")}</span>
-                    <span className="badge success xs">{t(language, "audit.source.apiExact")}</span>
+                    <Badge size="sm" variant="success">{t(language, "audit.source.apiExact")}</Badge>
                   </div>
                   <div className="audit-metric-val">
                     {formatPercent(pressureRatio)}{" "}
@@ -716,7 +733,7 @@ function RunInspectorSection({
                 <>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
                     <span className="muted xs">{t(language, "audit.sessionTotalTokens")}</span>
-                    <span className="badge xs">{t(language, usageSourceKey)}</span>
+                    <Badge size="sm" variant="secondary">{t(language, usageSourceKey)}</Badge>
                   </div>
                   <div className="audit-metric-val">
                     {formatTokenCount(usage?.totalTokens ?? analytics.totalCapturedTokens)}
@@ -763,9 +780,9 @@ function RunInspectorSection({
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <strong style={{ fontSize: 13 }}>{t(language, "audit.compositionTitle")}</strong>
-                <span className="badge xs">
+                <Badge size="sm" variant="secondary">
                   {hasExactBreakdown ? t(language, "audit.exactUsageSplit") : t(language, "audit.capturedPayloadTitle")}
-                </span>
+                </Badge>
               </div>
               <span className="muted xs">
                 {t(language, "audit.capturedPayloadTitle")}: {formatBytes(analytics.totalCapturedBytes)} (~{formatTokenCount(analytics.totalCapturedTokens)} tok)
@@ -818,7 +835,7 @@ function RunInspectorSection({
                           </span>
                           <span>{cat.label}</span>
                         </span>
-                        <span className="badge xs">{pct}%</span>
+                        <Badge size="sm" variant="secondary">{pct}%</Badge>
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
                         <strong style={{ fontSize: 13.5 }}>{formatBytes(cat.bytes)}</strong>
@@ -842,26 +859,25 @@ function RunInspectorSection({
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <strong style={{ fontSize: 13 }}>{t(language, "audit.contextStepTrend")}</strong>
-                    <span className="badge success xs">{t(language, "audit.source.apiExact")}</span>
+                    <Badge size="sm" variant="success">{t(language, "audit.source.apiExact")}</Badge>
                   </div>
-                  <div className="segmented">
-                    <button
-                      type="button"
-                      className={chartMode === "area" ? "active" : ""}
-                      data-testid="audit-chart-mode-area"
-                      onClick={() => setChartMode("area")}
-                    >
+                  <SegmentedControl
+                    size="sm"
+                    render={
+                      <RadioGroupPrimitive
+                        className="flex items-center"
+                        value={chartMode}
+                        onValueChange={(next) => next && setChartMode(next as "area" | "bars")}
+                      />
+                    }
+                  >
+                    <SegmentedControlItem render={<RadioPrimitive.Root value="area" data-testid="audit-chart-mode-area" />}>
                       {t(language, "audit.chartMode.area")}
-                    </button>
-                    <button
-                      type="button"
-                      className={chartMode === "bars" ? "active" : ""}
-                      data-testid="audit-chart-mode-bars"
-                      onClick={() => setChartMode("bars")}
-                    >
+                    </SegmentedControlItem>
+                    <SegmentedControlItem render={<RadioPrimitive.Root value="bars" data-testid="audit-chart-mode-bars" />}>
                       {t(language, "audit.chartMode.bars")}
-                    </button>
-                  </div>
+                    </SegmentedControlItem>
+                  </SegmentedControl>
                 </div>
                 {chartMode === "area" ? (
                   <ContextGrowthChart
@@ -915,7 +931,7 @@ function RunInspectorSection({
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <strong style={{ fontSize: 13 }}>{t(language, "audit.stepPayloadTitle")}</strong>
-                    <span className="badge xs">{t(language, "audit.source.logSteps")}</span>
+                    <Badge size="sm" variant="secondary">{t(language, "audit.source.logSteps")}</Badge>
                   </div>
                   <span className="muted xs">{t(language, "audit.stepPayloadHint")}</span>
                 </div>
@@ -964,18 +980,22 @@ function RunInspectorSection({
             <div className="audit-activity-card" data-testid="audit-file-activity">
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <strong style={{ fontSize: 13 }}>{t(language, "audit.fileActivityTitle")}</strong>
-                <div className="segmented">
+                <SegmentedControl
+                  size="sm"
+                  render={
+                    <RadioGroupPrimitive
+                      className="flex items-center"
+                      value={fileFilter}
+                      onValueChange={(next) => next && setFileFilter(next as FileFilter)}
+                    />
+                  }
+                >
                   {(["all", "read", "write", "search"] as const).map((f) => (
-                    <button
-                      key={f}
-                      type="button"
-                      className={fileFilter === f ? "active" : ""}
-                      onClick={() => setFileFilter(f)}
-                    >
+                    <SegmentedControlItem key={f} render={<RadioPrimitive.Root value={f} />}>
                       {t(language, `audit.fileFilter.${f}` as MessageKey)}
-                    </button>
+                    </SegmentedControlItem>
                   ))}
-                </div>
+                </SegmentedControl>
               </div>
               {filteredFiles.length === 0 ? (
                 <div className="muted xs" style={{ marginTop: 8 }}>{t(language, "audit.fileEmpty")}</div>
@@ -986,19 +1006,19 @@ function RunInspectorSection({
                       <span className="audit-file-path">{f.path}</span>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                         {f.reads > 0 && (
-                          <span className="badge xs" title="Read">
+                          <Badge size="sm" variant="secondary" title="Read">
                             <Icon icon={Eye} size={14} /> {f.reads}
-                          </span>
+                          </Badge>
                         )}
                         {f.writes > 0 && (
-                          <span className="badge info xs" title="Edit / Write">
+                          <Badge size="sm" variant="info" title="Edit / Write">
                             <Icon icon={FileEdit} size={14} /> {f.writes}
-                          </span>
+                          </Badge>
                         )}
                         {f.searches > 0 && (
-                          <span className="badge xs" title="Search">
+                          <Badge size="sm" variant="secondary" title="Search">
                             <Icon icon={Search} size={14} /> {f.searches}
-                          </span>
+                          </Badge>
                         )}
                       </span>
                     </div>
@@ -1011,18 +1031,22 @@ function RunInspectorSection({
           <div className="audit-activity-card" data-testid="audit-command-list">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <strong style={{ fontSize: 13 }}>{t(language, "audit.commandListTitle")}</strong>
-              <div className="segmented">
+              <SegmentedControl
+                size="sm"
+                render={
+                  <RadioGroupPrimitive
+                    className="flex items-center"
+                    value={cmdFilter}
+                    onValueChange={(next) => next && setCmdFilter(next as CommandFilter)}
+                  />
+                }
+              >
                 {(["all", "edits", "wb", "errors"] as const).map((f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    className={cmdFilter === f ? "active" : ""}
-                    onClick={() => setCmdFilter(f)}
-                  >
+                  <SegmentedControlItem key={f} render={<RadioPrimitive.Root value={f} />}>
                     {t(language, `audit.cmdFilter.${f}` as MessageKey)}
-                  </button>
+                  </SegmentedControlItem>
                 ))}
-              </div>
+              </SegmentedControl>
             </div>
             {filteredCommands.length === 0 ? (
               <div className="muted xs" style={{ marginTop: 8 }}>{t(language, "audit.cmdEmpty")}</div>
@@ -1035,22 +1059,23 @@ function RunInspectorSection({
                       <div className="audit-cmd-head">
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                           <span className="muted xs">#{c.step}</span>
-                          <span className={`badge xs ${c.isError ? "danger" : c.category === "edit" ? "info" : ""}`}>
+                          <Badge size="sm" variant={c.isError ? "error" : c.category === "edit" ? "info" : "secondary"}>
                             {c.toolName}
-                          </span>
-                          {c.isWb && <span className="badge info xs">wb</span>}
+                          </Badge>
+                          {c.isWb && <Badge size="sm" variant="info">wb</Badge>}
                           <code className="xs">{c.summary}</code>
                         </span>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                           {c.durationMs !== undefined && <span className="muted xs">{formatDurationHuman(c.durationMs)}</span>}
                           {c.content && (
-                            <button
+                            <Button
                               type="button"
-                              className="btn ghost xs"
+                              size="xs"
+                              variant="ghost"
                               onClick={() => setExpandedCmdIds((prev) => ({ ...prev, [c.id]: !expanded }))}
                             >
                               {c.linesCount > 0 ? t(language, "console.lines", { count: c.linesCount }) : t(language, "audit.inspectDetails")}
-                            </button>
+                            </Button>
                           )}
                         </span>
                       </div>
@@ -1069,13 +1094,15 @@ function RunInspectorSection({
           {ctxLoading && !synthesizedContext ? (
             <div className="muted xs">{t(language, "common.loading")}</div>
           ) : !synthesizedContext ? (
-            <div className="callout info xs">{t(language, "audit.noContextSnapshot")}</div>
+            <Alert variant="info" className="text-xs">
+              <AlertDescription className="text-foreground">{t(language, "audit.noContextSnapshot")}</AlertDescription>
+            </Alert>
           ) : (
             <>
               {!ctxData?.hasContext && (
-                <div className="callout info xs" style={{ marginBottom: 10 }}>
-                  {t(language, "audit.fallbackSnapshotNotice")}
-                </div>
+                <Alert variant="info" className="mb-2.5 text-xs">
+                  <AlertDescription className="text-foreground">{t(language, "audit.fallbackSnapshotNotice")}</AlertDescription>
+                </Alert>
               )}
               <div className="audit-kv-grid">
                 <div>
@@ -1111,14 +1138,15 @@ function RunInspectorSection({
                         cand.harness === synthesizedContext.selectedTarget.harness &&
                         cand.model === synthesizedContext.selectedTarget.model;
                       return (
-                        <span
+                        <Badge
                           key={`${cand.harness}-${cand.model}-${idx}`}
-                          className={`badge xs ${isPicked ? "success" : ""}`}
+                          size="sm"
+                          variant={isPicked ? "success" : "secondary"}
                         >
                           {cand.harness}/{cand.model}
                           {cand.reasoningEffort ? ` (${cand.reasoningEffort})` : ""}
                           {!isPicked && cand.skippedReason ? ` · ${cand.skippedReason}` : ""}
-                        </span>
+                        </Badge>
                       );
                     })}
                   </div>
@@ -1139,9 +1167,9 @@ function RunInspectorSection({
                       <span className="muted">
                         ~{formatTokenCount(s.estTokens)} tok · {formatBytes(s.finalBytes)}
                         {s.truncated && (
-                          <span className="badge warning xs" style={{ marginLeft: 6 }}>
+                          <Badge size="sm" variant="warning" className="ms-1.5">
                             {t(language, "audit.trimmedFrom", { raw: formatBytes(s.rawBytes) })}
-                          </span>
+                          </Badge>
                         )}
                       </span>
                     </div>
@@ -1150,32 +1178,28 @@ function RunInspectorSection({
               </div>
 
               <div className="audit-context-view-bar">
-                <div className="segmented">
-                  <button
-                    type="button"
-                    className={contextView === "handoff" ? "active" : ""}
-                    onClick={() => setContextView("handoff")}
-                  >
+                <SegmentedControl
+                  size="sm"
+                  render={
+                    <RadioGroupPrimitive
+                      className="flex items-center"
+                      value={contextView}
+                      onValueChange={(next) => next && setContextView(next as ContextSubView)}
+                    />
+                  }
+                >
+                  <SegmentedControlItem render={<RadioPrimitive.Root value="handoff" />}>
                     {t(language, "audit.viewHandoffMd")}
-                  </button>
-                  <button
-                    type="button"
-                    className={contextView === "prompt" ? "active" : ""}
-                    onClick={() => setContextView("prompt")}
-                  >
+                  </SegmentedControlItem>
+                  <SegmentedControlItem render={<RadioPrimitive.Root value="prompt" />}>
                     {t(language, "audit.viewFullPrompt")}
-                  </button>
+                  </SegmentedControlItem>
                   {parentRun && (
-                    <button
-                      type="button"
-                      className={contextView === "diff" ? "active" : ""}
-                      data-testid="handoff-diff-btn"
-                      onClick={() => setContextView("diff")}
-                    >
+                    <SegmentedControlItem render={<RadioPrimitive.Root value="diff" data-testid="handoff-diff-btn" />}>
                       {t(language, "audit.viewHandoffDiff")}
-                    </button>
+                    </SegmentedControlItem>
                   )}
-                </div>
+                </SegmentedControl>
               </div>
 
               {contextView === "handoff" && (
@@ -1210,7 +1234,7 @@ function RunInspectorSection({
           )}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -1270,12 +1294,12 @@ function TimelineRunsTabInner({
   return (
     <>
       {runs.length > 0 && (
-        <div className="card">
+        <Card className="mb-3.5 p-4">
           <div className="card-head">
             <h3>{t(language, "timeline.runs")}</h3>
-            <button className="btn xs" type="button" onClick={() => void openHandoff(d.state.id)}>
+            <Button size="xs" variant="outline" type="button" onClick={() => void openHandoff(d.state.id)}>
               <Icon icon={FileText} size={14} /> {t(language, "timeline.viewHandoff")}
-            </button>
+            </Button>
           </div>
           {runs.map((r) => (
             <div
@@ -1285,7 +1309,7 @@ function TimelineRunsTabInner({
               style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <span className={`badge ${AGENT_RUN_TONE[r.status]}`}>
+                <Badge variant={mapRunToneToBadge(AGENT_RUN_TONE[r.status])}>
                   <Icon
                     icon={
                       r.status === "running"
@@ -1300,14 +1324,14 @@ function TimelineRunsTabInner({
                     className={r.status === "running" ? "spin" : undefined}
                   />{" "}
                   {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
-                </span>
+                </Badge>
                 <strong style={{ fontSize: 13 }}>
                   {r.harness} / {r.model}
                 </strong>
                 {r.modelFallback && r.effectiveModel && (
-                  <span className="badge warning xs">
+                  <Badge size="sm" variant="warning">
                     {t(language, "timeline.actual", { model: r.effectiveModel })}
-                  </span>
+                  </Badge>
                 )}
                 <span className="muted xs">
                   {formatDurationHuman(r.durationMs)}
@@ -1315,8 +1339,9 @@ function TimelineRunsTabInner({
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 {hasQueryClient && (
-                  <button
-                    className="btn ghost xs"
+                  <Button
+                    size="xs"
+                    variant="ghost"
                     type="button"
                     data-testid={`timeline-inspect-run-btn-${r.id}`}
                     onClick={() => {
@@ -1325,37 +1350,42 @@ function TimelineRunsTabInner({
                     }}
                   >
                     {t(language, "audit.inspectDetails")}
-                  </button>
+                  </Button>
                 )}
-                <button
-                  className="btn ghost xs"
+                <Button
+                  size="xs"
+                  variant="ghost"
                   type="button"
                   data-testid={`view-run-output-btn-${r.id}`}
                   onClick={() => void openRunConsole(d.state.id, r.id)}
                 >
                   <Icon icon={Terminal} size={14} /> {t(language, "timeline.viewOutput")}
-                </button>
+                </Button>
               </div>
             </div>
           ))}
-        </div>
+        </Card>
       )}
 
-      <div className="card">
+      <Card className="p-4">
         <div className="card-head" style={{ flexWrap: "wrap", gap: 8 }}>
           <h3>{t(language, "timeline.title")}</h3>
-          <div className="segmented">
+          <SegmentedControl
+            size="sm"
+            render={
+              <RadioGroupPrimitive
+                className="flex items-center"
+                value={timelineFilter}
+                onValueChange={(next) => next && setTimelineFilter(next as TimelineFilter)}
+              />
+            }
+          >
             {(["all", "agent", "review", "verify", "system"] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                className={timelineFilter === f ? "active" : ""}
-                onClick={() => setTimelineFilter(f)}
-              >
+              <SegmentedControlItem key={f} render={<RadioPrimitive.Root value={f} />}>
                 {t(language, `audit.timelineFilter.${f}` as MessageKey)}
-              </button>
+              </SegmentedControlItem>
             ))}
-          </div>
+          </SegmentedControl>
         </div>
         {events.map((ev, i) => (
           <div key={`${ev.at}-${i}`} className="timeline-item">
@@ -1363,16 +1393,17 @@ function TimelineRunsTabInner({
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <strong style={{ fontSize: 13.5 }}>{ev.summary}</strong>
                 {ev.runId && (
-                  <button
+                  <Button
                     type="button"
-                    className="btn ghost xs"
+                    size="xs"
+                    variant="ghost"
                     onClick={() => {
                       setInspectedRunId(ev.runId!);
                       void openRunConsole(d.state.id, ev.runId!);
                     }}
                   >
                     <Icon icon={Terminal} size={14} /> {ev.runId.slice(-6)}
-                  </button>
+                  </Button>
                 )}
               </div>
               <span className="muted" style={{ fontSize: 12 }}>
@@ -1386,7 +1417,7 @@ function TimelineRunsTabInner({
             )}
           </div>
         ))}
-      </div>
+      </Card>
     </>
   );
 }
@@ -1448,9 +1479,9 @@ function ExecutionAuditTabInner({
 
   if (runs.length === 0) {
     return (
-      <div className="card" data-testid="audit-empty-state">
+      <Card className="p-4" data-testid="audit-empty-state">
         <p className="muted" style={{ margin: 0 }}>{t(language, "audit.emptyRuns")}</p>
-      </div>
+      </Card>
     );
   }
 
@@ -1490,12 +1521,12 @@ function ExecutionAuditTabInner({
         )}
       </div>
 
-      <div className="card">
+      <Card className="mb-3.5 p-4">
         <div className="card-head">
           <h3>{t(language, "audit.runsTableTitle")}</h3>
-          <button className="btn xs" type="button" onClick={() => void openHandoff(d.state.id)}>
+          <Button size="xs" variant="outline" type="button" onClick={() => void openHandoff(d.state.id)}>
             <Icon icon={FileText} size={14} /> {t(language, "timeline.viewHandoff")}
-          </button>
+          </Button>
         </div>
         {runs.map((r) => {
           const selected = inspectedRun?.id === r.id;
@@ -1508,7 +1539,7 @@ function ExecutionAuditTabInner({
               style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <span className={`badge ${AGENT_RUN_TONE[r.status]}`}>
+                <Badge variant={mapRunToneToBadge(AGENT_RUN_TONE[r.status])}>
                   <Icon
                     icon={
                       r.status === "running"
@@ -1523,22 +1554,22 @@ function ExecutionAuditTabInner({
                     className={r.status === "running" ? "spin" : undefined}
                   />{" "}
                   {formatAgentActionLabel(language, r.action)} · {formatAgentStatusLabel(language, r.status)}
-                </span>
+                </Badge>
                 <strong style={{ fontSize: 13 }}>
                   {r.harness} / {r.model}
                 </strong>
                 {r.modelFallback && r.effectiveModel && (
-                  <span className="badge warning xs">
+                  <Badge size="sm" variant="warning">
                     {t(language, "timeline.actual", { model: r.effectiveModel })}
-                  </span>
+                  </Badge>
                 )}
                 {r.quotaPool && (
-                  <span className="badge xs" title={r.billingMode}>
+                  <Badge size="sm" variant="secondary" title={r.billingMode}>
                     {r.quotaPool} · {r.billingMode ?? "subscription"}
-                  </span>
+                  </Badge>
                 )}
                 {isEstimated && (
-                  <span className="badge xs">{t(language, "audit.estimatedTag")}</span>
+                  <Badge size="sm" variant="secondary">{t(language, "audit.estimatedTag")}</Badge>
                 )}
                 {r.handoffMode && (
                   <span className="muted xs" style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
@@ -1563,8 +1594,9 @@ function ExecutionAuditTabInner({
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 {hasQueryClient && (
-                  <button
-                    className={`btn xs ${selected ? "primary" : "ghost"}`}
+                  <Button
+                    size="xs"
+                    variant={selected ? "default" : "ghost"}
                     type="button"
                     data-testid={`inspect-run-btn-${r.id}`}
                     onClick={() => {
@@ -1573,21 +1605,22 @@ function ExecutionAuditTabInner({
                     }}
                   >
                     {t(language, "audit.inspectDetails")}
-                  </button>
+                  </Button>
                 )}
-                <button
-                  className="btn ghost xs"
+                <Button
+                  size="xs"
+                  variant="ghost"
                   type="button"
                   data-testid={`audit-view-output-btn-${r.id}`}
                   onClick={() => void openRunConsole(d.state.id, r.id)}
                 >
                   <Icon icon={Terminal} size={14} /> {t(language, "timeline.viewOutput")}
-                </button>
+                </Button>
               </div>
             </div>
           );
         })}
-      </div>
+      </Card>
 
       {hasQueryClient && inspectedRun && (
         <RunInspectorSection d={d} reqId={d.state.id} runs={runs} inspectedRun={inspectedRun} />

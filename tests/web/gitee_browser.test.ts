@@ -15,6 +15,7 @@ import type { GiteeApiDeps } from "../../src/core/gitee.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const browserEnv = resolveTestBrowser();
 const HAS_BROWSER = browserEnv !== null;
@@ -329,7 +330,7 @@ describe("Gitee Web UI workflow", () => {
       await page.click('[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 2. Settings -> Project tab displays English Gitee auth failure with HTTP status & upstream detail.
@@ -395,7 +396,7 @@ describe("Gitee Web UI workflow", () => {
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       // 2. Submit invalid work item ref in English -> localized validation toast without Chinese text.
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
       await page.click('[data-testid="new-req-btn"]');
       await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
@@ -416,7 +417,7 @@ describe("Gitee Web UI workflow", () => {
       expect(/[\u4e00-\u9fff]/.test(enToast)).toBe(false);
 
       // 3. Switch to Simplified Chinese and confirm the same validation toast renders localized Chinese text.
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(

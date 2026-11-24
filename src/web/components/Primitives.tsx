@@ -4,36 +4,42 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentAction } from "../../core/types.ts";
 import { t, type UiLanguage } from "../i18n.ts";
+import { cn } from "../lib/utils.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Button } from "./ui/button.tsx";
 import { Dialog, DialogPopup, DialogTitle } from "./ui/dialog.tsx";
 import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
+import { SimpleSelect } from "./ui/select.tsx";
 
 export function UiLanguageSelect({ className = "" }: { className?: string }) {
   const language = useUiStore((s) => s.language);
   const setLanguage = useUiStore((s) => s.setLanguage);
   return (
-    <select
-      className={`select xs ui-language-select ${className}`.trim()}
-      data-testid="ui-language-select"
+    <SimpleSelect
       aria-label={t(language, "app.languageSwitch")}
+      className={cn("ui-language-select w-auto min-w-[96px]", className)}
+      data-testid="ui-language-select"
+      options={[
+        { value: "zh-CN", label: "简体中文" },
+        { value: "en", label: "English" },
+      ]}
+      size="sm"
       title={t(language, "app.languageSwitch")}
       value={language}
-      onChange={(e) => setLanguage(e.target.value as UiLanguage)}
-    >
-      <option value="zh-CN">简体中文</option>
-      <option value="en">English</option>
-    </select>
+      onValueChange={(next) => setLanguage(next as UiLanguage)}
+    />
   );
 }
 
 export function RunLockNotice({ testId = "run-lock-notice" }: { testId?: string }) {
   const language = useUiStore((s) => s.language);
   return (
-    <div className="callout warning xs" data-testid={testId} style={{ marginBottom: 10 }}>
+    <Alert variant="warning" className="mb-2.5 text-xs" data-testid={testId}>
       <Icon icon={Lock} size={14} />
-      <span>{t(language, "runLock.notice")}</span>
-    </div>
+      <AlertDescription className="text-foreground">{t(language, "runLock.notice")}</AlertDescription>
+    </Alert>
   );
 }
 
@@ -93,9 +99,11 @@ export function MarkdownView({
       return (
         <div className="md-annot-row">
           <Tag>{children}</Tag>
-          <button
-            className="btn ghost xs md-annot-btn"
+          <Button
+            className="md-annot-btn"
+            size="xs"
             type="button"
+            variant="ghost"
             data-action="annotate-anchor"
             data-anchor={anchor}
             title={t(language, "md.annotateTitle")}
@@ -106,7 +114,7 @@ export function MarkdownView({
               <Icon icon={MessageSquare} size={14} />
             </span>
             {t(language, "md.annotate")}
-          </button>
+          </Button>
         </div>
       );
     };
@@ -156,36 +164,37 @@ export function ModalShell({
   onClose,
   wide = false,
   testId,
+  className,
+  showCloseButton = true,
+  hasExplicitTitle = false,
   children,
 }: {
   onClose: () => void;
   wide?: boolean;
   testId?: string;
+  className?: string;
+  showCloseButton?: boolean;
+  hasExplicitTitle?: boolean;
   children: React.ReactNode;
 }) {
   const language = useUiStore((s) => s.language);
   return (
     <Dialog
+      modal={false}
+      disablePointerDismissal
       open
-      onOpenChange={(open, eventDetails) => {
-        if (open) return;
-        if (eventDetails?.reason === "outside-press") {
-          const target = eventDetails.event?.target as HTMLElement | null;
-          if (target?.closest('[data-slot="toast-viewport"], [data-slot="toast-root"]')) {
-            eventDetails.cancel();
-            return;
-          }
-        }
-        onClose();
+      onOpenChange={(open) => {
+        if (!open) onClose();
       }}
     >
       <DialogPopup
         bottomStickOnMobile={false}
-        className={`modal ${wide ? "modal-wide" : ""}`}
+        className={cn(wide ? "sm:max-w-3xl" : "sm:max-w-xl", className)}
         data-testid={testId}
-        showCloseButton={false}
+        onBackdropClick={onClose}
+        showCloseButton={showCloseButton}
       >
-        <DialogTitle className="sr-only">{t(language, "app.dialogTitle")}</DialogTitle>
+        {!hasExplicitTitle && <DialogTitle className="sr-only">{t(language, "app.dialogTitle")}</DialogTitle>}
         {children}
       </DialogPopup>
     </Dialog>

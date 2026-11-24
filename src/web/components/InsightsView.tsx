@@ -27,6 +27,14 @@ import { formatDurationHuman, formatPercent, formatTokenCount, formatUsd } from 
 import { useUiStore } from "../stores/uiStore.ts";
 import { ActivityHeatmap, DonutRingChart, StackedBarChart, type StackedBarDatum } from "./Charts.tsx";
 import { Icon } from "./Icon.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
+import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
+import { SimpleSelect } from "./ui/select.tsx";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table.tsx";
 
 type DailyMetricMode = "tokens" | "cost" | "runs";
 type ModelSortKey =
@@ -175,115 +183,127 @@ export function InsightsView() {
             {t(language, "insights.subtitle")}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
+        <div className="flex flex-wrap gap-2">
+          <Button
             type="button"
-            className="btn xs"
+            size="xs"
+            variant="outline"
             data-testid="insights-pricing-btn"
             onClick={() => setModal({ kind: "observability_pricing" })}
           >
             <Icon icon={Settings} size={14} /> {t(language, "insights.configPricing")}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn xs"
+            size="xs"
+            variant="outline"
             data-testid="insights-export-btn"
             disabled={!insights}
             onClick={handleExportJson}
           >
             <Icon icon={Download} size={14} /> {t(language, "insights.exportJson")}
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="btn ghost xs"
+            size="xs"
+            variant="ghost"
             data-testid="insights-back-btn"
             onClick={() => setMainView("workspace")}
           >
             <Icon icon={ArrowLeft} size={14} /> {t(language, "insights.backWorkspace")}
-          </button>
+          </Button>
         </div>
       </div>
 
-      <div className="card insights-filter-bar" data-testid="insights-filter-bar">
-        <div className="segmented">
+      <Card className="insights-filter-bar flex-row flex-wrap items-center gap-2 p-2.5" data-testid="insights-filter-bar">
+        <SegmentedControl
+          size="sm"
+          render={
+            <RadioGroupPrimitive
+              className="flex items-center"
+              value={String(days)}
+              onValueChange={(next) => next && setDays(Number(next))}
+            />
+          }
+        >
           {([7, 30, 0] as const).map((dOpt) => (
-            <button
+            <SegmentedControlItem
               key={dOpt}
-              type="button"
-              className={days === dOpt ? "active" : ""}
-              data-testid={`insights-days-${dOpt}`}
-              onClick={() => setDays(dOpt)}
+              render={<RadioPrimitive.Root value={String(dOpt)} data-testid={`insights-days-${dOpt}`} />}
             >
               {t(language, `insights.days.${dOpt}` as MessageKey)}
-            </button>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
 
-        <select
-          className="select xs"
+        <SimpleSelect
           aria-label={t(language, "insights.filterProject")}
+          className="w-auto min-w-[130px] text-xs"
+          options={[
+            { value: "", label: t(language, "insights.allProjects") },
+            ...(insights?.facets.projects ?? []).map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          size="sm"
           value={projectId}
-          onChange={(e) => setProjectId(e.target.value)}
-        >
-          <option value="">{t(language, "insights.allProjects")}</option>
-          {(insights?.facets.projects ?? []).map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </select>
+          onValueChange={setProjectId}
+        />
 
-        <select
-          className="select xs"
+        <SimpleSelect
           aria-label={t(language, "insights.filterAction")}
+          className="w-auto min-w-[130px] text-xs"
+          options={[
+            { value: "", label: t(language, "insights.allActions") },
+            ...INSIGHT_ACTIONS.map((a) => ({ value: a, label: formatAgentActionLabel(language, a) })),
+          ]}
+          size="sm"
           value={action}
-          onChange={(e) => setAction(e.target.value as AgentAction | "")}
-        >
-          <option value="">{t(language, "insights.allActions")}</option>
-          {INSIGHT_ACTIONS.map((a) => (
-            <option key={a} value={a}>{formatAgentActionLabel(language, a)}</option>
-          ))}
-        </select>
+          onValueChange={(next) => setAction(next as AgentAction | "")}
+        />
 
-        <select
-          className="select xs"
+        <SimpleSelect
           aria-label={t(language, "insights.filterQuotaPool")}
+          className="w-auto min-w-[130px] text-xs"
           data-testid="insights-pool-filter"
+          options={[
+            { value: "", label: t(language, "insights.allPools") },
+            ...(insights?.facets.quotaPools ?? []).map((q) => ({ value: q.id, label: q.label })),
+          ]}
+          size="sm"
           value={quotaPool}
-          onChange={(e) => setQuotaPool(e.target.value)}
-        >
-          <option value="">{t(language, "insights.allPools")}</option>
-          {(insights?.facets.quotaPools ?? []).map((q) => (
-            <option key={q.id} value={q.id}>{q.label}</option>
-          ))}
-        </select>
+          onValueChange={setQuotaPool}
+        />
 
-        <select
-          className="select xs"
+        <SimpleSelect
           aria-label={t(language, "insights.filterBilling")}
+          className="w-auto min-w-[120px] text-xs"
+          options={[
+            { value: "", label: t(language, "insights.allBilling") },
+            { value: "subscription", label: t(language, "insights.billing.subscription") },
+            { value: "api", label: t(language, "insights.billing.api") },
+            { value: "free", label: t(language, "insights.billing.free") },
+          ]}
+          size="sm"
           value={billingMode}
-          onChange={(e) => setBillingMode(e.target.value as RunBillingMode | "")}
-        >
-          <option value="">{t(language, "insights.allBilling")}</option>
-          <option value="subscription">{t(language, "insights.billing.subscription")}</option>
-          <option value="api">{t(language, "insights.billing.api")}</option>
-          <option value="free">{t(language, "insights.billing.free")}</option>
-        </select>
+          onValueChange={(next) => setBillingMode(next as RunBillingMode | "")}
+        />
 
-        <select
-          className="select xs"
+        <SimpleSelect
           aria-label={t(language, "insights.filterHarness")}
+          className="w-auto min-w-[120px] text-xs"
+          options={[
+            { value: "", label: t(language, "insights.allHarnesses") },
+            ...(insights?.facets.harnesses ?? []).map((h) => ({ value: h, label: h })),
+          ]}
+          size="sm"
           value={harness}
-          onChange={(e) => setHarness(e.target.value)}
-        >
-          <option value="">{t(language, "insights.allHarnesses")}</option>
-          {(insights?.facets.harnesses ?? []).map((h) => (
-            <option key={h} value={h}>{h}</option>
-          ))}
-        </select>
+          onValueChange={setHarness}
+        />
 
         {(projectId || quotaPool || harness || action || billingMode) && (
-          <button
+          <Button
             type="button"
-            className="btn ghost xs"
+            size="xs"
+            variant="ghost"
             onClick={() => {
               setProjectId("");
               setQuotaPool("");
@@ -293,79 +313,86 @@ export function InsightsView() {
             }}
           >
             {t(language, "insights.resetFilters")}
-          </button>
+          </Button>
         )}
-      </div>
+      </Card>
 
       {isLoading && !insights ? (
         <div className="muted">{t(language, "common.loading")}</div>
       ) : kpi && kpi.totalRuns === 0 ? (
-        <div className="card">
+        <Card className="p-4">
           <div className="muted">{t(language, "insights.empty")}</div>
-        </div>
+        </Card>
       ) : kpi ? (
         <>
           <div className="insights-kpi-grid" data-testid="insights-kpi-grid">
-            <div className="card insights-kpi-card">
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs"><Icon icon={Activity} size={14} /> {t(language, "insights.kpi.runs")}</div>
               <div className="insights-kpi-val">{kpi.totalRuns}</div>
               <div className="muted xs">
                 {t(language, "insights.kpi.successRate")}: <strong>{formatPercent(kpi.successRate)}</strong> ({kpi.succeededRuns}/{kpi.failedRuns} err)
               </div>
-            </div>
-            <div className="card insights-kpi-card">
+            </Card>
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs"><Icon icon={Cpu} size={14} /> {t(language, "insights.kpi.tokens")}</div>
               <div className="insights-kpi-val">{formatTokenCount(kpi.totalTokens)}</div>
               <div className="muted xs">
                 {t(language, "audit.cacheHitRate")}: <strong>{formatPercent(kpi.cacheHitRate)}</strong> ({formatTokenCount(kpi.cacheReadTokens)})
               </div>
-            </div>
-            <div className="card insights-kpi-card">
+            </Card>
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs">{t(language, "audit.dualCost")}</div>
               <div className="insights-kpi-val">{formatUsd(kpi.apiCostUsd)}</div>
               <div className="muted xs">
                 {t(language, "audit.equivShort")}: <strong>{formatUsd(kpi.equivalentCostUsd)}</strong>
               </div>
-            </div>
-            <div className="card insights-kpi-card">
+            </Card>
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs"><Icon icon={Clock} size={14} /> {t(language, "insights.kpi.duration")}</div>
               <div className="insights-kpi-val">{formatDurationHuman(kpi.avgDurationMs)}</div>
               <div className="muted xs">
                 P50 {formatDurationHuman(kpi.p50DurationMs)} · P95 {formatDurationHuman(kpi.p95DurationMs)}
               </div>
-            </div>
-            <div className="card insights-kpi-card">
+            </Card>
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs"><Icon icon={Wrench} size={14} /> {t(language, "insights.kpi.tools")}</div>
               <div className="insights-kpi-val">{kpi.totalToolCalls}</div>
               <div className="muted xs">
                 {t(language, "insights.kpi.toolErrors")}: <strong>{kpi.totalToolErrors}</strong>
               </div>
-            </div>
-            <div className="card insights-kpi-card">
+            </Card>
+            <Card className="insights-kpi-card p-3">
               <div className="muted xs">{t(language, "insights.kpi.reliability")}</div>
               <div className="insights-kpi-val">{kpi.totalCompactions}</div>
               <div className="muted xs">
                 429 {kpi.rateLimitedRuns} · timeout {kpi.timedOutRuns} · fallback {kpi.degradedRuns}
               </div>
-            </div>
+            </Card>
           </div>
 
           <div className="insights-charts-grid">
-            <div className="card">
+            <Card className="p-4">
               <div className="card-head">
                 <h3>{t(language, "insights.dailyTrend")}</h3>
-                <div className="segmented">
+                <SegmentedControl
+                  size="sm"
+                  render={
+                    <RadioGroupPrimitive
+                      className="flex items-center"
+                      value={metricMode}
+                      onValueChange={(next) => next && setMetricMode(next as DailyMetricMode)}
+                    />
+                  }
+                >
                   {(["tokens", "cost", "runs"] as const).map((m) => (
-                    <button
+                    <SegmentedControlItem
                       key={m}
-                      type="button"
-                      className={metricMode === m ? "active" : ""}
-                      onClick={() => setMetricMode(m)}
+                      render={<RadioPrimitive.Root value={m} />}
                     >
                       {t(language, `insights.metric.${m}` as MessageKey)}
-                    </button>
+                    </SegmentedControlItem>
                   ))}
-                </div>
+                </SegmentedControl>
               </div>
               <StackedBarChart
                 data={stackedData}
@@ -377,9 +404,9 @@ export function InsightsView() {
                       : String(Math.round(v))
                 }
               />
-            </div>
+            </Card>
 
-            <div className="card">
+            <Card className="p-4">
               <div className="card-head">
                 <h3>{t(language, "insights.heatmap84d")}</h3>
               </div>
@@ -387,11 +414,11 @@ export function InsightsView() {
                 days={insights.heatmap}
                 formatTooltip={(d) => `${d.date}: ${d.runs} runs · ${formatTokenCount(d.tokens)} tok · ${formatUsd(d.equivalentCostUsd)}`}
               />
-            </div>
+            </Card>
           </div>
 
           <div className="insights-charts-grid">
-            <div className="card" data-testid="insights-quota-pools-card">
+            <Card className="p-4" data-testid="insights-quota-pools-card">
               <div className="card-head">
                 <h3>{t(language, "insights.byQuotaPool")}</h3>
               </div>
@@ -411,9 +438,9 @@ export function InsightsView() {
                   <div key={p.quotaPool} className="audit-section-row xs" data-testid={`pool-row-${p.quotaPool}`}>
                     <span>
                       <strong>{p.label}</strong>{" "}
-                      <span className={`badge xs ${p.billingMode === "api" ? "warning" : p.billingMode === "free" ? "success" : "info"}`}>
+                      <Badge size="sm" variant={p.billingMode === "api" ? "warning" : p.billingMode === "free" ? "success" : "info"}>
                         {t(language, `insights.billing.${p.billingMode}` as MessageKey)}
-                      </span>
+                      </Badge>
                     </span>
                     <span className="muted">
                       {p.runs} runs · {formatTokenCount(p.tokens)} · cache {formatPercent(p.cacheHitRate)} · API {formatUsd(p.apiCostUsd)} / eq{" "}
@@ -422,9 +449,9 @@ export function InsightsView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </Card>
 
-            <div className="card">
+            <Card className="p-4">
               <div className="card-head">
                 <h3>{t(language, "insights.byStage")}</h3>
               </div>
@@ -439,130 +466,132 @@ export function InsightsView() {
                   hint: `${a.runs} · ${formatTokenCount(a.tokens)} · ${formatUsd(a.equivalentCostUsd)}`,
                 }))}
               />
-            </div>
+            </Card>
           </div>
 
           {insights.diagnostics.length > 0 && (
-            <div className="card" data-testid="insights-diagnostics-card">
+            <Card className="p-4" data-testid="insights-diagnostics-card">
               <div className="card-head">
                 <h3>{t(language, "insights.diagnosticsTitle")}</h3>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="flex flex-col gap-2">
                 {insights.diagnostics.map((diag) => (
-                  <div
+                  <Alert
                     key={diag.id}
-                    className={`callout ${diag.severity} xs`}
-                    style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+                    variant={diag.severity === "info" ? "info" : diag.severity === "warning" ? "warning" : "error"}
+                    className="text-xs"
                   >
-                    <div>
-                      <Icon icon={diag.severity === "info" ? CheckCircle2 : AlertTriangle} size={14} />{" "}
-                      <strong>{t(language, diag.titleKey as MessageKey, diag.params)}</strong>
-                      <div className="muted" style={{ marginTop: 2 }}>
-                        {t(language, diag.detailKey as MessageKey, diag.params)}
+                    <Icon icon={diag.severity === "info" ? CheckCircle2 : AlertTriangle} size={14} />
+                    <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2 text-foreground">
+                      <div>
+                        <strong>{t(language, diag.titleKey as MessageKey, diag.params)}</strong>
+                        <div className="mt-0.5 text-muted-foreground">
+                          {t(language, diag.detailKey as MessageKey, diag.params)}
+                        </div>
                       </div>
-                    </div>
-                    {diag.requirementId && (
-                      <button
-                        type="button"
-                        className="btn ghost xs"
-                        onClick={() => void jumpToRequirementFromInsights(diag.projectId, diag.requirementId!)}
-                      >
-                        {diag.requirementId} →
-                      </button>
-                    )}
-                  </div>
+                      {diag.requirementId && (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => void jumpToRequirementFromInsights(diag.projectId, diag.requirementId!)}
+                        >
+                          {diag.requirementId} →
+                        </Button>
+                      )}
+                    </AlertDescription>
+                  </Alert>
                 ))}
               </div>
-            </div>
+            </Card>
           )}
 
-          <div className="card" data-testid="insights-model-table-card">
+          <Card className="p-4" data-testid="insights-model-table-card">
             <div className="card-head">
               <h3>{t(language, "insights.modelEfficiencyTitle")}</h3>
             </div>
-            <div className="insights-table-wrap">
-              <table className="insights-table">
-                <thead>
-                  <tr>
-                    <th>Harness / Model</th>
-                    <th>{t(language, "insights.col.stage")}</th>
-                    <th>{t(language, "insights.col.pool")}</th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("runs")}>
-                        Runs
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("successRate")}>
-                        {t(language, "insights.kpi.successRate")}
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("avgDurationMs")}>
-                        {t(language, "insights.kpi.duration")}
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("avgTokens")}>
-                        Avg Tok
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("cacheHitRate")}>
-                        Cache
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="table-sort-btn" onClick={() => handleSort("totalEquivalentCostUsd")}>
-                        Equiv USD
-                      </button>
-                    </th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedModels.map((m) => (
-                    <tr key={`${m.harness}-${m.model}-${m.action}`}>
-                      <td>
-                        <strong>{m.harness}</strong> / {m.model}
-                      </td>
-                      <td>{formatAgentActionLabel(language, m.action)}</td>
-                      <td className="muted xs">{m.quotaPool}</td>
-                      <td>{m.runs}</td>
-                      <td>{formatPercent(m.runs > 0 ? m.succeededRuns / m.runs : 0)}</td>
-                      <td>{formatDurationHuman(m.avgDurationMs)}</td>
-                      <td>{formatTokenCount(m.avgTokens)}</td>
-                      <td>{formatPercent(m.cacheHitRate)}</td>
-                      <td>{formatUsd(m.totalEquivalentCostUsd)}</td>
-                      <td>
-                        {m.coolingUntil ? (
-                          <button
-                            type="button"
-                            className="btn warning xs"
-                            disabled={busy}
-                            onClick={async () => {
-                              const ok = await runBusy(() => api.clearModelCooldown(m.harness, m.model));
-                              if (ok) {
-                                await invalidateAllWorkbenchQueries();
-                                showToastKey("evo.clearedCooldowns");
-                              }
-                            }}
-                          >
-                            <Icon icon={RotateCcw} size={14} /> {t(language, "insights.clearCooldown")}
-                          </button>
-                        ) : (
-                          <span className="badge success xs">{t(language, "insights.healthy")}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+            <Table className="text-xs">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Harness / Model</TableHead>
+                  <TableHead>{t(language, "insights.col.stage")}</TableHead>
+                  <TableHead>{t(language, "insights.col.pool")}</TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("runs")}>
+                      Runs
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("successRate")}>
+                      {t(language, "insights.kpi.successRate")}
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("avgDurationMs")}>
+                      {t(language, "insights.kpi.duration")}
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("avgTokens")}>
+                      Avg Tok
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("cacheHitRate")}>
+                      Cache
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button type="button" className="table-sort-btn" onClick={() => handleSort("totalEquivalentCostUsd")}>
+                      Equiv USD
+                    </button>
+                  </TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedModels.map((m) => (
+                  <TableRow key={`${m.harness}-${m.model}-${m.action}`}>
+                    <TableCell>
+                      <strong>{m.harness}</strong> / {m.model}
+                    </TableCell>
+                    <TableCell>{formatAgentActionLabel(language, m.action)}</TableCell>
+                    <TableCell className="text-muted-foreground">{m.quotaPool}</TableCell>
+                    <TableCell>{m.runs}</TableCell>
+                    <TableCell>{formatPercent(m.runs > 0 ? m.succeededRuns / m.runs : 0)}</TableCell>
+                    <TableCell>{formatDurationHuman(m.avgDurationMs)}</TableCell>
+                    <TableCell>{formatTokenCount(m.avgTokens)}</TableCell>
+                    <TableCell>{formatPercent(m.cacheHitRate)}</TableCell>
+                    <TableCell>{formatUsd(m.totalEquivalentCostUsd)}</TableCell>
+                    <TableCell>
+                      {m.coolingUntil ? (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={async () => {
+                            const ok = await runBusy(() => api.clearModelCooldown(m.harness, m.model));
+                            if (ok) {
+                              await invalidateAllWorkbenchQueries();
+                              showToastKey("evo.clearedCooldowns");
+                            }
+                          }}
+                        >
+                          <Icon icon={RotateCcw} size={14} /> {t(language, "insights.clearCooldown")}
+                        </Button>
+                      ) : (
+                        <Badge size="sm" variant="success">{t(language, "insights.healthy")}</Badge>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Card>
 
           {insights.topRequirements.length > 0 && (
-            <div className="card" data-testid="insights-top-reqs-card">
+            <Card className="p-4" data-testid="insights-top-reqs-card">
               <div className="card-head">
                 <h3>{t(language, "insights.topRequirementsTitle")}</h3>
               </div>
@@ -574,14 +603,15 @@ export function InsightsView() {
                     style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}
                   >
                     <div>
-                      <button
+                      <Button
                         type="button"
-                        className="btn ghost xs"
+                        size="xs"
+                        variant="ghost"
                         data-testid={`insights-jump-req-${r.requirementId}`}
                         onClick={() => void jumpToRequirementFromInsights(r.projectId, r.requirementId)}
                       >
                         <strong>{r.requirementId}</strong>
-                      </button>{" "}
+                      </Button>{" "}
                       <span className="xs">{r.requirementTitle}</span>{" "}
                       <span className="muted xs">({r.projectName})</span>
                     </div>
@@ -592,7 +622,7 @@ export function InsightsView() {
                   </div>
                 ))}
               </div>
-            </div>
+            </Card>
           )}
         </>
       ) : null}

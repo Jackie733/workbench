@@ -66,12 +66,14 @@ export function DialogPopup({
   children,
   showCloseButton = true,
   bottomStickOnMobile = true,
+  onBackdropClick,
   closeProps,
   portalProps,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
   bottomStickOnMobile?: boolean;
+  onBackdropClick?: () => void;
   closeProps?: DialogPrimitive.Close.Props;
   portalProps?: DialogPrimitive.Portal.Props;
 }): React.ReactElement {
@@ -83,6 +85,9 @@ export function DialogPopup({
           bottomStickOnMobile &&
             "max-sm:grid-rows-[1fr_auto] max-sm:p-0 max-sm:pt-12",
         )}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onBackdropClick?.();
+        }}
       >
         <DialogPrimitive.Popup
           className={cn(

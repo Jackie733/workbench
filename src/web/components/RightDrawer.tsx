@@ -31,6 +31,13 @@ import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/ui
 import { ConsoleOutput } from "./ConsoleOutput.tsx";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card } from "./ui/card.tsx";
+import { SimpleSelect } from "./ui/select.tsx";
+import { Tabs, TabsList, TabsTab } from "./ui/tabs.tsx";
+import { Textarea } from "./ui/textarea.tsx";
 import { DiffViewerPanel } from "./WorkspaceView.tsx";
 
 function computeMaxDrawerWidth(workspaceEl: HTMLElement | null): number {
@@ -284,42 +291,45 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
           ) : (
             <>
               <div className="drawer-head">
-                <div className="drawer-tabs">
-                  <button
-                    className={`drawer-tab ${drawerTab === "discuss" ? "active" : ""}`}
-                    type="button"
-                    data-action="set-drawer-tab"
-                    data-tab="discuss"
-                    data-testid="drawer-tab-discuss"
-                    onClick={() => setDrawerTab("discuss")}
-                  >
-                    <Icon icon={MessageSquare} size={14} /> {t(language, "drawer.tab.discuss")}
-                    {pendingAnnotations.length > 0 ? ` (${pendingAnnotations.length})` : ""}
-                  </button>
-                  <button
-                    className={`drawer-tab ${drawerTab === "console" ? "active" : ""}`}
-                    type="button"
-                    data-action="set-drawer-tab"
-                    data-tab="console"
-                    data-testid="drawer-tab-console"
-                    onClick={() => setDrawerTab("console")}
-                  >
-                    <Icon icon={Terminal} size={14} /> {t(language, "drawer.tab.console")}
-                    {activeRun && (
-                      <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />
-                    )}
-                  </button>
-                  <button
-                    className={`drawer-tab ${drawerTab === "diff" ? "active" : ""}`}
-                    type="button"
-                    data-action="set-drawer-tab"
-                    data-tab="diff"
-                    data-testid="drawer-tab-diff"
-                    onClick={() => setDrawerTab("diff")}
-                  >
-                    <Icon icon={FileDiff} size={14} /> {t(language, "drawer.tab.diff")}
-                  </button>
-                </div>
+                <Tabs
+                  className="w-full gap-0"
+                  value={drawerTab}
+                  onValueChange={(next) => setDrawerTab(next as "discuss" | "console" | "diff")}
+                >
+                  <TabsList size="sm" variant="underline" className="w-full justify-start">
+                    <TabsTab
+                      value="discuss"
+                      className="grow-0"
+                      data-action="set-drawer-tab"
+                      data-tab="discuss"
+                      data-testid="drawer-tab-discuss"
+                    >
+                      <Icon icon={MessageSquare} size={14} /> {t(language, "drawer.tab.discuss")}
+                      {pendingAnnotations.length > 0 ? ` (${pendingAnnotations.length})` : ""}
+                    </TabsTab>
+                    <TabsTab
+                      value="console"
+                      className="grow-0"
+                      data-action="set-drawer-tab"
+                      data-tab="console"
+                      data-testid="drawer-tab-console"
+                    >
+                      <Icon icon={Terminal} size={14} /> {t(language, "drawer.tab.console")}
+                      {activeRun && (
+                        <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />
+                      )}
+                    </TabsTab>
+                    <TabsTab
+                      value="diff"
+                      className="grow-0"
+                      data-action="set-drawer-tab"
+                      data-tab="diff"
+                      data-testid="drawer-tab-diff"
+                    >
+                      <Icon icon={FileDiff} size={14} /> {t(language, "drawer.tab.diff")}
+                    </TabsTab>
+                  </TabsList>
+                </Tabs>
               </div>
 
               {drawerTab === "diff" ? (
@@ -332,30 +342,32 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     <div className="annot-queue" data-testid="pending-annotations">
                       <div className="annot-queue-head">
                         <strong>{t(language, "drawer.pending", { count: pendingAnnotations.length })}</strong>
-                        <button
-                          className="btn ghost xs"
+                        <Button
+                          size="xs"
                           type="button"
+                          variant="ghost"
                           onClick={() => clearPendingAnnotations()}
                         >
                           <Icon icon={Trash2} size={14} /> {t(language, "common.clear")}
-                        </button>
+                        </Button>
                       </div>
                       {pendingAnnotations.map((a) => (
                         <div key={a.id} className="annot-chip">
                           <div>
-                            <span className="badge info">{a.anchor}</span>
+                            <Badge variant="info">{a.anchor}</Badge>
                             <div className="xs" style={{ marginTop: 4 }}>
                               {a.message}
                             </div>
                           </div>
-                          <button
-                            className="btn ghost xs"
+                          <Button
+                            size="icon-xs"
                             type="button"
+                            variant="ghost"
                             aria-label={t(language, "drawer.removeAnnotation")}
                             onClick={() => removePendingAnnotation(a.id)}
                           >
                             <Icon icon={X} size={14} />
-                          </button>
+                          </Button>
                         </div>
                       ))}
                     </div>
@@ -363,9 +375,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
                   <div className="discuss-thread" data-testid="discuss-thread" ref={threadRef}>
                     {discussions.length === 0 && !activeRun ? (
-                      <div className="empty-card xs muted" style={{ textAlign: "center" }}>
+                      <Card className="p-4 text-center text-xs text-muted-foreground">
                         {t(language, "drawer.discussEmpty")}
-                      </div>
+                      </Card>
                     ) : (
                       discussions.map((item) => (
                         <div key={item.id} className={`discuss-msg ${item.actor}`}>
@@ -375,7 +387,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 ? t(language, "drawer.me")
                                 : `${item.harness ?? "Agent"}${item.model ? ` · ${item.model}` : ""}`}
                             </span>
-                            <span className={`badge ${item.mode === "ask" ? "info" : "warning"}`}>
+                            <Badge variant={item.mode === "ask" ? "info" : "warning"}>
                               <Icon
                                 icon={item.mode === "ask" ? Lightbulb : item.resolved ? Check : MessageSquare}
                                 size={14}
@@ -385,7 +397,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                 : item.resolved
                                   ? t(language, "drawer.mode.resolved")
                                   : t(language, "drawer.mode.annotate")}
-                            </span>
+                            </Badge>
                             <span className="muted xs">{formatDateTime(item.at, language)}</span>
                           </div>
                           {item.anchor && (
@@ -396,16 +408,17 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <MarkdownView markdown={item.message} className="md-body xs" />
                           {item.actor === "agent" && item.mode === "ask" && !isReadonlyStage && (
                             <div style={{ marginTop: 6 }}>
-                              <button
-                                className="btn ghost xs"
+                              <Button
+                                size="xs"
                                 type="button"
+                                variant="ghost"
                                 data-testid="adopt-discussion-btn"
                                 disabled={Boolean(activeRun)}
                                 onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
                               >
                                 <Icon icon={Check} size={14} />{" "}
                                 {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
-                              </button>
+                              </Button>
                             </div>
                           )}
                         </div>
@@ -419,9 +432,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                             <Icon icon={Zap} size={14} /> {activeRun.harness} · {activeRun.model}
                           </span>
-                          <span className="badge info">
+                          <Badge variant="info">
                             {t(language, "drawer.streaming")} · <LiveTimer startedAt={activeRun.startedAt} />
-                          </span>
+                          </Badge>
                         </div>
                         <pre className="discuss-stream-pre" data-testid="discuss-stream-output">
                           {streamText.trim() || t(language, "drawer.connecting")}
@@ -439,21 +452,22 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     {discussAnchor && (
                       <div className="xs muted" style={{ marginBottom: 4 }}>
                         {t(language, "drawer.anchor", { anchor: discussAnchor })}{" "}
-                        <button
-                          className="btn ghost xs"
+                        <Button
+                          size="icon-xs"
                           type="button"
+                          variant="ghost"
                           aria-label={t(language, "drawer.clearAnchor")}
                           onClick={() => setDiscussAnchor(null)}
                         >
                           <Icon icon={X} size={14} />
-                        </button>
+                        </Button>
                       </div>
                     )}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
                       <RunnerSelect stageAction="ask" testId="drawer-runner-select" />
                     </div>
-                    <textarea
-                      className="textarea"
+                    <Textarea
+                      size="sm"
                       id="discuss-input"
                       data-testid="discuss-input"
                       rows={3}
@@ -467,78 +481,89 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       </div>
                     )}
                     <div className="drawer-composer-actions">
-                      <button
-                        className="btn"
+                      <Button
+                        size="xs"
                         type="button"
+                        variant="outline"
+                        className="flex-1"
                         data-action="run-ask"
                         data-testid="run-ask-btn"
                         disabled={busy || Boolean(activeRun)}
                         onClick={() => void runAskFromDrawer(d.state.id)}
                       >
                         <Icon icon={Lightbulb} size={14} /> {t(language, "drawer.ask")}
-                      </button>
-                      <button
-                        className="btn primary"
+                      </Button>
+                      <Button
+                        size="xs"
                         type="button"
+                        className="flex-1"
                         data-action="run-refine"
                         data-testid="run-refine-btn"
                         disabled={busy || Boolean(activeRun) || isReadonlyStage}
                         onClick={() => void runRefineFromDrawer(d.state.id)}
                       >
                         <Icon icon={Pencil} size={14} /> {t(language, isImplOrAccept ? "drawer.refineCode" : "drawer.refine")}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="drawer-body" data-testid="console-pane">
                   <div className="console-toolbar">
-                    <button
-                      className="btn ghost xs"
+                    <Button
+                      size="xs"
                       type="button"
+                      variant="ghost"
                       data-action="open-handoff"
                       data-testid="view-handoff-btn"
                       onClick={() => void openHandoff(d.state.id)}
                     >
                       <Icon icon={FileText} size={14} /> {t(language, "drawer.handoff")}
-                    </button>
+                    </Button>
                     {runs.length > 0 && (
-                      <select
-                        className="select xs"
-                        value={currentRunId ?? ""}
-                        onChange={(e) => void openRunConsole(d.state.id, e.target.value)}
-                      >
-                        {runs.map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {formatAgentActionLabel(language, r.action)} · {r.harness}/{r.model}
-                            {r.modelFallback && r.effectiveModel
+                      <SimpleSelect
+                        className="w-auto max-w-[260px] text-xs"
+                        data-testid="console-run-select"
+                        options={runs.map((r) => ({
+                          value: r.id,
+                          label: `${formatAgentActionLabel(language, r.action)} · ${r.harness}/${r.model}${
+                            r.modelFallback && r.effectiveModel
                               ? ` → ${t(language, "drawer.actual", { model: r.effectiveModel })}`
-                              : ""}{" "}
-                            ({formatAgentStatusLabel(language, r.status)})
-                          </option>
-                        ))}
-                      </select>
+                              : ""
+                          } (${formatAgentStatusLabel(language, r.status)})`,
+                        }))}
+                        size="sm"
+                        value={currentRunId ?? ""}
+                        onValueChange={(next) => void openRunConsole(d.state.id, next)}
+                      />
                     )}
                   </div>
 
                   {currentRun ? (
                     <>
                       {activeRun && currentRun.id !== activeRun.id && (
-                        <div className="callout warning xs console-historical-banner" data-testid="historical-run-banner">
-                          <span>{t(language, "drawer.viewingHistorical", { runId: currentRun.id })}</span>
-                          <button
-                            className="btn ghost xs"
-                            type="button"
-                            data-testid="jump-to-live-run-btn"
-                            onClick={() => void openRunConsole(d.state.id, activeRun.id)}
-                          >
-                            {t(language, "drawer.jumpToLive")}
-                          </button>
-                        </div>
+                        <Alert variant="warning" className="console-historical-banner py-2 text-xs" data-testid="historical-run-banner">
+                          <AlertDescription className="flex w-full items-center justify-between gap-2 text-foreground">
+                            <span>{t(language, "drawer.viewingHistorical", { runId: currentRun.id })}</span>
+                            <Button
+                              size="xs"
+                              type="button"
+                              variant="ghost"
+                              data-testid="jump-to-live-run-btn"
+                              onClick={() => void openRunConsole(d.state.id, activeRun.id)}
+                            >
+                              {t(language, "drawer.jumpToLive")}
+                            </Button>
+                          </AlertDescription>
+                        </Alert>
                       )}
                       <div className="console-status-bar">
                         <div className="console-status-info">
-                          <span className={`badge ${AGENT_RUN_TONE[currentRun.status]}`}>
+                          {(() => {
+                            const tone = AGENT_RUN_TONE[currentRun.status];
+                            const badgeVariant = tone === "danger" ? "error" : tone === "neutral" ? "secondary" : tone;
+                            return (
+                              <Badge variant={badgeVariant}>
                             <Icon
                               icon={
                                 currentRun.status === "running"
@@ -551,36 +576,39 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               className={currentRun.status === "running" ? "spin" : undefined}
                             />{" "}
                             {formatAgentStatusLabel(language, currentRun.status)}
-                          </span>
+                          </Badge>
+                            );
+                          })()}
                           <span className="xs">
                             <strong>{currentRun.harness}</strong> · {currentRun.model}
                           </span>
                           {currentRun.modelFallback && currentRun.effectiveModel && (
-                            <span className="badge warning xs">
+                            <Badge size="sm" variant="warning">
                               {t(language, "drawer.degraded", { model: currentRun.effectiveModel })}
-                            </span>
+                            </Badge>
                           )}
                         </div>
                         <div className="console-status-actions">
                           {currentRun.status === "running" ? (
-                            <button
-                              className="btn danger xs"
+                            <Button
+                              size="xs"
                               type="button"
+                              variant="destructive"
                               data-action="cancel-run"
                               data-testid="cancel-run-btn"
                               onClick={() => void cancelRun(d.state.id, currentRun.id)}
                             >
                               <Icon icon={Square} size={14} /> {t(language, "drawer.stop")}
-                            </button>
+                            </Button>
                           ) : currentRun.status === "failed" || currentRun.rateLimited ? (
-                            <button
-                              className="btn primary xs"
+                            <Button
+                              size="xs"
                               type="button"
                               data-testid="retry-fallback-btn"
                               onClick={() => void triggerActiveRun(d.state.id, currentRun.action, { useFallback: true })}
                             >
                               <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.retryFallback")}
-                            </button>
+                            </Button>
                           ) : null}
                         </div>
                       </div>
@@ -623,9 +651,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         </div>
                       )}
                       {currentRun.errorSummary && (
-                        <div className="callout danger xs" style={{ marginBottom: 8 }}>
-                          <Icon icon={AlertTriangle} size={14} /> {currentRun.errorSummary}
-                        </div>
+                        <Alert variant="error" className="mb-2 text-xs">
+                          <Icon icon={AlertTriangle} size={14} />
+                          <AlertDescription className="text-foreground">{currentRun.errorSummary}</AlertDescription>
+                        </Alert>
                       )}
                       <ConsoleOutput
                         runId={currentRun.id}
@@ -638,9 +667,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       />
                     </>
                   ) : (
-                    <div className="empty-card xs muted" style={{ textAlign: "center" }}>
+                    <Card className="p-4 text-center text-xs text-muted-foreground">
                       {t(language, "drawer.consoleEmpty")}
-                    </div>
+                    </Card>
                   )}
                 </div>
               )}

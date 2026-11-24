@@ -22,6 +22,8 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 import { UiLanguageSelect } from "./Primitives.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
 
 export function Topbar() {
   const theme = useUiStore((s) => s.theme);
@@ -86,9 +88,10 @@ export function Topbar() {
         </button>
 
         {hasSidebar && (
-          <button
-            className="btn ghost xs"
+          <Button
+            size="icon-xs"
             type="button"
+            variant="ghost"
             data-action="toggle-sidebar"
             data-testid="toggle-sidebar-btn"
             title={sidebarLabel}
@@ -97,7 +100,7 @@ export function Topbar() {
             onClick={() => (isMobile ? setSidebarOpen(!sidebarOpen) : setDesktopSidebarOpen(!desktopSidebarOpen))}
           >
             <Icon icon={(isMobile ? sidebarOpen : desktopSidebarOpen) ? PanelLeftClose : PanelLeftOpen} />
-          </button>
+          </Button>
         )}
 
         {projName && (
@@ -105,15 +108,16 @@ export function Topbar() {
             <span className="muted">/</span>
             {selectedId ? (
               <>
-                <button
-                  className="btn ghost xs"
+                <Button
+                  size="xs"
                   type="button"
+                  variant="ghost"
                   data-action="back-home"
                   data-testid="back-home-btn"
                   onClick={() => backHome()}
                 >
                   <Icon icon={ArrowLeft} size={14} /> {projName}
-                </button>
+                </Button>
                 <span className="muted">/</span>
                 <strong className="app-req-id">{selectedId}</strong>
               </>
@@ -121,8 +125,8 @@ export function Topbar() {
               <span className="brand">{projName}</span>
             )}
             {isRemoteProj && activeSummary && (
-              <span
-                className={`badge ${activeSummary.nodeOnline === false ? "warning" : "info"}`}
+              <Badge
+                variant={activeSummary.nodeOnline === false ? "warning" : "info"}
                 title={t(language, "topbar.nodeTitle", {
                   node: activeSummary.nodeName ?? activeSummary.nodeId ?? "",
                   root: activeSummary.root,
@@ -131,22 +135,23 @@ export function Topbar() {
               >
                 <Icon icon={Laptop} size={14} /> {activeSummary.nodeName ?? activeSummary.nodeId}
                 {activeSummary.nodeOnline === false ? t(language, "topbar.offlineSuffix") : ""}
-              </span>
+              </Badge>
             )}
           </div>
         )}
 
         {!projName && selectedId && (
           <div className="app-breadcrumb">
-            <button
-              className="btn ghost xs"
+            <Button
+              size="xs"
               type="button"
+              variant="ghost"
               data-action="back-home"
               data-testid="back-home-btn"
               onClick={() => backHome()}
             >
               <Icon icon={ArrowLeft} size={14} /> {t(language, "topbar.workspace")}
-            </button>
+            </Button>
             <span className="muted">/</span>
             <strong className="app-req-id">{selectedId}</strong>
           </div>
@@ -161,9 +166,10 @@ export function Topbar() {
       <div className="topbar-right">
         <UiLanguageSelect className="topbar-language" />
 
-        <button
-          className={`btn xs ${mainView === "insights" ? "primary" : "ghost"}`}
+        <Button
+          size="xs"
           type="button"
+          variant={mainView === "insights" ? "default" : "ghost"}
           data-testid="topbar-insights-btn"
           title={t(language, "insights.title")}
           aria-label={t(language, "insights.navLabel")}
@@ -174,12 +180,13 @@ export function Topbar() {
         >
           <Icon icon={BarChart3} size={14} />
           <span className="header-btn-label">{t(language, "insights.navLabel")}</span>
-        </button>
+        </Button>
 
         {isHub && (
-          <button
-            className="btn ghost xs"
+          <Button
+            size="xs"
             type="button"
+            variant="ghost"
             data-action="open-evolution"
             data-testid="open-evolution-btn"
             title={t(language, "topbar.evolutionTitle")}
@@ -192,21 +199,22 @@ export function Topbar() {
             <Icon icon={Sparkles} size={14} />
             <span className="header-btn-label">{t(language, "topbar.evolutionLabel")}</span>
             {(hub?.evolutionOpenCount ?? 0) > 0 && (
-              <span className="sb-badge warn" title={t(language, "topbar.pendingPains")}>
+              <Badge size="sm" variant="warning" title={t(language, "topbar.pendingPains")}>
                 {hub?.evolutionOpenCount}
-              </span>
+              </Badge>
             )}
             {(hub?.cooldownCount ?? 0) > 0 && (
-              <span className="sb-badge" title={t(language, "topbar.cooldownModels")}>
+              <Badge size="sm" variant="secondary" title={t(language, "topbar.cooldownModels")}>
                 {hub?.cooldownCount}
-              </span>
+              </Badge>
             )}
-          </button>
+          </Button>
         )}
 
-        <button
-          className="btn ghost xs"
+        <Button
+          size="xs"
           type="button"
+          variant="ghost"
           data-action="open-quick-report"
           data-testid="open-quick-report-btn"
           title={t(language, "topbar.quickReportTitle")}
@@ -225,11 +233,12 @@ export function Topbar() {
         >
           <Icon icon={Zap} size={14} />
           <span className="header-btn-label">{t(language, "topbar.quickReportLabel")}</span>
-        </button>
+        </Button>
 
-        <button
-          className="btn ghost xs"
+        <Button
+          size="xs"
           type="button"
+          variant="ghost"
           data-action="open-routing"
           data-testid="open-routing-btn"
           title={t(language, "topbar.settingsTitle")}
@@ -238,22 +247,24 @@ export function Topbar() {
         >
           <Icon icon={Settings} size={14} />
           <span className="header-btn-label">{t(language, "topbar.settingsLabel")}</span>
-        </button>
+        </Button>
 
-        <button
-          className="btn ghost xs"
+        <Button
+          size="icon-xs"
           type="button"
+          variant="ghost"
           data-action="toggle-theme"
           title={theme === "dark" ? t(language, "topbar.themeToLight") : t(language, "topbar.themeToDark")}
           aria-label={theme === "dark" ? t(language, "topbar.themeToLight") : t(language, "topbar.themeToDark")}
           onClick={toggleTheme}
         >
           <Icon icon={theme === "dark" ? Sun : Moon} size={14} />
-        </button>
+        </Button>
 
-        <button
-          className={`btn xs ${selectedId && drawerOpen ? "primary" : ""}`}
+        <Button
+          size="xs"
           type="button"
+          variant={selectedId && drawerOpen ? "default" : "outline"}
           data-action="toggle-drawer"
           data-testid="toggle-drawer-btn"
           disabled={!selectedId}
@@ -275,19 +286,20 @@ export function Topbar() {
           <span className="header-btn-label">
             {selectedId && drawerOpen ? t(language, "topbar.drawerLabelOpen") : t(language, "topbar.drawerLabelClosed")}
           </span>
-        </button>
+        </Button>
 
         {auth?.required && auth?.authenticated && (
-          <button
-            className="btn ghost xs"
+          <Button
+            size="icon-xs"
             type="button"
+            variant="ghost"
             data-testid="logout-btn"
             title={t(language, "topbar.logout")}
             aria-label={t(language, "topbar.logout")}
             onClick={() => void logoutSession()}
           >
             <Icon icon={LogOut} size={14} />
-          </button>
+          </Button>
         )}
       </div>
     </header>

@@ -305,7 +305,8 @@ suite("REQ-001 coss UI 消息提示真实浏览器回归", () => {
       const dark = await readToastStyle();
       expect(dark).not.toBeNull();
       expect(dark!.theme).toBe("dark");
-      expect(dark!.bg).toBe("rgb(19, 23, 34)");
+      expect(dark!.bg).toBe("color(srgb 0.10566 0.105675 0.105676)");
+      expect(dark!.bg).not.toBe(light!.bg);
       expect(dark!.color).not.toBe(light!.color);
       await waitToastsGone(page);
 

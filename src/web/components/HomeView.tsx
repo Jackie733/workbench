@@ -39,71 +39,93 @@ import {
   orderUnifiedRequirements,
   progressDetail,
   relativeTime,
+  type Scope,
   STAGE_META,
 } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon, STAGE_ICONS } from "./Icon.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { Card, CardDescription, CardFooter, CardHeader, CardPanel, CardTitle } from "./ui/card.tsx";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./ui/empty.tsx";
+import { Input } from "./ui/input.tsx";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "./ui/input-group.tsx";
+import { Label } from "./ui/label.tsx";
+import { Radio, RadioGroup, RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
+import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
+import { SimpleSelect } from "./ui/select.tsx";
 
 export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
   const language = useUiStore((s) => s.language);
   const nodeLabel = project.nodeName ?? project.nodeId ?? "remote";
   return (
-    <div className="empty-card" data-testid="remote-node-offline-card">
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <Icon icon={WifiOff} size={20} />
-        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-          {t(language, "remote.title", { node: nodeLabel })}
-        </h2>
-      </div>
-      <p className="muted" style={{ margin: "0 0 12px" }}>
-        {t(language, "remote.descPrefix")}
-        <strong>{project.name}</strong>
-        {t(language, "remote.descMiddle")}
-        <code>{project.root}</code>
-        {t(language, "remote.descMid2")}
-        <strong>{nodeLabel}</strong>
-        {t(language, "remote.descSuffix")}
-      </p>
-      <div className="callout info xs" style={{ marginBottom: 14 }}>
-        <Icon icon={Info} size={14} />{" "}
-        {t(language, "remote.hintPrefix")}
-        <strong>{nodeLabel}</strong>
-        {t(language, "remote.hintMiddle")}
-        <pre style={{ margin: "6px 0 0", fontFamily: "var(--mono)", fontSize: 12 }}>wb node start</pre>
-      </div>
-      <button
-        className="btn primary"
-        type="button"
-        data-testid="remote-node-refresh-btn"
-        onClick={() => void invalidateAllWorkbenchQueries()}
-      >
-        <Icon icon={RefreshCw} size={14} /> {t(language, "remote.refresh")}
-      </button>
-    </div>
+    <Card className="mx-auto my-6 max-w-2xl" data-testid="remote-node-offline-card">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Icon icon={WifiOff} size={20} />
+          <span>{t(language, "remote.title", { node: nodeLabel })}</span>
+        </CardTitle>
+        <CardDescription>
+          {t(language, "remote.descPrefix")}
+          <strong>{project.name}</strong>
+          {t(language, "remote.descMiddle")}
+          <code>{project.root}</code>
+          {t(language, "remote.descMid2")}
+          <strong>{nodeLabel}</strong>
+          {t(language, "remote.descSuffix")}
+        </CardDescription>
+      </CardHeader>
+      <CardPanel>
+        <Alert variant="info" className="text-xs">
+          <Icon icon={Info} size={14} />
+          <AlertDescription className="text-foreground">
+            <div>
+              {t(language, "remote.hintPrefix")}
+              <strong>{nodeLabel}</strong>
+              {t(language, "remote.hintMiddle")}
+            </div>
+            <pre className="mt-1.5 font-mono text-xs">wb node start</pre>
+          </AlertDescription>
+        </Alert>
+      </CardPanel>
+      <CardFooter>
+        <Button
+          type="button"
+          data-testid="remote-node-refresh-btn"
+          onClick={() => void invalidateAllWorkbenchQueries()}
+        >
+          <Icon icon={RefreshCw} size={14} /> {t(language, "remote.refresh")}
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
 
 export function EmptyHubCard() {
   const language = useUiStore((s) => s.language);
   return (
-    <div className="empty-card" data-testid="empty-hub-card">
-      <h2 className="icon-heading" style={{ margin: "0 0 10px", fontSize: 18, fontWeight: 600 }}>
-        <Icon icon={FolderPlus} size={20} />
-        <span>{t(language, "hub.emptyTitle")}</span>
-      </h2>
-      <p className="muted" style={{ margin: "0 0 16px" }}>
-        {t(language, "hub.emptyDesc")}
-      </p>
-      <button
-        className="btn primary"
-        type="button"
-        data-testid="empty-hub-add-btn"
-        onClick={() => void openAddProjectModal()}
-      >
-        <Icon icon={Plus} size={16} /> {t(language, "hub.addLocal")}
-      </button>
-    </div>
+    <Card className="mx-auto my-6 max-w-2xl" data-testid="empty-hub-card">
+      <Empty className="py-10 md:py-12">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Icon icon={FolderPlus} size={20} />
+          </EmptyMedia>
+          <EmptyTitle>{t(language, "hub.emptyTitle")}</EmptyTitle>
+          <EmptyDescription>{t(language, "hub.emptyDesc")}</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button
+            type="button"
+            data-testid="empty-hub-add-btn"
+            onClick={() => void openAddProjectModal()}
+          >
+            <Icon icon={Plus} size={16} /> {t(language, "hub.addLocal")}
+          </Button>
+        </EmptyContent>
+      </Empty>
+    </Card>
   );
 }
 
@@ -111,21 +133,24 @@ export function EmptyRequirementsCard() {
   const language = useUiStore((s) => s.language);
   const setModal = useUiStore((s) => s.setModal);
   return (
-    <div className="empty-card" data-testid="empty-state" style={{ textAlign: "center" }}>
-      <p style={{ margin: "0 0 8px", fontWeight: 600, fontSize: 16 }}>{t(language, "home.emptyTitle")}</p>
-      <p className="muted" style={{ margin: "0 0 16px", fontSize: 13 }}>
-        {t(language, "home.emptyDesc")}
-      </p>
-      <button
-        className="btn primary"
-        type="button"
-        data-action="open-new-req"
-        data-testid="empty-new-req-btn"
-        onClick={() => setModal({ kind: "new_req", goal: "" })}
-      >
-        <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
-      </button>
-    </div>
+    <Card className="mx-auto my-6 max-w-2xl" data-testid="empty-state">
+      <Empty className="py-10 md:py-12">
+        <EmptyHeader>
+          <EmptyTitle>{t(language, "home.emptyTitle")}</EmptyTitle>
+          <EmptyDescription>{t(language, "home.emptyDesc")}</EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button
+            type="button"
+            data-action="open-new-req"
+            data-testid="empty-new-req-btn"
+            onClick={() => setModal({ kind: "new_req", goal: "" })}
+          >
+            <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
+          </Button>
+        </EmptyContent>
+      </Empty>
+    </Card>
   );
 }
 
@@ -144,86 +169,89 @@ export function InitCard() {
   const rootLabel = project?.root ?? "";
 
   return (
-    <div className="init-card" data-testid="init-card">
-      <h2 className="icon-heading">
-        <Icon icon={FolderGit2} size={20} />
-        <span>{t(language, "init.title")}</span>
-      </h2>
-      <p className="muted" style={{ margin: "0 0 14px" }}>
-        {t(language, "init.descPrefix")}
-        <code>{rootLabel}</code>
-        {t(language, "init.descMiddle")}
-        <code>.workbench/</code>
-        {t(language, "init.descSuffix")}
-      </p>
-      <div style={{ marginBottom: 12 }}>
-        <label className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
-          {t(language, "init.nameLabel")}
-        </label>
-        <input
-          className="input"
-          id="init-name"
-          value={initName}
-          placeholder={t(language, "init.namePlaceholder")}
-          onChange={(e) => setInitName(e.target.value)}
-        />
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        <label className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
-          {t(language, "init.outputLanguageLabel")}
-        </label>
-        <select
-          className="select"
-          id="init-output-language"
-          style={{ width: "100%" }}
-          value={initOutputLanguage}
-          onChange={(e) => setInitOutputLanguage(e.target.value as OutputLanguage | "inherit")}
+    <Card className="mx-auto my-6 max-w-2xl" data-testid="init-card">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Icon icon={FolderGit2} size={20} />
+          <span>{t(language, "init.title")}</span>
+        </CardTitle>
+        <CardDescription>
+          {t(language, "init.descPrefix")}
+          <code>{rootLabel}</code>
+          {t(language, "init.descMiddle")}
+          <code>.workbench/</code>
+          {t(language, "init.descSuffix")}
+        </CardDescription>
+      </CardHeader>
+      <CardPanel className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-xs text-muted-foreground" htmlFor="init-name">
+            {t(language, "init.nameLabel")}
+          </Label>
+          <Input
+            id="init-name"
+            value={initName}
+            placeholder={t(language, "init.namePlaceholder")}
+            onChange={(e) => setInitName(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-xs text-muted-foreground" htmlFor="init-output-language">
+            {t(language, "init.outputLanguageLabel")}
+          </Label>
+          <SimpleSelect
+            id="init-output-language"
+            className="w-full"
+            options={[
+              { value: "inherit", label: t(language, "init.langInherit") },
+              { value: "zh-CN", label: t(language, "init.langZh") },
+              { value: "en", label: t(language, "init.langEn") },
+              { value: "auto", label: t(language, "init.langAuto") },
+            ]}
+            value={initOutputLanguage}
+            onValueChange={(next) => setInitOutputLanguage(next as OutputLanguage | "inherit")}
+          />
+        </div>
+        <RadioGroup
+          className="gap-2"
+          value={initPrivacy}
+          onValueChange={(next) => setInitPrivacy(next as "local" | "tracked")}
         >
-          <option value="inherit">{t(language, "init.langInherit")}</option>
-          <option value="zh-CN">{t(language, "init.langZh")}</option>
-          <option value="en">{t(language, "init.langEn")}</option>
-          <option value="auto">{t(language, "init.langAuto")}</option>
-        </select>
-      </div>
-      <div className="radio-row">
-        <label
-          className={`radio-card ${initPrivacy === "local" ? "selected" : ""}`}
-          onClick={() => setInitPrivacy("local")}
-        >
-          <input type="radio" name="privacy" checked={initPrivacy === "local"} readOnly />
-          <div>
-            <strong>{t(language, "init.localTitle")}</strong>
-            <div className="muted" style={{ fontSize: 12 }}>
-              {t(language, "init.localDescPrefix")}
-              <code>.git/info/exclude</code>
-              {t(language, "init.localDescSuffix")}
+          <Label className="flex w-full cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors has-data-checked:border-primary/48 has-data-checked:bg-accent/50">
+            <Radio className="mt-0.5" value="local" />
+            <div className="flex flex-col gap-1">
+              <strong className="text-sm font-medium">{t(language, "init.localTitle")}</strong>
+              <span className="text-xs font-normal text-muted-foreground">
+                {t(language, "init.localDescPrefix")}
+                <code>.git/info/exclude</code>
+                {t(language, "init.localDescSuffix")}
+              </span>
             </div>
-          </div>
-        </label>
-        <label
-          className={`radio-card ${initPrivacy === "tracked" ? "selected" : ""}`}
-          onClick={() => setInitPrivacy("tracked")}
-        >
-          <input type="radio" name="privacy" checked={initPrivacy === "tracked"} readOnly />
-          <div>
-            <strong>{t(language, "init.trackedTitle")}</strong>
-            <div className="muted" style={{ fontSize: 12 }}>
-              {t(language, "init.trackedDesc")}
+          </Label>
+          <Label className="flex w-full cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-colors has-data-checked:border-primary/48 has-data-checked:bg-accent/50">
+            <Radio className="mt-0.5" value="tracked" />
+            <div className="flex flex-col gap-1">
+              <strong className="text-sm font-medium">{t(language, "init.trackedTitle")}</strong>
+              <span className="text-xs font-normal text-muted-foreground">
+                {t(language, "init.trackedDesc")}
+              </span>
             </div>
-          </div>
-        </label>
-      </div>
-      <button
-        className="btn primary"
-        type="button"
-        data-action="submit-init"
-        data-testid="init-submit-btn"
-        disabled={busy}
-        onClick={() => void initProjectSubmit()}
-      >
-        <Icon icon={Check} size={14} /> {t(language, "init.submit")}
-      </button>
-    </div>
+          </Label>
+        </RadioGroup>
+      </CardPanel>
+      <CardFooter>
+        <Button
+          type="button"
+          data-action="submit-init"
+          data-testid="init-submit-btn"
+          disabled={busy}
+          loading={busy}
+          onClick={() => void initProjectSubmit()}
+        >
+          <Icon icon={Check} size={14} /> {t(language, "init.submit")}
+        </Button>
+      </CardFooter>
+    </Card>
   );
 }
 
@@ -294,15 +322,15 @@ export function HomeView() {
       <div className="sb-req-top">
         <div className="sb-head" style={{ padding: "0 2px" }}>
           <span>{t(language, "sidebar.requirementsTitle")}</span>
-          <button
-            className="btn primary xs"
+          <Button
+            size="xs"
             type="button"
             data-action="open-new-req"
             data-testid="new-req-btn"
             onClick={() => setModal({ kind: "new_req", goal: "" })}
           >
             <Icon icon={Plus} size={14} /> {t(language, "home.newRequirement")}
-          </button>
+          </Button>
         </div>
 
         <div className="mission-stats">
@@ -332,59 +360,80 @@ export function HomeView() {
           </button>
         </div>
 
-        <div className="search-wrap">
-          <Icon icon={Search} size={14} />
-          <input
-            className="search-box"
+        <InputGroup>
+          <InputGroupAddon>
+            <Icon icon={Search} size={14} />
+          </InputGroupAddon>
+          <InputGroupInput
             id="search-input"
             data-testid="search-input"
+            size="sm"
             type="search"
             value={query}
             placeholder={t(language, "home.searchPlaceholder")}
             onChange={(e) => setQuery(e.target.value)}
           />
-        </div>
+        </InputGroup>
 
-        <div className="segmented sb-scope-tabs" role="tablist" data-testid="scope-tabs">
+        <SegmentedControl
+          size="sm"
+          className="sb-scope-tabs w-full"
+          data-testid="scope-tabs"
+          render={
+            <RadioGroupPrimitive
+              aria-label={t(language, "sidebar.requirementsTitle")}
+              value={scope === "sandboxes" ? "" : scope}
+              onValueChange={(next) => {
+                if (next) setScope(next as Scope);
+              }}
+            />
+          }
+        >
           {(["active", "decisions", "done", "all"] as const).map((sc) => (
-            <button
+            <SegmentedControlItem
               key={sc}
-              type="button"
-              role="tab"
-              aria-selected={scope === sc}
-              className={scope === sc ? "active" : ""}
-              data-action="set-scope"
-              data-value={sc}
-              onClick={() => setScope(sc)}
+              className="grow min-w-0 px-1.5 text-[11.5px]"
+              render={
+                <RadioPrimitive.Root
+                  value={sc}
+                  data-action="set-scope"
+                  data-value={sc}
+                />
+              }
             >
-              {sc === "active"
-                ? t(language, "home.scope.active")
-                : sc === "decisions"
-                  ? `${t(language, "home.scope.decisions")}${decisionCnt > 0 ? ` (${decisionCnt})` : ""}`
-                  : sc === "done"
-                    ? t(language, "home.scope.done")
-                    : t(language, "home.scope.all")}
-            </button>
+              <span className="truncate">
+                {sc === "active"
+                  ? t(language, "home.scope.active")
+                  : sc === "decisions"
+                    ? `${t(language, "home.scope.decisions")}${decisionCnt > 0 ? ` (${decisionCnt})` : ""}`
+                    : sc === "done"
+                      ? t(language, "home.scope.done")
+                      : t(language, "home.scope.all")}
+              </span>
+            </SegmentedControlItem>
           ))}
-        </div>
+        </SegmentedControl>
 
         {activeSandboxes.length > 0 && mergeOrder && mergeOrder.ordered.length > 0 && (
           <div className="sb-sandbox-toolbar" data-testid="sandbox-toolbar">
-            <button
+            <Button
               type="button"
-              className={`btn xs sb-sandbox-filter-btn ${scope === "sandboxes" ? "primary" : ""}`}
+              size="xs"
+              variant={scope === "sandboxes" ? "default" : "outline"}
+              className="sb-sandbox-filter-btn flex-1 shrink min-w-0 justify-start"
               data-testid="scope-sandboxes-btn"
               aria-pressed={scope === "sandboxes"}
               title={t(language, "home.mergeOrderHint")}
               onClick={() => setScope(scope === "sandboxes" ? "active" : "sandboxes")}
             >
               <Icon icon={GitBranch} size={14} />
-              <span>{t(language, "home.scope.sandboxes", { count: mergeOrder.ordered.length })}</span>
+              <span className="truncate">{t(language, "home.scope.sandboxes", { count: mergeOrder.ordered.length })}</span>
               {hasSandboxConflict && <span className="sb-sandbox-alert-dot" aria-hidden="true" />}
-            </button>
-            <button
-              className="btn ghost xs"
+            </Button>
+            <Button
+              size="icon-xs"
               type="button"
+              variant="ghost"
               data-testid="refresh-sandboxes-remote-btn"
               disabled={busy}
               title={t(language, "home.sandboxesRefresh")}
@@ -401,7 +450,7 @@ export function HomeView() {
               }}
             >
               <Icon icon={RefreshCw} size={14} />
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -416,7 +465,7 @@ export function HomeView() {
       >
         <div id="home-body">
           {listSource.length === 0 ? (
-            <div className="empty-card sb-empty-box" data-testid="sb-empty-state" style={{ textAlign: "center", margin: 0, padding: 14 }}>
+            <Card className="sb-empty-box text-center p-3.5" data-testid="sb-empty-state">
               <p className="muted xs" style={{ margin: "0 0 10px" }}>
                 {allBaseItems.length === 0
                   ? t(language, "home.emptyTitle")
@@ -429,41 +478,43 @@ export function HomeView() {
                         : t(language, "home.emptyActive")}
               </p>
               {allBaseItems.length === 0 ? (
-                <button
-                  className="btn primary xs"
+                <Button
+                  size="xs"
                   type="button"
                   data-action="open-new-req"
                   onClick={() => setModal({ kind: "new_req", goal: "" })}
                 >
                   <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
-                </button>
+                </Button>
               ) : (
                 scope !== "all" && (
-                  <button
-                    className="btn xs"
+                  <Button
+                    size="xs"
                     type="button"
+                    variant="outline"
                     data-testid="empty-scope-all-btn"
                     onClick={() => setScope("all")}
                   >
                     {t(language, "home.viewAll")}
-                  </button>
+                  </Button>
                 )
               )}
-            </div>
+            </Card>
           ) : visible.length === 0 ? (
-            <div className="empty-card sb-empty-box" data-testid="sb-empty-search" style={{ textAlign: "center", margin: 0, padding: 14 }}>
+            <Card className="sb-empty-box text-center p-3.5" data-testid="sb-empty-search">
               <p className="muted xs" style={{ margin: "0 0 10px" }}>
                 {t(language, "home.noMatch", { query })}
               </p>
-              <button
-                className="btn xs"
+              <Button
+                size="xs"
                 type="button"
+                variant="outline"
                 data-action="clear-search"
                 onClick={() => setQuery("")}
               >
                 <Icon icon={X} size={14} /> {t(language, "home.clearSearch")}
-              </button>
-            </div>
+              </Button>
+            </Card>
           ) : (
             <div className="req-list" data-testid="req-list">
               {visible.map((item) => {
@@ -479,13 +530,23 @@ export function HomeView() {
                 const reasonKey = mergeInfo ? (`home.orderReason.${mergeInfo.entry.reason}` as const) : null;
                 const reasonTone = mergeInfo
                   ? mergeInfo.entry.reason === "main_conflict"
-                    ? "danger"
+                    ? "error"
                     : mergeInfo.entry.reason === "sibling_conflict"
                       ? "warning"
                       : mergeInfo.entry.reason === "auto_mergeable"
                         ? "info"
                         : "success"
                   : null;
+                const stageBadgeTone: "secondary" | "info" | "success" | "warning" | "error" =
+                  meta.tone === "danger"
+                    ? "error"
+                    : meta.tone === "warning"
+                      ? "warning"
+                      : meta.tone === "success"
+                        ? "success"
+                        : meta.tone === "info"
+                          ? "info"
+                          : "secondary";
                 return (
                   <div
                     key={item.id}
@@ -510,8 +571,8 @@ export function HomeView() {
                         <div className="sb-req-item-id-group">
                           <span className="req-id">{item.id}</span>
                           {isPendingDecision && (
-                            <span
-                              className={`badge ${isBlockingDecision ? "danger" : "warning"}`}
+                            <Badge
+                              variant={isBlockingDecision ? "error" : "warning"}
                               data-testid={`req-decision-badge-${item.id}`}
                             >
                               <Icon icon={isBlockingDecision ? CircleAlert : Clock} size={14} />{" "}
@@ -521,54 +582,55 @@ export function HomeView() {
                                 item.decisionReason ?? t(language, "home.decisionFallback"),
                                 item.decisionReasonParams,
                               )}
-                            </span>
+                            </Badge>
                           )}
                         </div>
                         <span className="req-time">{relativeTime(item.updatedAt, language)}</span>
                       </div>
                       <div className="req-title">{item.title}</div>
                       <div className="req-sub">
-                        <span className={`badge ${meta.tone}`}>
+                        <Badge variant={stageBadgeTone}>
                           <Icon icon={STAGE_ICONS[item.stage]} size={14} /> {meta.labels[language]}
-                        </span>
+                        </Badge>
                         {item.github?.issue && (
-                          <span className="badge neutral">
+                          <Badge variant="secondary">
                             <Icon icon={Link2} size={14} /> Issue #{item.github.issue.number}
-                          </span>
+                          </Badge>
                         )}
                         {item.github?.pr && (
-                          <span className={`badge ${item.github.pr.state === "merged" ? "success" : "info"}`}>
+                          <Badge variant={item.github.pr.state === "merged" ? "success" : "info"}>
                             <Icon icon={GitPullRequest} size={14} /> PR #{item.github.pr.number}
-                          </span>
+                          </Badge>
                         )}
                         {activeReqRun && (
-                          <span className="badge info">
+                          <Badge variant="info">
                             <span className="pulse-dot" />{" "}
                             {t(language, "home.running", {
                               harness: activeReqRun.harness,
                               model: activeReqRun.model,
                             })}
-                          </span>
+                          </Badge>
                         )}
                         {detail && <span>{detail}</span>}
                       </div>
                       {mergeInfo && reasonKey && reasonTone && (
                         <div className="req-sandbox-strip" data-testid={`req-sandbox-strip-${item.id}`}>
                           <div className="req-sandbox-badges">
-                            <span className="badge neutral" data-testid={`merge-order-rank-${item.id}`}>
+                            <Badge variant="secondary" data-testid={`merge-order-rank-${item.id}`}>
                               #{mergeInfo.rank}
-                            </span>
-                            <span className={`badge ${reasonTone}`}>{t(language, reasonKey)}</span>
+                            </Badge>
+                            <Badge variant={reasonTone}>{t(language, reasonKey)}</Badge>
                             {mergeInfo.entry.behindCount > 0 && (
-                              <span className={`badge ${mergeInfo.entry.conflictFiles.length > 0 ? "danger" : "warning"}`}>
+                              <Badge variant={mergeInfo.entry.conflictFiles.length > 0 ? "error" : "warning"}>
                                 -{mergeInfo.entry.behindCount}
-                              </span>
+                              </Badge>
                             )}
                           </div>
                           {canAutoSync && (
-                            <button
-                              className="btn xs"
+                            <Button
+                              size="xs"
                               type="button"
+                              variant="outline"
                               data-testid={`req-sync-sandbox-btn-${item.id}`}
                               disabled={busy}
                               onClick={(e) => {
@@ -577,7 +639,7 @@ export function HomeView() {
                               }}
                             >
                               <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
-                            </button>
+                            </Button>
                           )}
                         </div>
                       )}

@@ -10,6 +10,8 @@ import { api } from "../api.ts";
 import { describeClientErrorRef, t, type LocalizedError } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Button } from "./ui/button.tsx";
 
 const CLIENT_ALLOWED_EXTS = new Set([
   "png",
@@ -207,9 +209,11 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
       </div>
 
       {error && (
-        <div className="callout danger xs" role="alert" data-testid="attachment-error" style={{ marginTop: 6 }}>
-          {error.key ? t(language, error.key, error.params) : error.text}
-        </div>
+        <Alert variant="error" className="mt-1.5 text-xs" data-testid="attachment-error">
+          <AlertDescription className="text-foreground">
+            {error.key ? t(language, error.key, error.params) : error.text}
+          </AlertDescription>
+        </Alert>
       )}
 
       {value.length > 0 && (
@@ -232,15 +236,16 @@ export function AttachmentPicker({ value, onChange, disabled, scope = "project" 
                 {meta.name}
               </span>
               <span className="xs muted">{formatSize(meta.size)}</span>
-              <button
-                className="btn ghost xs"
+              <Button
+                size="icon-xs"
                 type="button"
+                variant="ghost"
                 aria-label={t(language, "attachment.removeAria", { name: meta.name })}
                 data-testid="attachment-remove"
                 onClick={() => removeLocal(meta.id)}
               >
                 <Icon icon={X} size={14} />
-              </button>
+              </Button>
             </div>
           ))}
           <div className="xs muted">

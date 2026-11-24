@@ -20,6 +20,7 @@ import {
   initGitRepoIn,
   launchE2eBrowser,
 } from "./e2e_helpers.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
@@ -664,7 +665,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(await readTriggerLabel()).toContain("codex/gpt-6.1-sol");
       // page.select waits with puppeteer's 30s default; bound it so a missing control fails fast.
       await page.waitForSelector('[data-testid="banner-runner-select-effort"]', { timeout: 5000 });
-      await page.select('[data-testid="banner-runner-select-effort"]', "medium");
+      await selectUiOption(page, '[data-testid="banner-runner-select-effort"]', "medium");
 
       await runWithCurrentSelection(2);
       expect(runCalls[1]!.body).toMatchObject({ action: "design", harness: "codex", model: "gpt-6.1-sol", reasoningEffort: "medium" });
@@ -711,9 +712,9 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       ]);
 
       // 4. Console run selector and Timeline runs badge localize action & status cleanly across language switches.
-      await page.waitForSelector('[data-testid="console-pane"] select option', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="console-pane"] [data-testid="console-run-select"]', { timeout: 5000 });
       const zhOptionText = await page.evaluate(
-        () => document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "",
+        () => document.querySelector('[data-testid="console-pane"] [data-testid="console-run-select"]')?.textContent ?? "",
       );
       expect(zhOptionText).toContain("设计 ·");
       expect(zhOptionText).toContain("(已完成)");
@@ -724,13 +725,13 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         { timeout: 5000 },
       );
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(
         () =>
-          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+          (document.querySelector('[data-testid="console-pane"] [data-testid="console-run-select"]')?.textContent ?? "").includes(
             "Design ·",
           ) &&
-          (document.querySelector('[data-testid="console-pane"] select option')?.textContent ?? "").includes(
+          (document.querySelector('[data-testid="console-pane"] [data-testid="console-run-select"]')?.textContent ?? "").includes(
             "(Completed)",
           ) &&
           (document.querySelector('[data-testid="workspace-tab-scroll"]')?.textContent ?? "").includes(
@@ -815,7 +816,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
     const readTitle = () => page.evaluate(() => document.title);
     const bodyText = () => page.evaluate(() => document.body.innerText);
     const selectLang = async (lang: string) => {
-      await page.select('[data-testid="ui-language-select"]', lang);
+      await selectUiOption(page, '[data-testid="ui-language-select"]', lang);
       await page.waitForFunction(
         (expected) => document.documentElement.lang === (expected as string),
         { timeout: 5000 },
@@ -826,7 +827,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       page.evaluate(
         (tid: string, text: string) => {
           const buttons = Array.from(
-            document.querySelectorAll(`[data-testid="${tid}"] .modal-actions button`),
+            document.querySelectorAll(`[data-testid="${tid}"] [data-slot="dialog-footer"] [data-slot="button"]`),
           ) as HTMLButtonElement[];
           const target = buttons.find((b) => (b.textContent ?? "").includes(text));
           if (!target) throw new Error(`modal action not found: ${text}`);
@@ -1043,7 +1044,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.click('[data-testid="settings-tab-project"]');
       expect(
         await page.evaluate(
-          () => (document.querySelector('[data-testid="project-output-language-select"]') as HTMLSelectElement | null)?.value,
+          () => document.querySelector('[data-testid="project-output-language-select"]')?.getAttribute("data-value") ?? "",
         ),
       ).toBe("en");
       await page.click('[data-testid="project-provider-gitee"]');
@@ -1217,7 +1218,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
           throw new Error("storage blocked");
         };
       });
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 5000 });
       expect(await bodyText()).toContain("验证与截图");
       await page.evaluate(() => {
@@ -1244,7 +1245,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         expect(blockedErrors).toEqual([]);
         await blockedPage.waitForSelector('[data-testid="ui-language-select"]', { timeout: 10_000 });
         expect(await blockedPage.evaluate(() => document.documentElement.lang)).toBe("zh-CN");
-        await blockedPage.select('[data-testid="ui-language-select"]', "en");
+        await selectUiOption(blockedPage, '[data-testid="ui-language-select"]', "en");
         await blockedPage.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
         expect(await blockedPage.evaluate(() => document.body.innerText)).toContain("Workbench");
         expect(blockedErrors).toEqual([]);

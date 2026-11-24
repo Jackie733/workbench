@@ -12,6 +12,7 @@ import { useModelFavoritesStore } from "../../stores/modelFavoritesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { cn } from "../../lib/utils.ts";
 import { Icon } from "../Icon.tsx";
+import { Badge } from "./badge.tsx";
 import {
   Command,
   CommandGroup,
@@ -86,8 +87,8 @@ function ModelPickerRow({
           )}
         </div>
         <span className="flex items-center gap-1 shrink-0">
-          {option.preserved && <span className="badge warning">{t(language, "routing.preserved")}</span>}
-          {option.unverified && <span className="badge neutral">{t(language, "routing.unverified")}</span>}
+          {option.preserved && <Badge size="sm" variant="warning">{t(language, "routing.preserved")}</Badge>}
+          {option.unverified && <Badge size="sm" variant="secondary">{t(language, "routing.unverified")}</Badge>}
           <span className={cn("px-1.5 py-0.5 rounded text-[10px] uppercase", tierTone(option.tier))}>
             {option.tier}
           </span>

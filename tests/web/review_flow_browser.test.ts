@@ -212,18 +212,18 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         () => (document.querySelector('[data-testid="confirm-accept-override-btn"]') as HTMLButtonElement).disabled,
       );
       expect(disabledInitially).toBe(true);
-      await clickReady(page, '[data-testid="accept-override-modal"] .btn:not([data-testid])');
+      await clickReady(page, '[data-testid="accept-override-modal"] [data-slot="dialog-footer"] [data-slot="button"]:not([data-testid])');
       await page.waitForFunction(() => !document.querySelector('[data-testid="accept-override-modal"]'), { timeout: 5000 });
 
       // 3. Feedback modal in awaiting_acceptance displays fix mode & one-click fill review button
       await clickReady(page, '[data-testid="action-request_changes"]');
       await page.waitForSelector('[data-testid="feedback-modal"]', { timeout: 5000 });
-      const fbHeading = await page.evaluate(() => document.querySelector('[data-testid="feedback-modal"] h3')?.textContent ?? "");
+      const fbHeading = await page.evaluate(() => document.querySelector('[data-testid="feedback-modal"] [data-slot="dialog-title"]')?.textContent ?? "");
       expect(fbHeading).toContain("打回修改");
       await clickReady(page, '[data-testid="feedback-fill-review-btn"]');
       const prefilled = await page.evaluate(() => (document.querySelector("#feedback-input") as HTMLTextAreaElement).value);
       expect(prefilled).toContain("错误提示未随语言切换");
-      await clickReady(page, '[data-testid="feedback-modal"] .btn:not([data-testid])');
+      await clickReady(page, '[data-testid="feedback-modal"] [data-slot="dialog-footer"] [data-slot="button"]:not([data-testid])');
       await page.waitForFunction(() => !document.querySelector('[data-testid="feedback-modal"]'), { timeout: 5000 });
 
       // 4. Select qodercn/DeepSeek-Flash for fix, then click run-review-btn -> review MUST NOT use qodercn/DeepSeek-Flash!

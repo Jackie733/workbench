@@ -22,6 +22,11 @@ import { parseConsoleLog, type ConsoleBlock, type ConsoleBlockKind } from "../li
 import { formatDurationHuman, formatPercent, formatTokenCount, formatUsd } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Button } from "./ui/button.tsx";
+import { RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
+import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
 
 export interface ConsoleOutputProps {
   runId: string;
@@ -428,57 +433,64 @@ export function ConsoleOutput({
   return (
     <>
       <div className="console-controls-bar" data-testid="console-controls-bar">
-        <div className="segmented" role="group" aria-label={t(language, "console.modeAria")}>
-          <button
-            type="button"
-            className={viewMode === "structured" ? "active" : ""}
-            data-testid="console-mode-structured"
-            onClick={() => setViewMode("structured")}
+        <SegmentedControl
+          size="sm"
+          render={
+            <RadioGroupPrimitive
+              aria-label={t(language, "console.modeAria")}
+              className="flex items-center"
+              value={viewMode}
+              onValueChange={(next) => next && setViewMode(next as "structured" | "raw")}
+            />
+          }
+        >
+          <SegmentedControlItem
+            render={<RadioPrimitive.Root value="structured" data-testid="console-mode-structured" />}
           >
             <Icon icon={Layers} size={14} /> {t(language, "console.modeStructured")}
-          </button>
-          <button
-            type="button"
-            className={viewMode === "raw" ? "active" : ""}
-            data-testid="console-mode-raw"
-            onClick={() => setViewMode("raw")}
+          </SegmentedControlItem>
+          <SegmentedControlItem
+            render={<RadioPrimitive.Root value="raw" data-testid="console-mode-raw" />}
           >
             <Icon icon={Terminal} size={14} /> {t(language, "console.modeRaw")}
-          </button>
-        </div>
+          </SegmentedControlItem>
+        </SegmentedControl>
 
         <div className="console-controls-actions">
           {viewMode === "structured" && hasStructuredTrace && toolPairsInView.length > 0 && (
-            <button
+            <Button
               type="button"
-              className="btn ghost xs"
+              size="xs"
+              variant="ghost"
               data-testid="trace-toggle-tools-btn"
               onClick={toggleAllTraceCards}
             >
               <Icon icon={Wrench} size={14} /> {t(language, "console.toggleTools")}
-            </button>
+            </Button>
           )}
           {viewMode === "structured" && !hasStructuredTrace && secondaryBlocks.length > 0 && (
-            <button
+            <Button
               type="button"
-              className="btn ghost xs"
+              size="xs"
+              variant="ghost"
               data-testid="console-toggle-secondary-btn"
               onClick={toggleAllSecondary}
             >
               <Icon icon={hasCollapsedSecondary ? ChevronRight : ChevronDown} size={14} />{" "}
               {t(language, hasCollapsedSecondary ? "console.expandAll" : "console.collapseSecondary")}
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             type="button"
-            className="btn ghost xs"
+            size="xs"
+            variant="ghost"
             data-testid="console-copy-btn"
             disabled={!rawLog && !hasStructuredTrace}
             onClick={() => void handleCopy()}
           >
             <Icon icon={copied ? Check : Copy} size={14} />
             {t(language, copied ? "console.copied" : "console.copy")}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -499,9 +511,10 @@ export function ConsoleOutput({
       )}
 
       {isLegacyWithoutTrace && rawLog && (
-        <div className="callout info xs console-legacy-notice" data-testid="legacy-no-trace-notice">
-          <Icon icon={Info} size={14} /> {t(language, "console.legacyNoTrace")}
-        </div>
+        <Alert variant="info" className="console-legacy-notice py-2 text-xs" data-testid="legacy-no-trace-notice">
+          <Icon icon={Info} size={14} />
+          <AlertDescription className="text-foreground">{t(language, "console.legacyNoTrace")}</AlertDescription>
+        </Alert>
       )}
 
       <div className="console-shell">
@@ -553,7 +566,7 @@ export function ConsoleOutput({
                             )}
                             <span className="console-fold-title">{tool.toolName}</span>
                             <span className="trace-cat-badge">{tool.category}</span>
-                            {tool.wbCommand && <span className="badge info xs">wb</span>}
+                            {tool.wbCommand && <Badge size="sm" variant="info">wb</Badge>}
                             <span className="console-fold-summary">{tool.summary}</span>
                           </span>
                           <span className="console-fold-meta">
@@ -579,7 +592,7 @@ export function ConsoleOutput({
                               <div className="trace-io-section">
                                 <div className="trace-io-label">
                                   {t(language, "console.toolInput")}
-                                  {tool.inputTruncated && <span className="badge warning xs">truncated</span>}
+                                  {tool.inputTruncated && <Badge size="sm" variant="warning">truncated</Badge>}
                                 </div>
                                 <pre className="trace-tool-pre">{tool.inputText}</pre>
                               </div>
@@ -588,7 +601,7 @@ export function ConsoleOutput({
                               <div className="trace-io-section">
                                 <div className="trace-io-label">
                                   {t(language, "console.toolOutput")}
-                                  {tool.outputTruncated && <span className="badge warning xs">clipped 32KB</span>}
+                                  {tool.outputTruncated && <Badge size="sm" variant="warning">clipped 32KB</Badge>}
                                 </div>
                                 <pre className="trace-tool-pre">{tool.outputText}</pre>
                               </div>
@@ -704,23 +717,26 @@ export function ConsoleOutput({
 
                   if (ev.type === "context.compaction") {
                     return (
-                      <div key={`cmp-${ev.seq}`} className="callout warning xs trace-compaction-pill">
-                        <Icon icon={Layers} size={14} />{" "}
-                        {ev.summary ??
-                          t(language, "console.compactionNotice", {
-                            turn: ev.turnIndex,
-                            mode: ev.mode,
-                            reclaimed: ev.reclaimedTokens ?? 0,
-                          })}
-                      </div>
+                      <Alert key={`cmp-${ev.seq}`} variant="warning" className="trace-compaction-pill py-2 text-xs">
+                        <Icon icon={Layers} size={14} />
+                        <AlertDescription className="text-foreground">
+                          {ev.summary ??
+                            t(language, "console.compactionNotice", {
+                              turn: ev.turnIndex,
+                              mode: ev.mode,
+                              reclaimed: ev.reclaimedTokens ?? 0,
+                            })}
+                        </AlertDescription>
+                      </Alert>
                     );
                   }
 
                   if (ev.type === "trace.truncated") {
                     return (
-                      <div key={`trunc-${ev.seq}`} className="callout info xs">
-                        <Icon icon={Info} size={14} /> {t(language, "console.traceTruncated")}
-                      </div>
+                      <Alert key={`trunc-${ev.seq}`} variant="info" className="py-2 text-xs">
+                        <Icon icon={Info} size={14} />
+                        <AlertDescription className="text-foreground">{t(language, "console.traceTruncated")}</AlertDescription>
+                      </Alert>
                     );
                   }
 
@@ -868,15 +884,17 @@ export function ConsoleOutput({
         </div>
 
         {showJumpBottom && (
-          <button
+          <Button
             type="button"
-            className="btn xs console-jump-bottom"
+            size="xs"
+            variant="outline"
+            className="console-jump-bottom"
             data-testid="console-scroll-bottom-btn"
             onClick={jumpToBottom}
           >
             <Icon icon={ArrowDown} size={14} />
             {t(language, "console.jumpBottom")}
-          </button>
+          </Button>
         )}
       </div>
     </>

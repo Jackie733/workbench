@@ -161,14 +161,14 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       expect(await disabled('[data-testid="menu-edit-req-btn"]')).toBe(true);
       expect(await disabled('[data-testid="menu-enable-sandbox-btn"]')).toBe(true);
       const handoffEnabled = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] button'));
-        const target = buttons.find((b) => (b.textContent ?? "").includes("查看交接简报")) as HTMLButtonElement | undefined;
-        return Boolean(target && !target.disabled && target.getAttribute("aria-disabled") !== "true");
+        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] [role="menuitem"]'));
+        const target = buttons.find((b) => (b.textContent ?? "").includes("查看交接简报")) as HTMLElement | undefined;
+        return Boolean(target && !target.hasAttribute("data-disabled") && target.getAttribute("aria-disabled") !== "true");
       });
       expect(handoffEnabled).toBe(true);
       await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] button'));
-        (buttons.find((b) => (b.textContent ?? "").includes("查看交接简报")) as HTMLButtonElement | undefined)?.click();
+        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] [role="menuitem"]'));
+        (buttons.find((b) => (b.textContent ?? "").includes("查看交接简报")) as HTMLElement | undefined)?.click();
       });
       await page.waitForSelector('[data-testid="handoff-modal"]', { timeout: 5000 });
       await closeModal("handoff-modal");

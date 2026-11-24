@@ -84,10 +84,10 @@ describe("icon dependency and bundle contract", () => {
     // 2026-11 threshold raised from 2.7MB to 2.9MB after bilingual UI (REQ-003) and model favorites (REQ-002),
     // to 3.2MB after adding execution observability, run audit inspector, and global InsightsView,
     // to 3.8MB raw / 720KB gzip after replacing hand-drawn SVGs with modular tree-shaken chart.js (+~98KB gzip),
-    // and to 4.2MB raw / 800KB gzip after migrating Radix/cmdk/sonner to coss UI (@base-ui/react, +~384KB raw / +~73KB gzip unminified);
+    // and to 4.3MB raw / 820KB gzip after migrating all remaining UI controls to coss UI (@base-ui/react, including Select/Tabs/Checkbox/RadioGroup/AlertDialog/Tooltip);
     // the un-tree-shaken catalog baseline (fixture raw ≈ 1.47MB) remains the real guard (~5.0MB if broken).
-    expect(app.raw).toBeLessThan(4_200_000);
-    expect(app.gzip).toBeLessThan(800_000);
+    expect(app.raw).toBeLessThan(4_300_000);
+    expect(app.gzip).toBeLessThan(820_000);
   });
 
   test("static named imports tree-shake instead of pulling the whole catalog", async () => {

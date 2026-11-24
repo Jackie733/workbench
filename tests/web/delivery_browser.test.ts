@@ -19,6 +19,7 @@ import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const browserEnv = resolveTestBrowser();
 const HAS_BROWSER = browserEnv !== null;
@@ -156,8 +157,10 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.waitForSelector('[data-testid="deliver-modal"]', { timeout: 5000 });
 
       const selectionState = await page.evaluate(() => ({
-        appChecked: (document.querySelector('[data-testid="deliver-file-app.ts"]') as HTMLInputElement | null)?.checked,
-        scratchChecked: (document.querySelector('[data-testid="deliver-file-scratch.ts"]') as HTMLInputElement | null)?.checked,
+        appChecked:
+          document.querySelector('[data-testid="deliver-file-app.ts"]')?.getAttribute("aria-checked") === "true",
+        scratchChecked:
+          document.querySelector('[data-testid="deliver-file-scratch.ts"]')?.getAttribute("aria-checked") === "true",
         appStatus: document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent ?? "",
         scratchStatus: document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent ?? "",
         modalText: document.querySelector('[data-testid="deliver-modal"]')?.textContent ?? "",
@@ -169,14 +172,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       expect(selectionState.modalText).toContain("本次验收");
       expect(selectionState.modalText).toContain("工作区其他");
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(
         () =>
           document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "Modified" &&
           document.querySelector('[data-testid="deliver-status-scratch.ts"]')?.textContent === "Untracked",
         { timeout: 5000 },
       );
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           document.querySelector('[data-testid="deliver-status-app.ts"]')?.textContent === "已修改" &&
@@ -268,7 +271,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       await page.waitForSelector('[data-action="set-scope"][data-value="done"]', { timeout: 10_000 });
@@ -424,7 +427,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
     try {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 1. New requirement with "Also create a GitHub issue" when gh issue create fails -> localized warning toast.
@@ -557,7 +560,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
     try {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 1. Acceptance gate blocker error from UI Accept click localizes blockers in English & re-renders in Chinese.
@@ -594,7 +597,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       expect(/[\u4e00-\u9fff]/.test(enAcceptErr)).toBe(false);
 
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some(
@@ -604,7 +607,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
           ),
         { timeout: 10_000 },
       );
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
       // 2. Quick report auto-promote with GitHub issue creation failing -> localized English warning toast.
@@ -724,7 +727,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
     try {
       await page.setViewport({ width: 1360, height: 860 });
       await page.goto(server.url, { waitUntil: "networkidle2" });
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
@@ -733,7 +736,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
         await page.evaluate(() => document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? ""),
       ).toContain("PR #77 · 开启");
 
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? "").includes("PR #77 · open"),

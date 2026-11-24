@@ -253,7 +253,7 @@ describe("REQ-001 real browser icon behavior", () => {
         );
         expect(row, `${cid} must keep its textual status label`).toContain(label);
         const iconCount = await page.evaluate(
-          (id: string) => document.querySelectorAll(`[data-testid="crit-${id}"] .badge svg.ui-icon`).length,
+          (id: string) => document.querySelectorAll(`[data-testid="crit-${id}"] [data-slot="badge"] svg.ui-icon`).length,
           cid,
         );
         expect(iconCount).toBe(1);
@@ -263,7 +263,7 @@ describe("REQ-001 real browser icon behavior", () => {
       await page.click('[data-testid="tab-changes"]');
       await page.waitForSelector(".task-row", { timeout: 5000 });
       const taskLabels = await page.evaluate(() =>
-        Array.from(document.querySelectorAll(".task-row .badge")).map((el) => ({
+        Array.from(document.querySelectorAll(".task-row [data-slot=\"badge\"]")).map((el) => ({
           text: el.textContent ?? "",
           icons: el.querySelectorAll("svg.ui-icon").length,
         })),
@@ -581,13 +581,13 @@ describe("REQ-010 icon coverage across home and workspace", () => {
         await page.evaluate(() => document.querySelectorAll('[data-testid="new-req-btn"] svg.ui-icon').length),
       ).toBe(1);
       expect(
-        await page.evaluate(() => document.querySelectorAll(".search-wrap svg.ui-icon").length),
+        await page.evaluate(() => document.querySelectorAll('[data-slot="input-group"] svg.ui-icon').length),
       ).toBe(1);
-      expect(await page.evaluate(() => Boolean(document.querySelector(".search-wrap #search-input")))).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-slot="input-group"] #search-input')))).toBe(true);
 
       // Home: requirement row stage badge carries exactly one icon; optional Issue/PR badges must too.
       const rowIcons = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[data-testid="req-row-REQ-001"] .badge')).map((badge) => ({
+        Array.from(document.querySelectorAll('[data-testid="req-row-REQ-001"] [data-slot="badge"]')).map((badge) => ({
           text: (badge.textContent ?? "").trim(),
           icons: badge.querySelectorAll("svg.ui-icon").length,
         })),
@@ -613,7 +613,7 @@ describe("REQ-010 icon coverage across home and workspace", () => {
         await page.evaluate(() => document.querySelectorAll('[data-testid="ws-stage-badge"] svg.ui-icon').length),
       ).toBe(1);
       const tabIcons = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[data-testid="workspace-tabs"] .tab')).map(
+        Array.from(document.querySelectorAll('[data-testid="workspace-tabs"] [data-slot="tabs-tab"]')).map(
           (tab) => tab.querySelectorAll("svg.ui-icon").length,
         ),
       );
@@ -632,7 +632,7 @@ describe("REQ-010 icon coverage across home and workspace", () => {
       await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
       const menuReport = await page.evaluate(() => {
         const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
-        const buttons = Array.from(menu.querySelectorAll("button")).map((button) => {
+        const buttons = Array.from(menu.querySelectorAll('[role="menuitem"]')).map((button) => {
           const rect = button.getBoundingClientRect();
           const icon = button.querySelector("svg.ui-icon") as SVGElement | null;
           return {
@@ -683,7 +683,7 @@ describe("REQ-010 icon coverage across home and workspace", () => {
         await page.evaluate(() => document.querySelectorAll('[data-testid="manual-verify-btn"] svg.ui-icon').length),
       ).toBe(1);
       const evidenceBadgeIcons = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[data-testid^="ev-"] .badge')).map(
+        Array.from(document.querySelectorAll('[data-testid^="ev-"] [data-slot="badge"]')).map(
           (badge) => badge.querySelectorAll("svg.ui-icon").length,
         ),
       );

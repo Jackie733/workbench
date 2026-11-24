@@ -262,7 +262,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       expect(narrowStackRow.selectFlexShrink).toBe("1");
       await page.setViewport({ width: 1360, height: 900 });
       await Bun.sleep(150);
-      await clickReady(page, '.modal-actions .btn:not(.primary)');
+      await clickReady(page, '[data-slot="dialog-footer"] [data-slot="button"]:not([data-testid])');
 
       // 3. Open REQ-002 -> auto_mergeable callout shows one-click auto-merge button + sibling radar -> click sync!
       await clickReady(page, '[data-testid="req-row-REQ-002"]');
@@ -282,11 +282,13 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       await clickReady(page, '[data-testid="action-reopen"]');
       await page.waitForSelector('[data-testid="reopen-keep-approval-option"]', { timeout: 5000 });
       const keepChecked = await page.evaluate(() => {
-        const input = document.querySelector('[data-testid="reopen-keep-approval-option"] input') as HTMLInputElement | null;
-        return Boolean(input?.checked);
+        const option = document.querySelector('[data-testid="reopen-keep-approval-option"]');
+        const input = option?.querySelector("input") as HTMLInputElement | null;
+        const radio = option?.querySelector('[role="radio"]') as HTMLElement | null;
+        return Boolean(input?.checked || radio?.getAttribute("aria-checked") === "true");
       });
       expect(keepChecked).toBe(true);
-      await clickReady(page, '.modal-actions .btn:not(.primary)');
+      await clickReady(page, '[data-slot="dialog-footer"] [data-slot="button"]:not([data-testid])');
 
       // Click "Let Agent sync main & resolve conflicts" directly from `done` stage!
       await clickReady(page, '[data-testid="agent-sync-sandbox-btn"]');

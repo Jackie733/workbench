@@ -5,6 +5,7 @@ import { t, type UiLanguage } from "../../i18n.ts";
 import { collectRoutingModelOptions } from "../../state.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { Icon } from "../Icon.tsx";
+import { Button } from "./button.tsx";
 import { ModelPickerMenu } from "./ModelPickerMenu.tsx";
 import { Popover, PopoverPopup, PopoverTrigger } from "./popover.tsx";
 
@@ -60,10 +61,12 @@ export function RoutingModelPicker({
         <span ref={anchorRef} className="inline-flex min-w-0 max-w-full" data-testid={`${testId}-anchor`}>
           <PopoverTrigger
             render={
-              <button
+              <Button
                 ref={triggerRef}
                 type="button"
-                className="btn xs routing-picker-trigger inline-flex items-center gap-1.5"
+                variant="outline"
+                size="xs"
+                className="routing-picker-trigger w-[230px] max-w-[280px] min-w-0 shrink justify-between"
                 data-testid={`${testId}-trigger`}
                 aria-label={t(language, "routing.pickerAriaCurrent", {
                   label: resolvedAriaLabel,
@@ -73,14 +76,14 @@ export function RoutingModelPicker({
               >
                 <span className="truncate min-w-0 font-mono text-[11.5px]">{selected?.label ?? value}</span>
                 <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
-              </button>
+              </Button>
             }
           />
         </span>
         <PopoverPopup
           align="start"
           anchor={anchorRef}
-          className="w-[360px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
+          className="w-[360px] rounded-xl p-0 overflow-hidden"
           finalFocus={triggerRef}
           positionerClassName="z-[80]"
           sideOffset={6}

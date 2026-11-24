@@ -248,20 +248,23 @@ describe("shared icon wrapper", () => {
 
   test("iconified controls keep their alignment and width contracts", () => {
     const css = read("src/web/styles.css");
-    // Workspace tabs and search box must stay vertically centered after adding 14px glyphs.
-    expect(css).toMatch(/\.tab\s*\{[^}]*display:\s*inline-flex/);
-    expect(css).toMatch(/\.tab\s*\{[^}]*align-items:\s*center/);
-    expect(css).toMatch(/\.tab\s*\{[^}]*gap:\s*6px/);
-    expect(css).toContain(".search-wrap");
+    const tabsSrc = read("src/web/components/ui/tabs.tsx");
+    const inputGroupSrc = read("src/web/components/ui/input-group.tsx");
+    const menuSrc = read("src/web/components/ui/menu.tsx");
+    // Workspace tabs (coss Tabs) and search box (coss InputGroup) stay vertically centered with inline icons.
+    expect(tabsSrc).toContain("flex");
+    expect(tabsSrc).toContain("items-center");
+    expect(read("src/web/components/ui/segmented-control.tsx")).toContain("gap-1.5");
+    expect(inputGroupSrc).toContain('data-slot="input-group"');
     expect(css).toMatch(/\.sb-req-item-id-group\s*\{[^}]*display:\s*flex/);
     expect(css).toMatch(/\.icon-heading\s*\{[^}]*display:\s*flex/);
     expect(css).toMatch(/\.callout-lead\s*\{[^}]*display:\s*inline-flex/);
-    // REQ-005: keep menu items content-sized; never stretch or blockify them.
-    expect(css).toMatch(/\.more-menu button\s*\{[^}]*width:\s*auto/);
-    expect(css).toMatch(/\.more-menu button\s*\{[^}]*display:\s*flex/);
-    expect(css).toMatch(/\.more-menu button\s*\{[^}]*gap:\s*8px/);
-    expect(css).not.toMatch(/\.more-menu button\s*\{[^}]*display:\s*block/);
-    expect(css).not.toMatch(/\.more-menu button\s*\{[^}]*width:\s*100%/);
+    // REQ-005 / coss Menu: menu popup uses column flex content sizing rather than legacy .more-menu button hacks.
+    expect(menuSrc).toContain('data-slot="menu-item"');
+    expect(menuSrc).toContain("flex");
+    expect(menuSrc).toContain("items-center");
+    expect(menuSrc).toContain("gap-2");
+    expect(css).not.toMatch(/\.more-menu button/);
     // Spinner utility used by running badges.
     expect(css).toMatch(/\.ui-icon\.spin\s*\{[^}]*animation:/);
     expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.ui-icon\.spin/);
@@ -518,6 +521,12 @@ describe("shared brand mark and browser icons", () => {
 
   test("REQ-015: controls share two height tiers and guard against flex squeezing", () => {
     const css = read("src/web/styles.css");
+    const buttonSrc = read("src/web/components/ui/button.tsx");
+    const inputSrc = read("src/web/components/ui/input.tsx");
+    const selectSrc = read("src/web/components/ui/select.tsx");
+    const segmentedSrc = read("src/web/components/ui/segmented-control.tsx");
+    const badgeSrc = read("src/web/components/ui/badge.tsx");
+    const menuSrc = read("src/web/components/ui/menu.tsx");
     const escape = (selector: string) => selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const rule = (selector: string, declaration: RegExp) =>
       new RegExp(`${escape(selector)}\\s*\\{[^}]*${declaration.source}`);
@@ -526,38 +535,25 @@ describe("shared brand mark and browser icons", () => {
     expect(css).toMatch(/:root\s*\{[^}]*--control-h-xs:\s*28px/);
     expect(css).toMatch(/:root\s*\{[^}]*--badge-h:\s*22px/);
 
-    // 标准控件严格对齐 34px，并拒绝被同行输入框挤压换行。
-    for (const selector of [".btn", ".input", ".select"]) {
-      expect(css, `${selector} must use the standard control height`).toMatch(
-        rule(selector, /(min-height|height):\s*var\(--control-h\)/),
-      );
-    }
-    expect(css).toMatch(rule(".btn", /white-space:\s*nowrap/));
-    expect(css).toMatch(rule(".btn", /flex-shrink:\s*0/));
-    expect(css).toMatch(rule(".select", /flex-shrink:\s*0/));
-    expect(css).toMatch(rule(".input", /min-width:\s*0/));
-    expect(css).toMatch(rule(".search-wrap", /min-height:\s*var\(--control-h\)/));
+    // coss ui 原语尺寸与布局契约。
+    expect(buttonSrc).toContain("whitespace-nowrap");
+    expect(buttonSrc).toContain("shrink-0");
+    expect(buttonSrc).toContain("h-7 gap-1");
+    expect(inputSrc).toContain("w-full min-w-0");
+    expect(selectSrc).toContain("min-h-8 gap-1.5");
+    expect(segmentedSrc).toContain("gap-1.5");
+    expect(badgeSrc).toContain("shrink-0");
+    expect(badgeSrc).toContain("whitespace-nowrap");
 
-    // 紧凑控件严格对齐 28px，补齐此前缺失的 .input.xs 规则。
-    for (const selector of [".btn.xs", ".input.xs", ".select.xs"]) {
-      expect(css, `${selector} must use the compact control height`).toMatch(
-        rule(selector, /(min-height|height):\s*var\(--control-h-xs\)/),
-      );
-    }
-    expect(css).toMatch(rule(".segmented", /min-height:\s*var\(--control-h-xs\)/));
-    expect(css).toMatch(rule(".segmented", /align-items:\s*center/));
-    expect(css).toMatch(rule(".segmented button", /min-height:\s*24px/));
-    expect(css).toMatch(rule(".segmented button", /white-space:\s*nowrap/));
-
-    // REQ-015 审查修复：需要内部省略的特殊按钮必须以更高优先级覆盖基础 .btn 的 flex-shrink: 0。
-    expect(css).toMatch(rule(".btn.sb-sandbox-filter-btn", /flex:\s*1 1 auto/));
-    expect(css).toMatch(rule(".btn.sb-sandbox-filter-btn", /min-width:\s*0/));
-    expect(css).toMatch(rule(".btn.model-runner-trigger", /flex-shrink:\s*1/));
-    expect(css).toMatch(rule(".btn.routing-picker-trigger", /flex-shrink:\s*1/));
-    expect(css).toMatch(rule(".btn.routing-picker-trigger", /min-width:\s*0/));
-    expect(css).toMatch(rule(".btn.routing-picker-trigger", /width:\s*230px/));
-    expect(css).toMatch(rule(".btn.model-runner-trigger .truncate", /min-width:\s*0/));
-    expect(css).toMatch(rule(".btn.routing-picker-trigger .truncate", /min-width:\s*0/));
+    // REQ-015 审查修复：需要内部省略的特殊触发器覆盖默认收缩行为。
+    expect(css).toMatch(rule(".sb-sandbox-filter-btn", /flex:\s*1 1 auto/));
+    expect(css).toMatch(rule(".sb-sandbox-filter-btn", /min-width:\s*0/));
+    expect(css).toMatch(rule(".model-runner-trigger", /flex-shrink:\s*1/));
+    expect(css).toMatch(rule(".routing-picker-trigger", /flex-shrink:\s*1/));
+    expect(css).toMatch(rule(".routing-picker-trigger", /min-width:\s*0/));
+    expect(css).toMatch(rule(".routing-picker-trigger", /width:\s*230px/));
+    expect(css).toMatch(rule(".model-runner-trigger .truncate", /min-width:\s*0/));
+    expect(css).toMatch(rule(".routing-picker-trigger .truncate", /min-width:\s*0/));
 
     // REQ-015 审查修复：窄布局下终端状态栏可整体换行，分叉基准下拉框可收缩。
     expect(css).toMatch(rule(".console-status-bar", /flex-wrap:\s*wrap/));
@@ -565,8 +561,8 @@ describe("shared brand mark and browser icons", () => {
     expect(css).toMatch(rule(".console-status-info", /min-width:\s*0/));
     expect(css).toMatch(rule(".console-status-actions", /flex-wrap:\s*wrap/));
     expect(css).toMatch(rule(".new-req-stack-label", /white-space:\s*nowrap/));
-    expect(css).toMatch(rule(".select.new-req-stack-select", /min-width:\s*0/));
-    expect(css).toMatch(rule(".select.new-req-stack-select", /flex:\s*1 1 0/));
+    expect(css).toMatch(rule(".new-req-stack-select", /min-width:\s*0/));
+    expect(css).toMatch(rule(".new-req-stack-select", /flex:\s*1 1 0/));
 
     // REQ-015 审查修复：窄屏证据卡片信息区弹性基准、操作组换行与长命令任意断行。
     expect(css).toMatch(rule(".evidence-info", /flex:\s*1 1 260px/));
@@ -574,17 +570,12 @@ describe("shared brand mark and browser icons", () => {
     expect(css).toMatch(rule(".evidence-actions", /flex-wrap:\s*wrap/));
     expect(css).toMatch(rule(".evidence-command", /overflow-wrap:\s*anywhere/));
 
-    // 状态徽标与顶栏连接胶囊保持单行且不被压缩。
-    expect(css).toMatch(rule(".badge", /min-height:\s*var\(--badge-h\)/));
-    expect(css).toMatch(rule(".badge", /flex-shrink:\s*0/));
+    // 顶栏连接胶囊保持单行且不被压缩，菜单项保持 flex 单行排版。
     expect(css).toMatch(rule(".bridge-pill", /white-space:\s*nowrap/));
     expect(css).toMatch(rule(".bridge-pill", /flex-shrink:\s*0/));
-
-    // REQ-010 守卫：菜单项仍按内容自适应宽度，不拉伸、不块级化。
-    expect(css).toMatch(rule(".more-menu button", /width:\s*auto/));
-    expect(css).toMatch(rule(".more-menu button", /display:\s*flex/));
-    expect(css).not.toMatch(rule(".more-menu button", /display:\s*block/));
-    expect(css).not.toMatch(rule(".more-menu button", /width:\s*100%/));
+    expect(menuSrc).toContain('data-slot="menu-item"');
+    expect(menuSrc).toContain("items-center gap-2");
+    expect(css).not.toMatch(/\.more-menu button/);
   });
 
   test("page declares the vector, compatibility, and apple touch icons", () => {

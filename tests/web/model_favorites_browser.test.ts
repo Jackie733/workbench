@@ -9,6 +9,7 @@ import { HubExecutor } from "../../src/hub/executor.ts";
 import { applyHubRoutingPreset, readHubConfig, writeHubConfig } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const browserEnv = resolveTestBrowser();
 const HAS_BROWSER = browserEnv !== null;
@@ -136,10 +137,12 @@ async function waitRoutingStagePickerClosed(page: BrowserPage, stage: string): P
 }
 
 async function readSelectValue(page: BrowserPage, testId: string): Promise<string> {
-  return page.evaluate(
-    (id: string) => (document.querySelector(`[data-testid="${id}"]`) as HTMLSelectElement | null)?.value ?? "",
-    testId,
-  );
+  return page.evaluate((id: string) => {
+    const el = document.querySelector(`[data-testid="${id}"]`);
+    if (!el) return "";
+    if (el.tagName === "SELECT") return (el as HTMLSelectElement).value ?? "";
+    return el.getAttribute("data-value") ?? "";
+  }, testId);
 }
 
 async function readStoredFavorites(page: BrowserPage): Promise<string[]> {
@@ -431,7 +434,7 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       await page.keyboard.press("Escape");
 
       // 切换英文界面时收藏分组标题与收藏按钮无障碍文本同步本地化
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
       await openRunnerPicker(page);
       const enPickerText = await page.evaluate(() => ({
@@ -452,7 +455,7 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       );
       expect(await readSelectValue(page, "banner-runner-select")).toBe("codex::gpt-6.1-sol");
       await page.waitForSelector('[data-testid="banner-runner-select-effort"]', { timeout: 5000 });
-      await page.select('[data-testid="banner-runner-select-effort"]', "medium");
+      await selectUiOption(page, '[data-testid="banner-runner-select-effort"]', "medium");
       expect(await readSelectValue(page, "banner-runner-select-effort")).toBe("medium");
 
       await openRunnerPicker(page);
@@ -559,7 +562,7 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       expect(await readSelectValue(page, "route-effort-implement")).toBe("");
 
       // 设置兼容强度后切换到同样支持 high 的模型：强度保留
-      await page.select('[data-testid="route-effort-implement"]', "high");
+      await selectUiOption(page, '[data-testid="route-effort-implement"]', "high");
       await openRoutingStagePicker(page, "implement");
       await clickReady(page, '[data-testid="route-select-implement-option-omp::gpt-6.1-sol"]');
       await waitRoutingStagePickerClosed(page, "implement");

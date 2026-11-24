@@ -19,6 +19,7 @@ import {
   initGitRepoIn,
   launchE2eBrowser,
 } from "./e2e_helpers.ts";
+import { selectUiOption } from "./coss_select_helper.ts";
 
 const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
@@ -249,14 +250,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ],
         28,
       );
-      await clickReady(page, '[data-testid="diff-view-mode-toggle"] button:nth-child(2)');
+      await clickReady(page, '[data-testid="diff-view-mode-toggle"] [role="radio"]:nth-of-type(2)');
       await page.waitForSelector('[data-testid="diff-unified-list"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="diff-expand-height-btn"]');
       expect(
         await page.evaluate(() => document.querySelector('[data-testid="diff-unified-list"]')?.classList.contains("expanded")),
       ).toBe(true);
       await clickReady(page, '[data-testid="diff-expand-height-btn"]');
-      await clickReady(page, '[data-testid="diff-view-mode-toggle"] button:nth-child(1)');
+      await clickReady(page, '[data-testid="diff-view-mode-toggle"] [role="radio"]:nth-of-type(1)');
 
       await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');
       await page.waitForSelector('[data-testid="drawer-diff-pane"]', { timeout: 5000 });
@@ -266,11 +267,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await page.click('[data-testid="tab-changes"]');
       await page.waitForSelector('[data-testid="verify-diff-shortcut-card"]', { timeout: 5000 });
-      // REQ-015: 手动验证命令输入、条件输入与运行按钮严格等高 34px 且单行。
+      // REQ-015: 手动验证命令输入、条件输入与运行按钮严格等高 32px 且单行。
       await expectControlsAligned(
         page,
-        ['#manual-verify-cmd', '#manual-verify-criteria', '[data-testid="manual-verify-btn"]'],
-        34,
+        [
+          '[data-slot="input-control"]:has(#manual-verify-cmd)',
+          '[data-slot="input-control"]:has(#manual-verify-criteria)',
+          '[data-testid="manual-verify-btn"]',
+        ],
+        32,
       );
       // REQ-015 审查修复：窄屏证据卡片信息区保留弹性基准，长命令可在任意位置换行，操作组另起一行。
       await page.waitForSelector(".evidence-card", { timeout: 5000 });
@@ -499,10 +504,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.type(`[data-testid="category-input-${alphaId}"]`, "核心");
       await clickReady(page, `[data-testid="category-save-${alphaId}"]`);
       await page.waitForSelector(`[data-testid="project-cat-badge-${alphaId}"]`, { timeout: 5000 });
-      await page.select('[data-testid="project-sort-select"]', "name");
-      await page.select('[data-testid="project-group-select"]', "category");
+      await selectUiOption(page, '[data-testid="project-sort-select"]', "name");
+      await selectUiOption(page, '[data-testid="project-group-select"]', "category");
       await page.waitForSelector('[data-testid="project-group-cat:核心"]', { timeout: 5000 });
-      await page.select('[data-testid="project-group-select"]', "none");
+      await selectUiOption(page, '[data-testid="project-group-select"]', "none");
 
       // 1c. Switching between projects does not jump/reorder the sidebar project queue
       const orderBeforeSwitch = await page.evaluate(() =>
@@ -511,7 +516,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ),
       );
       const otherId = orderBeforeSwitch.find((id) => id && id !== alphaId)!;
-      await page.select('[data-testid="project-sort-select"]', "recent");
+      await selectUiOption(page, '[data-testid="project-sort-select"]', "recent");
       const orderOnRecentBefore = await page.evaluate(() =>
         Array.from(document.querySelectorAll('[data-testid="hub-project-list"] [data-action="switch-project"]')).map((el) =>
           el.getAttribute("data-id"),
@@ -525,7 +530,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ),
       );
       expect(orderAfterSwitch).toEqual(orderOnRecentBefore);
-      await page.select('[data-testid="project-sort-select"]', "attention");
+      await selectUiOption(page, '[data-testid="project-sort-select"]', "attention");
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
@@ -535,17 +540,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="custom-model-input"]')))).toBe(false);
       await clickReady(page, '[data-testid="settings-tab-global"]');
       await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
-      await page.select('[data-testid="hub-output-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="hub-output-language-select"]', "en");
       await clickReady(page, '[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="project-github-repo-input"]', { timeout: 5000 });
       const inheritLabel = await page.evaluate(
         () =>
-          document.querySelector('[data-testid="project-output-language-select"] option[value="inherit"]')?.textContent ?? "",
+          document.querySelector('[data-testid="project-output-language-select"]')?.textContent ?? "",
       );
       expect(inheritLabel).toContain("当前：zh-CN"); // 已持久化的全局语言，而非未保存草稿
       await clickReady(page, '[data-testid="settings-tab-global"]');
       await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
-      await page.select('[data-testid="hub-output-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="hub-output-language-select"]', "zh-CN");
       await clickReady(page, '[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="preset-quota_saver"]');
@@ -582,7 +587,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(lockedEffortMetrics.lockedVerticalOverflow).toBe(false);
       expect(lockedEffortMetrics.lockedTitle).toContain("XHigh (极高)");
       await page.select('[data-testid="route-select-design"]', "qodercn::Qwen4-Max");
-      await page.select('[data-testid="route-effort-design"]', "xhigh");
+      await selectUiOption(page, '[data-testid="route-effort-design"]', "xhigh");
       await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
@@ -591,14 +596,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const firstReopen = await page.evaluate(() => ({
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
       }));
       expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
 
       await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
-      await page.select('[data-testid="route-effort-design"]', "high");
+      await selectUiOption(page, '[data-testid="route-effort-design"]', "high");
       await page.select('[data-testid="route-select-implement"]', "opencode::opencode/deepseek-v4.1-flash-free");
-      await page.select('[data-testid="route-effort-implement"]', "medium");
+      await selectUiOption(page, '[data-testid="route-effort-implement"]', "medium");
       await clickReady(page, '[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
@@ -606,9 +611,9 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const secondReopen = await page.evaluate(() => ({
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
         implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
-        implementEffort: (document.querySelector('[data-testid="route-effort-implement"]') as HTMLSelectElement)?.value,
+        implementEffort: document.querySelector('[data-testid="route-effort-implement"]')?.getAttribute("data-value") ?? "",
       }));
       expect(secondReopen).toEqual({
         designModel: "codex::gpt-6-astra",
@@ -624,9 +629,9 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const afterReload = await page.evaluate(() => ({
         designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: (document.querySelector('[data-testid="route-effort-design"]') as HTMLSelectElement)?.value,
+        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
         implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
-        implementEffort: (document.querySelector('[data-testid="route-effort-implement"]') as HTMLSelectElement)?.value,
+        implementEffort: document.querySelector('[data-testid="route-effort-implement"]')?.getAttribute("data-value") ?? "",
       }));
       expect(afterReload).toEqual(secondReopen);
       await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
@@ -686,7 +691,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         ],
         28,
       );
-      await page.select('[data-testid="banner-runner-select-effort"]', "high");
+      await selectUiOption(page, '[data-testid="banner-runner-select-effort"]', "high");
       await clickReady(page, '[data-testid="run-selected-model-btn"]');
       await page.waitForFunction(
         () =>
@@ -741,15 +746,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => (document.querySelector('[data-testid="quick-report-selector"]') as HTMLInputElement)?.value ?? "",
       );
       expect(pickedSel).toBe('[data-testid="new-req-btn"]');
-      // REQ-015: 快速上报分类下拉、选择器输入框与拾取元素按钮严格等高 34px 且单行。
+      // REQ-015: 快速上报分类下拉、选择器输入框与拾取元素按钮严格等高 32px 且单行。
       await expectControlsAligned(
         page,
         [
           '[data-testid="quick-report-category"]',
-          '[data-testid="quick-report-selector"]',
+          '[data-slot="input-control"]:has([data-testid="quick-report-selector"])',
           '[data-testid="pick-element-btn"]',
         ],
-        34,
+        32,
       );
       await page.type('[data-testid="quick-report-title"]', "窄屏下工具栏按钮间距略紧");
       await page.type('[data-testid="quick-report-detail"]', "在 390px 宽度下建议增加 gap");
@@ -793,12 +798,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(
         await page.evaluate(() => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent ?? ""),
       ).toBe("审查");
-      await page.select('[data-testid="ui-language-select"]', "en");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(
         () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "Review",
         { timeout: 5000 },
       );
-      await page.select('[data-testid="ui-language-select"]', "zh-CN");
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "审查",
         { timeout: 5000 },
@@ -931,10 +936,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     };
     const clickMenuItem = (label: string) =>
       page.evaluate((text: string) => {
-        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] button'));
+        const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] [role="menuitem"]'));
         const target = buttons.find((b) => (b.textContent ?? "").includes(text));
         if (!target) throw new Error(`menu item not found: ${text}`);
-        (target as HTMLButtonElement).click();
+        (target as HTMLElement).click();
       }, label);
 
     try {
@@ -1254,8 +1259,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           color: cs.color,
         };
       });
-      expect(lightColors.bg).toBe("rgb(248, 250, 252)");
-      expect(lightColors.color).toBe("rgb(30, 41, 59)");
+      expect(lightColors.bg).toBe("rgb(250, 250, 250)");
+      expect(lightColors.color).toBe("rgb(38, 38, 38)");
 
       await clickReady(page, '[data-action="toggle-theme"]');
       const darkColors = await page.evaluate(() => {
@@ -1268,8 +1273,8 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         };
       });
       expect(darkColors.theme).toBe("dark");
-      expect(darkColors.bg).toBe("rgb(15, 19, 26)");
-      expect(darkColors.color).toBe("rgb(226, 232, 240)");
+      expect(darkColors.bg).toBe("rgb(16, 16, 19)");
+      expect(darkColors.color).toBe("rgb(228, 228, 231)");
 
       // 2. 次要区块默认折叠，主要回复与错误告警默认展开
       const initialState = await page.evaluate(() => {
@@ -1338,7 +1343,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         const bar = document.querySelector(".console-status-bar") as HTMLElement | null;
         const info = bar?.querySelector(".console-status-info") as HTMLElement | null;
         const actions = bar?.querySelector(".console-status-actions") as HTMLElement | null;
-        const badge = info?.querySelector(".badge") as HTMLElement | null;
+        const badge = info?.querySelector('[data-slot="badge"]') as HTMLElement | null;
         return {
           bar: rect(bar),
           info: rect(info),
@@ -1425,10 +1430,11 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
           const menu = document.querySelector('[data-testid="more-menu"]') as HTMLElement;
           const trigger = document.querySelector('[data-testid="more-menu-btn"]')!.getBoundingClientRect();
           const rect = menu.getBoundingClientRect();
-          const style = getComputedStyle(menu);
+          const inner = (menu.firstElementChild as HTMLElement | null) ?? menu;
+          const style = getComputedStyle(inner);
           const contentWidth =
-            menu.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
-          const items = Array.from(menu.querySelectorAll("button")).map((b) => (b as HTMLElement).offsetWidth);
+            inner.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+          const items = Array.from(menu.querySelectorAll('[role="menuitem"]')).map((b) => (b as HTMLElement).offsetWidth);
           return {
             width: rect.width,
             right: rect.right,
