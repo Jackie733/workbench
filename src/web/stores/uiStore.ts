@@ -1,6 +1,6 @@
 import React from "react";
-import { toast } from "sonner";
 import { create } from "zustand";
+import { toastManager } from "../components/ui/toast.tsx";
 import type { OutputLanguage } from "../../core/types.ts";
 import {
   applyDocumentLanguage,
@@ -273,35 +273,40 @@ export const useUiStore = create<UiStoreState>((set) => ({
       modal: typeof modalOrUpdater === "function" ? modalOrUpdater(s.modal) : modalOrUpdater,
     })),
   showToast: (message, isError = false) => {
-    if (isError) toast.error(message);
-    else toast(message);
+    toastManager.add({
+      title: message,
+      ...(isError ? { type: "error" } : {}),
+    });
   },
   showToastKey: (key, params, isError = false) => {
     const message = React.createElement(LocalizedToastMessage, { messageKey: key, params });
-    if (isError) toast.error(message);
-    else toast(message);
+    toastManager.add({
+      title: message,
+      ...(isError ? { type: "error" } : {}),
+    });
   },
   showToastError: (err) => {
     const ref = describeClientErrorRef(err);
     if (ref.key) {
       const message = React.createElement(LocalizedToastMessage, { messageKey: ref.key, params: ref.params });
-      toast.error(message);
+      toastManager.add({ title: message, type: "error" });
     } else {
-      toast.error(ref.text);
+      toastManager.add({ title: ref.text, type: "error" });
     }
   },
   showReloadPendingToast: () => {
-    toast(React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadPending" }), {
+    toastManager.add({
       id: RELOAD_PENDING_TOAST_ID,
-      duration: Number.POSITIVE_INFINITY,
-      action: {
-        label: React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadAction" }),
+      title: React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadPending" }),
+      timeout: 0,
+      actionProps: {
+        children: React.createElement(LocalizedToastMessage, { messageKey: "toast.reloadAction" }),
         onClick: () => window.location.reload(),
       },
     });
   },
   dismissReloadPendingToast: () => {
-    toast.dismiss(RELOAD_PENDING_TOAST_ID);
+    toastManager.close(RELOAD_PENDING_TOAST_ID);
   },
 }));
 

@@ -202,7 +202,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       // Verify design version diff toggle works
       // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
-      await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout: 15000 });
+      await page.waitForFunction(() => !document.querySelector('[data-slot="toast-root"]'), { timeout: 15000 });
       await page.click('[data-action="toggle-design-diff"]');
       await page.waitForSelector(".diff-code", { timeout: 5000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
@@ -969,7 +969,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="more-menu-btn"]');
       await menuGone();
 
-      // 5. 选择菜单项后菜单关闭，且动作正常打开 Radix Dialog（交接简报弹窗）。
+      // 5. 选择菜单项后菜单关闭，且动作正常打开 coss Dialog（交接简报弹窗）。
       await openMenu();
       await clickMenuItem("查看交接简报");
       await menuGone();
@@ -1035,11 +1035,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         const remembered = (window as unknown as { __req014Anchor?: Element | null }).__req014Anchor;
         return Boolean(remembered && document.querySelector(sel) === remembered);
       }, anchorSel);
-    const waitAnchorPlaced = (anchorSel: string) =>
+    const waitAnchorPlaced = () =>
       page.waitForFunction(
-        (sel: unknown) => document.querySelector(String(sel))?.hasAttribute("data-radix-popper-side") === true,
+        () => document.querySelector('[data-slot="menu-positioner"][data-side], [data-slot="popover-positioner"][data-side]') !== null,
         { timeout: 5000 },
-        anchorSel,
       );
 
     try {
@@ -1053,7 +1052,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       // 1. 「更多」菜单：锚点是按钮的稳定包装节点，外部状态更新不重建锚点。
       await clickReady(page, '[data-testid="more-menu-btn"]');
       await page.waitForSelector('[data-testid="more-menu"]', { timeout: 5000 });
-      await waitAnchorPlaced('[data-testid="more-menu-anchor"]');
+      await waitAnchorPlaced();
       expect(await anchorContains('[data-testid="more-menu-anchor"]', '[data-testid="more-menu-btn"]')).toBe(true);
       expect(await rememberAnchor('[data-testid="more-menu-anchor"]')).toBe(true);
       await page.select('[data-testid="banner-runner-select"]', "manual_copy");
@@ -1083,7 +1082,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.select('[data-testid="banner-runner-select"]', "");
       await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
       await page.waitForSelector('[data-testid="banner-runner-select-search"]', { timeout: 5000 });
-      await waitAnchorPlaced('[data-testid="banner-runner-select-anchor"]');
+      await waitAnchorPlaced();
       expect(
         await anchorContains('[data-testid="banner-runner-select-anchor"]', '[data-testid="banner-runner-select-trigger"]'),
       ).toBe(true);
@@ -1119,7 +1118,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="route-select-design-trigger"]');
       await page.waitForSelector('[data-testid="route-select-design-search"]', { timeout: 5000 });
-      await waitAnchorPlaced('[data-testid="route-select-design-anchor"]');
+      await waitAnchorPlaced();
       expect(await rememberAnchor('[data-testid="route-select-design-anchor"]')).toBe(true);
       const nextImplementValue = await page.evaluate(() => {
         const select = document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement | null;

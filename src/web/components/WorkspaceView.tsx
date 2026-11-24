@@ -1,12 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Content as DropdownContent,
-  Item as DropdownItem,
-  Portal as DropdownPortal,
-  Root as DropdownRoot,
-  Trigger as DropdownTrigger,
-} from "@radix-ui/react-dropdown-menu";
-import {
   AlertTriangle,
   ArrowUp,
   Ban,
@@ -128,6 +121,7 @@ import {
   VERDICT_ICONS,
 } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, ModalShell, RunnerSelect } from "./Primitives.tsx";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu.tsx";
 
 function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }) {
   const language = useUiStore((s) => s.language);
@@ -2080,6 +2074,7 @@ export function WorkspaceView() {
   const busy = useUiStore((s) => s.busy);
   const moreMenuOpen = useUiStore((s) => s.moreMenuOpen);
   const moreMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const moreMenuAnchorRef = useRef<HTMLSpanElement | null>(null);
   const setWorkspaceTab = useUiStore((s) => s.setWorkspaceTab);
   const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
   const setModal = useUiStore((s) => s.setModal);
@@ -2228,223 +2223,206 @@ export function WorkspaceView() {
           {stageMeta.labels[language]}
         </span>
         <div className="more-wrap">
-          <DropdownRoot open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
+          <Menu open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
             {/*
              * 「更多」菜单的锚点固定在包装节点上，内部按钮重渲染不再重新登记
-             * PopperAnchor 节点；关闭时显式把焦点还给按钮，保留原有键盘行为。
+             * 位置锚点节点；关闭时显式把焦点还给按钮，保留原有键盘行为。
              */}
-            <DropdownTrigger asChild>
-              <span className="inline-flex shrink-0" data-testid="more-menu-anchor">
-                <button ref={moreMenuButtonRef} className="btn xs" type="button" data-testid="more-menu-btn">
-                  <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
-                </button>
-              </span>
-            </DropdownTrigger>
-            <DropdownPortal>
-              <DropdownContent
-                className="more-menu"
-                data-testid="more-menu"
-                align="end"
-                sideOffset={6}
-                onCloseAutoFocus={(event) => {
-                  event.preventDefault();
-                  moreMenuButtonRef.current?.focus();
+            <span ref={moreMenuAnchorRef} className="inline-flex shrink-0" data-testid="more-menu-anchor">
+              <MenuTrigger
+                render={
+                  <button ref={moreMenuButtonRef} className="btn xs" type="button" data-testid="more-menu-btn">
+                    <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
+                  </button>
+                }
+              />
+            </span>
+            <MenuPopup
+              align="end"
+              anchor={moreMenuAnchorRef}
+              className="more-menu"
+              contentClassName="p-0"
+              data-testid="more-menu"
+              finalFocus={moreMenuButtonRef}
+              side="bottom"
+              sideOffset={6}
+            >
+              {runningThis && (
+                <div className="xs muted" data-testid="more-menu-lock-hint" style={{ padding: "6px 8px", maxWidth: 280 }}>
+                  {t(language, "ws.runLockMenuHint")}
+                </div>
+              )}
+              <MenuItem
+                disabled={runningThis}
+                nativeButton
+                onClick={() => {
+                  startEditSpec(
+                    s.title,
+                    d.specMarkdown,
+                    s.criteria.map((c) => ({
+                      id: c.id,
+                      description: c.description,
+                      required: c.required,
+                      command: c.command ?? "",
+                    })),
+                  );
                 }}
+                render={<button type="button" data-testid="menu-edit-req-btn" />}
               >
-                {runningThis && (
-                  <div className="xs muted" data-testid="more-menu-lock-hint" style={{ padding: "6px 8px", maxWidth: 280 }}>
-                    {t(language, "ws.runLockMenuHint")}
-                  </div>
-                )}
-                <DropdownItem asChild disabled={runningThis}>
-                  <button
-                    type="button"
-                    data-testid="menu-edit-req-btn"
+                <Icon icon={Pencil} size={14} /> {t(language, "ws.menu.editReq")}
+              </MenuItem>
+              <MenuItem
+                disabled={runningThis}
+                nativeButton
+                onClick={() => startEditDesign(d.designMarkdown)}
+                render={<button type="button" data-testid="menu-edit-design-btn" />}
+              >
+                <Icon icon={FileEdit} size={14} /> {t(language, "ws.menu.editDesign")}
+              </MenuItem>
+              <MenuItem
+                nativeButton
+                onClick={() => void openHandoff(s.id)}
+                render={<button type="button" />}
+              >
+                <Icon icon={FileText} size={14} /> {t(language, "ws.menu.handoff")}
+              </MenuItem>
+              {!reqData?.sandbox &&
+                project?.git?.isGitRepo &&
+                s.stage !== "done" &&
+                s.stage !== "cancelled" && (
+                  <MenuItem
                     disabled={runningThis}
-                    onClick={() => {
-                      startEditSpec(
-                        s.title,
-                        d.specMarkdown,
-                        s.criteria.map((c) => ({
-                          id: c.id,
-                          description: c.description,
-                          required: c.required,
-                          command: c.command ?? "",
-                        })),
-                      );
-                    }}
-                  >
-                    <Icon icon={Pencil} size={14} /> {t(language, "ws.menu.editReq")}
-                  </button>
-                </DropdownItem>
-                <DropdownItem asChild disabled={runningThis}>
-                  <button
-                    type="button"
-                    data-testid="menu-edit-design-btn"
-                    disabled={runningThis}
-                    onClick={() => startEditDesign(d.designMarkdown)}
-                  >
-                    <Icon icon={FileEdit} size={14} /> {t(language, "ws.menu.editDesign")}
-                  </button>
-                </DropdownItem>
-                <DropdownItem asChild>
-                  <button type="button" onClick={() => void openHandoff(s.id)}>
-                    <Icon icon={FileText} size={14} /> {t(language, "ws.menu.handoff")}
-                  </button>
-                </DropdownItem>
-                {!reqData?.sandbox &&
-                  project?.git?.isGitRepo &&
-                  s.stage !== "done" &&
-                  s.stage !== "cancelled" && (
-                    <DropdownItem asChild disabled={runningThis}>
-                      <button
-                        type="button"
-                        data-testid="menu-enable-sandbox-btn"
-                        disabled={runningThis}
-                        onClick={async () => {
-                          if (guardRequirementRunLock(s.id)) return;
-                          const out = await runBusy(() => api.createRequirementSandbox(s.id));
-                          if (out) {
-                            await invalidateAllWorkbenchQueries();
-                            showToastKey("ws.sandboxEnabledToast", {
-                              id: s.id,
-                              branch: out.sandbox.branch,
-                            });
-                          }
-                        }}
-                      >
-                        <Icon icon={GitBranch} size={14} /> {t(language, "ws.menu.enableSandbox")}
-                      </button>
-                    </DropdownItem>
-                  )}
-                {!s.github?.issue ? (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-link-issue-btn"
-                      disabled={runningThis}
-                      onClick={() => {
-                        setModal({
-                          kind: "link_issue",
-                          requirementId: s.id,
-                          provider: isGiteeProject ? "gitee" : "github",
-                          mode: isGiteeProject ? "link" : "create",
-                          issueRef: "",
+                    nativeButton
+                    onClick={async () => {
+                      if (guardRequirementRunLock(s.id)) return;
+                      const out = await runBusy(() => api.createRequirementSandbox(s.id));
+                      if (out) {
+                        await invalidateAllWorkbenchQueries();
+                        showToastKey("ws.sandboxEnabledToast", {
+                          id: s.id,
+                          branch: out.sandbox.branch,
                         });
-                      }}
-                    >
-                      <Icon icon={Link2} size={14} /> {t(language, isGiteeProject ? "ws.menu.linkGitee" : "ws.menu.linkIssue")}
-                    </button>
-                  </DropdownItem>
-                ) : s.github.provider !== "gitee" ? (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-sync-issue-btn"
-                      disabled={runningThis}
-                      onClick={async () => {
-                        if (guardRequirementRunLock(s.id)) return;
-                        const out = await runBusy(() => api.syncRequirementIssue(s.id));
-                        if (out) {
-                          await invalidateAllWorkbenchQueries();
-                          showToastKey("toast.gitHubSynced", { number: s.github!.issue!.number });
-                        }
-                      }}
-                    >
-                      <Icon icon={RefreshCw} size={14} /> {t(language, "ws.menu.syncIssue", { number: s.github.issue.number })}
-                    </button>
-                  </DropdownItem>
-                ) : null}
-                {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-fast-track-btn"
-                      disabled={runningThis}
-                      onClick={() => {
-                        void handleBannerAction(d, "fast_track", bridgeConnected);
-                      }}
-                    >
-                      <Icon icon={Zap} size={14} /> {t(language, "ws.menu.fastTrack")}
-                    </button>
-                  </DropdownItem>
-                )}
-                {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-block-btn"
-                      disabled={runningThis}
-                      onClick={() => {
-                        setModal({ kind: "lifecycle", action: "block", reason: "" });
-                      }}
-                    >
-                      <Icon icon={Ban} size={14} /> {t(language, "ws.menu.block")}
-                    </button>
-                  </DropdownItem>
-                )}
-                {s.stage !== "done" && s.stage !== "cancelled" && (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-cancel-btn"
-                      disabled={runningThis}
-                      onClick={() => {
-                        setModal({ kind: "lifecycle", action: "cancel", reason: "" });
-                      }}
-                    >
-                      <Icon icon={XCircle} size={14} /> {t(language, "ws.menu.cancel")}
-                    </button>
-                  </DropdownItem>
-                )}
-                {(s.stage === "done" || s.stage === "cancelled") && (
-                  <DropdownItem asChild disabled={runningThis}>
-                    <button
-                      type="button"
-                      data-testid="menu-reopen-btn"
-                      disabled={runningThis}
-                      onClick={() => {
-                        setModal({
-                          kind: "lifecycle",
-                          action: "reopen",
-                          reason: "",
-                          preserveApproval: d.validity.approval.valid,
-                        });
-                      }}
-                    >
-                      <Icon icon={RotateCcw} size={14} /> {t(language, "ws.menu.reopen")}
-                    </button>
-                  </DropdownItem>
-                )}
-                <DropdownItem asChild>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setModal({
-                        kind: "debug_info",
-                        text: JSON.stringify(
-                          {
-                            projectRoot: project?.root,
-                            projectId: project?.project?.projectId,
-                            id: s.id,
-                            revision: s.revision,
-                            specHash: s.specHash,
-                            designVersion: s.designVersion,
-                            designHash: s.designHash,
-                            baseline: s.baseline,
-                          },
-                          null,
-                          2,
-                        ),
-                      });
+                      }
                     }}
+                    render={<button type="button" data-testid="menu-enable-sandbox-btn" />}
                   >
-                    <Icon icon={Bug} size={14} /> {t(language, "ws.menu.debug")}
-                  </button>
-                </DropdownItem>
-              </DropdownContent>
-            </DropdownPortal>
-          </DropdownRoot>
+                    <Icon icon={GitBranch} size={14} /> {t(language, "ws.menu.enableSandbox")}
+                  </MenuItem>
+                )}
+              {!s.github?.issue ? (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    setModal({
+                      kind: "link_issue",
+                      requirementId: s.id,
+                      provider: isGiteeProject ? "gitee" : "github",
+                      mode: isGiteeProject ? "link" : "create",
+                      issueRef: "",
+                    });
+                  }}
+                  render={<button type="button" data-testid="menu-link-issue-btn" />}
+                >
+                  <Icon icon={Link2} size={14} /> {t(language, isGiteeProject ? "ws.menu.linkGitee" : "ws.menu.linkIssue")}
+                </MenuItem>
+              ) : s.github.provider !== "gitee" ? (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={async () => {
+                    if (guardRequirementRunLock(s.id)) return;
+                    const out = await runBusy(() => api.syncRequirementIssue(s.id));
+                    if (out) {
+                      await invalidateAllWorkbenchQueries();
+                      showToastKey("toast.gitHubSynced", { number: s.github!.issue!.number });
+                    }
+                  }}
+                  render={<button type="button" data-testid="menu-sync-issue-btn" />}
+                >
+                  <Icon icon={RefreshCw} size={14} /> {t(language, "ws.menu.syncIssue", { number: s.github.issue.number })}
+                </MenuItem>
+              ) : null}
+              {(s.stage === "draft" || s.stage === "designing" || s.stage === "awaiting_approval") && (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    void handleBannerAction(d, "fast_track", bridgeConnected);
+                  }}
+                  render={<button type="button" data-testid="menu-fast-track-btn" />}
+                >
+                  <Icon icon={Zap} size={14} /> {t(language, "ws.menu.fastTrack")}
+                </MenuItem>
+              )}
+              {s.stage !== "blocked" && s.stage !== "done" && s.stage !== "cancelled" && (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    setModal({ kind: "lifecycle", action: "block", reason: "" });
+                  }}
+                  render={<button type="button" data-testid="menu-block-btn" />}
+                >
+                  <Icon icon={Ban} size={14} /> {t(language, "ws.menu.block")}
+                </MenuItem>
+              )}
+              {s.stage !== "done" && s.stage !== "cancelled" && (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    setModal({ kind: "lifecycle", action: "cancel", reason: "" });
+                  }}
+                  render={<button type="button" data-testid="menu-cancel-btn" />}
+                >
+                  <Icon icon={XCircle} size={14} /> {t(language, "ws.menu.cancel")}
+                </MenuItem>
+              )}
+              {(s.stage === "done" || s.stage === "cancelled") && (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    setModal({
+                      kind: "lifecycle",
+                      action: "reopen",
+                      reason: "",
+                      preserveApproval: d.validity.approval.valid,
+                    });
+                  }}
+                  render={<button type="button" data-testid="menu-reopen-btn" />}
+                >
+                  <Icon icon={RotateCcw} size={14} /> {t(language, "ws.menu.reopen")}
+                </MenuItem>
+              )}
+              <MenuItem
+                nativeButton
+                onClick={() => {
+                  setModal({
+                    kind: "debug_info",
+                    text: JSON.stringify(
+                      {
+                        projectRoot: project?.root,
+                        projectId: project?.project?.projectId,
+                        id: s.id,
+                        revision: s.revision,
+                        specHash: s.specHash,
+                        designVersion: s.designVersion,
+                        designHash: s.designHash,
+                        baseline: s.baseline,
+                      },
+                      null,
+                      2,
+                    ),
+                  });
+                }}
+                render={<button type="button" />}
+              >
+                <Icon icon={Bug} size={14} /> {t(language, "ws.menu.debug")}
+              </MenuItem>
+            </MenuPopup>
+          </Menu>
         </div>
       </div>
 

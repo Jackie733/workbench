@@ -180,7 +180,7 @@ function makeGitHubDeps(prStates: Record<number, { baseBranch: string; headBranc
 
 async function isToastPending(page: BrowserPage): Promise<boolean> {
   return page.evaluate(() =>
-    Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) => {
+    Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) => {
       const text = el.textContent ?? "";
       return text.includes("工作台前端已热编译更新") && text.includes("立即刷新");
     }),
@@ -266,7 +266,7 @@ suite("REQ-008 同步 PR 不打断已打开弹窗", () => {
       await page.click('[data-testid="sync-pain-pr-EVO-1"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) => {
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) => {
             const text = el.textContent ?? "";
             return text.includes("工作台前端已热编译更新") && text.includes("立即刷新");
           }),
@@ -292,7 +292,7 @@ suite("REQ-008 同步 PR 不打断已打开弹窗", () => {
       expect(await isToastPending(page)).toBe(true);
       const pendingToastCount = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).filter((el) => {
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).filter((el) => {
             const text = el.textContent ?? "";
             return text.includes("工作台前端已热编译更新");
           }).length,

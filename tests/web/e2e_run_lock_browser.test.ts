@@ -106,10 +106,11 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
     });
 
     const disabled = (selector: string) =>
-      page.evaluate(
-        (sel: string) => Boolean((document.querySelector(sel) as HTMLButtonElement | null)?.disabled),
-        selector,
-      );
+      page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLButtonElement | null;
+        if (!el) return false;
+        return Boolean(el.disabled || el.getAttribute("aria-disabled") === "true" || el.hasAttribute("data-disabled"));
+      }, selector);
     const projectId = (name: string) =>
       page.evaluate((needle: string) => {
         const row = Array.from(document.querySelectorAll('[data-action="switch-project"]')).find((el) =>
@@ -162,7 +163,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       const handoffEnabled = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('[data-testid="more-menu"] button'));
         const target = buttons.find((b) => (b.textContent ?? "").includes("查看交接简报")) as HTMLButtonElement | undefined;
-        return Boolean(target && !target.disabled);
+        return Boolean(target && !target.disabled && target.getAttribute("aria-disabled") !== "true");
       });
       expect(handoffEnabled).toBe(true);
       await page.evaluate(() => {
@@ -485,10 +486,11 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
         (window as unknown as { __wbBlockSockets: boolean }).__wbBlockSockets = false;
       });
     const disabled = (selector: string) =>
-      page.evaluate(
-        (sel: string) => Boolean((document.querySelector(sel) as HTMLButtonElement | null)?.disabled),
-        selector,
-      );
+      page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLButtonElement | null;
+        if (!el) return false;
+        return Boolean(el.disabled || el.getAttribute("aria-disabled") === "true" || el.hasAttribute("data-disabled"));
+      }, selector);
 
     try {
       await page.setViewport({ width: 1360, height: 860 });

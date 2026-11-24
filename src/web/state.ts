@@ -18,7 +18,6 @@ import type {
   ValidityReport,
 } from "../core/types.ts";
 import type { PainPointCategory } from "../hub/evolution.ts";
-import { defaultFilter } from "cmdk";
 import { REASONING_EFFORTS, type DiscoveredModel, type HarnessId, type HarnessInfo, type ModelTarget, type ReasoningEffort, type RoutingConfig } from "../hub/types.ts";
 import type { BridgeStatus } from "../server/index.ts";
 import type { BrowseResponse, GiteeIssueListItem } from "./api.ts";
@@ -956,9 +955,18 @@ export function runnerModelSearchText(option: RunnerModelOption): string {
 }
 
 export function matchesModelQuery(text: string, query: string): boolean {
-  const trimmed = query.trim();
+  const trimmed = query.trim().toLowerCase();
   if (!trimmed) return true;
-  return defaultFilter(text, trimmed) > 0;
+  const haystack = text.toLowerCase();
+  if (haystack.includes(trimmed)) return true;
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  if (tokens.length > 1 && tokens.every((token) => haystack.includes(token))) return true;
+  const compactQuery = trimmed.replace(/\s+/g, "");
+  let qi = 0;
+  for (let i = 0; i < haystack.length && qi < compactQuery.length; i += 1) {
+    if (haystack[i] === compactQuery[qi]) qi += 1;
+  }
+  return qi === compactQuery.length;
 }
 
 export function filterRunnerModelOptions(

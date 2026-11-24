@@ -1,5 +1,4 @@
 import React from "react";
-import { Content, Overlay, Portal, Root, Title } from "@radix-ui/react-dialog";
 import { Lock, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -7,6 +6,7 @@ import type { AgentAction } from "../../core/types.ts";
 import { t, type UiLanguage } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
+import { Dialog, DialogPopup, DialogTitle } from "./ui/dialog.tsx";
 import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
 
 export function UiLanguageSelect({ className = "" }: { className?: string }) {
@@ -165,32 +165,29 @@ export function ModalShell({
 }) {
   const language = useUiStore((s) => s.language);
   return (
-    <Root
+    <Dialog
       open
-      onOpenChange={(open) => {
-        if (!open) onClose();
+      onOpenChange={(open, eventDetails) => {
+        if (open) return;
+        if (eventDetails?.reason === "outside-press") {
+          const target = eventDetails.event?.target as HTMLElement | null;
+          if (target?.closest('[data-slot="toast-viewport"], [data-slot="toast-root"]')) {
+            eventDetails.cancel();
+            return;
+          }
+        }
+        onClose();
       }}
     >
-      <Portal>
-        <Overlay className="modal-backdrop" />
-        <Content
-          aria-describedby={undefined}
-          className={`modal ${wide ? "modal-wide" : ""}`}
-          data-testid={testId}
-          onEscapeKeyDown={onClose}
-          onPointerDownOutside={(e) => {
-            const target = e.target as HTMLElement | null;
-            if (target?.closest("[data-sonner-toaster], [data-sonner-toast]")) {
-              e.preventDefault();
-              return;
-            }
-            onClose();
-          }}
-        >
-          <Title className="sr-only">{t(language, "app.dialogTitle")}</Title>
-          {children}
-        </Content>
-      </Portal>
-    </Root>
+      <DialogPopup
+        bottomStickOnMobile={false}
+        className={`modal ${wide ? "modal-wide" : ""}`}
+        data-testid={testId}
+        showCloseButton={false}
+      >
+        <DialogTitle className="sr-only">{t(language, "app.dialogTitle")}</DialogTitle>
+        {children}
+      </DialogPopup>
+    </Dialog>
   );
 }

@@ -405,13 +405,13 @@ describe("Gitee Web UI workflow", () => {
       await page.click('[data-testid="import-issue-draft-btn"]');
       await page.waitForFunction(
         () =>
-          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+          (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
             "Please enter a valid Gitee work item ID",
           ),
         { timeout: 10_000 },
       );
       const enToast = await page.evaluate(
-        () => document.querySelector("[data-sonner-toast]")?.textContent ?? "",
+        () => document.querySelector('[data-slot="toast-root"]')?.textContent ?? "",
       );
       expect(/[\u4e00-\u9fff]/.test(enToast)).toBe(false);
 
@@ -419,7 +419,7 @@ describe("Gitee Web UI workflow", () => {
       await page.select('[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
-          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+          (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
             "请输入有效的 Gitee 工作项编号",
           ),
         { timeout: 10_000 },

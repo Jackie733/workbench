@@ -566,7 +566,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
     const pickVisibleItem = async (needle: string) => {
       const found = await page.evaluate((text: string) => {
         document.querySelectorAll("[data-e2e-pick]").forEach((el) => el.removeAttribute("data-e2e-pick"));
-        const item = Array.from(document.querySelectorAll("[cmdk-item]")).find((el) => (el.textContent ?? "").includes(text));
+        const item = Array.from(document.querySelectorAll('[data-slot="command-item"]')).find((el) => (el.textContent ?? "").includes(text));
         if (!item) return false;
         item.setAttribute("data-e2e-pick", "1");
         return true;
@@ -655,7 +655,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
 
       // 2. Picking a model in the visible popover drives the hidden select, the request, the target, and the record.
       await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
-      await page.waitForSelector('[cmdk-item]', { timeout: 5000 });
+      await page.waitForSelector('[data-slot="command-item"]', { timeout: 5000 });
       await pickVisibleItem("gpt-6.1-sol");
       await page.waitForFunction(
         () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement)?.value === "codex::gpt-6.1-sol",
@@ -680,7 +680,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
 
       // 3. Returning to automatic routing through the same picker drops the override entirely.
       await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
-      await page.waitForSelector('[cmdk-item]', { timeout: 5000 });
+      await page.waitForSelector('[data-slot="command-item"]', { timeout: 5000 });
       await pickVisibleItem("自动路由");
       await page.waitForFunction(
         () => (document.querySelector('[data-testid="banner-runner-select-trigger"]')?.textContent ?? "").includes("自动 ("),
@@ -1057,14 +1057,14 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.click('[data-testid="save-project-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Invalid Git branch name"),
           ),
         { timeout: 10_000 },
       );
       const branchToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Invalid Git branch name")) ?? "",
       );
@@ -1080,14 +1080,14 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.click('[data-testid="save-project-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Invalid GitHub repository slug"),
           ),
         { timeout: 10_000 },
       );
       const repoToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Invalid GitHub repository slug")) ?? "",
       );
@@ -1095,7 +1095,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await selectLang("zh-CN");
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("无效的 GitHub 仓库标识"),
           ),
         { timeout: 10_000 },
@@ -1113,14 +1113,14 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await clickReady(page, '[data-testid="import-issue-draft-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Please enter a valid GitHub Issue number"),
           ),
         { timeout: 10_000 },
       );
       const ghImportToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Please enter a valid GitHub Issue number")) ?? "",
       );
@@ -1142,7 +1142,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await clickReady(page, '[data-testid="manual-verify-btn"]');
       await page.waitForFunction(
         () =>
-          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+          (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
             "Enter a verification command first",
           ),
         { timeout: 5000 },
@@ -1151,7 +1151,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await selectLang("zh-CN");
       await page.waitForFunction(
         () =>
-          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+          (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
             "请先输入验证命令",
           ),
         { timeout: 5000 },
@@ -1159,7 +1159,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await selectLang("en");
       await page.waitForFunction(
         () =>
-          (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+          (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
             "Enter a verification command first",
           ),
         { timeout: 5000 },
@@ -1178,7 +1178,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         await clickReady(page, '[data-testid="screenshot-recapture"]');
         await page.waitForFunction(
           () =>
-            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
               "does not exist",
             ),
           { timeout: 5000 },
@@ -1186,7 +1186,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         await selectLang("zh-CN");
         await page.waitForFunction(
           () =>
-            (document.querySelector("[data-sonner-toast]")?.textContent ?? "").includes(
+            (document.querySelector('[data-slot="toast-root"]')?.textContent ?? "").includes(
               "指向的浏览器不存在",
             ),
           { timeout: 5000 },

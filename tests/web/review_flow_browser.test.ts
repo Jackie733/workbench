@@ -228,9 +228,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
 
       // 4. Select qodercn/DeepSeek-Flash for fix, then click run-review-btn -> review MUST NOT use qodercn/DeepSeek-Flash!
       await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
-      await page.waitForSelector("[cmdk-item]", { timeout: 5000 });
+      await page.waitForSelector('[data-slot="command-item"]', { timeout: 5000 });
       const picked = await page.evaluate(() => {
-        const item = Array.from(document.querySelectorAll("[cmdk-item]")).find((el) =>
+        const item = Array.from(document.querySelectorAll('[data-slot="command-item"]')).find((el) =>
           (el.textContent ?? "").includes("DeepSeek-Flash"),
         ) as HTMLElement | undefined;
         if (!item) return false;
@@ -470,9 +470,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.waitForSelector('[data-testid="drawer-runner-select-trigger"]', { timeout: 5000 });
 
       await clickReady(page, '[data-testid="drawer-runner-select-trigger"]');
-      await page.waitForSelector("[cmdk-item]", { timeout: 5000 });
+      await page.waitForSelector('[data-slot="command-item"]', { timeout: 5000 });
       const picked = await page.evaluate(() => {
-        const item = Array.from(document.querySelectorAll("[cmdk-item]")).find((el) =>
+        const item = Array.from(document.querySelectorAll('[data-slot="command-item"]')).find((el) =>
           (el.textContent ?? "").includes("DeepSeek-Flash"),
         ) as HTMLElement | undefined;
         if (!item) return false;

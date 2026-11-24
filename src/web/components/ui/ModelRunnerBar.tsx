@@ -1,11 +1,4 @@
 import React, { useMemo, useRef, useState } from "react";
-import {
-  Anchor as PopoverAnchor,
-  Content as PopoverContent,
-  Portal as PopoverPortal,
-  Root as PopoverRoot,
-  Trigger as PopoverTrigger,
-} from "@radix-ui/react-popover";
 import { ChevronsUpDown, Cpu, Gauge } from "lucide-react";
 import type { AgentAction } from "../../../core/types.ts";
 import type { ReasoningEffort } from "../../../hub/types.ts";
@@ -21,6 +14,7 @@ import { useDraftStore } from "../../stores/draftStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { Icon } from "../Icon.tsx";
 import { ModelPickerMenu, type ModelPickerShortcut } from "./ModelPickerMenu.tsx";
+import { Popover, PopoverPopup, PopoverTrigger } from "./popover.tsx";
 
 export function ModelRunnerBar({
   stageAction,
@@ -46,6 +40,7 @@ export function ModelRunnerBar({
 
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
 
   const modelOptions = useMemo(() => collectModelOptions(harnesses), [harnesses]);
   const choice = activeRunnerChoice(selectedRunnerKey, routing, stageAction, selectedEffort);
@@ -133,15 +128,14 @@ export function ModelRunnerBar({
         {includeManualCopy && <option value="manual_copy">{t(language, "runner.manual")}</option>}
       </select>
 
-      <PopoverRoot open={open} onOpenChange={setOpen}>
+      <Popover open={open} onOpenChange={setOpen}>
         {/*
          * 引用稳定：锚点放在独立的 span 上，交互按钮只承载触发与焦点。
-         * 这样按钮在无关重新渲染或局部替换时不会反复触发 PopperAnchor 的
-         * onAnchorChange(node)，避免组合引用回调形成嵌套 setState 循环。
+         * 这样按钮在无关重新渲染或局部替换时不会反复触发位置重算循环。
          */}
-        <PopoverAnchor asChild>
-          <span className="inline-flex min-w-0 max-w-full" data-testid={`${testId}-anchor`}>
-            <PopoverTrigger asChild>
+        <span ref={anchorRef} className="inline-flex min-w-0 max-w-full" data-testid={`${testId}-anchor`}>
+          <PopoverTrigger
+            render={
               <button
                 ref={triggerRef}
                 type="button"
@@ -153,34 +147,32 @@ export function ModelRunnerBar({
                 <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
                 <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
               </button>
-            </PopoverTrigger>
-          </span>
-        </PopoverAnchor>
-        <PopoverPortal>
-          <PopoverContent
-            align="end"
-            sideOffset={6}
-            className="z-[80] w-[340px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
-            onCloseAutoFocus={(event) => {
-              event.preventDefault();
-              triggerRef.current?.focus();
+            }
+          />
+        </span>
+        <PopoverPopup
+          align="end"
+          anchor={anchorRef}
+          className="w-[340px] rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl p-0 overflow-hidden"
+          finalFocus={triggerRef}
+          positionerClassName="z-[80]"
+          sideOffset={6}
+          viewportClassName="p-0"
+        >
+          <ModelPickerMenu
+            options={modelOptions}
+            selectedKey={selectedKey}
+            shortcuts={shortcuts}
+            testIdPrefix={testId}
+            onSelect={(option) => {
+              if (option.key !== selectedRunnerKey) {
+                setSelectedRunnerKey(option.key, stageAction);
+              }
+              setOpen(false);
             }}
-          >
-            <ModelPickerMenu
-              options={modelOptions}
-              selectedKey={selectedKey}
-              shortcuts={shortcuts}
-              testIdPrefix={testId}
-              onSelect={(option) => {
-                if (option.key !== selectedRunnerKey) {
-                  setSelectedRunnerKey(option.key, stageAction);
-                }
-                setOpen(false);
-              }}
-            />
-          </PopoverContent>
-        </PopoverPortal>
-      </PopoverRoot>
+          />
+        </PopoverPopup>
+      </Popover>
 
       {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
       {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (

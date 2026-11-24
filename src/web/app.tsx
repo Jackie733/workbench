@@ -1,8 +1,8 @@
-import { Component, useEffect, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { Crosshair, X } from "lucide-react";
-import { Toaster } from "sonner";
+import { AnchoredToastProvider, ToastProvider } from "./components/ui/toast.tsx";
 import { api } from "./api.ts";
 import { EmptyHubCard, EmptyRequirementsCard, InitCard, RemoteNodeOfflineCard } from "./components/HomeView.tsx";
 import { HubSidebar } from "./components/HubSidebar.tsx";
@@ -456,7 +456,7 @@ function WorkbenchShell() {
 
   return (
     <>
-      <div id="main-root" className={`app-shell ${projectReady ? "detail-mode" : ""}`}>
+      <div id="main-root" className={`app-shell isolate ${projectReady ? "detail-mode" : ""}`}>
         <Topbar />
         <div
           ref={layoutRef}
@@ -491,22 +491,6 @@ function WorkbenchShell() {
         <Modals />
       </div>
       <DomElementPicker />
-      <Toaster
-        position="bottom-right"
-        duration={4000}
-        closeButton
-        richColors
-        theme={theme}
-        offset={18}
-        visibleToasts={4}
-        style={
-          {
-            "--normal-bg": "var(--surface)",
-            "--normal-text": "var(--text)",
-            "--normal-border": "var(--border)",
-          } as CSSProperties
-        }
-      />
     </>
   );
 }
@@ -559,7 +543,11 @@ if (rootEl) {
   createRoot(rootEl).render(
     <RootErrorBoundary>
       <QueryClientProvider client={queryClient}>
-        <AuthGate />
+        <ToastProvider position="bottom-right" timeout={4000} limit={4}>
+          <AnchoredToastProvider>
+            <AuthGate />
+          </AnchoredToastProvider>
+        </ToastProvider>
       </QueryClientProvider>
     </RootErrorBoundary>,
   );

@@ -289,14 +289,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="submit-link-issue-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Failed to create GitHub Issue: API rate limit exceeded"),
           ),
         { timeout: 10_000 },
       );
       const issueErrToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Failed to create GitHub Issue")) ?? "",
       );
@@ -322,14 +322,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Failed to create GitHub PR: Permission denied to repo"),
           ),
         { timeout: 10_000 },
       );
       const prErrToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Failed to create GitHub PR")) ?? "",
       );
@@ -348,14 +348,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="sync-pr-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Failed to query PR #42 status: Could not resolve to a PullRequest"),
           ),
         { timeout: 10_000 },
       );
       const syncErrToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Failed to query PR #42 status")) ?? "",
       );
@@ -440,7 +440,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="save-draft-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes(
               "GitHub issue sync warning: Failed to create GitHub Issue: API quota exceeded",
             ),
@@ -449,7 +449,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       const createWarnToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("GitHub issue sync warning")) ?? "",
       );
@@ -468,14 +468,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="menu-sync-issue-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Failed to comment on Issue #12: Upstream sync blocked"),
           ),
         { timeout: 10_000 },
       );
       const manualSyncToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Failed to comment on Issue #12")) ?? "",
       );
@@ -493,7 +493,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes(
               "Created PR #42 (issue sync warning: Failed to comment on Issue #12: Upstream sync blocked)",
             ),
@@ -502,7 +502,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       const deliverWarnToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Created PR #42")) ?? "",
       );
@@ -579,7 +579,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await clickWithDetachedRetry(page, '[data-testid="action-accept"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some(
             (el) =>
               (el.textContent ?? "").includes("Acceptance gate failed:") &&
               (el.textContent ?? "").includes("AC-1"),
@@ -588,7 +588,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       const enAcceptErr = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("Acceptance gate failed:")) ?? "",
       );
@@ -597,7 +597,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.select('[data-testid="ui-language-select"]', "zh-CN");
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some(
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some(
             (el) =>
               (el.textContent ?? "").includes("验收门禁未通过：") &&
               (el.textContent ?? "").includes("AC-1"),
@@ -628,7 +628,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="submit-quick-report-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes(
               "Created requirement REQ-002 with a sandbox (issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
             ),
@@ -637,7 +637,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       const quickWarnToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("issue sync warning: Failed to create GitHub Issue")) ?? "",
       );
@@ -745,14 +745,14 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-testid="sync-pr-btn"]');
       await page.waitForFunction(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]")).some((el) =>
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Main repository has uncommitted changes; skipped automatic fast-forward merge"),
           ),
         { timeout: 10_000 },
       );
       const mergeSkipToast = await page.evaluate(
         () =>
-          Array.from(document.querySelectorAll("[data-sonner-toast]"))
+          Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
             .find((txt) => txt.includes("PR #77 merged")) ?? "",
       );

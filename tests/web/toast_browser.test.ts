@@ -33,7 +33,7 @@ const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 let browser: BrowserInstance | null = null;
 
-const TOAST_SEL = '[data-sonner-toast]:not([data-removed="true"])';
+const TOAST_SEL = '[data-slot="toast-root"]:not([data-ending-style])';
 
 function initGitRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-toast-"));
@@ -96,7 +96,7 @@ async function toastTexts(page: BrowserPage): Promise<string[]> {
 }
 
 async function waitToastsGone(page: BrowserPage, timeout = 6000): Promise<void> {
-  await page.waitForFunction(() => !document.querySelector("[data-sonner-toast]"), { timeout });
+  await page.waitForFunction(() => !document.querySelector('[data-slot="toast-root"]'), { timeout });
 }
 
 beforeAll(async () => {
@@ -124,7 +124,7 @@ afterAll(async () => {
 
 const suite = HAS_BROWSER ? describe : describe.skip;
 
-suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
+suite("REQ-001 coss UI 消息提示真实浏览器回归", () => {
   test("连续提示共存、普通/错误分类、单独关闭与约四秒自动消失", async () => {
     const server = await startServer(true);
     const page = await newPage(server);
@@ -140,7 +140,7 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       expect(first.text).toContain("请先输入需求描述");
       expect(first.type).toBe("error");
 
-      // 等待滑入落定后悬停提示区域：Sonner 悬停暂停计时，使两条提示确定性共存。
+      // 等待滑入落定后悬停提示区域：Base UI Toast 悬停暂停计时，使两条提示确定性共存。
       await page.waitForFunction(
         (sel: unknown) => {
           const el = document.querySelector(String(sel));
@@ -183,7 +183,7 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       // 单独关闭错误提示：通过其自身关闭按钮，另一条不受影响。
       await page.evaluate((sel: string) => {
         const el = Array.from(document.querySelectorAll(sel)).find((n) => (n.textContent ?? "").includes("请先输入需求描述"));
-        const btn = el?.querySelector("[data-close-button]") as HTMLButtonElement | null;
+        const btn = el?.querySelector('[data-slot="toast-close"]') as HTMLButtonElement | null;
         if (!btn) throw new Error("error toast close button not found");
         btn.click();
       }, TOAST_SEL);
@@ -219,13 +219,12 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       await triggerErrorToast(page);
 
       const aria = await page.evaluate(() => {
-        const ol = document.querySelector("[data-sonner-toaster]");
-        const section = ol?.closest("section");
-        const btn = document.querySelector("[data-sonner-toast] [data-close-button]") as HTMLButtonElement | null;
+        const viewport = document.querySelector('[data-slot="toast-viewport"]');
+        const btn = document.querySelector('[data-slot="toast-root"] [data-slot="toast-close"]') as HTMLButtonElement | null;
         return {
-          live: section?.getAttribute("aria-live") ?? "",
-          relevant: section?.getAttribute("aria-relevant") ?? "",
-          label: section?.getAttribute("aria-label") ?? "",
+          live: viewport?.getAttribute("aria-live") ?? "",
+          relevant: viewport?.getAttribute("aria-relevant") ?? "",
+          label: viewport?.getAttribute("aria-label") ?? "",
           closeTag: btn?.tagName ?? "",
           closeLabel: btn?.getAttribute("aria-label") ?? "",
         };
@@ -240,7 +239,7 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       await page.keyboard.press("Escape");
       await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-goal"]'), { timeout: 5000 });
       const focused = await page.evaluate(() => {
-        const btn = document.querySelector("[data-sonner-toast] [data-close-button]") as HTMLButtonElement | null;
+        const btn = document.querySelector('[data-slot="toast-root"] [data-slot="toast-close"]') as HTMLButtonElement | null;
         if (!btn) return false;
         btn.focus();
         return document.activeElement === btn;
@@ -254,7 +253,7 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
       await page.keyboard.press("Escape");
       await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-goal"]'), { timeout: 5000 });
       await page.evaluate(() => {
-        (document.querySelector("[data-sonner-toast] [data-close-button]") as HTMLButtonElement | null)?.focus();
+        (document.querySelector('[data-slot="toast-root"] [data-slot="toast-close"]') as HTMLButtonElement | null)?.focus();
       });
       await page.keyboard.press("Space");
       await waitToastsGone(page, 5000);
@@ -272,12 +271,12 @@ suite("REQ-001 Sonner 消息提示真实浏览器回归", () => {
 
     const readToastStyle = () =>
       page.evaluate((sel: string) => {
-        const ol = document.querySelector("[data-sonner-toaster]");
+        const viewport = document.querySelector('[data-slot="toast-viewport"]');
         const el = document.querySelector(sel);
-        if (!ol || !el) return null;
+        if (!viewport || !el) return null;
         const cs = getComputedStyle(el);
         return {
-          theme: ol.getAttribute("data-sonner-theme") ?? "",
+          theme: document.documentElement.getAttribute("data-theme") ?? "",
           type: el.getAttribute("data-type") ?? "",
           bg: cs.backgroundColor,
           color: cs.color,

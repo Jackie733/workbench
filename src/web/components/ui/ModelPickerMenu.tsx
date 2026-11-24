@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Command } from "cmdk";
-import { Check, Search, Star } from "lucide-react";
+import { Check, Star } from "lucide-react";
 import { t, type UiLanguage } from "../../i18n.ts";
 import {
   filterRunnerModelOptions,
@@ -13,10 +12,18 @@ import { useModelFavoritesStore } from "../../stores/modelFavoritesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { cn } from "../../lib/utils.ts";
 import { Icon } from "../Icon.tsx";
+import {
+  Command,
+  CommandGroup,
+  CommandGroupLabel,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "./command.tsx";
 
 export interface ModelPickerShortcut {
   key: string;
-  /** cmdk 搜索匹配文本 */
+  /** 搜索匹配文本 */
   value: string;
   content: ReactNode;
   selected: boolean;
@@ -57,12 +64,12 @@ function ModelPickerRow({
     option.displayLabel !== option.modelId ? option.displayLabel : showHarness ? option.harnessLabel : "";
   return (
     <div className="flex items-center gap-1" data-testid={`${testIdPrefix}-row-${option.key}`}>
-      <Command.Item
+      <CommandItem
         value={runnerModelSearchText(option)}
-        onSelect={onSelect}
+        onClick={onSelect}
         data-testid={`${testIdPrefix}-option-${option.key}`}
         className={cn(
-          "min-w-0 flex-1 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer aria-selected:bg-[var(--accent-soft)]",
+          "min-w-0 flex-1 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer data-highlighted:bg-[var(--accent-soft)] data-highlighted:text-foreground",
           selected && "font-semibold text-[var(--accent)]",
         )}
       >
@@ -86,7 +93,7 @@ function ModelPickerRow({
           </span>
           {selected && <Icon icon={Check} size={14} />}
         </span>
-      </Command.Item>
+      </CommandItem>
       <button
         type="button"
         data-testid={`${testIdPrefix}-fav-${option.key}`}
@@ -105,7 +112,7 @@ function ModelPickerRow({
         }}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
-          // 阻断 cmdk 根节点的 Enter 选中逻辑，让空格/回车只切换收藏。
+          // 阻断 Command 根节点的 Enter 选中逻辑，让空格/回车只切换收藏。
           event.preventDefault();
           event.stopPropagation();
           onToggleFavorite();
@@ -184,82 +191,94 @@ export function ModelPickerMenu({
   const resolvedEmptyText = emptyText ?? t(language, "runner.noMatch");
 
   return (
-    <Command ref={rootRef} shouldFilter={false} className="flex flex-col max-h-[360px]">
-      <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
-        <Icon icon={Search} size={14} className="text-[var(--muted)] shrink-0" />
-        <Command.Input
+    <div ref={rootRef} className="flex flex-col max-h-[360px]">
+      <Command
+        filter={null}
+        value={query}
+        onValueChange={(nextValue, eventDetails) => {
+          if (eventDetails?.reason === "item-press") return;
+          setQuery(nextValue);
+        }}
+      >
+        <CommandInput
           data-testid={`${testIdPrefix}-search`}
-          value={query}
-          onValueChange={setQuery}
+          wrapperClassName="border-b border-[var(--border)] px-2 py-1"
           placeholder={t(language, "runner.searchPlaceholder")}
-          className="w-full bg-transparent text-[12.5px] outline-none placeholder:text-[var(--muted)]"
+          className="text-[12.5px]"
         />
-      </div>
-      <Command.List className="overflow-y-auto p-1.5 flex-1">
-        {empty && (
-          <div data-testid={`${testIdPrefix}-empty`} className="py-6 text-center text-xs text-[var(--muted)]">
-            {resolvedEmptyText}
-          </div>
-        )}
-        {visibleShortcuts.length > 0 && (
-          <Command.Group heading={t(language, "runner.quickPresets")} className="cmdk-group" data-testid={`${testIdPrefix}-shortcuts`}>
-            {visibleShortcuts.map((shortcut) => (
-              <Command.Item
-                key={shortcut.key}
-                value={shortcut.value}
-                onSelect={() => shortcut.onSelect()}
-                data-testid={`${testIdPrefix}-shortcut-${shortcut.key}`}
-                className={cn(
-                  "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer aria-selected:bg-[var(--accent-soft)]",
-                  shortcut.selected && "font-semibold text-[var(--accent)]",
-                )}
-              >
-                <span>{shortcut.content}</span>
-                {shortcut.selected && <Icon icon={Check} size={14} />}
-              </Command.Item>
-            ))}
-          </Command.Group>
-        )}
-        {sections.favorites.length > 0 && (
-          <Command.Group heading={t(language, "runner.favoritesHeading")} className="cmdk-group" data-testid={`${testIdPrefix}-favorites`}>
-            {sections.favorites.map((option) => (
-              <ModelPickerRow
-                key={option.key}
-                option={option}
-                selected={selectedKey === option.key}
-                favorite
-                showHarness
-                testIdPrefix={testIdPrefix}
-                language={language}
-                onSelect={() => onSelect(option)}
-                onToggleFavorite={() => toggleAndKeepFocus(option.key)}
-              />
-            ))}
-          </Command.Group>
-        )}
-        {sections.groups.map((group) => (
-          <Command.Group
-            key={group.key}
-            heading={group.label}
-            className="cmdk-group"
-            data-testid={`${testIdPrefix}-group-${group.key}`}
-          >
-            {group.items.map((option) => (
-              <ModelPickerRow
-                key={option.key}
-                option={option}
-                selected={selectedKey === option.key}
-                favorite={favoriteSet.has(option.key)}
-                showHarness={false}
-                testIdPrefix={testIdPrefix}
-                language={language}
-                onSelect={() => onSelect(option)}
-                onToggleFavorite={() => toggleAndKeepFocus(option.key)}
-              />
-            ))}
-          </Command.Group>
-        ))}
-      </Command.List>
-    </Command>
+        <CommandList className="max-h-[310px] overflow-y-auto p-1.5 flex-1">
+          {empty && (
+            <div data-testid={`${testIdPrefix}-empty`} className="py-6 text-center text-xs text-[var(--muted)]">
+              {resolvedEmptyText}
+            </div>
+          )}
+          {visibleShortcuts.length > 0 && (
+            <CommandGroup data-testid={`${testIdPrefix}-shortcuts`}>
+              <CommandGroupLabel className="px-2 pt-1.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.03em] text-[var(--muted)]">
+                {t(language, "runner.quickPresets")}
+              </CommandGroupLabel>
+              {visibleShortcuts.map((shortcut) => (
+                <CommandItem
+                  key={shortcut.key}
+                  value={shortcut.value}
+                  onClick={() => shortcut.onSelect()}
+                  data-testid={`${testIdPrefix}-shortcut-${shortcut.key}`}
+                  className={cn(
+                    "flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer data-highlighted:bg-[var(--accent-soft)] data-highlighted:text-foreground",
+                    shortcut.selected && "font-semibold text-[var(--accent)]",
+                  )}
+                >
+                  <span>{shortcut.content}</span>
+                  {shortcut.selected && <Icon icon={Check} size={14} />}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
+          {sections.favorites.length > 0 && (
+            <CommandGroup data-testid={`${testIdPrefix}-favorites`}>
+              <CommandGroupLabel className="px-2 pt-1.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.03em] text-[var(--muted)]">
+                {t(language, "runner.favoritesHeading")}
+              </CommandGroupLabel>
+              {sections.favorites.map((option) => (
+                <ModelPickerRow
+                  key={option.key}
+                  option={option}
+                  selected={selectedKey === option.key}
+                  favorite
+                  showHarness
+                  testIdPrefix={testIdPrefix}
+                  language={language}
+                  onSelect={() => onSelect(option)}
+                  onToggleFavorite={() => toggleAndKeepFocus(option.key)}
+                />
+              ))}
+            </CommandGroup>
+          )}
+          {sections.groups.map((group) => (
+            <CommandGroup
+              key={group.key}
+              data-testid={`${testIdPrefix}-group-${group.key}`}
+            >
+              <CommandGroupLabel className="px-2 pt-1.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.03em] text-[var(--muted)]">
+                {group.label}
+              </CommandGroupLabel>
+              {group.items.map((option) => (
+                <ModelPickerRow
+                  key={option.key}
+                  option={option}
+                  selected={selectedKey === option.key}
+                  favorite={favoriteSet.has(option.key)}
+                  showHarness={false}
+                  testIdPrefix={testIdPrefix}
+                  language={language}
+                  onSelect={() => onSelect(option)}
+                  onToggleFavorite={() => toggleAndKeepFocus(option.key)}
+                />
+              ))}
+            </CommandGroup>
+          ))}
+        </CommandList>
+      </Command>
+    </div>
   );
 }
