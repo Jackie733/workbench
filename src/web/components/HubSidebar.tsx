@@ -18,6 +18,15 @@ import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, useUiStore
 import { BrandMark } from "./BrandMark.tsx";
 import { HomeView } from "./HomeView.tsx";
 import { Icon } from "./Icon.tsx";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "./ui/alert-dialog.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
@@ -30,6 +39,12 @@ function computeMaxSidebarWidth(layoutEl: HTMLElement | null): number {
 
 function clampSidebarWidth(width: number, maxWidth: number): number {
   return Math.min(Math.max(Math.round(width), MIN_SIDEBAR_WIDTH), Math.max(MIN_SIDEBAR_WIDTH, maxWidth));
+}
+
+interface NodeUpdateTarget {
+  nodeId: string;
+  name: string;
+  revision: string;
 }
 
 export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement | null> }) {
@@ -52,6 +67,8 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
 
   const [editingCatId, setEditingCatId] = useState<string | null>(null);
   const [catDraft, setCatDraft] = useState("");
+  const [nodeUpdateTarget, setNodeUpdateTarget] = useState<NodeUpdateTarget | null>(null);
+  const [nodeUpdateOpen, setNodeUpdateOpen] = useState(false);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const [maxWidth, setMaxWidth] = useState<number>(MAX_SIDEBAR_WIDTH);
   const recentSnapshotRef = useRef<Map<string, number>>(new Map());
@@ -193,6 +210,61 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
     onError: (error) => useUiStore.getState().showToastError(error),
     onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.hubState }),
   });
+
+  const targetNode = nodeUpdateTarget ? nodes.find((node) => node.nodeId === nodeUpdateTarget.nodeId) : undefined;
+  const targetNodeEligible = Boolean(
+    targetNode &&
+      targetNode.connected &&
+      targetNode.updateEnabled &&
+      targetNode.revision &&
+      hubRevision &&
+      targetNode.revision !== hubRevision &&
+      targetNode.activeRuns.length === 0 &&
+      targetNode.update?.phase !== "running",
+  );
+  const targetNodeSynced = Boolean(targetNode && hubRevision && targetNode.revision === hubRevision);
+  const { isPending: isNodeUpdatePending, isError: isNodeUpdateError, reset: resetNodeUpdate } = updateNode;
+
+  useEffect(() => {
+    if (!nodeUpdateOpen || !nodeUpdateTarget || isNodeUpdatePending) return;
+    if (isNodeUpdateError) {
+      if (targetNodeSynced) {
+        setNodeUpdateOpen(false);
+        resetNodeUpdate();
+      }
+      return;
+    }
+    if (!targetNodeEligible) {
+      setNodeUpdateOpen(false);
+    }
+  }, [
+    isNodeUpdateError,
+    isNodeUpdatePending,
+    nodeUpdateOpen,
+    nodeUpdateTarget,
+    resetNodeUpdate,
+    targetNodeEligible,
+    targetNodeSynced,
+  ]);
+
+  const handleNodeUpdateOpenChange = (open: boolean) => {
+    setNodeUpdateOpen(open);
+    if (!open) resetNodeUpdate();
+  };
+
+  const confirmNodeUpdate = () => {
+    const target = nodeUpdateTarget;
+    if (!target || isNodeUpdatePending || !targetNodeEligible) return;
+    updateNode.mutate(
+      { nodeId: target.nodeId, revision: target.revision },
+      {
+        onSuccess: () => {
+          setNodeUpdateOpen(false);
+          resetNodeUpdate();
+        },
+      },
+    );
+  };
 
   const harnesses = hub?.harnesses ?? [];
   const installedHarnesses = harnesses.filter((h) => h.installed);
@@ -542,11 +614,16 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                               size="xs"
                               type="button"
                               variant="ghost"
+                              data-testid={`node-update-${n.nodeId}`}
                               disabled={updateNode.isPending || n.activeRuns.length > 0}
                               onClick={() => {
-                                if (window.confirm(t(language, "sidebar.nodeUpdateConfirm", { node: n.name, revision: hubRevision.slice(0, 7) }))) {
-                                  updateNode.mutate({ nodeId: n.nodeId, revision: hubRevision });
-                                }
+                                resetNodeUpdate();
+                                setNodeUpdateTarget({
+                                  nodeId: n.nodeId,
+                                  name: n.name,
+                                  revision: hubRevision,
+                                });
+                                setNodeUpdateOpen(true);
                               }}
                             >
                               {t(language, "sidebar.nodeUpdateAction", { revision: hubRevision.slice(0, 7) })}
@@ -656,6 +733,36 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
           />
         )}
       </aside>
+      <AlertDialog open={nodeUpdateOpen} onOpenChange={handleNodeUpdateOpenChange}>
+        <AlertDialogPopup data-testid="node-update-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t(language, "sidebar.nodeUpdateTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t(language, "sidebar.nodeUpdateConfirm", {
+                node: nodeUpdateTarget?.name ?? "",
+                revision: nodeUpdateTarget?.revision.slice(0, 7) ?? "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose
+              data-testid="node-update-cancel"
+              render={<Button variant="ghost" />}
+            >
+              {t(language, "common.cancel")}
+            </AlertDialogClose>
+            <Button
+              data-testid="node-update-confirm"
+              disabled={updateNode.isPending || !targetNodeEligible}
+              loading={updateNode.isPending}
+              variant="default"
+              onClick={confirmNodeUpdate}
+            >
+              {t(language, "sidebar.nodeUpdateConfirmAction")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
     </>
   );
 }
