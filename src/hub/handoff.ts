@@ -319,9 +319,12 @@ export async function synthesizeHandoffPacket(
     options.action !== "review" &&
     Boolean(review) &&
     (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement");
+  const includeReReviewPriorChecklist =
+    options.action === "review" && Boolean(review) && review!.verdict !== "pass";
   const hasSteering =
     Boolean(options.resolveConflict) ||
     includeReviewDetail ||
+    includeReReviewPriorChecklist ||
     pendingNotes.length > 0 ||
     Boolean(state.lastFeedback) ||
     Boolean(options.humanInstruction?.trim());
@@ -357,6 +360,29 @@ export async function synthesizeHandoffPacket(
       key: "steering",
       priority: 1,
       text: clipTextByBytes(steerLines.join("\n"), 4000),
+    });
+  } else if (includeReReviewPriorChecklist && review) {
+    // Re-review convergence reference: show ONLY the structured checklist from the previous non-pass review
+    // (never the full verbose markdown or project playbook) so re-reviews verify fixes without scope creep.
+    const priorLines: string[] = [
+      "## 上轮审查问题清单（复审收敛参考）",
+      `- **上轮审查结论**：\`${review.verdict}\`（${review.reviewerHarness}/${review.reviewerModel} · 代码快照 \`${review.reviewedCodeSnapshotHash.slice(0, 10)}\`）`,
+      `- **核心摘要**：${sanitizeOutput(review.summary, 600).text}`,
+    ];
+    if (review.findings && review.findings.length > 0) {
+      priorLines.push("- **上轮问题清单**：");
+      for (const f of review.findings.slice(0, 15)) {
+        const critTag = f.criterionIds?.length ? ` [${f.criterionIds.join(", ")}]` : "";
+        const fileTag = f.files?.length ? ` (${f.files.slice(0, 4).join(", ")})` : "";
+        priorLines.push(`  - [${f.severity}] \`${f.id}\` ${f.title}${critTag}${fileTag}`);
+        if (f.suggestion) priorLines.push(`    - 建议：${sanitizeOutput(f.suggestion, 260).text}`);
+      }
+    }
+    priorLines.push("");
+    sections.push({
+      key: "steering",
+      priority: 1,
+      text: clipTextByBytes(priorLines.join("\n"), 2400),
     });
   } else if (hasSteering) {
     const steerLines: string[] = ["## 待处理反馈与审查意见"];
@@ -477,7 +503,9 @@ export async function synthesizeHandoffPacket(
         ? failedEvs
         : [...validity.verifications].reverse().filter((v) => isUnresolvedFailure(v))
     ).slice(0, 3);
-    if (unresolvedEvs.length > 0 || options.previousLogTail?.trim()) {
+    const includeLogTail =
+      Boolean(options.previousLogTail?.trim()) && options.previousRun?.status !== "succeeded";
+    if (unresolvedEvs.length > 0 || includeLogTail) {
       const failLines: string[] = ["## 失败与运行现场"];
       const perExcerptBudget = Math.max(600, Math.floor(1800 / Math.max(1, unresolvedEvs.length)));
       for (const failedEv of unresolvedEvs) {
@@ -494,7 +522,7 @@ export async function synthesizeHandoffPacket(
         failLines.push(sanitizeOutput(excerpt, perExcerptBudget).text);
         failLines.push("```");
       }
-      if (options.previousLogTail?.trim()) {
+      if (includeLogTail && options.previousLogTail?.trim()) {
         failLines.push("- 前序运行末尾输出：");
         failLines.push("```text");
         failLines.push(sanitizeOutput(options.previousLogTail.slice(-1000), 1000).text);
@@ -509,8 +537,9 @@ export async function synthesizeHandoffPacket(
     }
   }
 
-  // Objective Trace summary from previous run (omitted during blind review)
-  if (options.action !== "review" && options.previousRun) {
+  // Objective Trace summary from previous run (omitted during blind review, and skipped when previous run was a read-only review
+  // whose structured findings are already provided in the steering section).
+  if (options.action !== "review" && options.previousRun && options.previousRun.action !== "review") {
     const traceSummary = extractTraceHandoffSummary(root, id, options.previousRun.id);
     if (traceSummary) {
       sections.push({

@@ -701,7 +701,13 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       const callId = typeof item.id === "string" ? item.id : `item-${this.turnIndex}`;
       const startedAt = this.itemStarts.get(callId);
       if (startedAt !== undefined) this.itemStarts.delete(callId);
-      const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
+      const reportedDurationMs =
+        typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) && item.duration_ms >= 0
+          ? Math.round(item.duration_ms)
+          : typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0
+            ? Math.round(item.durationMs)
+            : undefined;
+      const durationMs = reportedDurationMs ?? (startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined);
       const itemType = String(item.type ?? "");
       const turn = Math.max(1, this.turnIndex);
 

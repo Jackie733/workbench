@@ -869,4 +869,140 @@ describe("execution guards", () => {
     expect(warningsEmitted[0]).toContain("上下文接近窗口上限");
     expect(warningsEmitted[1]).toContain("探索漂移告警");
   });
+
+  test("REQ-022 workflow optimizations: isolates design->implement sessions, guards 200k bloat, tracks specHashAfter, deduplicates review handoff, and prevents duplicate full-suite shell runs", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("req022-opt");
+    await initProject(repo, { name: "Req022Opt", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "验证跨阶段上下文隔离、specHashAfter、去重与避免重复全量测试",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+
+    const routing = buildInitialProjectRouting();
+    routing.autoReview = false;
+    routing.autoHeal = false;
+    routing.defaultLead = {
+      primary: { harness: "codex", model: "gpt-6.2-sol" },
+      fallbacks: [],
+    };
+    await updateProjectConfig(repo, { routing });
+
+    const seen: Array<{ action: string; nativeSessionId?: string; prompt: string }> = [];
+    const executor = new HubExecutor({
+      initialHarnesses: [harness("codex", "codex")],
+      commandBuilder: (_target, ctx) => {
+        seen.push({ action: ctx.action, nativeSessionId: ctx.nativeSessionId, prompt: ctx.prompt });
+        if (ctx.action === "design") {
+          return {
+            command: "bun",
+            args: [
+              "-e",
+              `
+              import * as fs from "node:fs";
+              import * as path from "node:path";
+              console.log("session_id: ses-design-001");
+              const itemDir = path.join(${JSON.stringify(ctx.root)}, ".workbench/items/REQ-001");
+              fs.writeFileSync(path.join(itemDir, "spec.md"), "# Refined Spec\\n");
+              fs.writeFileSync(path.join(itemDir, "design.md"), "# Design\\n\\nClean plan.\\n");
+              `,
+            ],
+            displayCommand: "mock-design",
+          };
+        }
+        return {
+          command: "bash",
+          args: ["-c", `echo 'session_id: ses-coding-002'`],
+          displayCommand: `mock-${ctx.action}`,
+        };
+      },
+    });
+
+    // 1. Design updates spec.md -> design finishes with specHashAfter persisted
+    const dRun = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "design" });
+    await waitForRun(executor, dRun.run.id);
+    const afterDesign = getRequirement(repo, "REQ-001");
+    expect(afterDesign.state.agentRuns?.[0]?.specHashAfter).toBe(afterDesign.state.specHash);
+
+    await approveDesign(repo, "REQ-001");
+
+    // 2. Implement MUST NOT resume design's session (fresh_handoff), and must not label succeeded design tail as failure
+    const iRun = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "implement" });
+    await waitForRun(executor, iRun.run.id);
+    expect(seen[1]?.nativeSessionId).toBeUndefined();
+    expect(seen[1]?.prompt).not.toContain("## 失败与运行现场");
+    const afterImpl = getRequirement(repo, "REQ-001");
+    expect(afterImpl.state.agentRuns?.[1]?.handoffMode).toBe("fresh_handoff");
+    expect(afterImpl.state.agentRuns?.[1]?.specHashAfter).toBe(afterImpl.state.specHash);
+
+    // 3. Record a blocking review and run fix with duplicate humanInstruction -> native_resume from implement,
+    //    NO false "规范/方案已更新" warning, and review summary appears only once in compact resume context.
+    const { recordReviewReport } = await import("../../src/core/engine.ts");
+    const snap = (await observeGitSnapshot(repo))!;
+    await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "block",
+      summary: "弹窗在断连后关闭",
+      markdown: "完整审查细节",
+      findings: [{ id: "F-1", severity: "high", title: "断连关闭弹窗", suggestion: "保留弹窗" }],
+      reviewedSpecHash: afterImpl.state.specHash,
+      reviewedCodeSnapshotHash: snap.fingerprint,
+    });
+
+    const fRun = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "fix",
+      message: "请根据跨模型 Code Review 修复：\n核心结论：弹窗在断连后关闭\n- F-1 断连关闭弹窗",
+    });
+    await waitForRun(executor, fRun.run.id);
+    expect(seen[2]?.nativeSessionId).toBe("ses-coding-002");
+    expect(seen[2]?.prompt).not.toContain("规范/方案已更新");
+    expect(seen[2]?.prompt).not.toContain("本次追加指令");
+    expect(seen[2]?.prompt).toContain("无需重读全文");
+
+    // 4. Prompt tells coding agent not to manually run slow full suite when distinct fullCommand exists
+    const promptWithFull = buildExecutionPrompt(
+      afterImpl,
+      "",
+      { root: repo, requirementId: "REQ-001", action: "implement" },
+      { fastCommand: "bun run typecheck", fullCommand: "bun run test" },
+    );
+    expect(promptWithFull).toContain("不要通过普通 shell 手动跑耗时的全量测试（`bun run test`）");
+    expect(promptWithFull).toContain("wb verify REQ-001 --all");
+
+    // 5. Extreme context bloat (>= 200k tokens) resets native_resume to fresh_handoff
+    const { startAgentRun, finishAgentRun } = await import("../../src/core/engine.ts");
+    await startAgentRun(repo, "REQ-001", {
+      id: "RUN-EXTREME-BLOAT",
+      action: "fix",
+      harness: "codex",
+      model: "gpt-6.2-sol",
+      status: "running",
+      startedAt: Date.now() - 2000,
+      endedAt: null,
+      exitCode: null,
+      durationMs: 0,
+      logPath: "runs/run-RUN-EXTREME-BLOAT.log",
+    });
+    await finishAgentRun(
+      repo,
+      "REQ-001",
+      "RUN-EXTREME-BLOAT",
+      {
+        status: "succeeded",
+        endedAt: Date.now() - 1000,
+        exitCode: 0,
+        durationMs: 1000,
+        nativeSessionId: "ses-bloated-250k",
+        peakContextTokens: 250_000,
+      },
+      "ok\n",
+    );
+    const fRun2 = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
+    await waitForRun(executor, fRun2.run.id);
+    expect(seen[3]?.nativeSessionId).toBeUndefined();
+    expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("fresh_handoff");
+  }, { timeout: 15000 });
 });

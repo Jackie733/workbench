@@ -167,12 +167,16 @@ interface ActiveJob {
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
 const MAX_AUTO_HEAL_ATTEMPTS = 2;
+const MAX_RESUME_CONTEXT_TOKENS = 200_000;
 const globalActiveRunIds = new Set<string>();
 
 function isHealthyForNativeResume(candidate: AgentRunRecord | null | undefined): boolean {
   if (!candidate || !candidate.nativeSessionId) return false;
   if (candidate.status === "cancelled" || candidate.rateLimited) return false;
   if (candidate.errorSummary?.includes("模型不可用")) return false;
+  if (typeof candidate.peakContextTokens === "number" && candidate.peakContextTokens >= MAX_RESUME_CONTEXT_TOKENS) {
+    return false;
+  }
   return true;
 }
 
@@ -577,14 +581,15 @@ export class HubExecutor {
       conflictContext,
     });
 
-    // Native session resume across design -> implement -> fix on the same harness.
+    // Native session resume within the coding phase (implement <-> fix) and same-action retries.
+    // Design runs are NOT resumed into implement/fix so 50+ turns of planning exploration don't bloat coding context
+    // (authoritative planning output is already crystallized in spec.md and design.md).
     const prevLeadRun =
       input.action === "review"
         ? null
         : input.action === "implement" || input.action === "fix"
           ? ([...runsList].reverse().find((r) => r.action === "implement" || r.action === "fix") ??
-            [...runsList].reverse().find((r) => r.action === "design") ??
-            [...runsList].reverse().find((r) => r.action !== "review") ??
+            [...runsList].reverse().find((r) => r.action !== "review" && r.action !== "design") ??
             null)
           : ([...runsList].reverse().find((r) => r.action === input.action) ?? null);
 
@@ -641,10 +646,13 @@ export class HubExecutor {
 
     let previousSpecHash: string | null = null;
     if (canResumeSameHarness && prevLeadRun) {
-      try {
-        previousSpecHash = getAgentRunContext(base, id, prevLeadRun.id)?.specHashBefore ?? null;
-      } catch {
-        previousSpecHash = null;
+      previousSpecHash = prevLeadRun.specHashAfter ?? null;
+      if (!previousSpecHash) {
+        try {
+          previousSpecHash = getAgentRunContext(base, id, prevLeadRun.id)?.specHashBefore ?? null;
+        } catch {
+          previousSpecHash = null;
+        }
       }
     }
 
@@ -1321,6 +1329,7 @@ export class HubExecutor {
             toolDurationMs: traceSummary.toolDurationMs,
             ...(traceSummary.ttftMs !== undefined ? { ttftMs: traceSummary.ttftMs } : {}),
             specChanged,
+            ...(latestReq?.state.specHash ? { specHashAfter: latestReq.state.specHash } : {}),
             codeChanged,
             tracePath: traceRelPath,
             contextPath: contextRelPath,

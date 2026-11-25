@@ -921,6 +921,7 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     (raw.toolDurationMs !== undefined && !isSafeInt(raw.toolDurationMs, 0)) ||
     (raw.ttftMs !== undefined && !isSafeInt(raw.ttftMs, 0)) ||
     (raw.specChanged !== undefined && typeof raw.specChanged !== "boolean") ||
+    (raw.specHashAfter !== undefined && !isSafeText(raw.specHashAfter, 128)) ||
     (raw.codeChanged !== undefined && typeof raw.codeChanged !== "boolean") ||
     (raw.tracePath !== undefined && !isSafeText(raw.tracePath, 260, true)) ||
     (raw.contextPath !== undefined && !isSafeText(raw.contextPath, 260, true)) ||

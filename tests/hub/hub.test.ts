@@ -1374,7 +1374,7 @@ printf 'done\\n'
     const run1 = await executor.startRun({
       root: repo,
       requirementId: "REQ-001",
-      action: "design",
+      action: "implement",
       harness: "codex",
       model: SELECTED_MODEL,
       reasoningEffort: "medium",

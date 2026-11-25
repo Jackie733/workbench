@@ -803,6 +803,7 @@ export interface AgentRunRecord {
   toolDurationMs?: number;
   ttftMs?: number;
   specChanged?: boolean;
+  specHashAfter?: string;
   codeChanged?: boolean;
   tracePath?: string;
   contextPath?: string;

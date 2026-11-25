@@ -516,6 +516,18 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap1 = (await observeGitSnapshot(repo))!;
 
+    // Round 1 (no prior review): pure blind review without prior checklist or playbook
+    const initialReviewHandoff = await synthesizeHandoffPacket(repo, "REQ-001", { action: "review" });
+    expect(initialReviewHandoff.markdown).not.toContain("上轮审查问题清单");
+    expect(initialReviewHandoff.markdown).not.toContain("项目持久避坑与偏好法则");
+    const initialReviewPrompt = buildExecutionPrompt(initialReviewHandoff.detail, initialReviewHandoff.markdown, {
+      root: repo,
+      requirementId: "REQ-001",
+      action: "review",
+    });
+    expect(initialReviewPrompt).not.toContain("复审收敛原则");
+    expect(initialReviewPrompt).toContain("只读 Code Review");
+
     // Round 1 review
     const r1 = await recordReviewReport(repo, "REQ-001", {
       reviewerHarness: "codex",
@@ -530,22 +542,23 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(r1.state.reviewReport?.verdict).toBe("concern");
     expect(r1.validity.banner.primaryAction?.id).toBe("dispatch_fix_review");
 
-    // Round 2 handoff & prompt stay blind (no playbook or delta convergence mode)
+    // Round 2 handoff & prompt inject concise prior checklist + convergence guidance (still no playbook or raw markdown chatter)
     fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
     fs.writeFileSync(path.join(repo, "other.ts"), "export const other = 2;\n");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap2 = (await observeGitSnapshot(repo))!;
 
     const reviewHandoff = await synthesizeHandoffPacket(repo, "REQ-001", { action: "review" });
-    expect(reviewHandoff.markdown).not.toContain("第 2 轮 · 增量收敛模式");
-    expect(reviewHandoff.markdown).not.toContain("增量收敛模式");
+    expect(reviewHandoff.markdown).toContain("上轮审查问题清单（复审收敛参考）");
+    expect(reviewHandoff.markdown).toContain("收缩规则缺失");
+    expect(reviewHandoff.markdown).not.toContain("F-1 details");
     expect(reviewHandoff.markdown).not.toContain("项目持久避坑与偏好法则");
     const reviewPrompt = buildExecutionPrompt(reviewHandoff.detail, reviewHandoff.markdown, {
       root: repo,
       requirementId: "REQ-001",
       action: "review",
     });
-    expect(reviewPrompt).not.toContain("增量收敛模式");
+    expect(reviewPrompt).toContain("复审收敛原则");
     expect(reviewPrompt).toContain("只读 Code Review");
 
     // Round 2 non-blocking concern keeps accept available

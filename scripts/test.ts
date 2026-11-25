@@ -123,29 +123,32 @@ async function main(): Promise<number> {
     return runPassthrough(args);
   }
 
+  // Schedule heaviest files (including browser suites) first so isolated workers stay balanced instead of idling on a serial tail.
   const files = collectTestFiles(TESTS_DIR).sort(
-    (a, b) =>
-      Number(isHeavyBrowserTest(a)) - Number(isHeavyBrowserTest(b)) ||
-      estimateWeight(b) - estimateWeight(a) ||
-      a.localeCompare(b),
+    (a, b) => estimateWeight(b) - estimateWeight(a) || a.localeCompare(b),
   );
   const rawWorkers = Number(process.env.WORKBENCH_TEST_WORKERS ?? "");
   const defaultWorkers = Math.min(3, Math.max(2, Math.floor(os.cpus().length / 2)));
   const concurrency = Math.max(1, Math.min(files.length, Number.isFinite(rawWorkers) && rawWorkers > 0 ? Math.floor(rawWorkers) : defaultWorkers));
+  const rawBrowserWorkers = Number(process.env.WORKBENCH_BROWSER_WORKERS ?? "");
+  const maxBrowserWorkers = Math.max(
+    1,
+    Math.min(concurrency, Number.isFinite(rawBrowserWorkers) && rawBrowserWorkers > 0 ? Math.floor(rawBrowserWorkers) : Math.min(2, concurrency)),
+  );
 
   const suiteStart = Date.now();
   const queue = [...files];
   const results: FileRunResult[] = [];
   let completed = 0;
-  let browserRunning = false;
+  let activeBrowserWorkers = 0;
   const browserWaiters: Array<() => void> = [];
 
   const acquireNextFile = async (): Promise<{ file: string; isBrowser: boolean } | null> => {
     while (queue.length > 0) {
-      if (!browserRunning) {
+      if (activeBrowserWorkers < maxBrowserWorkers) {
         const next = queue.shift()!;
         const isBrowser = isHeavyBrowserTest(next);
-        if (isBrowser) browserRunning = true;
+        if (isBrowser) activeBrowserWorkers += 1;
         return { file: next, isBrowser };
       }
       const nonBrowserIdx = queue.findIndex((f) => !isHeavyBrowserTest(f));
@@ -153,7 +156,7 @@ async function main(): Promise<number> {
         const [nonBrowser] = queue.splice(nonBrowserIdx, 1);
         return { file: nonBrowser!, isBrowser: false };
       }
-      // Only browser tests remain while another worker holds the Chromium slot.
+      // Only browser tests remain while browser slots are full.
       await new Promise<void>((resolve) => {
         browserWaiters.push(resolve);
       });
@@ -162,7 +165,7 @@ async function main(): Promise<number> {
   };
 
   const releaseBrowserSlot = () => {
-    browserRunning = false;
+    activeBrowserWorkers = Math.max(0, activeBrowserWorkers - 1);
     while (browserWaiters.length > 0) {
       browserWaiters.shift()!();
     }

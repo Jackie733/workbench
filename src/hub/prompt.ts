@@ -92,7 +92,10 @@ export function buildCompactResumeContext(
     }
   }
 
-  if (state.reviewReport && (state.reviewReport.verdict !== "pass" || input.action === "fix")) {
+  const emittedReview = Boolean(
+    state.reviewReport && (state.reviewReport.verdict !== "pass" || input.action === "fix"),
+  );
+  if (emittedReview && state.reviewReport) {
     const rev = state.reviewReport;
     parts.push(
       isEn
@@ -111,10 +114,20 @@ export function buildCompactResumeContext(
 
   const feedback = state.lastFeedback?.trim() ?? "";
   const extraMsg = input.message?.trim() ?? "";
-  if (feedback) {
+  const reviewSummary = emittedReview ? state.reviewReport?.summary?.trim() ?? "" : "";
+  const extraDuplicatesReview = Boolean(
+    extraMsg && reviewSummary && extraMsg.includes(reviewSummary),
+  );
+  if (feedback && !(reviewSummary && feedback === reviewSummary)) {
     parts.push(isEn ? `- **Latest Feedback**: ${feedback}` : `- **最新打回意见**：${feedback}`);
   }
-  if (extraMsg && input.action !== "ask" && extraMsg !== feedback && !feedback.includes(extraMsg)) {
+  if (
+    extraMsg &&
+    input.action !== "ask" &&
+    extraMsg !== feedback &&
+    !feedback.includes(extraMsg) &&
+    !extraDuplicatesReview
+  ) {
     parts.push(isEn ? `- **Additional Instruction**: ${extraMsg}` : `- **本次追加指令**：${extraMsg}`);
   }
 
@@ -196,6 +209,13 @@ export function buildExecutionPrompt(
   }
 
   if (input.action === "review") {
+    const isReReview = Boolean(detail.state.reviewReport && detail.state.reviewReport.verdict !== "pass");
+    const reReviewRuleEn = isReReview
+      ? "5. Re-review convergence: first verify whether every item in the prior review checklist was resolved and whether the fix introduced any regression. Do NOT expand scope beyond `spec.md` or raise new `block` verdicts for speculative edge cases outside the requirement; put non-essential suggestions under `low` and return `pass` once prior blockers are closed with no confirmed regressions."
+      : "";
+    const reReviewRuleZh = isReReview
+      ? "5. 复审收敛原则：优先逐条核验「上轮审查问题清单」是否已修复以及本次修复是否引入新回归；严禁在复审中脱离 `spec.md` 范围不断拔高要求或为极端边界场景新增 `block`。非必需优化放 `low` 建议，若上轮阻塞项已关闭且无新增确定性缺陷，请直接给 `pass`。"
+      : "";
     return (
       isEn
         ? [
@@ -205,7 +225,8 @@ export function buildExecutionPrompt(
             `1. Use native file & Git tools to inspect \`${itemDirHint}/spec.md\`, \`${itemDirHint}/design.md\`, actual Git Diff (or \`wb_get({ id: "${reqId}", includeDiff: true })\`), and verification evidence.`,
             `2. Reuse matching verification logs under \`${itemDirHint}/evidence/\` first; only run ${fastVerifyHint} if evidence is missing or stale.`,
             "3. Do NOT modify repository files or run background commands (`&` / `run_in_background`). Focus on real bugs, missing requirements, security issues, or test tampering.",
-            "4. Distinguish severities strictly: `block` only for confirmed functional bugs, data/security risks, or unmet required criteria; `concern` for medium risks; put minor nits in `findings` (`low`) and use `pass` when acceptable.",
+            "4. Distinguish severities strictly within `spec.md` scope: `block` only for confirmed functional bugs, data/security risks, or unmet required criteria; `concern` for medium risks; put minor nits or out-of-scope edge cases in `findings` (`low`) and use `pass` when acceptable.",
+            reReviewRuleEn,
             "",
             buildOutputLanguageDirective(lang, "review"),
             "",
@@ -221,7 +242,8 @@ export function buildExecutionPrompt(
             `1. 使用原生文件与 Git 工具检查 \`${itemDirHint}/spec.md\`、\`${itemDirHint}/design.md\`、实际 Git Diff（或调用 \`wb_get({ id: "${reqId}", includeDiff: true })\`）与验收证据。`,
             `2. 优先复用匹配证据：先核验 \`${itemDirHint}/evidence/\` 中与当前代码快照一致的验证日志，无需重跑已匹配的耗时测试（仅在证据缺失或过期时按需运行${fastVerifyHint}）。`,
             "3. 禁止修改任何仓库代码，禁止在后台运行命令（如 `&` 或 `run_in_background`）或等待外部通知；同步完成检查并聚焦真实问题：实现是否满足需求、是否存在功能/安全缺陷、是否存在删改或跳过测试的迹象。",
-            "4. 严格区分严重度：`block` 仅用于确定性功能故障、数据/安全风险或必需验收条件未满足；`concern` 用于待确认的中等风险；低优先级优化建议放 `findings`（`low`）即可，若达标直接给 `pass`。",
+            "4. 严格结合 `spec.md` 范围区分严重度：`block` 仅用于确定性功能故障、数据/安全风险或必需验收条件未满足；`concern` 用于待确认的中等风险；低优先级优化或超出需求边界的极端假设放 `findings`（`low`）即可，若达标直接给 `pass`。",
+            reReviewRuleZh,
             "",
             buildOutputLanguageDirective(lang, "review"),
             "",
@@ -245,7 +267,7 @@ export function buildExecutionPrompt(
             `Produce the specification refinement and technical design for ${reqId} (${detail.state.title}).`,
             "",
             "Workflow:",
-            `1. Read \`${itemDirHint}/spec.md\` completely and inspect relevant source files; you may run read-only checks/tests to reproduce or confirm behavior.`,
+            `1. Read \`${itemDirHint}/spec.md\` completely and inspect only relevant source files (avoid redundant exploration or running full test suites); you may run lightweight read-only checks to confirm behavior.`,
             `2. Edit \`${itemDirHint}/spec.md\` if needed and write a clear technical plan in \`${itemDirHint}/design.md\`. Include verifiable acceptance criteria in a fenced \`\`\`workbench-criteria JSON block at the end of \`design.md\` (e.g. \`[{"id":"AC-1","description":"...","required":true,"command":"..."}]\`), or call \`wb propose ${reqId}\`.`,
             "3. Design only in this turn — do NOT edit business source code. End the turn once design.md is written; Workbench will automatically sync and submit it for human approval.",
             "",
@@ -257,7 +279,7 @@ export function buildExecutionPrompt(
             `请完成工作台需求 ${reqId}（${detail.state.title}）的规范整理与技术方案设计。`,
             "",
             "工作方式：",
-            `1. 使用原生文件工具完整阅读 \`${itemDirHint}/spec.md\` 并调研相关源码；如需排查 Bug 或确认现有行为，可运行只读测试或检查命令复现定位。`,
+            `1. 使用原生文件工具完整阅读 \`${itemDirHint}/spec.md\` 并精准调研相关源码（避免反复翻阅无关文件或运行耗时全量测试）；如需排查 Bug 或确认现有行为，可运行只读测试或检查命令复现定位。`,
             `2. 直接编辑 \`${itemDirHint}/spec.md\`（如需细化目标/边界）并在 \`${itemDirHint}/design.md\` 中写出清晰的技术方案；请在 \`design.md\` 末尾附带一个 \`\`\`workbench-criteria JSON 代码块声明验收条件（例如 \`[{"id":"AC-1","description":"...","required":true,"command":"..."}]\`），也可直接调用 \`wb propose ${reqId}\` / \`wb_propose\`。`,
             "3. 本轮仅完成设计方案，不要修改业务源码或进入编码实施；方案写完后直接结束本轮，工作台将自动同步文件并提交人类审阅批准。",
             "",
@@ -321,14 +343,36 @@ export function buildExecutionPrompt(
         : `4. 本需求涉及 UI，验收命令通过后工作台会自动采集界面截图；如有需要也可运行 \`wb screenshot ${reqId}\`。`
       : "";
 
+  const hasDesign = Boolean(detail.designMarkdown.trim());
+  const specUnchangedOnResume = Boolean(
+    options.resumedSession &&
+      (!options.previousSpecHash || options.previousSpecHash === detail.state.specHash),
+  );
+  const fullCmd = options.fullCommand?.trim() || null;
+  const hasDistinctFullCmd = Boolean(fullCmd && fullCmd !== options.fastCommand?.trim());
+
+  const step1En = specUnchangedOnResume
+    ? `1. You are resuming the same session and the spec is unchanged; go straight to the target files and feedback (re-read \`${itemDirHint}/spec.md\`${hasDesign ? ` or \`${itemDirHint}/design.md\`` : ""} only if needed).`
+    : `1. Read \`${itemDirHint}/spec.md\`${hasDesign ? ` and \`${itemDirHint}/design.md\`` : ""} directly from disk.`;
+  const step1Zh = specUnchangedOnResume
+    ? `1. 当前为同会话续接且规范未变，无需重读全文，直接聚焦目标文件与反馈修改（需核对细节时再按需读取 \`${itemDirHint}/spec.md\`${hasDesign ? ` 或 \`${itemDirHint}/design.md\`` : ""}）。`
+    : `1. 使用原生文件工具完整阅读 \`${itemDirHint}/spec.md\`${hasDesign ? ` 与 \`${itemDirHint}/design.md\`` : ""}，以磁盘完整原文为准。`;
+
+  const step2En = hasDistinctFullCmd
+    ? `2. Modify only code and tests relevant to this requirement; run ${fastVerifyHint} and targeted tests for your changes locally, and do NOT manually run the slow full suite (\`${fullCmd}\`) via raw shell — Workbench runs it automatically on exit (or run \`wb verify ${reqId} --all\` if you need full-suite output early so Workbench can reuse the evidence).`
+    : "2. Modify only code and tests relevant to this requirement, and run fast or targeted checks locally as needed.";
+  const step2Zh = hasDistinctFullCmd
+    ? `2. 只改动与本需求相关的代码与测试；本地验证只需运行${fastVerifyHint}及本次新增/相关的定向测试，不要通过普通 shell 手动跑耗时的全量测试（\`${fullCmd}\`），工作台会在你退出后统一执行并记录验收证据（若确需提前跑全量，请调用 \`wb verify ${reqId} --all\` 以便工作台复用结果）。`
+    : "2. 只改动与本需求相关的代码与测试，并按需在本地运行快速检查或定向测试验证改动正确性。";
+
   return (
     isEn
       ? [
           objectiveLine,
           "",
           "Workflow:",
-          `1. Read \`${itemDirHint}/spec.md\`${detail.designMarkdown.trim() ? ` and \`${itemDirHint}/design.md\`` : ""} directly from disk.`,
-          "2. Modify only code and tests relevant to this requirement, and run local checks as needed.",
+          step1En,
+          step2En,
           "3. End the turn once done — Workbench will automatically run required verification commands, capture screenshots if UI-related, and dispatch blind review on pass (or hand failures back to you for auto-heal).",
           screenshotHint,
           "",
@@ -340,8 +384,8 @@ export function buildExecutionPrompt(
           objectiveLine,
           "",
           "工作方式：",
-          `1. 使用原生文件工具完整阅读 \`${itemDirHint}/spec.md\`${detail.designMarkdown.trim() ? ` 与 \`${itemDirHint}/design.md\`` : ""}，以磁盘完整原文为准。`,
-          "2. 只改动与本需求相关的代码与测试，并按需在本地运行测试验证改动正确性。",
+          step1Zh,
+          step2Zh,
           "3. 完成后直接结束本轮即可——工作台会在你退出后自动执行必需验收命令，全部通过则自动触发独立审查与人工验收，若有失败会自动把报错交回给你继续修复（勿在后台留下未结束命令或等待人工确认；批准与最终验收仅由人类在工作台触发）。",
           screenshotHint,
           "",

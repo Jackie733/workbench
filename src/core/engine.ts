@@ -2718,6 +2718,7 @@ export async function finishAgentRun(
     toolDurationMs?: number;
     ttftMs?: number;
     specChanged?: boolean;
+    specHashAfter?: string;
     codeChanged?: boolean;
     tracePath?: string;
     contextPath?: string;
@@ -2759,6 +2760,7 @@ export async function finishAgentRun(
       ...(patch.toolDurationMs !== undefined ? { toolDurationMs: patch.toolDurationMs } : {}),
       ...(patch.ttftMs !== undefined ? { ttftMs: patch.ttftMs } : {}),
       ...(patch.specChanged !== undefined ? { specChanged: patch.specChanged } : {}),
+      ...(patch.specHashAfter ? { specHashAfter: patch.specHashAfter } : {}),
       ...(patch.codeChanged !== undefined ? { codeChanged: patch.codeChanged } : {}),
       ...(patch.tracePath ? { tracePath: patch.tracePath } : {}),
       ...(patch.contextPath ? { contextPath: patch.contextPath } : {}),
