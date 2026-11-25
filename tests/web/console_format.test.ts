@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConsoleOutput } from "../../src/web/components/ConsoleOutput.tsx";
-import { parseConsoleLog, stripAnsi } from "../../src/web/lib/consoleFormat.ts";
+import { parseConsoleLog, reconstructAgyTraceEvents, shortenDisplayPath, stripAnsi } from "../../src/web/lib/consoleFormat.ts";
 
 describe("stripAnsi", () => {
   test("removes CSI/OSC escape codes and normalizes CRLF", () => {
@@ -210,5 +210,120 @@ describe("ConsoleOutput SSR rendering", () => {
     expect(html).toContain("Copy");
     expect(html).toContain("Command &amp; Environment");
     expect(html).toContain("已完成中文与英文对齐。");
+  });
+
+  test("reconstructs legacy AGY NDJSON logs into grouped structured trace cards, shortened paths, and file-ref links", () => {
+    const agyRawLog = [
+      "$ /home/tsien/.local/bin/agy -p --output-format stream-json (model=gemini-4-neon-medium)",
+      JSON.stringify({ event: "init", conversation_id: "c-legacy", init: { model: "gemini-4-neon-medium" } }),
+      JSON.stringify({ event: "step_update", step_update: { conversation_id: "c-legacy", step_index: 0, state: "DONE", step_type: "user_input" } }),
+      ...[1, 2, 3].map((idx) =>
+        JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "c-legacy",
+            step_index: idx,
+            state: "DONE",
+            step_type: "tool",
+            tool_name: "read_file",
+            duration_seconds: 0.4,
+            tool_info: {
+              name: "read_file",
+              parameters: { Path: `/home/tsien/.workbench-hub/evolution/worktrees/abc/REQ-016/src/web/file${idx}.ts` },
+              output: "10 lines",
+            },
+          },
+        }),
+      ),
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "c-legacy", step_index: 4, state: "ACTIVE", step_type: "agent_response", text_delta: "查看 [HomeView.tsx]" },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "c-legacy", step_index: 4, state: "ACTIVE", step_type: "agent_response", text_delta: "(file:///home/tsien/repo/src/web/components/HomeView.tsx) 已完成。" },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "c-legacy",
+          step_index: 4,
+          state: "DONE",
+          step_type: "agent_response",
+          duration_seconds: 1.5,
+          usage: { input_tokens: 500, output_tokens: 60, thinking_tokens: 20, cache_read_tokens: 100, total_tokens: 560 },
+        },
+      }),
+    ].join("\n");
+
+    expect(shortenDisplayPath("/home/tsien/.workbench-hub/evolution/worktrees/abc/REQ-016/src/web/file1.ts")).toBe("src/web/file1.ts");
+    const trace = reconstructAgyTraceEvents(agyRawLog);
+    expect(trace).not.toBeNull();
+    expect(trace!.filter((e) => e.type === "tool.end")).toHaveLength(3);
+
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, { runId: "RUN-AGY-LEGACY", rawLog: agyRawLog, isRunning: false, language: "zh-CN" }),
+    );
+    expect(html).toContain('data-testid="trace-event-list"');
+    expect(html).toContain('data-testid="trace-tool-group"');
+    expect(html).toContain("探索与检索 · 3 次操作");
+    expect(html).toContain('class="console-file-ref"');
+    expect(html).toContain("HomeView.tsx");
+    expect(html).not.toContain('"step_update"');
+
+    // Legacy AGY run with hasTrace=false still reconstructs structured trace without legacy banner
+    const htmlNoTrace = renderToStaticMarkup(
+      createElement(ConsoleOutput, {
+        runId: "RUN-AGY-NO-TRACE",
+        rawLog: agyRawLog,
+        traceEvents: [],
+        hasTrace: false,
+        traceHydrated: true,
+        isRunning: false,
+        language: "zh-CN",
+      }),
+    );
+    expect(htmlNoTrace).toContain('data-testid="trace-event-list"');
+    expect(htmlNoTrace).not.toContain('data-testid="legacy-no-trace-notice"');
+  });
+
+  test("renders Markdown tables after paragraphs, nested inline code inside bold, and multiline AGY_ERROR stderr cleanly", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, {
+        runId: "RUN-MD-EDGE",
+        rawLog: "",
+        traceEvents: [
+          {
+            seq: 1,
+            ts: 1,
+            type: "assistant.message",
+            turnIndex: 1,
+            text: [
+              "汇总结果如下，详见 **组件 `SegmentedControl`** 与 **[App.tsx](file:///repo/src/App.tsx)**：",
+              "",
+              "| 指标 | 数值 |",
+              "| --- | --- |",
+              "| 通过 | `100%` |",
+            ].join("\n"),
+          },
+          {
+            seq: 2,
+            ts: 2,
+            type: "raw.line",
+            stream: "stderr",
+            text:
+              'error: Individual quota reached.\nAGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached.","status":"RESOURCE_EXHAUSTED","error_code":429}\n',
+          },
+        ],
+        hasTrace: true,
+        isRunning: false,
+        language: "zh-CN",
+      }),
+    );
+    expect(html).toContain('<table class="console-msg-table">');
+    expect(html).toContain('<strong>组件 <code class="console-inline-code">SegmentedControl</code></strong>');
+    expect(html).toContain('class="console-file-ref"');
+    expect(html).toContain("RESOURCE_EXHAUSTED (code 429): Individual quota reached.");
+    expect(html).not.toContain('"error_code":429');
   });
 });

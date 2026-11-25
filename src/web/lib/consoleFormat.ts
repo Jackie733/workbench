@@ -1,3 +1,4 @@
+import type { RunTokenUsage, RunToolCategory, RunTraceEvent } from "../../core/types.ts";
 import { t, type UiLanguage } from "../i18n.ts";
 
 export type ConsoleBlockKind =
@@ -61,7 +62,7 @@ const PROMPT_START_PATTERNS = [
 ];
 
 const ERROR_LINE_RE =
-  /^(?:\[(?:spawn error|timeout|error)\]|(?:API error|FATAL|Unhandled(?:Rejection| Exception)?|SyntaxError|TypeError|ReferenceError|RangeError|ERROR|Error)\s*:|.*(?:RESOURCE_EXHAUSTED|You've hit your usage limit|\b429\s+Too Many Requests\b|(?:HTTP|status|code)\s*[:=]\s*429\b))/i;
+  /^(?:\[(?:spawn error|timeout|error)\]|AGY_ERROR\s*:|(?:API error|FATAL|Unhandled(?:Rejection| Exception)?|SyntaxError|TypeError|ReferenceError|RangeError|ERROR|Error)\s*:|.*(?:RESOURCE_EXHAUSTED|You've hit your usage limit|\b429\s+Too Many Requests\b|(?:HTTP|status|code)\s*[:=]\s*429\b))/i;
 
 const EXEC_RESULT_RE = /^(.+?)\s+(?:in\s+.+?\s+)?(succeeded|exited\s+(-?\d+))\s+in\s+([^\s:]+):?$/;
 const OPENCODE_STEP_RE = /^>\s+\S+\s+·\s+\S+\s*$/;
@@ -118,11 +119,16 @@ function isLauncherCmdLine(lines: string[], idx: number): boolean {
   return true;
 }
 
+function isAgyJsonLine(trimmed: string): boolean {
+  return trimmed.startsWith("{") && /"event"\s*:\s*"(?:init|step_update|result)"/.test(trimmed);
+}
+
 function isStructuralBoundary(lines: string[], idx: number): boolean {
   const line = lines[idx] ?? "";
   const trimmed = line.trim();
   if (!trimmed) return false;
   if (isLauncherCmdLine(lines, idx)) return true;
+  if (isAgyJsonLine(trimmed)) return true;
   if (
     trimmed === "user" ||
     trimmed === "user:" ||
@@ -258,6 +264,91 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
       linesCount: countLines(trimmedContent),
     });
   };
+
+  // 0. AGY stream-json NDJSON pre-pass when raw text contains AGY event envelopes
+  if (/"event"\s*:\s*"(?:init|step_update|result)"/.test(normalized)) {
+    const reconstructed = reconstructAgyTraceEvents(normalized);
+    if (reconstructed && reconstructed.length > 0) {
+      const agyBlocks: ConsoleBlock[] = [];
+      const pushAgy = (spec: Omit<ConsoleBlock, "id" | "linesCount">) => {
+        const trimmedContent = spec.content.replace(/^\n+|\n+$/g, "");
+        if (!trimmedContent) return;
+        const idx = agyBlocks.length;
+        agyBlocks.push({
+          ...spec,
+          id: `block-${idx}-${spec.kind}`,
+          content: trimmedContent,
+          linesCount: countLines(trimmedContent),
+        });
+      };
+
+      const cmdLine = lines.find((l) => isLauncherCmdLine([l.trim()], 0))?.trim();
+      if (cmdLine) {
+        pushAgy({
+          kind: "command_env",
+          title: t(language, "console.block.commandEnv"),
+          summary: summarizeCommandEnv(cmdLine, language),
+          content: cmdLine,
+          defaultCollapsed: true,
+          collapsible: true,
+          tone: "neutral",
+        });
+      }
+
+      const starts = new Map<string, Extract<RunTraceEvent, { type: "tool.start" }>>();
+      for (const ev of reconstructed) {
+        if (ev.type === "thinking") {
+          const preview = previewFirstLine(ev.text, 64);
+          pushAgy({
+            kind: "thinking",
+            title: t(language, "console.block.thinking"),
+            summary: preview,
+            content: ev.text,
+            defaultCollapsed: true,
+            collapsible: true,
+            tone: "neutral",
+          });
+        } else if (ev.type === "tool.start") {
+          starts.set(ev.callId, ev);
+        } else if (ev.type === "tool.end") {
+          const st = starts.get(ev.callId);
+          const body = [st?.inputText, ev.output].filter(Boolean).join("\n---\n") || ev.summary || ev.toolName;
+          const durStr = typeof ev.durationMs === "number" ? `${(ev.durationMs / 1000).toFixed(1)}s` : undefined;
+          pushAgy({
+            kind: "tool_call",
+            title: ev.toolName,
+            summary: `${shortenDisplayPath(ev.summary || ev.toolName)}${durStr ? ` · ${durStr}` : ""}`,
+            content: body,
+            defaultCollapsed: !ev.isError,
+            collapsible: Boolean(st?.inputText || ev.output),
+            tone: ev.isError ? "danger" : "info",
+            meta: { toolName: ev.toolName, ...(durStr ? { duration: durStr } : {}) },
+          });
+        } else if (ev.type === "assistant.message") {
+          pushAgy({
+            kind: "message",
+            title: t(language, "console.block.agentReply"),
+            summary: previewFirstLine(ev.text, 72),
+            content: ev.text,
+            defaultCollapsed: false,
+            collapsible: false,
+            tone: "neutral",
+          });
+        } else if (ev.type === "run.error") {
+          pushAgy({
+            kind: "error",
+            title: t(language, "console.block.error"),
+            summary: previewFirstLine(ev.message, 80),
+            content: ev.message,
+            defaultCollapsed: false,
+            collapsible: countLines(ev.message) > 12,
+            tone: "danger",
+          });
+        }
+      }
+      if (agyBlocks.length > 0) return agyBlocks;
+    }
+  }
 
   while (i < lines.length) {
     const rawLine = lines[i]!;
@@ -753,4 +844,369 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
   }
 
   return blocks;
+}
+
+/** Shortens long worktree or absolute workspace paths for compact UI display. */
+export function shortenDisplayPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const wtMatch = /\/\.workbench-hub\/[^/]+\/worktrees\/[^/]+\/REQ-\d+\/(.+)$/.exec(trimmed);
+  if (wtMatch?.[1]) return wtMatch[1];
+  const repoMarker = /\/((?:src|tests|\.workbench)\/.+)$/.exec(trimmed);
+  if (repoMarker?.[1] && trimmed.startsWith("/")) return repoMarker[1];
+  if (trimmed.length > 68 && trimmed.includes("/")) {
+    const parts = trimmed.split("/").filter(Boolean);
+    if (parts.length > 3) return `…/${parts.slice(-3).join("/")}`;
+  }
+  return trimmed;
+}
+
+function classifyAgyTool(toolName: string, input: unknown): RunToolCategory {
+  if (input && typeof input === "object") {
+    const rec = input as Record<string, unknown>;
+    const cmd = typeof rec.CommandLine === "string" ? rec.CommandLine : typeof rec.command === "string" ? rec.command : "";
+    if (/(?:^|[;&|\s(])wb\s+(propose|verify|tasks|screenshot|get|list|show)\b/.test(cmd)) return "wb_cli";
+  }
+  const lower = toolName.trim().toLowerCase();
+  if (/^(?:bash|sh|shell|exec|run_command|execute|terminal)$/.test(lower)) return "bash";
+  if (lower.startsWith("mcp__") || lower.includes("mcp")) return "mcp";
+  if (/subagent|invoke_subagent|delegate|spawn_agent/.test(lower)) return "subagent";
+  if (/web_search|search_web|fetch|read_url|browser/.test(lower)) return "web";
+  if (/write|edit|replace|patch|create_file|delete_file|notebook_edit|sed_file/.test(lower)) return "write";
+  if (/grep|glob|search|find|list_dir/.test(lower)) return "search";
+  if (/read|view|cat|open_file/.test(lower)) return "read";
+  return "other";
+}
+
+function summarizeAgyParams(input: unknown): string {
+  if (!input || typeof input !== "object") return "";
+  const rec = input as Record<string, unknown>;
+  const raw =
+    typeof rec.CommandLine === "string"
+      ? rec.CommandLine
+      : typeof rec.command === "string"
+        ? rec.command
+        : typeof rec.Path === "string"
+          ? rec.Path
+          : typeof rec.AbsolutePath === "string"
+            ? rec.AbsolutePath
+            : typeof rec.TargetFile === "string"
+              ? rec.TargetFile
+              : typeof rec.file_path === "string"
+                ? rec.file_path
+                : typeof rec.DirectoryPath === "string"
+                  ? rec.DirectoryPath
+                  : typeof rec.SearchPath === "string"
+                    ? rec.SearchPath
+                    : typeof rec.Query === "string"
+                      ? rec.Query
+                      : typeof rec.Pattern === "string"
+                        ? rec.Pattern
+                        : "";
+  return raw.replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function extractAgyFiles(cat: RunToolCategory, input: unknown): string[] {
+  if (!input || typeof input !== "object") return [];
+  const rec = input as Record<string, unknown>;
+  const out: string[] = [];
+  for (const k of ["Path", "AbsolutePath", "TargetFile", "file_path", "path", "DirectoryPath", "SearchPath"]) {
+    const v = rec[k];
+    if (typeof v === "string" && v.trim() && v.length < 400 && !v.includes("\n")) {
+      if (!out.includes(v.trim())) out.push(v.trim());
+    }
+  }
+  return cat === "bash" ? [] : out.slice(0, 12);
+}
+
+function parseAgyUsage(raw: Record<string, unknown>): RunTokenUsage {
+  const uncached = Math.max(0, Math.floor(Number(raw.input_tokens) || 0));
+  const cacheRead = Math.max(0, Math.floor(Number(raw.cache_read_tokens ?? raw.cache_read_input_tokens) || 0));
+  const rawOutput = Math.max(0, Math.floor(Number(raw.output_tokens) || 0));
+  const thinking = Math.max(0, Math.floor(Number(raw.thinking_tokens ?? raw.reasoning_tokens) || 0));
+  const rawTotal = Math.max(0, Math.floor(Number(raw.total_tokens) || 0));
+  const thinkingIncluded = thinking > 0 && (rawTotal === uncached + rawOutput || (rawTotal === 0 && thinking <= rawOutput));
+  const output = thinkingIncluded ? Math.max(0, rawOutput - thinking) : rawOutput;
+  const inputTokens = uncached + cacheRead;
+  return {
+    inputTokens,
+    uncachedInputTokens: uncached,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: 0,
+    outputTokens: output,
+    reasoningTokens: thinking,
+    totalTokens: inputTokens + output + thinking,
+  };
+}
+
+/**
+ * Reconstructs structured `RunTraceEvent[]` from historical AGY NDJSON raw logs or `raw.line` traces
+ * so older persisted AGY runs render cleanly in the structured trace view.
+ */
+export function reconstructAgyTraceEvents(
+  rawLog: string,
+  existingTrace?: RunTraceEvent[],
+): RunTraceEvent[] | null {
+  const sourceLines: Array<{ text: string; ts?: number }> = [];
+  if (rawLog.trim()) {
+    for (const l of stripAnsi(rawLog).split("\n")) {
+      if (l.trim()) sourceLines.push({ text: l.trim() });
+    }
+  } else if (existingTrace && existingTrace.length > 0) {
+    for (const ev of existingTrace) {
+      if (ev.type === "raw.line") {
+        for (const l of stripAnsi(ev.text).split("\n")) {
+          if (l.trim()) sourceLines.push({ text: l.trim(), ts: ev.ts });
+        }
+      }
+    }
+  }
+
+  const hasAgyEnvelope = sourceLines.some((l) => isAgyJsonLine(l.text));
+  if (!hasAgyEnvelope) return null;
+
+  const reconstructed: RunTraceEvent[] = [];
+  let seq = 0;
+  const baseTs = existingTrace?.[0]?.ts ?? Date.now();
+  const push = (ev: Record<string, unknown>, ts?: number) => {
+    seq += 1;
+    reconstructed.push({ ...ev, seq, ts: ts ?? baseTs + seq } as RunTraceEvent);
+  };
+
+  if (existingTrace) {
+    for (const ev of existingTrace) {
+      if (ev.type === "run.init" || ev.type === "handoff.snapshot") {
+        push({ ...ev }, ev.ts);
+      }
+    }
+  }
+
+  let turnIndex = 0;
+  let hasReply = false;
+  let lastErrorMsg = "";
+  const stepTurns = new Map<number, number>();
+  const pendingText = new Map<number, string>();
+  const pendingThink = new Map<number, string>();
+  const startedTools = new Set<string>();
+  const completedTools = new Set<string>();
+  const completedTurns = new Set<number>();
+
+  const formatAgyOutput = (raw: unknown): string | undefined => {
+    if (raw === undefined || raw === null) return undefined;
+    if (typeof raw === "string") return raw.length > 32 * 1024 ? `${raw.slice(0, 16 * 1024)}\n…\n${raw.slice(-16 * 1024)}` : raw;
+    try {
+      const s = JSON.stringify(raw, null, 2);
+      return s.length > 32 * 1024 ? `${s.slice(0, 16 * 1024)}\n…\n${s.slice(-16 * 1024)}` : s;
+    } catch {
+      return String(raw);
+    }
+  };
+
+  const formatAgyError = (errObj: unknown, fallbackOutput: unknown): string => {
+    if (typeof errObj === "string" && errObj.trim()) return errObj.trim();
+    if (errObj && typeof errObj === "object") {
+      const rec = errObj as Record<string, unknown>;
+      const errType = typeof rec.type === "string" ? rec.type.trim() : "";
+      const msg = typeof rec.message === "string" ? rec.message.trim() : "";
+      if (errType && msg) return `${errType}: ${msg}`;
+      if (msg) return msg;
+      if (errType) return errType;
+    }
+    return formatAgyOutput(fallbackOutput) ?? "Tool failed";
+  };
+
+  const pushErrorUnique = (msg: string, ts?: number) => {
+    const clean = msg.trim();
+    if (!clean) return;
+    if (lastErrorMsg && (lastErrorMsg === clean || lastErrorMsg.includes(clean) || clean.includes(lastErrorMsg))) {
+      return;
+    }
+    lastErrorMsg = clean;
+    push({ type: "run.error", message: clean }, ts);
+  };
+
+  const ensureTurn = (stepIdx: number, ts?: number): number => {
+    const existing = stepTurns.get(stepIdx);
+    if (existing !== undefined) return existing;
+    turnIndex += 1;
+    stepTurns.set(stepIdx, turnIndex);
+    push({ type: "turn.start", turnIndex }, ts);
+    return turnIndex;
+  };
+
+  for (const line of sourceLines) {
+    const trimmed = line.text;
+    if (trimmed.startsWith("AGY_ERROR:")) {
+      try {
+        const errObj = JSON.parse(trimmed.slice("AGY_ERROR:".length).trim()) as Record<string, unknown>;
+        const msg = typeof errObj.short_error === "string" ? errObj.short_error : trimmed;
+        pushErrorUnique(msg, line.ts);
+        continue;
+      } catch {
+        // ignore
+      }
+    }
+    if (!trimmed.startsWith("{")) continue;
+    let evt: Record<string, unknown>;
+    try {
+      evt = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    if (evt.event === "step_update" && evt.step_update && typeof evt.step_update === "object") {
+      const su = evt.step_update as Record<string, unknown>;
+      const stepIdx = typeof su.step_index === "number" ? su.step_index : 0;
+      const state = String(su.state ?? "").toUpperCase();
+      const stepType = String(su.step_type ?? "");
+
+      if (stepType === "agent_response") {
+        const thinkChunk =
+          typeof su.thinking_delta === "string"
+            ? su.thinking_delta
+            : typeof su.thinking === "string"
+              ? su.thinking
+              : "";
+        if (thinkChunk) pendingThink.set(stepIdx, (pendingThink.get(stepIdx) ?? "") + thinkChunk);
+        const delta = typeof su.text_delta === "string" ? su.text_delta : typeof su.text === "string" ? su.text : "";
+        if (delta) pendingText.set(stepIdx, (pendingText.get(stepIdx) ?? "") + delta);
+
+        if (state === "DONE" || state === "ERROR") {
+          const turn = ensureTurn(stepIdx, line.ts);
+          const thinkTxt = (pendingThink.get(stepIdx) ?? "").trim();
+          pendingThink.delete(stepIdx);
+          if (thinkTxt) push({ type: "thinking", turnIndex: turn, text: thinkTxt }, line.ts);
+
+          const bodyTxt = (pendingText.get(stepIdx) ?? "").trim();
+          pendingText.delete(stepIdx);
+          if (bodyTxt) {
+            hasReply = true;
+            push({ type: "assistant.message", turnIndex: turn, text: bodyTxt }, line.ts);
+          }
+
+          if (!completedTurns.has(stepIdx)) {
+            completedTurns.add(stepIdx);
+            const usage = su.usage && typeof su.usage === "object" ? parseAgyUsage(su.usage as Record<string, unknown>) : undefined;
+            const durationMs =
+              typeof su.duration_seconds === "number" ? Math.round(su.duration_seconds * 1000) : undefined;
+            push(
+              {
+                type: "turn.end",
+                turnIndex: turn,
+                ...(durationMs !== undefined ? { durationMs } : {}),
+                ...(usage && usage.inputTokens > 0 ? { contextTokens: usage.inputTokens } : {}),
+                ...(usage ? { usage } : {}),
+              },
+              line.ts,
+            );
+          }
+        }
+      } else if (stepType === "tool") {
+        const callId = `agy-step-${stepIdx}`;
+        const toolInfo = (su.tool_info && typeof su.tool_info === "object" ? su.tool_info : {}) as Record<string, unknown>;
+        const toolName = String(su.tool_name ?? toolInfo.name ?? "tool");
+        const params = toolInfo.parameters ?? toolInfo.input;
+        const cat = classifyAgyTool(toolName, params);
+        const summary = summarizeAgyParams(params);
+        const files = extractAgyFiles(cat, params);
+        const paramsRec = params && typeof params === "object" ? (params as Record<string, unknown>) : null;
+        const cmdStr =
+          paramsRec && typeof paramsRec.CommandLine === "string"
+            ? paramsRec.CommandLine
+            : paramsRec && typeof paramsRec.command === "string"
+              ? paramsRec.command
+              : paramsRec && typeof paramsRec.cmd === "string"
+                ? paramsRec.cmd
+                : "";
+        const lowerTool = toolName.trim().toLowerCase();
+        const wbToolMatch = /^(?:mcp__.*__)?wb_(list|get|propose|update_tasks|verify|screenshot)$/.exec(lowerTool);
+        const wbCmdMatch = /(?:^|[;&|\s(])wb\s+(propose|verify|tasks|screenshot|get|list|show)\b/.exec(cmdStr);
+        const wbCommand = wbToolMatch ? `wb_${wbToolMatch[1]}` : wbCmdMatch ? `wb ${wbCmdMatch[1]}` : undefined;
+        const turn = turnIndex > 0 ? turnIndex : ensureTurn(stepIdx, line.ts);
+
+        if ((state === "ACTIVE" || state === "DONE" || state === "ERROR") && !startedTools.has(callId)) {
+          startedTools.add(callId);
+          let inputText: string | undefined;
+          if (params !== undefined && params !== null) {
+            try {
+              inputText = JSON.stringify(params, null, 2);
+            } catch {
+              inputText = String(params);
+            }
+          }
+          push(
+            {
+              type: "tool.start",
+              turnIndex: turn,
+              callId,
+              toolName,
+              category: cat,
+              summary,
+              ...(inputText ? { inputText } : {}),
+              ...(files.length > 0 ? { filesTouched: files } : {}),
+              ...(wbCommand ? { wbCommand } : {}),
+            },
+            line.ts,
+          );
+        }
+        if ((state === "DONE" || state === "ERROR") && !completedTools.has(callId)) {
+          completedTools.add(callId);
+          const isError = state === "ERROR" || Boolean(toolInfo.error);
+          const output = isError
+            ? formatAgyError(toolInfo.error, toolInfo.output)
+            : formatAgyOutput(toolInfo.output);
+          const durationMs =
+            typeof su.duration_seconds === "number" ? Math.round(su.duration_seconds * 1000) : undefined;
+          push(
+            {
+              type: "tool.end",
+              turnIndex: turn,
+              callId,
+              toolName,
+              category: cat,
+              summary,
+              ...(output !== undefined ? { output } : {}),
+              ...(isError ? { isError: true } : {}),
+              ...(durationMs !== undefined ? { durationMs } : {}),
+              ...(files.length > 0 ? { filesTouched: files } : {}),
+              ...(wbCommand ? { wbCommand } : {}),
+            },
+            line.ts,
+          );
+        }
+      }
+    } else if (evt.event === "result" && evt.result && typeof evt.result === "object") {
+      const res = evt.result as Record<string, unknown>;
+      const status = String(res.status ?? "").toUpperCase();
+      if (status === "ERROR" || res.is_error === true) {
+        const msg = typeof res.error === "string" && res.error.trim() ? res.error.trim() : "AGY execution failed";
+        pushErrorUnique(msg, line.ts);
+      } else if (!hasReply && typeof res.response === "string" && res.response.trim()) {
+        hasReply = true;
+        push({ type: "assistant.message", turnIndex: Math.max(1, turnIndex), text: res.response.trim() }, line.ts);
+      }
+    }
+  }
+
+  for (const [stepIdx, thinkTxt] of pendingThink.entries()) {
+    if (!thinkTxt.trim()) continue;
+    const turn = ensureTurn(stepIdx);
+    push({ type: "thinking", turnIndex: turn, text: thinkTxt.trim() });
+  }
+
+  for (const [stepIdx, txt] of pendingText.entries()) {
+    if (!txt.trim()) continue;
+    const turn = ensureTurn(stepIdx);
+    push({ type: "assistant.message", turnIndex: turn, text: txt.trim() });
+  }
+
+  if (existingTrace) {
+    for (const ev of existingTrace) {
+      if (ev.type === "run.end" || ev.type === "trace.truncated") {
+        push({ ...ev }, ev.ts);
+      }
+    }
+  }
+
+  return reconstructed.length > 0 ? reconstructed : null;
 }

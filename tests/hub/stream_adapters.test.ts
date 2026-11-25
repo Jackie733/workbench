@@ -314,4 +314,222 @@ describe("stream_adapters structured JSONL parsing & bounds", () => {
     expect(extractWbCommand("bash", { command: "wb verify REQ-001 --all" })).toBe("wb verify");
     expect(extractTouchedFiles("write", { file_path: "src/a.ts" }).all).toContain("src/a.ts");
   });
+
+  test("parses real AGY step_update/init/result protocol, text_delta buffering, PascalCase params, and AGY usage without double-counting thinking_tokens", () => {
+    const adapter = createHarnessStreamAdapter("agy", "gemini-4-neon", true);
+
+    const init = adapter.feedLine(
+      JSON.stringify({
+        event: "init",
+        conversation_id: "agy-conv-1",
+        init: { model: "gemini-4-neon-medium", cwd: "/repo", tools: ["read_file", "run_command"] },
+      }),
+    );
+    expect(init.sessionId).toBe("agy-conv-1");
+    expect(init.effectiveModel).toBe("gemini-4-neon-medium");
+    expect(init.displayText).toContain("⚡ AGY 引擎已就绪");
+
+    // user_input & system_message should be silently absorbed (no raw.line pollution)
+    const userInput = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "agy-conv-1", step_index: 0, state: "DONE", step_type: "user_input" },
+      }),
+    );
+    expect(userInput.events).toEqual([]);
+    expect(userInput.displayText).toBe("");
+
+    // Intermediate agent_response step (no text_delta, reports usage & duration)
+    const step1 = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          duration_seconds: 2.5,
+          usage: { input_tokens: 1000, output_tokens: 200, thinking_tokens: 120, cache_read_tokens: 500, total_tokens: 1200 },
+        },
+      }),
+    );
+    expect(step1.events.map((e) => e.type)).toEqual(["turn.start", "turn.end"]);
+    const turnEnd1 = step1.events[1];
+    if (turnEnd1?.type === "turn.end") {
+      expect(turnEnd1.durationMs).toBe(2500);
+      expect(turnEnd1.contextTokens).toBe(1500);
+      expect(turnEnd1.usage).toEqual({
+        inputTokens: 1500,
+        uncachedInputTokens: 1000,
+        cacheReadTokens: 500,
+        cacheWriteTokens: 0,
+        outputTokens: 80,
+        reasoningTokens: 120,
+        totalTokens: 1700,
+      });
+    }
+
+    // Tool ACTIVE + DONE with PascalCase Path
+    const toolActive = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 2,
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "read_file",
+          tool_info: { name: "read_file", parameters: { Path: "/repo/src/app.ts" } },
+        },
+      }),
+    );
+    const tStart = toolActive.events[0];
+    expect(tStart?.type).toBe("tool.start");
+    if (tStart?.type === "tool.start") {
+      expect(tStart.category).toBe("read");
+      expect(tStart.summary).toBe("/repo/src/app.ts");
+      expect(tStart.filesTouched).toContain("/repo/src/app.ts");
+    }
+
+    const toolDone = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 2,
+          state: "DONE",
+          step_type: "tool",
+          tool_name: "read_file",
+          duration_seconds: 0.42,
+          tool_info: { name: "read_file", parameters: { Path: "/repo/src/app.ts" }, output: "20 lines" },
+        },
+      }),
+    );
+    const tEnd = toolDone.events[0];
+    expect(tEnd?.type).toBe("tool.end");
+    if (tEnd?.type === "tool.end") {
+      expect(tEnd.durationMs).toBe(420);
+      expect(tEnd.output).toBe("20 lines");
+      expect(tEnd.isError).toBeUndefined();
+    }
+
+    // Duplicate DONE for the same tool step_index is ignored idempotently
+    const dupToolDone = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 2,
+          state: "DONE",
+          step_type: "tool",
+          tool_name: "read_file",
+          duration_seconds: 0.42,
+          tool_info: { name: "read_file", parameters: { Path: "/repo/src/app.ts" }, output: "20 lines" },
+        },
+      }),
+    );
+    expect(dupToolDone.events).toEqual([]);
+
+    // Tool with CommandLine running wb verify + ERROR state
+    adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 3,
+          state: "ACTIVE",
+          step_type: "tool",
+          tool_name: "run_command",
+          tool_info: { name: "run_command", parameters: { CommandLine: "wb verify REQ-001 --all" } },
+        },
+      }),
+    );
+    const toolErr = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 3,
+          state: "ERROR",
+          step_type: "tool",
+          tool_name: "run_command",
+          duration_seconds: 1.1,
+          tool_info: {
+            name: "run_command",
+            parameters: { CommandLine: "wb verify REQ-001 --all" },
+            error: { type: "TOOL_ERROR", message: "exit code 1" },
+          },
+        },
+      }),
+    );
+    const tErrEnd = toolErr.events[0];
+    expect(tErrEnd?.type).toBe("tool.end");
+    if (tErrEnd?.type === "tool.end") {
+      expect(tErrEnd.category).toBe("wb_cli");
+      expect(tErrEnd.wbCommand).toBe("wb verify");
+      expect(tErrEnd.isError).toBe(true);
+      expect(tErrEnd.output).toContain("TOOL_ERROR: exit code 1");
+    }
+
+    // Streaming text_delta chunks coalesced into one assistant.message on DONE
+    const d1 = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "agy-conv-1", step_index: 4, state: "ACTIVE", step_type: "agent_response", text_delta: "已完成 " },
+      }),
+    );
+    expect(d1.events).toEqual([]);
+    adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "agy-conv-1", step_index: 4, state: "ACTIVE", step_type: "agent_response", text_delta: "全部修改。" },
+      }),
+    );
+    const dDone = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "agy-conv-1",
+          step_index: 4,
+          state: "DONE",
+          step_type: "agent_response",
+          duration_seconds: 1.8,
+          usage: { input_tokens: 1200, output_tokens: 150, thinking_tokens: 50, cache_read_tokens: 800, total_tokens: 1350 },
+        },
+      }),
+    );
+    const msgEv = dDone.events.find((e) => e.type === "assistant.message");
+    expect(msgEv?.type).toBe("assistant.message");
+    if (msgEv?.type === "assistant.message") {
+      expect(msgEv.text).toBe("已完成 全部修改。");
+    }
+    expect(dDone.replyText).toBe("已完成 全部修改。");
+
+    // Result envelope does not duplicate already-emitted reply and keeps multi-step turnsCount
+    const res = adapter.feedLine(
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "agy-conv-1",
+          status: "SUCCESS",
+          response: "已完成 全部修改。",
+          duration_seconds: 6.2,
+          num_turns: 1,
+          usage: { input_tokens: 2200, output_tokens: 350, thinking_tokens: 170, cache_read_tokens: 1300, total_tokens: 2550 },
+        },
+      }),
+    );
+    expect(res.events).toEqual([]);
+    expect(res.replyText).toBeNull();
+    expect(res.authoritativeTurnsCount).toBe(2);
+    expect(res.authoritativeUsage).toEqual({
+      inputTokens: 3500,
+      uncachedInputTokens: 2200,
+      cacheReadTokens: 1300,
+      cacheWriteTokens: 0,
+      outputTokens: 180,
+      reasoningTokens: 170,
+      totalTokens: 3850,
+    });
+  });
 });

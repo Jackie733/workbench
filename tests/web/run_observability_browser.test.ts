@@ -370,4 +370,153 @@ suite("Agent Observability E2E (Chromium)", () => {
     expect(invokeCount).toBe(2);
     await page.close();
   }, { timeout: 60_000 });
+
+  test("renders AGY step_update/init/result streams as structured trace cards with grouped reads and clean Markdown", async () => {
+    makeTempHub();
+    const repo = initGitRepo();
+    await initProject(repo, { name: "AgyObsProj", privacyMode: "local" });
+    await createRequirement(repo, { goal: "Verify AGY structured console rendering" });
+    registerHubProject(repo, { name: "AgyObsProj" });
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "agy",
+          label: "Antigravity (agy)",
+          subscription: "Antigravity",
+          installed: true,
+          executable: "agy",
+          models: [{ id: "gemini-4-neon", label: "Gemini 4 Neon", tier: "balanced", source: "detected" }],
+          defaultModel: "gemini-4-neon",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => {
+        const lines = [
+          JSON.stringify({ event: "init", conversation_id: "agy-e2e-1", init: { model: "gemini-4-neon-medium", cwd: repo } }),
+          JSON.stringify({ event: "step_update", step_update: { conversation_id: "agy-e2e-1", step_index: 0, state: "DONE", step_type: "user_input" } }),
+          ...[1, 2, 3].map((idx) =>
+            JSON.stringify({
+              event: "step_update",
+              step_update: {
+                conversation_id: "agy-e2e-1",
+                step_index: idx,
+                state: "DONE",
+                step_type: "tool",
+                tool_name: "read_file",
+                duration_seconds: 0.25,
+                tool_info: {
+                  name: "read_file",
+                  parameters: { Path: `${repo}/src/file${idx}.ts` },
+                  output: `line-${idx}`,
+                },
+              },
+            }),
+          ),
+          JSON.stringify({
+            event: "step_update",
+            step_update: {
+              conversation_id: "agy-e2e-1",
+              step_index: 4,
+              state: "DONE",
+              step_type: "tool",
+              tool_name: "run_command",
+              duration_seconds: 0.4,
+              tool_info: {
+                name: "run_command",
+                parameters: { CommandLine: "wb verify REQ-001 --all" },
+                output: "PASS",
+              },
+            },
+          }),
+          JSON.stringify({
+            event: "step_update",
+            step_update: { conversation_id: "agy-e2e-1", step_index: 5, state: "ACTIVE", step_type: "agent_response", text_delta: "AGY_E2E_REPLY " },
+          }),
+          JSON.stringify({
+            event: "step_update",
+            step_update: { conversation_id: "agy-e2e-1", step_index: 5, state: "ACTIVE", step_type: "agent_response", text_delta: "[index.ts](file:///repo/index.ts)" },
+          }),
+          JSON.stringify({
+            event: "step_update",
+            step_update: {
+              conversation_id: "agy-e2e-1",
+              step_index: 5,
+              state: "DONE",
+              step_type: "agent_response",
+              duration_seconds: 1.2,
+              usage: { input_tokens: 900, output_tokens: 80, thinking_tokens: 30, cache_read_tokens: 300, total_tokens: 980 },
+            },
+          }),
+          JSON.stringify({
+            event: "result",
+            result: {
+              conversation_id: "agy-e2e-1",
+              status: "SUCCESS",
+              response: "AGY_E2E_REPLY [index.ts](file:///repo/index.ts)",
+              duration_seconds: 2.3,
+              num_turns: 1,
+              usage: { input_tokens: 900, output_tokens: 80, thinking_tokens: 30, cache_read_tokens: 300, total_tokens: 980 },
+            },
+          }),
+        ];
+        const script = lines.map((l) => `printf '%s\\n' ${JSON.stringify(l)}`).join("; ");
+        return { command: "bash", args: ["-c", script], displayCommand: "mock-agy" };
+      },
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, hubMode: true, writeDiscovery: false, executor });
+    servers.push(server);
+
+    const runDone = new Promise<void>((resolve) => {
+      const unsub = executor.subscribe((ev) => {
+        if (ev.type === "agent.run.finished" && ev.harness === "agy") {
+          unsub();
+          resolve();
+        }
+      });
+    });
+    await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "ask",
+      harness: "agy",
+      model: "gemini-4-neon",
+      message: "inspect repo",
+    });
+    await runDone;
+
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(String(err)));
+    await page.setViewport({ width: 1360, height: 860 });
+    await page.goto(`${server.url}?req=REQ-001`, { waitUntil: "networkidle0" });
+    await page.waitForSelector('[data-testid="toggle-drawer-btn"]', { timeout: 15000 });
+    const isDrawerOpen = await page.evaluate(() => Boolean(document.querySelector('[data-testid="right-drawer"].open')));
+    if (!isDrawerOpen) {
+      await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 15000 });
+    }
+    await clickReady(page, '[data-testid="drawer-tab-console"]');
+    await page.waitForSelector('[data-testid="console-pane"] [data-testid="trace-tool-group"]', { timeout: 15000 });
+    await page.waitForSelector('[data-testid="console-pane"] [data-testid="trace-tool-card"]', { timeout: 15000 });
+
+    const snap = await page.evaluate(() => {
+      const out = document.querySelector('[data-testid="console-pane"] [data-testid="console-log-output"]');
+      return {
+        text: out?.textContent ?? "",
+        hasFileRef: Boolean(out?.querySelector(".console-file-ref")),
+        groupCount: out?.querySelectorAll('[data-testid="trace-tool-group"]').length ?? 0,
+        cardCount: out?.querySelectorAll('[data-testid="trace-tool-card"]').length ?? 0,
+      };
+    });
+
+    expect(snap.text).toContain("AGY_E2E_REPLY");
+    expect(snap.text).not.toContain('"step_update"');
+    expect(snap.hasFileRef).toBe(true);
+    expect(snap.groupCount).toBe(1);
+    expect(snap.cardCount).toBe(1);
+    expect(pageErrors).toEqual([]);
+    await page.close();
+  }, { timeout: 60_000 });
 });

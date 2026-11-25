@@ -64,17 +64,35 @@ function summarizeToolInput(inp: unknown): string {
       ? rec.command
       : typeof rec.cmd === "string"
         ? rec.cmd
-        : typeof rec.file_path === "string"
-          ? rec.file_path
-          : typeof rec.TargetFile === "string"
-            ? rec.TargetFile
-            : typeof rec.path === "string"
-              ? rec.path
-              : typeof rec.pattern === "string"
-                ? rec.pattern
-                : typeof rec.query === "string"
-                  ? rec.query
-                  : "";
+        : typeof rec.CommandLine === "string"
+          ? rec.CommandLine
+          : typeof rec.file_path === "string"
+            ? rec.file_path
+            : typeof rec.TargetFile === "string"
+              ? rec.TargetFile
+              : typeof rec.Path === "string"
+                ? rec.Path
+                : typeof rec.AbsolutePath === "string"
+                  ? rec.AbsolutePath
+                  : typeof rec.path === "string"
+                    ? rec.path
+                    : typeof rec.DirectoryPath === "string"
+                      ? rec.DirectoryPath
+                      : typeof rec.SearchPath === "string"
+                        ? rec.SearchPath
+                        : typeof rec.pattern === "string"
+                          ? rec.pattern
+                          : typeof rec.Pattern === "string"
+                            ? rec.Pattern
+                            : typeof rec.query === "string"
+                              ? rec.query
+                              : typeof rec.Query === "string"
+                                ? rec.Query
+                                : typeof rec.url === "string"
+                                  ? rec.url
+                                  : typeof rec.Url === "string"
+                                    ? rec.Url
+                                    : "";
   return raw.replace(/\s+/g, " ").trim().slice(0, 90);
 }
 
@@ -150,7 +168,14 @@ export function extractWbCommand(toolName: string, input: unknown): string | und
   }
   if (input && typeof input === "object") {
     const rec = input as Record<string, unknown>;
-    const cmd = typeof rec.command === "string" ? rec.command : typeof rec.cmd === "string" ? rec.cmd : "";
+    const cmd =
+      typeof rec.command === "string"
+        ? rec.command
+        : typeof rec.cmd === "string"
+          ? rec.cmd
+          : typeof rec.CommandLine === "string"
+            ? rec.CommandLine
+            : "";
     const match = /(?:^|[;&|\s(])wb\s+(propose|verify|tasks|screenshot|get|list|show)\b/.exec(cmd);
     if (match) return `wb ${match[1]}`;
   } else if (typeof input === "string") {
@@ -167,7 +192,7 @@ export function classifyToolName(toolName: string, input?: unknown): RunToolCate
   if (lower.startsWith("mcp__") || lower.includes("mcp")) return "mcp";
   if (/subagent|invoke_subagent|delegate|spawn_agent|task(?:_tool)?$/.test(lower)) return "subagent";
   if (/web_search|search_web|fetch|read_url|webfetch|browser/.test(lower)) return "web";
-  if (/write|edit|replace|patch|file_change|create_file|delete_file|notebookedit/.test(lower)) return "write";
+  if (/write|edit|replace|patch|file_change|create_file|delete_file|notebookedit|notebook_edit|sed_file/.test(lower)) return "write";
   if (/grep|glob|search|find|list_dir|ls$/.test(lower)) return "search";
   if (/read|view|cat|open_file/.test(lower)) return "read";
   return "other";
@@ -189,9 +214,13 @@ export function extractTouchedFiles(toolName: string, input: unknown): {
     const rec = input as Record<string, unknown>;
     collect(rec.file_path);
     collect(rec.path);
+    collect(rec.Path);
     collect(rec.AbsolutePath);
     collect(rec.TargetFile);
     collect(rec.target_file);
+    collect(rec.targetFile);
+    collect(rec.file);
+    collect(rec.DirectoryPath);
     collect(rec.SearchPath);
     if (Array.isArray(rec.paths)) for (const p of rec.paths) collect(p);
     if (Array.isArray(rec.files)) for (const p of rec.files) collect(p);
@@ -244,6 +273,36 @@ function normalizeUsageOpenAi(raw: Record<string, unknown>): RunTokenUsage {
     outputTokens: output,
     reasoningTokens: reasoning,
     totalTokens: inputTokens + output + reasoning,
+  };
+}
+
+/**
+ * Normalizes AGY `usage` payloads (`input_tokens` is uncached, `cache_read_tokens` is separate,
+ * and `thinking_tokens` is already included in `output_tokens` when `total_tokens === input_tokens + output_tokens`).
+ */
+export function normalizeUsageAgy(raw: Record<string, unknown>): RunTokenUsage {
+  const uncached = toSafeCount(raw.input_tokens ?? raw.inputTokens);
+  const cacheRead = toSafeCount(
+    raw.cache_read_tokens ?? raw.cacheReadTokens ?? raw.cache_read_input_tokens ?? raw.cacheReadInputTokens,
+  );
+  const cacheWrite = toSafeCount(
+    raw.cache_write_tokens ?? raw.cacheWriteTokens ?? raw.cache_creation_input_tokens ?? raw.cacheCreationInputTokens,
+  );
+  const rawOutput = toSafeCount(raw.output_tokens ?? raw.outputTokens);
+  const thinking = toSafeCount(raw.thinking_tokens ?? raw.thinkingTokens ?? raw.reasoning_tokens ?? raw.reasoningTokens);
+  const rawTotal = toSafeCount(raw.total_tokens ?? raw.totalTokens);
+  const thinkingIncludedInOutput =
+    thinking > 0 && (rawTotal === uncached + rawOutput || (rawTotal === 0 && thinking <= rawOutput));
+  const output = thinkingIncludedInOutput ? Math.max(0, rawOutput - thinking) : rawOutput;
+  const inputTokens = uncached + cacheRead + cacheWrite;
+  return {
+    inputTokens,
+    uncachedInputTokens: uncached,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: cacheWrite,
+    outputTokens: output,
+    reasoningTokens: thinking,
+    totalTokens: inputTokens + output + thinking,
   };
 }
 
@@ -1079,14 +1138,381 @@ class OpencodeStreamAdapter implements HarnessStreamAdapter {
 class AgyStreamAdapter implements HarnessStreamAdapter {
   private turnIndex = 0;
   private hasReply = false;
-  private pendingTools = new Map<string, { name: string; category: RunToolCategory; summary: string; startedAt: number; files: string[]; wbCommand?: string }>();
+  private pendingTools = new Map<
+    string,
+    { name: string; category: RunToolCategory; summary: string; startedAt: number; files: string[]; wbCommand?: string; turnIndex: number }
+  >();
+  private pendingResponseByStep = new Map<number, string>();
+  private pendingThinkingByStep = new Map<number, string>();
+  private stepTurnMap = new Map<number, number>();
+  private completedAgentSteps = new Set<number>();
+  private completedToolSteps = new Set<string>();
+  private lastErrorMessage = "";
 
   constructor(private readonly requestedModel: string) {}
+
+  private ensureStepTurn(stepIndex: number, events: PartialTraceEvent[]): number {
+    const existing = this.stepTurnMap.get(stepIndex);
+    if (existing !== undefined) return existing;
+    this.turnIndex += 1;
+    const turn = this.turnIndex;
+    this.stepTurnMap.set(stepIndex, turn);
+    events.push({ type: "turn.start", turnIndex: turn });
+    return turn;
+  }
+
+  private formatAgyToolError(errObj: unknown): string {
+    if (typeof errObj === "string") return errObj;
+    if (errObj && typeof errObj === "object") {
+      const rec = errObj as Record<string, unknown>;
+      const msg = typeof rec.message === "string" ? rec.message : "";
+      const errType = typeof rec.type === "string" ? rec.type : "";
+      if (errType && msg) return `${errType}: ${msg}`;
+      if (msg) return msg;
+    }
+    return formatToolOutputBounded(errObj).output ?? "Tool execution failed";
+  }
+
+  private handleAgyEventEnvelope(evt: Record<string, unknown>): AdapterLineResult {
+    const eventName = String(evt.event);
+    const sessionId =
+      typeof evt.conversation_id === "string"
+        ? evt.conversation_id
+        : typeof evt.session_id === "string"
+          ? evt.session_id
+          : undefined;
+
+    if (eventName === "init") {
+      const initObj = (evt.init && typeof evt.init === "object" ? evt.init : {}) as Record<string, unknown>;
+      const convId =
+        sessionId ?? (typeof initObj.conversation_id === "string" ? initObj.conversation_id : undefined);
+      const actual =
+        typeof initObj.model === "string" && initObj.model.trim() ? initObj.model.trim() : this.requestedModel;
+      return {
+        events: [],
+        displayText: `⚡ AGY 引擎已就绪 (model: ${actual})\n`,
+        replyText: null,
+        sessionId: convId,
+        ...(typeof initObj.model === "string" && initObj.model.trim() ? { effectiveModel: initObj.model.trim() } : {}),
+      };
+    }
+
+    if (eventName === "step_update") {
+      const su = (evt.step_update && typeof evt.step_update === "object" ? evt.step_update : {}) as Record<
+        string,
+        unknown
+      >;
+      const stepConvId = typeof su.conversation_id === "string" ? su.conversation_id : sessionId;
+      const stepIndex = typeof su.step_index === "number" && Number.isFinite(su.step_index) ? su.step_index : 0;
+      const state = typeof su.state === "string" ? su.state.toUpperCase() : "";
+      const stepType = typeof su.step_type === "string" ? su.step_type : "";
+      const events: PartialTraceEvent[] = [];
+      const displayParts: string[] = [];
+      const replyParts: string[] = [];
+
+      if (stepType === "user_input" || stepType === "system_message" || stepType === "error_message") {
+        return { events: [], displayText: "", replyText: null, sessionId: stepConvId };
+      }
+
+      if (stepType === "agent_response") {
+        const thinkChunk =
+          typeof su.thinking_delta === "string"
+            ? su.thinking_delta
+            : typeof su.thinking === "string"
+              ? su.thinking
+              : typeof su.thought === "string"
+                ? su.thought
+                : "";
+        if (thinkChunk) {
+          this.pendingThinkingByStep.set(stepIndex, (this.pendingThinkingByStep.get(stepIndex) ?? "") + thinkChunk);
+        }
+        const delta =
+          typeof su.text_delta === "string"
+            ? su.text_delta
+            : typeof su.text === "string"
+              ? su.text
+              : "";
+        if (delta) {
+          this.pendingResponseByStep.set(stepIndex, (this.pendingResponseByStep.get(stepIndex) ?? "") + delta);
+        }
+
+        if (state === "DONE" || state === "ERROR") {
+          const turn = this.ensureStepTurn(stepIndex, events);
+          const fullThink = (this.pendingThinkingByStep.get(stepIndex) ?? "").trim();
+          this.pendingThinkingByStep.delete(stepIndex);
+          if (fullThink) {
+            const boundedThink = formatTraceTextBounded(fullThink);
+            events.push({
+              type: "thinking",
+              turnIndex: turn,
+              text: boundedThink.text,
+              ...(boundedThink.truncated ? { truncated: true } : {}),
+            });
+            displayParts.push(`💭 ${fullThink}`);
+          }
+
+          const fullText = (this.pendingResponseByStep.get(stepIndex) ?? "").trim();
+          this.pendingResponseByStep.delete(stepIndex);
+          if (fullText) {
+            const boundedText = formatTraceTextBounded(fullText);
+            events.push({
+              type: "assistant.message",
+              turnIndex: turn,
+              text: boundedText.text,
+              ...(boundedText.truncated ? { truncated: true } : {}),
+            });
+            displayParts.push(fullText);
+            replyParts.push(fullText);
+            this.hasReply = true;
+          }
+
+          const durationMs =
+            typeof su.duration_seconds === "number" && Number.isFinite(su.duration_seconds) && su.duration_seconds >= 0
+              ? Math.round(su.duration_seconds * 1000)
+              : undefined;
+          const usage =
+            su.usage && typeof su.usage === "object"
+              ? normalizeUsageAgy(su.usage as Record<string, unknown>)
+              : undefined;
+          if (!this.completedAgentSteps.has(stepIndex)) {
+            this.completedAgentSteps.add(stepIndex);
+            events.push({
+              type: "turn.end",
+              turnIndex: turn,
+              ...(durationMs !== undefined ? { durationMs } : {}),
+              ...(usage && usage.inputTokens > 0 ? { contextTokens: usage.inputTokens } : {}),
+              ...(usage ? { usage } : {}),
+            });
+          }
+        }
+
+        return {
+          events,
+          displayText: displayParts.length > 0 ? `${displayParts.join("\n")}\n` : "",
+          replyText: replyParts.length > 0 ? replyParts.join("\n\n") : null,
+          sessionId: stepConvId,
+        };
+      }
+
+      if (stepType === "tool") {
+        const callId = `agy-step-${stepIndex}`;
+        const toolInfo = (su.tool_info && typeof su.tool_info === "object" ? su.tool_info : {}) as Record<
+          string,
+          unknown
+        >;
+        const toolName =
+          typeof su.tool_name === "string" && su.tool_name.trim()
+            ? su.tool_name.trim()
+            : typeof toolInfo.name === "string" && toolInfo.name.trim()
+              ? toolInfo.name.trim()
+              : "tool";
+        const rawIn = toolInfo.parameters ?? toolInfo.input ?? toolInfo.arguments;
+        const turn = this.turnIndex > 0 ? this.turnIndex : this.ensureStepTurn(stepIndex, events);
+
+        if (state === "ACTIVE") {
+          if (!this.pendingTools.has(callId)) {
+            const summary = summarizeToolInput(rawIn);
+            const category = classifyToolName(toolName, rawIn);
+            const files = extractTouchedFiles(toolName, rawIn).all;
+            const wbCommand = extractWbCommand(toolName, rawIn);
+            const inp = formatToolInputBounded(rawIn);
+            this.pendingTools.set(callId, {
+              name: toolName,
+              category,
+              summary,
+              startedAt: Date.now(),
+              files,
+              wbCommand,
+              turnIndex: turn,
+            });
+            events.push({
+              type: "tool.start",
+              turnIndex: turn,
+              callId,
+              toolName,
+              category,
+              summary,
+              ...(inp.text !== undefined ? { inputText: inp.text } : {}),
+              ...(inp.truncated ? { inputTruncated: true } : {}),
+              ...(files.length > 0 ? { filesTouched: files } : {}),
+              ...(wbCommand ? { wbCommand } : {}),
+            });
+            displayParts.push(`🔧 调用工具: ${toolName}${summary ? ` (${summary})` : ""}`);
+          }
+          return {
+            events,
+            displayText: displayParts.length > 0 ? `${displayParts.join("\n")}\n` : "",
+            replyText: null,
+            sessionId: stepConvId,
+          };
+        }
+
+        if (state === "DONE" || state === "ERROR") {
+          if (this.completedToolSteps.has(callId)) {
+            return { events: [], displayText: "", replyText: null, sessionId: stepConvId };
+          }
+          this.completedToolSteps.add(callId);
+          const pending = this.pendingTools.get(callId);
+          if (pending) this.pendingTools.delete(callId);
+          const summary = pending?.summary ?? summarizeToolInput(rawIn);
+          const category = pending?.category ?? classifyToolName(toolName, rawIn);
+          const files = pending?.files ?? extractTouchedFiles(toolName, rawIn).all;
+          const wbCommand = pending?.wbCommand ?? extractWbCommand(toolName, rawIn);
+          const effectiveTurn = pending?.turnIndex ?? turn;
+
+          if (!pending) {
+            const inp = formatToolInputBounded(rawIn);
+            events.push({
+              type: "tool.start",
+              turnIndex: effectiveTurn,
+              callId,
+              toolName,
+              category,
+              summary,
+              ...(inp.text !== undefined ? { inputText: inp.text } : {}),
+              ...(inp.truncated ? { inputTruncated: true } : {}),
+              ...(files.length > 0 ? { filesTouched: files } : {}),
+              ...(wbCommand ? { wbCommand } : {}),
+            });
+            displayParts.push(`🔧 调用工具: ${toolName}${summary ? ` (${summary})` : ""}`);
+          }
+
+          const isError = state === "ERROR" || Boolean(toolInfo.error);
+          const rawOutput = isError ? this.formatAgyToolError(toolInfo.error ?? toolInfo.output) : toolInfo.output;
+          const boundedOut = formatToolOutputBounded(rawOutput);
+          const durationMs =
+            typeof su.duration_seconds === "number" && Number.isFinite(su.duration_seconds) && su.duration_seconds >= 0
+              ? Math.round(su.duration_seconds * 1000)
+              : pending
+                ? Math.max(0, Date.now() - pending.startedAt)
+                : undefined;
+
+          events.push({
+            type: "tool.end",
+            turnIndex: effectiveTurn,
+            callId,
+            toolName,
+            category,
+            summary,
+            ...(boundedOut.output !== undefined ? { output: boundedOut.output } : {}),
+            ...(boundedOut.outputBytes !== undefined ? { outputBytes: boundedOut.outputBytes } : {}),
+            ...(boundedOut.outputTruncated ? { outputTruncated: true } : {}),
+            ...(isError ? { isError: true } : {}),
+            ...(durationMs !== undefined ? { durationMs } : {}),
+            ...(files.length > 0 ? { filesTouched: files } : {}),
+            ...(wbCommand ? { wbCommand } : {}),
+          });
+
+          return {
+            events,
+            displayText: displayParts.length > 0 ? `${displayParts.join("\n")}\n` : "",
+            replyText: null,
+            sessionId: stepConvId,
+          };
+        }
+      }
+
+      return { events: [], displayText: "", replyText: null, sessionId: stepConvId };
+    }
+
+    if (eventName === "result") {
+      const resObj = (evt.result && typeof evt.result === "object" ? evt.result : {}) as Record<string, unknown>;
+      const resConvId = typeof resObj.conversation_id === "string" ? resObj.conversation_id : sessionId;
+      const status = typeof resObj.status === "string" ? resObj.status.toUpperCase() : "";
+      const isError = status === "ERROR" || resObj.is_error === true;
+      const responseText = typeof resObj.response === "string" && resObj.response.trim() ? resObj.response.trim() : null;
+      const errorText = typeof resObj.error === "string" && resObj.error.trim() ? resObj.error.trim() : null;
+      const authUsage =
+        resObj.usage && typeof resObj.usage === "object"
+          ? normalizeUsageAgy(resObj.usage as Record<string, unknown>)
+          : undefined;
+      const authCost =
+        typeof resObj.total_cost_usd === "number" && Number.isFinite(resObj.total_cost_usd)
+          ? resObj.total_cost_usd
+          : undefined;
+      const rawTurns =
+        typeof resObj.num_turns === "number" && Number.isFinite(resObj.num_turns) && resObj.num_turns > 0
+          ? Math.floor(resObj.num_turns)
+          : undefined;
+      const authTurns = this.turnIndex > 0 ? Math.max(this.turnIndex, rawTurns ?? 0) : rawTurns;
+      const sec =
+        typeof resObj.duration_seconds === "number" && Number.isFinite(resObj.duration_seconds)
+          ? resObj.duration_seconds.toFixed(1)
+          : undefined;
+
+      const events: PartialTraceEvent[] = [];
+      if (isError) {
+        const errMsg = errorText ?? responseText ?? "AGY 执行失败";
+        const cleanErr = sanitizeOutput(errMsg, 2000).text;
+        const isDup =
+          Boolean(this.lastErrorMessage) &&
+          (this.lastErrorMessage === cleanErr || this.lastErrorMessage.includes(cleanErr));
+        if (!isDup) {
+          this.lastErrorMessage = cleanErr;
+          events.push({ type: "run.error", message: cleanErr });
+        }
+        return {
+          events,
+          displayText: isDup ? "" : `❌ ${errMsg}\n`,
+          replyText: null,
+          sessionId: resConvId,
+          ...(authUsage ? { authoritativeUsage: authUsage } : {}),
+          ...(authCost !== undefined ? { authoritativeCostUsd: authCost } : {}),
+          ...(authTurns !== undefined ? { authoritativeTurnsCount: authTurns } : {}),
+        };
+      }
+
+      const reply = !this.hasReply ? responseText : null;
+      if (reply) {
+        this.hasReply = true;
+        const bounded = formatTraceTextBounded(reply);
+        events.push({
+          type: "assistant.message",
+          turnIndex: Math.max(1, this.turnIndex),
+          text: bounded.text,
+          ...(bounded.truncated ? { truncated: true } : {}),
+        });
+      }
+      const doneLine = sec ? `✓ 执行完成 (耗时 ${sec}s)\n` : "";
+      return {
+        events,
+        displayText: reply ? `${reply}\n${doneLine}` : doneLine,
+        replyText: reply,
+        sessionId: resConvId,
+        ...(authUsage ? { authoritativeUsage: authUsage } : {}),
+        ...(authCost !== undefined ? { authoritativeCostUsd: authCost } : {}),
+        ...(authTurns !== undefined ? { authoritativeTurnsCount: authTurns } : {}),
+      };
+    }
+
+    return { events: [], displayText: "", replyText: null, sessionId };
+  }
 
   feedLine(rawLine: string): AdapterLineResult {
     const trimmed = rawLine.trim();
     if (!trimmed || CLI_NOISE_RE.test(trimmed)) {
       return { events: [], displayText: "", replyText: null };
+    }
+    if (trimmed.startsWith("AGY_ERROR:")) {
+      const jsonPart = trimmed.slice("AGY_ERROR:".length).trim();
+      try {
+        const errObj = JSON.parse(jsonPart) as Record<string, unknown>;
+        const msg =
+          typeof errObj.short_error === "string" && errObj.short_error.trim()
+            ? errObj.short_error.trim()
+            : typeof errObj.message === "string" && errObj.message.trim()
+              ? errObj.message.trim()
+              : trimmed;
+        const cleanErr = sanitizeOutput(msg, 2000).text;
+        this.lastErrorMessage = cleanErr;
+        return {
+          events: [{ type: "run.error", message: cleanErr }],
+          displayText: `❌ ${msg}\n`,
+          replyText: null,
+        };
+      } catch {
+        // Fall through to plain line handling
+      }
     }
     if (!trimmed.startsWith("{")) {
       return {
@@ -1105,6 +1531,10 @@ class AgyStreamAdapter implements HarnessStreamAdapter {
         displayText: `${trimmed}\n`,
         replyText: trimmed,
       };
+    }
+
+    if (typeof evt.event === "string") {
+      return this.handleAgyEventEnvelope(evt);
     }
 
     if (typeof evt.type !== "string") {
@@ -1164,7 +1594,15 @@ class AgyStreamAdapter implements HarnessStreamAdapter {
             const files = extractTouchedFiles(toolName, rawIn).all;
             const wbCommand = extractWbCommand(toolName, rawIn);
             const inp = formatToolInputBounded(rawIn);
-            this.pendingTools.set(callId, { name: toolName, category, summary, startedAt: Date.now(), files, wbCommand });
+            this.pendingTools.set(callId, {
+              name: toolName,
+              category,
+              summary,
+              startedAt: Date.now(),
+              files,
+              wbCommand,
+              turnIndex: this.turnIndex,
+            });
             events.push({
               type: "tool.start",
               turnIndex: this.turnIndex,
@@ -1260,7 +1698,15 @@ class AgyStreamAdapter implements HarnessStreamAdapter {
       const files = extractTouchedFiles(toolName, rawIn).all;
       const wbCommand = extractWbCommand(toolName, rawIn);
       const inp = formatToolInputBounded(rawIn);
-      this.pendingTools.set(callId, { name: toolName, category, summary, startedAt: Date.now(), files, wbCommand });
+      this.pendingTools.set(callId, {
+        name: toolName,
+        category,
+        summary,
+        startedAt: Date.now(),
+        files,
+        wbCommand,
+        turnIndex: turn,
+      });
       return {
         events: [
           {
@@ -1353,7 +1799,48 @@ class AgyStreamAdapter implements HarnessStreamAdapter {
   }
 
   flush(): AdapterLineResult | null {
-    return null;
+    const events: PartialTraceEvent[] = [];
+    const displayParts: string[] = [];
+    const replyParts: string[] = [];
+
+    for (const [stepIndex, rawThink] of this.pendingThinkingByStep.entries()) {
+      const clean = rawThink.trim();
+      if (!clean) continue;
+      const turn = this.ensureStepTurn(stepIndex, events);
+      const bounded = formatTraceTextBounded(clean);
+      events.push({
+        type: "thinking",
+        turnIndex: turn,
+        text: bounded.text,
+        ...(bounded.truncated ? { truncated: true } : {}),
+      });
+      displayParts.push(`💭 ${clean}`);
+    }
+    this.pendingThinkingByStep.clear();
+
+    for (const [stepIndex, rawResp] of this.pendingResponseByStep.entries()) {
+      const clean = rawResp.trim();
+      if (!clean) continue;
+      const turn = this.ensureStepTurn(stepIndex, events);
+      const bounded = formatTraceTextBounded(clean);
+      events.push({
+        type: "assistant.message",
+        turnIndex: turn,
+        text: bounded.text,
+        ...(bounded.truncated ? { truncated: true } : {}),
+      });
+      displayParts.push(clean);
+      replyParts.push(clean);
+      this.hasReply = true;
+    }
+    this.pendingResponseByStep.clear();
+
+    if (events.length === 0) return null;
+    return {
+      events,
+      displayText: displayParts.length > 0 ? `${displayParts.join("\n")}\n` : "",
+      replyText: replyParts.length > 0 ? replyParts.join("\n\n") : null,
+    };
   }
 }
 

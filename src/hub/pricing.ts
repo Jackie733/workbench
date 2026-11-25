@@ -1,4 +1,5 @@
 import type { AgentRunRecord, RunBillingMode, RunCostSummary, RunTokenUsage } from "../core/types.ts";
+import { normalizeUsageAgy } from "./stream_adapters.ts";
 import type { HarnessInfo, HubObservabilityConfig, ModelPriceOverride } from "./types.ts";
 
 export interface QuotaPoolResolution {
@@ -327,6 +328,75 @@ const SHELL_CMD_LINE_RE = /^\$\s+\S+/;
 export function inferRunMetricsFromRawLog(rawLog: string): InferredLogMetrics {
   if (!rawLog || !rawLog.trim()) return {};
   const cleaned = rawLog.replace(ANSI_ESCAPE_RE, "");
+
+  // Fast path: raw AGY NDJSON logs (`{"event":"init"...}` / `{"event":"step_update"...}` / `{"event":"result"...}`)
+  if (/"event"\s*:\s*"(?:init|step_update|result)"/.test(cleaned)) {
+    let agyAgentTurns = 0;
+    let agyToolCalls = 0;
+    let agyToolErrors = 0;
+    let agyResultUsage: RunTokenUsage | undefined;
+    let agyAccUncached = 0;
+    let agyAccCacheRead = 0;
+    let agyAccOutput = 0;
+    let agyAccThinking = 0;
+
+    for (const line of cleaned.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        const obj = JSON.parse(trimmed) as Record<string, unknown>;
+        if (obj.event === "step_update" && obj.step_update && typeof obj.step_update === "object") {
+          const su = obj.step_update as Record<string, unknown>;
+          const st = String(su.step_type ?? "");
+          const state = String(su.state ?? "").toUpperCase();
+          if (st === "agent_response" && (state === "DONE" || state === "ERROR")) {
+            agyAgentTurns += 1;
+            if (su.usage && typeof su.usage === "object") {
+              const u = su.usage as Record<string, unknown>;
+              agyAccUncached += Number(u.input_tokens) || 0;
+              agyAccCacheRead += Number(u.cache_read_tokens) || 0;
+              agyAccOutput += Number(u.output_tokens) || 0;
+              agyAccThinking += Number(u.thinking_tokens) || 0;
+            }
+          } else if (st === "tool" && (state === "DONE" || state === "ERROR")) {
+            agyToolCalls += 1;
+            if (state === "ERROR" || Boolean((su.tool_info as Record<string, unknown> | undefined)?.error)) {
+              agyToolErrors += 1;
+            }
+          }
+        } else if (obj.event === "result" && obj.result && typeof obj.result === "object") {
+          const res = obj.result as Record<string, unknown>;
+          if (res.usage && typeof res.usage === "object") {
+            const normalized = normalizeUsageAgy(res.usage as Record<string, unknown>);
+            if (normalized.totalTokens > 0) {
+              agyResultUsage = normalized;
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed JSON line
+      }
+    }
+
+    const fallbackRawUsage = normalizeUsageAgy({
+      input_tokens: agyAccUncached,
+      cache_read_tokens: agyAccCacheRead,
+      output_tokens: agyAccOutput,
+      thinking_tokens: agyAccThinking,
+    });
+    const fallbackUsage: RunTokenUsage | undefined =
+      fallbackRawUsage.totalTokens > 0 ? fallbackRawUsage : undefined;
+    const usage = agyResultUsage ?? fallbackUsage;
+    if (usage || agyAgentTurns > 0 || agyToolCalls > 0) {
+      return {
+        ...(usage ? { usage } : {}),
+        turnsCount: Math.max(agyAgentTurns, 1),
+        toolCallsCount: agyToolCalls,
+        toolErrorCount: agyToolErrors,
+        estimated: !agyResultUsage,
+      };
+    }
+  }
 
   let codexReportedTotal = 0;
   const codexMatches = cleaned.matchAll(/tokens used\s*[\r\n]+\s*([\d,]+)/gi);

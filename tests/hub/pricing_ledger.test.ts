@@ -268,5 +268,55 @@ describe("quota pool attribution, dual pricing & global insights ledger", () => 
     expect(enrichedOpencode.turnsCount).toBe(3);
     expect(enrichedOpencode.usage?.totalTokens).toBeGreaterThan(0);
     expect(enrichedOpencode.cost?.equivalentCostUsd).toBeGreaterThan(0);
+
+    const agyLog = [
+      "$ /home/tsien/.local/bin/agy -p --output-format stream-json (model=gemini-4-neon-medium)",
+      JSON.stringify({ event: "init", conversation_id: "c1", init: { model: "gemini-4-neon-medium" } }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "c1",
+          step_index: 1,
+          state: "DONE",
+          step_type: "agent_response",
+          usage: { input_tokens: 1000, output_tokens: 100, thinking_tokens: 40, cache_read_tokens: 500, total_tokens: 1100 },
+        },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "c1",
+          step_index: 2,
+          state: "DONE",
+          step_type: "tool",
+          tool_name: "read_file",
+          tool_info: { name: "read_file", parameters: { Path: "src/a.ts" }, output: "ok" },
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "c1",
+          status: "SUCCESS",
+          response: "done",
+          num_turns: 1,
+          usage: { input_tokens: 1200, output_tokens: 200, thinking_tokens: 50, cache_read_tokens: 800, total_tokens: 1400 },
+        },
+      }),
+    ].join("\n");
+    const agyInferred = inferRunMetricsFromRawLog(agyLog);
+    expect(agyInferred.turnsCount).toBe(1);
+    expect(agyInferred.toolCallsCount).toBe(1);
+    expect(agyInferred.toolErrorCount).toBe(0);
+    expect(agyInferred.estimated).toBe(false);
+    expect(agyInferred.usage).toEqual({
+      inputTokens: 2000,
+      uncachedInputTokens: 1200,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 0,
+      outputTokens: 150,
+      reasoningTokens: 50,
+      totalTokens: 2200,
+    });
   });
 });

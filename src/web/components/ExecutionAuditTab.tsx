@@ -30,7 +30,7 @@ import type {
   TimelineEvent,
 } from "../../core/types.ts";
 import { formatAgentActionLabel, formatAgentStatusLabel, t, type MessageKey, type UiLanguage } from "../i18n.ts";
-import { parseConsoleLog, stripAnsi } from "../lib/consoleFormat.ts";
+import { parseConsoleLog, reconstructAgyTraceEvents, stripAnsi } from "../lib/consoleFormat.ts";
 import {
   hydrateRunLog,
   hydrateRunTrace,
@@ -248,7 +248,11 @@ function RunInspectorSection({
   }, [reqId, inspectedRun.id, isLogHydrated, traceState?.hydrated]);
 
   const analytics = useMemo(() => {
-    const events = traceState?.events ?? [];
+    const rawEvents = traceState?.events ?? [];
+    const hasRawRichTrace = rawEvents.some(
+      (ev) => ev.type === "tool.start" || ev.type === "turn.end" || ev.type === "assistant.message",
+    );
+    const events = hasRawRichTrace ? rawEvents : reconstructAgyTraceEvents(rawLog, rawEvents) ?? rawEvents;
     const compactions: Array<{ turnIndex: number; mode: string; reclaimedTokens?: number }> = [];
     const realTurns: ContextTurnPoint[] = [];
     const toolsByTurn = new Map<number, string[]>();
@@ -293,6 +297,13 @@ function RunInspectorSection({
       (ev) => ev.type === "tool.start" || ev.type === "turn.end" || ev.type === "assistant.message",
     );
     if (hasTraceEvents) {
+      for (const ev of events) {
+        if (ev.type === "tool.start") {
+          const list = toolsByTurn.get(ev.turnIndex) ?? [];
+          list.push(ev.toolName);
+          toolsByTurn.set(ev.turnIndex, list);
+        }
+      }
       const starts = new Map<string, Extract<RunTraceEvent, { type: "tool.start" }>>();
       let stepSeq = 0;
       for (const ev of events) {
@@ -326,17 +337,26 @@ function RunInspectorSection({
           weights.reply.count++;
         } else if (ev.type === "tool.start") {
           starts.set(ev.callId, ev);
-          const list = toolsByTurn.get(ev.turnIndex) ?? [];
-          list.push(ev.toolName);
-          toolsByTurn.set(ev.turnIndex, list);
           if (ev.filesTouched) {
-            const k = /edit|write|patch/i.test(ev.toolName) ? "write" : /grep|glob|search/i.test(ev.toolName) ? "search" : "read";
+            const k =
+              ev.category === "write"
+                ? "write"
+                : ev.category === "search"
+                  ? "search"
+                  : ev.category === "read"
+                    ? "read"
+                    : /edit|write|replace|patch|sed/i.test(ev.toolName)
+                      ? "write"
+                      : /grep|glob|search|find|list/i.test(ev.toolName)
+                        ? "search"
+                        : "read";
             for (const f of ev.filesTouched) bumpFile(f, k);
           }
         } else if (ev.type === "tool.end") {
           stepSeq++;
           const st = starts.get(ev.callId);
           const name = ev.toolName || st?.toolName || "tool";
+          const cat = ev.category || st?.category || "other";
           const summary = ev.summary || st?.summary || "";
           const outText = ev.output ?? "";
           const inText = st?.inputText ?? "";
@@ -344,11 +364,22 @@ function RunInspectorSection({
           const isErr = Boolean(ev.isError);
           bumpTool(name, isErr);
           if (ev.filesTouched) {
-            const k = /edit|write|patch/i.test(name) ? "write" : /grep|glob|search/i.test(name) ? "search" : "read";
+            const k =
+              cat === "write"
+                ? "write"
+                : cat === "search"
+                  ? "search"
+                  : cat === "read"
+                    ? "read"
+                    : /edit|write|replace|patch|sed/i.test(name)
+                      ? "write"
+                      : /grep|glob|search|find|list/i.test(name)
+                        ? "search"
+                        : "read";
             for (const f of ev.filesTouched) bumpFile(f, k);
           }
-          const isEdit = /edit|write|patch/i.test(name);
-          const isFileRead = /read|grep|glob|search|list/i.test(name);
+          const isEdit = cat === "write" || /edit|write|replace|patch|sed/i.test(name);
+          const isFileRead = cat === "read" || cat === "search" || /read|view|grep|glob|search|find|list/i.test(name);
           const targetCat: ContextCategoryKey = isEdit ? "reply" : isFileRead ? "files" : "commands";
           const bLen = byteLen(payloadText);
           const tokEst = approxTokens(payloadText);

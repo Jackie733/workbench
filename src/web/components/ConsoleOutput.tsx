@@ -7,18 +7,28 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  FileEdit,
   FileText,
+  GitBranch,
+  Globe,
   Info,
   Layers,
   Loader2,
+  Search,
   Sparkles,
   Terminal,
   Wrench,
   Zap,
 } from "lucide-react";
 import type { RunTraceEvent } from "../../core/types.ts";
-import { t, type UiLanguage } from "../i18n.ts";
-import { parseConsoleLog, type ConsoleBlock, type ConsoleBlockKind } from "../lib/consoleFormat.ts";
+import { t, type MessageKey, type UiLanguage } from "../i18n.ts";
+import {
+  parseConsoleLog,
+  reconstructAgyTraceEvents,
+  shortenDisplayPath,
+  type ConsoleBlock,
+  type ConsoleBlockKind,
+} from "../lib/consoleFormat.ts";
 import { formatDurationHuman, formatPercent, formatTokenCount, formatUsd } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
@@ -62,9 +72,130 @@ interface PairedToolCall {
   filesTouched?: string[];
 }
 
+interface ToolGroupItem {
+  id: string;
+  tools: PairedToolCall[];
+  totalDurationMs: number;
+  countsByTool: Array<{ toolName: string; count: number }>;
+}
+
 type StructuredRenderItem =
   | { kind: "event"; event: RunTraceEvent }
-  | { kind: "tool_pair"; tool: PairedToolCall };
+  | { kind: "tool_pair"; tool: PairedToolCall }
+  | { kind: "tool_group"; group: ToolGroupItem };
+
+function isGroupableReadTool(tool: PairedToolCall): boolean {
+  return tool.ended && !tool.isError && (tool.category === "read" || tool.category === "search");
+}
+
+function groupConsecutiveReadTools(items: StructuredRenderItem[], filter: TraceFilter): StructuredRenderItem[] {
+  if (filter !== "all" && filter !== "tools") return items;
+  const grouped: StructuredRenderItem[] = [];
+  let streak: PairedToolCall[] = [];
+
+  const flushStreak = () => {
+    if (streak.length === 0) return;
+    if (streak.length < 3) {
+      for (const tool of streak) grouped.push({ kind: "tool_pair", tool });
+      streak = [];
+      return;
+    }
+    const counts = new Map<string, number>();
+    let totalDurationMs = 0;
+    for (const tool of streak) {
+      counts.set(tool.toolName, (counts.get(tool.toolName) ?? 0) + 1);
+      totalDurationMs += tool.durationMs ?? 0;
+    }
+    grouped.push({
+      kind: "tool_group",
+      group: {
+        id: `tool-group-${streak[0]!.id}`,
+        tools: streak,
+        totalDurationMs,
+        countsByTool: Array.from(counts.entries()).map(([toolName, count]) => ({ toolName, count })),
+      },
+    });
+    streak = [];
+  };
+
+  for (const item of items) {
+    if (item.kind === "tool_pair" && isGroupableReadTool(item.tool)) {
+      streak.push(item.tool);
+      continue;
+    }
+    flushStreak();
+    grouped.push(item);
+  }
+  flushStreak();
+  return grouped;
+}
+
+function toolCategoryIcon(category: string) {
+  switch (category) {
+    case "read":
+      return FileText;
+    case "search":
+      return Search;
+    case "write":
+      return FileEdit;
+    case "bash":
+      return Terminal;
+    case "wb_cli":
+      return Zap;
+    case "subagent":
+      return GitBranch;
+    case "web":
+      return Globe;
+    case "mcp":
+      return Layers;
+    default:
+      return Wrench;
+  }
+}
+
+function toolCategoryLabel(language: UiLanguage, category: string): string {
+  const known = new Set(["read", "write", "search", "bash", "wb_cli", "mcp", "subagent", "web", "other"]);
+  const key = `console.cat.${known.has(category) ? category : "other"}` as MessageKey;
+  return t(language, key);
+}
+
+function formatToolSummaryCompact(tool: PairedToolCall): string {
+  const raw = tool.summary.trim();
+  if (!raw) return "";
+  if (tool.category === "bash" || tool.category === "wb_cli") return raw;
+  return shortenDisplayPath(raw);
+}
+
+function formatSmartToolInput(tool: PairedToolCall): { commandPreview?: string; rawInput?: string } {
+  const raw = tool.inputText?.trim();
+  if (!raw) return {};
+  if (raw.startsWith("{")) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const cmd =
+        typeof obj.CommandLine === "string"
+          ? obj.CommandLine
+          : typeof obj.command === "string"
+            ? obj.command
+            : typeof obj.cmd === "string"
+              ? obj.cmd
+              : "";
+      if ((tool.category === "bash" || tool.category === "wb_cli") && cmd.trim()) {
+        return { commandPreview: `$ ${cmd.trim()}` };
+      }
+      if (tool.category === "read" && typeof (obj.Path ?? obj.file_path ?? obj.AbsolutePath) === "string") {
+        const p = shortenDisplayPath(String(obj.Path ?? obj.file_path ?? obj.AbsolutePath));
+        const start = typeof obj.StartLine === "number" ? obj.StartLine : undefined;
+        const end = typeof obj.EndLine === "number" ? obj.EndLine : undefined;
+        const range = start !== undefined ? `#L${start}${end !== undefined ? `-L${end}` : ""}` : "";
+        return { commandPreview: `${p}${range}` };
+      }
+    } catch {
+      // Keep raw JSON fallback
+    }
+  }
+  return { rawInput: raw };
+}
 
 function pairTraceEvents(events: RunTraceEvent[], filter: TraceFilter): StructuredRenderItem[] {
   const items: StructuredRenderItem[] = [];
@@ -137,20 +268,22 @@ function pairTraceEvents(events: RunTraceEvent[], filter: TraceFilter): Structur
     items.push({ kind: "event", event: ev });
   }
 
-  if (filter === "all") return items;
-  return items.filter((item) => {
+  if (filter === "all") return groupConsecutiveReadTools(items, filter);
+  const grouped = items.filter((item) => {
     if (item.kind === "tool_pair") {
       if (filter === "tools") return true;
       if (filter === "errors") return item.tool.isError;
       if (filter === "wb") return Boolean(item.tool.wbCommand || item.tool.category === "wb_cli");
       return false;
     }
+    if (item.kind !== "event") return false;
     const tType = item.event.type;
     if (filter === "thinking") return tType === "thinking";
     if (filter === "replies") return tType === "assistant.message" || tType === "run.end";
     if (filter === "errors") return tType === "run.error" || (tType === "run.end" && item.event.status === "failed");
     return false;
   });
+  return groupConsecutiveReadTools(grouped, filter);
 }
 
 function blockIcon(kind: ConsoleBlockKind, tone: ConsoleBlock["tone"]) {
@@ -174,11 +307,19 @@ function blockIcon(kind: ConsoleBlockKind, tone: ConsoleBlock["tone"]) {
   }
 }
 
+function isMarkdownTableStart(lines: string[], idx: number): boolean {
+  const line = lines[idx];
+  if (!line || !line.trim().startsWith("|") || idx + 1 >= lines.length) return false;
+  return /^\s*\|?\s*[-:]+(?:\s*\|\s*[-:]+)+\s*\|?\s*$/.test(lines[idx + 1]!);
+}
+
 function renderFormattedMessage(text: string) {
   const lines = text.split("\n");
   const out: Array<
     | { kind: "heading"; key: string; text: string }
     | { kind: "code"; key: string; lang: string; content: string }
+    | { kind: "quote"; key: string; lines: string[] }
+    | { kind: "table"; key: string; headers: string[]; rows: string[][] }
     | { kind: "list"; key: string; items: string[] }
     | { kind: "text"; key: string; text: string }
   > = [];
@@ -205,6 +346,35 @@ function renderFormattedMessage(text: string) {
       continue;
     }
 
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i]!)) {
+        quoteLines.push(lines[i]!.replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      out.push({ kind: "quote", key: `quote-${i}`, lines: quoteLines });
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, i)) {
+      const splitRow = (rowLine: string) =>
+        rowLine
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+      const headers = splitRow(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i]!.trim().startsWith("|")) {
+        rows.push(splitRow(lines[i]!));
+        i += 1;
+      }
+      out.push({ kind: "table", key: `tbl-${i}`, headers, rows });
+      continue;
+    }
+
     if (/^\s*(?:[-*]|\d+\.)\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*(?:[-*]|\d+\.)\s+/.test(lines[i]!)) {
@@ -220,6 +390,8 @@ function renderFormattedMessage(text: string) {
       i < lines.length &&
       !lines[i]!.trim().startsWith("```") &&
       !/^#{1,4}\s+/.test(lines[i]!.trim()) &&
+      !/^\s*>\s?/.test(lines[i]!) &&
+      !isMarkdownTableStart(lines, i) &&
       !/^\s*(?:[-*]|\d+\.)\s+/.test(lines[i]!)
     ) {
       textLines.push(lines[i]!);
@@ -235,7 +407,7 @@ function renderFormattedMessage(text: string) {
         if (seg.kind === "heading") {
           return (
             <div key={seg.key} className="console-msg-heading">
-              {seg.text}
+              {renderInlineCode(seg.text)}
             </div>
           );
         }
@@ -245,6 +417,39 @@ function renderFormattedMessage(text: string) {
               {seg.lang && <span className="console-msg-code-lang">{seg.lang}</span>}
               <code>{seg.content}</code>
             </pre>
+          );
+        }
+        if (seg.kind === "quote") {
+          return (
+            <blockquote key={seg.key} className="console-msg-quote">
+              {seg.lines.map((ql, idx) => (
+                <div key={idx}>{renderInlineCode(ql)}</div>
+              ))}
+            </blockquote>
+          );
+        }
+        if (seg.kind === "table") {
+          return (
+            <div key={seg.key} className="console-msg-table-wrap">
+              <table className="console-msg-table">
+                <thead>
+                  <tr>
+                    {seg.headers.map((h, idx) => (
+                      <th key={idx}>{renderInlineCode(h)}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {seg.rows.map((r, rIdx) => (
+                    <tr key={rIdx}>
+                      {r.map((cell, cIdx) => (
+                        <td key={cIdx}>{renderInlineCode(cell)}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           );
         }
         if (seg.kind === "list") {
@@ -266,8 +471,11 @@ function renderFormattedMessage(text: string) {
   );
 }
 
-function renderInlineCode(text: string) {
-  const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
+function renderInlineCode(text: string, allowBold = true) {
+  const pattern = allowBold
+    ? /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\((?:file:\/\/\/[^)\s]+|https?:\/\/[^)\s]+)\))/g
+    : /(`[^`\n]+`|\[[^\]\n]+\]\((?:file:\/\/\/[^)\s]+|https?:\/\/[^)\s]+)\))/g;
+  const parts = text.split(pattern);
   return (
     <>
       {parts.map((part, idx) => {
@@ -278,8 +486,27 @@ function renderInlineCode(text: string) {
             </code>
           );
         }
-        if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
-          return <strong key={idx}>{part.slice(2, -2)}</strong>;
+        if (allowBold && part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+          return <strong key={idx}>{renderInlineCode(part.slice(2, -2), false)}</strong>;
+        }
+        const linkMatch = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(part);
+        if (linkMatch) {
+          const label = linkMatch[1]!;
+          const href = linkMatch[2]!;
+          if (href.startsWith("file://")) {
+            const fsPath = href.replace(/^file:\/\//, "");
+            return (
+              <span key={idx} className="console-file-ref" title={fsPath}>
+                <Icon icon={FileText} size={14} />
+                <span>{label}</span>
+              </span>
+            );
+          }
+          return (
+            <a key={idx} href={href} target="_blank" rel="noopener noreferrer" className="console-link">
+              {label}
+            </a>
+          );
         }
         return <Fragment key={idx}>{part}</Fragment>;
       })}
@@ -320,7 +547,7 @@ export function ConsoleOutput({
   const isAtBottomRef = useRef(true);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const hasRichTrace = Boolean(
+  const hasRichRawTrace = Boolean(
     traceEvents?.some(
       (ev) =>
         ev.type === "thinking" ||
@@ -331,12 +558,20 @@ export function ConsoleOutput({
         ev.type === "context.compaction",
     ),
   );
+  const reconstructedAgyTrace = useMemo(
+    () => (hasRichRawTrace ? null : reconstructAgyTraceEvents(rawLog, traceEvents)),
+    [hasRichRawTrace, rawLog, traceEvents],
+  );
+  const effectiveTraceEvents = hasRichRawTrace ? traceEvents : reconstructedAgyTrace ?? traceEvents;
+  const hasRichTrace = hasRichRawTrace || Boolean(reconstructedAgyTrace && reconstructedAgyTrace.length > 0);
   const hasStructuredTrace = Boolean(
-    traceEvents && traceEvents.length > 0 && hasTrace !== false && (hasRichTrace || !rawLog),
+    effectiveTraceEvents &&
+      effectiveTraceEvents.length > 0 &&
+      (Boolean(reconstructedAgyTrace) || (hasTrace !== false && (hasRichTrace || !rawLog))),
   );
   const traceItems = useMemo(
-    () => (hasStructuredTrace && traceEvents ? pairTraceEvents(traceEvents, traceFilter) : []),
-    [hasStructuredTrace, traceEvents, traceFilter],
+    () => (hasStructuredTrace && effectiveTraceEvents ? pairTraceEvents(effectiveTraceEvents, traceFilter) : []),
+    [hasStructuredTrace, effectiveTraceEvents, traceFilter],
   );
   const blocks = useMemo(() => parseConsoleLog(rawLog, language), [rawLog, language]);
 
@@ -406,10 +641,23 @@ export function ConsoleOutput({
 
   const toggleAllTraceCards = () => {
     const pairs = traceItems.filter((i): i is { kind: "tool_pair"; tool: PairedToolCall } => i.kind === "tool_pair");
-    const anyCollapsed = pairs.some((p) => !(collapseOverrides[p.tool.id] ?? p.tool.isError));
+    const groups = traceItems.filter((i): i is { kind: "tool_group"; group: ToolGroupItem } => i.kind === "tool_group");
+    const anyCollapsed =
+      pairs.some((p) => !(collapseOverrides[p.tool.id] ?? p.tool.isError)) ||
+      groups.some(
+        (g) =>
+          !(collapseOverrides[g.group.id] ?? false) ||
+          g.group.tools.some((tool) => !(collapseOverrides[tool.id] ?? tool.isError)),
+      );
     const next: Record<string, boolean> = { ...collapseOverrides };
     for (const p of pairs) {
       next[p.tool.id] = anyCollapsed;
+    }
+    for (const g of groups) {
+      next[g.group.id] = anyCollapsed;
+      for (const tool of g.group.tools) {
+        next[tool.id] = anyCollapsed;
+      }
     }
     setCollapseOverrides(next);
   };
@@ -428,7 +676,7 @@ export function ConsoleOutput({
   };
 
   const isLegacyWithoutTrace = traceHydrated && hasTrace === false && !hasStructuredTrace;
-  const toolPairsInView = traceItems.filter((i) => i.kind === "tool_pair");
+  const toolPairsInView = traceItems.filter((i) => i.kind === "tool_pair" || i.kind === "tool_group");
 
   return (
     <>
@@ -540,10 +788,12 @@ export function ConsoleOutput({
                 <div className="console-empty">{t(language, "console.filterEmpty")}</div>
               ) : (
                 traceItems.map((item) => {
-                  if (item.kind === "tool_pair") {
-                    const tool = item.tool;
+                  const renderToolCard = (tool: PairedToolCall) => {
                     const expanded = collapseOverrides[tool.id] ?? tool.isError;
                     const toneCls = tool.isError ? "tone-danger" : tool.ended ? "tone-success" : "tone-info";
+                    const CatIcon = toolCategoryIcon(tool.category);
+                    const compactSummary = formatToolSummaryCompact(tool);
+                    const smartInput = formatSmartToolInput(tool);
                     return (
                       <div
                         key={tool.id}
@@ -562,12 +812,14 @@ export function ConsoleOutput({
                             {!tool.ended && isRunning ? (
                               <Icon icon={Loader2} size={14} className="spin" />
                             ) : (
-                              <Icon icon={Wrench} size={14} />
+                              <Icon icon={CatIcon} size={14} />
                             )}
                             <span className="console-fold-title">{tool.toolName}</span>
-                            <span className="trace-cat-badge">{tool.category}</span>
+                            <span className="trace-cat-badge">{toolCategoryLabel(language, tool.category)}</span>
                             {tool.wbCommand && <Badge size="sm" variant="info">wb</Badge>}
-                            <span className="console-fold-summary">{tool.summary}</span>
+                            <span className="console-fold-summary" title={tool.summary}>
+                              {compactSummary}
+                            </span>
                           </span>
                           <span className="console-fold-meta">
                             {tool.isError
@@ -582,19 +834,28 @@ export function ConsoleOutput({
                             {tool.filesTouched && tool.filesTouched.length > 0 && (
                               <div className="trace-files-row">
                                 {tool.filesTouched.map((fp) => (
-                                  <span key={fp} className="trace-file-chip">
-                                    {fp}
+                                  <span key={fp} className="trace-file-chip" title={fp}>
+                                    {shortenDisplayPath(fp)}
                                   </span>
                                 ))}
                               </div>
                             )}
-                            {tool.inputText && (
+                            {smartInput.commandPreview && (
                               <div className="trace-io-section">
                                 <div className="trace-io-label">
                                   {t(language, "console.toolInput")}
                                   {tool.inputTruncated && <Badge size="sm" variant="warning">truncated</Badge>}
                                 </div>
-                                <pre className="trace-tool-pre">{tool.inputText}</pre>
+                                <pre className="trace-tool-pre trace-tool-cmd">{smartInput.commandPreview}</pre>
+                              </div>
+                            )}
+                            {smartInput.rawInput && (
+                              <div className="trace-io-section">
+                                <div className="trace-io-label">
+                                  {t(language, "console.toolInput")}
+                                  {tool.inputTruncated && <Badge size="sm" variant="warning">truncated</Badge>}
+                                </div>
+                                <pre className="trace-tool-pre">{smartInput.rawInput}</pre>
                               </div>
                             )}
                             {tool.outputText && (
@@ -603,9 +864,53 @@ export function ConsoleOutput({
                                   {t(language, "console.toolOutput")}
                                   {tool.outputTruncated && <Badge size="sm" variant="warning">clipped 32KB</Badge>}
                                 </div>
-                                <pre className="trace-tool-pre">{tool.outputText}</pre>
+                                <pre className={`trace-tool-pre ${tool.isError ? "is-error" : ""}`}>
+                                  {tool.outputText}
+                                </pre>
                               </div>
                             )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  };
+
+                  if (item.kind === "tool_pair") {
+                    return renderToolCard(item.tool);
+                  }
+
+                  if (item.kind === "tool_group") {
+                    const grp = item.group;
+                    const expanded = collapseOverrides[grp.id] ?? false;
+                    return (
+                      <div key={grp.id} className="console-block trace-tool-group" data-testid="trace-tool-group">
+                        <button
+                          type="button"
+                          className="console-fold-btn"
+                          aria-expanded={expanded}
+                          onClick={() => toggleBlock(grp.id, expanded)}
+                        >
+                          <span className="console-fold-left">
+                            <Icon icon={expanded ? ChevronDown : ChevronRight} size={14} />
+                            <Icon icon={Search} size={14} />
+                            <span className="console-fold-title">
+                              {t(language, "console.toolGroupSummary", { count: grp.tools.length })}
+                            </span>
+                            <span className="trace-group-badges">
+                              {grp.countsByTool.map((c) => (
+                                <span key={c.toolName} className="trace-cat-badge">
+                                  {c.toolName} ({c.count})
+                                </span>
+                              ))}
+                            </span>
+                          </span>
+                          <span className="console-fold-meta">
+                            {formatDurationHuman(grp.totalDurationMs)}
+                          </span>
+                        </button>
+                        {expanded && (
+                          <div className="trace-tool-group-body">
+                            {grp.tools.map((tool) => renderToolCard(tool))}
                           </div>
                         )}
                       </div>
@@ -767,6 +1072,23 @@ export function ConsoleOutput({
                   }
 
                   if (ev.type === "raw.line") {
+                    const agyErrMatch = /^AGY_ERROR:\s*(\{.*\})\s*$/m.exec(ev.text);
+                    if (agyErrMatch?.[1]) {
+                      try {
+                        const errObj = JSON.parse(agyErrMatch[1]) as Record<string, unknown>;
+                        const shortErr =
+                          typeof errObj.short_error === "string" && errObj.short_error.trim()
+                            ? errObj.short_error.trim()
+                            : ev.text;
+                        return (
+                          <div key={`raw-${ev.seq}`} className="console-block console-block-error tone-danger">
+                            <div className="console-block-body">{shortErr}</div>
+                          </div>
+                        );
+                      } catch {
+                        // fall through
+                      }
+                    }
                     return (
                       <div
                         key={`raw-${ev.seq}`}
