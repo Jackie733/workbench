@@ -133,7 +133,7 @@ async function main(): Promise<number> {
   const rawBrowserWorkers = Number(process.env.WORKBENCH_BROWSER_WORKERS ?? "");
   const maxBrowserWorkers = Math.max(
     1,
-    Math.min(concurrency, Number.isFinite(rawBrowserWorkers) && rawBrowserWorkers > 0 ? Math.floor(rawBrowserWorkers) : Math.min(2, concurrency)),
+    Math.min(concurrency, Number.isFinite(rawBrowserWorkers) && rawBrowserWorkers > 0 ? Math.floor(rawBrowserWorkers) : 1),
   );
 
   const suiteStart = Date.now();
