@@ -10,13 +10,10 @@ import {
   PanelRightOpen,
   Moon,
   Settings,
-  Sparkles,
   Sun,
-  Zap,
 } from "lucide-react";
 import { t } from "../i18n.ts";
 import { backHome, logoutSession, useAuthStatusQuery, useHubStateQuery, useProjectQuery } from "../queries.ts";
-import { bridgeStatusLabel } from "../state.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
@@ -64,8 +61,6 @@ export function Topbar() {
   const projName = noHubProject
     ? ""
     : (activeSummary?.name ?? project?.project?.name ?? project?.root.split("/").pop() ?? "");
-  const bridge = noHubProject ? undefined : project?.bridge;
-  const working = Boolean(bridge?.connected && bridge.state !== "idle");
   const sidebarLabel = isMobile
     ? t(language, "topbar.toggleSidebarMobile")
     : desktopSidebarOpen
@@ -157,10 +152,6 @@ export function Topbar() {
           </div>
         )}
 
-        <span className="bridge-pill" title={t(language, "topbar.bridgeTitle")}>
-          <span className={`dot ${working ? "working" : bridge?.connected ? "online" : ""}`} />
-          <span className="header-btn-label">{bridgeStatusLabel(bridge, language)}</span>
-        </span>
       </div>
 
       <div className="topbar-right">
@@ -180,59 +171,6 @@ export function Topbar() {
         >
           <Icon icon={BarChart3} size={14} />
           <span className="header-btn-label">{t(language, "insights.navLabel")}</span>
-        </Button>
-
-        {isHub && (
-          <Button
-            size="xs"
-            type="button"
-            variant="ghost"
-            data-action="open-evolution"
-            data-testid="open-evolution-btn"
-            title={t(language, "topbar.evolutionTitle")}
-            aria-label={t(language, "topbar.evolutionAria")}
-            onClick={() => {
-              setSidebarOpen(false);
-              setModal({ kind: "evolution", tab: "inbox", playbookDraft: null });
-            }}
-          >
-            <Icon icon={Sparkles} size={14} />
-            <span className="header-btn-label">{t(language, "topbar.evolutionLabel")}</span>
-            {(hub?.evolutionOpenCount ?? 0) > 0 && (
-              <Badge size="sm" variant="warning" title={t(language, "topbar.pendingPains")}>
-                {hub?.evolutionOpenCount}
-              </Badge>
-            )}
-            {(hub?.cooldownCount ?? 0) > 0 && (
-              <Badge size="sm" variant="secondary" title={t(language, "topbar.cooldownModels")}>
-                {hub?.cooldownCount}
-              </Badge>
-            )}
-          </Button>
-        )}
-
-        <Button
-          size="xs"
-          type="button"
-          variant="ghost"
-          data-action="open-quick-report"
-          data-testid="open-quick-report-btn"
-          title={t(language, "topbar.quickReportTitle")}
-          aria-label={t(language, "topbar.quickReportAria")}
-          onClick={() =>
-            setModal({
-              kind: "quick_report",
-              title: "",
-              detail: "",
-              category: "ui_anomaly",
-              domSelector: "",
-              pickingElement: false,
-              autoPromote: false,
-            })
-          }
-        >
-          <Icon icon={Zap} size={14} />
-          <span className="header-btn-label">{t(language, "topbar.quickReportLabel")}</span>
         </Button>
 
         <Button

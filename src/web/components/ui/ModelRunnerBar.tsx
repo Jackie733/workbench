@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from "react";
 import { ChevronsUpDown, Cpu, Gauge } from "lucide-react";
-import type { AgentAction } from "../../../core/types.ts";
+import type { AgentAction, RequirementTier } from "../../../core/types.ts";
 import type { ReasoningEffort } from "../../../hub/types.ts";
 import { t } from "../../i18n.ts";
 import { resolveEffectiveRouting, useHubStateQuery, useProjectQuery } from "../../queries.ts";
@@ -22,18 +22,18 @@ import { SimpleSelect } from "./select.tsx";
 export function ModelRunnerBar({
   stageAction,
   testId,
-  includeManualCopy = false,
+  tier = "standard",
 }: {
   stageAction: AgentAction;
   testId: string;
-  includeManualCopy?: boolean;
+  tier?: RequirementTier;
 }) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId ?? hub?.activeProjectId ?? null);
   const harnesses = hub?.harnesses ?? [];
-  const routing = resolveEffectiveRouting(hub, project);
+  const routing = resolveEffectiveRouting(project);
 
   const override = useDraftStore((s) => s.runnerOverrides[stageAction]);
   const selectedRunnerKey = override?.key ?? "";
@@ -46,11 +46,10 @@ export function ModelRunnerBar({
   const anchorRef = useRef<HTMLSpanElement | null>(null);
 
   const modelOptions = useMemo(() => collectModelOptions(harnesses), [harnesses]);
-  const choice = activeRunnerChoice(selectedRunnerKey, routing, stageAction, selectedEffort);
-  const selectedKey =
-    selectedRunnerKey === "manual_copy"
-      ? "manual_copy"
-      : selectedRunnerKey || (choice.harness && choice.model ? `${choice.harness}::${choice.model}` : "");
+  const choice = activeRunnerChoice(selectedRunnerKey, routing, stageAction, selectedEffort, tier);
+  const routedKey = choice.harness && choice.model ? `${choice.harness}::${choice.model}` : "";
+  const hasRoutedOption = Boolean(routedKey && modelOptions.some((o) => o.key === routedKey));
+  const selectedKey = selectedRunnerKey || routedKey;
 
   const effortCap = useMemo(
     () => getModelEffortCapability(harnesses, choice.harness, choice.model),
@@ -63,11 +62,11 @@ export function ModelRunnerBar({
     selectedEffort && efforts.includes(selectedEffort) ? selectedEffort : "";
 
   const shortcuts = useMemo<ModelPickerShortcut[]>(() => {
-    const items: ModelPickerShortcut[] = [
+    return [
       {
         key: "default",
         value: "__auto__ 默认路由 自动路由 auto routing default",
-        content: `${t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}${
+        content: `${t(language, "runner.defaultRoute")}${
           choice.harness ? ` (${choice.harness}/${choice.model ?? ""})` : ""
         }`,
         selected: selectedRunnerKey === "",
@@ -79,31 +78,13 @@ export function ModelRunnerBar({
         },
       },
     ];
-    if (includeManualCopy) {
-      items.push({
-        key: "manual_copy",
-        value: "manual_copy 仅生成提示词 手动复制 manual copy prompt",
-        content: t(language, "runner.manual"),
-        selected: selectedRunnerKey === "manual_copy",
-        onSelect: () => {
-          if (selectedRunnerKey !== "manual_copy") {
-            setSelectedRunnerKey("manual_copy", stageAction);
-          }
-          setOpen(false);
-        },
-      });
-    }
-    return items;
-  }, [language, includeManualCopy, choice.harness, choice.model, selectedRunnerKey, setSelectedRunnerKey, stageAction]);
+  }, [language, choice.harness, choice.model, selectedRunnerKey, setSelectedRunnerKey, stageAction]);
 
-  const currentDisplay =
-    selectedRunnerKey === "manual_copy"
-      ? t(language, "runner.manual")
-      : selectedRunnerKey
-        ? `${choice.harness}/${choice.model}`
-        : choice.harness
-          ? `${t(language, includeManualCopy ? "runner.auto" : "runner.default")} (${choice.harness}/${choice.model ?? ""})`
-          : t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute");
+  const currentDisplay = selectedRunnerKey
+    ? `${choice.harness}/${choice.model}`
+    : choice.harness
+      ? `${t(language, "runner.default")} (${choice.harness}/${choice.model ?? ""})`
+      : t(language, "runner.defaultRoute");
 
   return (
     <div className="inline-flex items-center gap-1.5 flex-wrap">
@@ -120,7 +101,7 @@ export function ModelRunnerBar({
         }}
       >
         <option value="">
-          {t(language, includeManualCopy ? "runner.autoRoute" : "runner.defaultRoute")}
+          {t(language, "runner.defaultRoute")}
           {choice.harness ? ` (${choice.harness}/${choice.model ?? ""})` : ""}
         </option>
         {modelOptions.map((o) => (
@@ -128,7 +109,9 @@ export function ModelRunnerBar({
             {o.label}
           </option>
         ))}
-        {includeManualCopy && <option value="manual_copy">{t(language, "runner.manual")}</option>}
+        {routedKey && !hasRoutedOption && (
+          <option value={routedKey}>{`${choice.harness}/${choice.model}`}</option>
+        )}
       </select>
 
       <Popover open={open} onOpenChange={setOpen}>
@@ -180,7 +163,7 @@ export function ModelRunnerBar({
       </Popover>
 
       {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
-      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "configurable" && (
+      {effortCap.mode === "configurable" && (
         <div className="inline-flex items-center gap-1" title={t(language, "runner.effortTitle")}>
           <span className="hidden sm:inline-flex items-center text-muted-foreground">
             <Icon icon={Gauge} size={14} />
@@ -205,7 +188,7 @@ export function ModelRunnerBar({
           />
         </div>
       )}
-      {selectedRunnerKey !== "manual_copy" && effortCap.mode === "locked" && (
+      {effortCap.mode === "locked" && (
         <Badge
           variant="outline"
           className="h-7 gap-1 px-2 font-mono text-xs text-muted-foreground"

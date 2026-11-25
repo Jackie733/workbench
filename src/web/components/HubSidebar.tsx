@@ -196,7 +196,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
 
   const harnesses = hub?.harnesses ?? [];
   const installedHarnesses = harnesses.filter((h) => h.installed);
-  const routing = resolveEffectiveRouting(hub, project);
+  const routing = resolveEffectiveRouting(project);
   const desktopPhase = useCollapsePhase(desktopSidebarOpen, 245, 195);
   const desktopCls =
     desktopPhase === "open"
@@ -209,12 +209,9 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
             ? "desktop-collapsed closing"
             : "desktop-collapsed settled";
 
-  const presetLabel =
-    routing?.activePreset === "sota_first"
-      ? t(language, "preset.sota_first")
-      : routing?.activePreset === "quota_saver"
-        ? t(language, "preset.quota_saver")
-        : t(language, "preset.balanced");
+  const leadLabel = routing?.defaultLead?.primary
+    ? `${routing.defaultLead.primary.harness}/${routing.defaultLead.primary.model}`
+    : t(language, "sidebar.routing");
 
   // 仅在首次见到项目时记录会话快照；点击切换项目不会重排项目队列。
   for (const p of projects) {
@@ -587,7 +584,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   onClick={() =>
                     setModal({
                       kind: "routing",
-                      tab: project?.initialized && !noHubProject ? "project" : "global",
+                      tab: "routing",
                       draft: null,
                     })
                   }
@@ -602,7 +599,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                 onClick={() =>
                   setModal({
                     kind: "routing",
-                    tab: project?.initialized && !noHubProject ? "project" : "global",
+                    tab: "routing",
                     draft: null,
                   })
                 }
@@ -610,13 +607,13 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   if (e.key === "Enter") {
                     setModal({
                       kind: "routing",
-                      tab: project?.initialized && !noHubProject ? "project" : "global",
+                      tab: "routing",
                       draft: null,
                     });
                   }
                 }}
               >
-                <Badge variant="info">{presetLabel}</Badge>
+                <Badge variant="info" className="truncate max-w-[140px]">{leadLabel}</Badge>
                 <span className="muted xs">
                   {t(language, "sidebar.harnessesReady", {
                     ready: installedHarnesses.length,

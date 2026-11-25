@@ -1,12 +1,12 @@
-# 领域模型与存储契约规范（v4/v5 混合存储与 Hub 路由基线）
+# 领域模型与存储契约规范（v6 极简 4 态与项目级路由基线）
 
-> 本文定义解耦工作台（`Workbench Core` + `Workbench Hub`）的数据存储格式、状态流转规则、模型路由/调度记录结构与不可削弱的工程不变量。产品与架构设计见 [DESIGN.md](DESIGN.md)，实施任务见 [TASKS.md](TASKS.md)。
+> 本文定义解耦工作台（`Workbench Core` + `Workbench Hub`）的数据存储格式、4 态流转规则、项目级 3 角色路由契约与不可削弱的工程不变量。产品与架构设计见 [DESIGN.md](DESIGN.md)。
 
 ---
 
 ## 1. 存储分层结构
 
-工作台严格隔离**“按 Git 项目归属的业务真相（`.workbench/`）”**与**“全局 Hub 注册与算力路由偏好（`~/.workbench-hub/`）”**：
+工作台严格隔离**“按 Git 项目归属的业务真相与路由配置（`.workbench/`）”**与**“全局 Hub 注册表与轻量遥测台账（`~/.workbench-hub/`）”**：
 
 ### 1.1 仓库内项目业务存储（`<projectRoot>/.workbench/`）
 
@@ -14,51 +14,48 @@
 
 ```text
 .workbench/
-├── project.json                  # 项目级元数据 (schemaVersion, projectId, name, nextNumber, privacyMode, createdAt)
-├── playbook.md                   # （v5.1 自进化新增）项目持久避坑与偏好法则（最大 16KB），由验收/打回/批注自动沉淀并在交接时注入
+├── project.json                  # 项目级元数据 (schemaVersion: 6, projectId, name, nextNumber, privacyMode, routing, outputLanguage?, github?, gitee?, verification?)
 └── items/
     └── REQ-001/
         ├── spec.md               # 需求目标 (Goal) 与范围 (Scope) 的 Markdown 正文
-        ├── design.md             # 当前技术方案 (Design) 的 Markdown 正文
-        ├── handoff.md            # （v5 新增）高信噪比跨 Harness 上下文交接简报（自动合成 + 人类可预览/补充）
-        ├── state.json            # 结构化状态、验收标准、批准记录、任务清单、研讨/批注记录、运行摘要与审查结论、时间线
-        ├── attachments/          # （v5.2 新增）附件二进制文件（<attId>.<ext>，元数据只存 state.json）
+        ├── design.md             # 当前技术方案 (Design) 的 Markdown 正文（支持内联 ```workbench-criteria JSON 块）
+        ├── handoff.md            # 高信噪比跨 Harness 上下文交接简报（自动合成，含前序轨迹摘要）
+        ├── state.json            # schemaVersion: 6 结构化状态（4 态 stage, tier, revision, criteria, approval, acceptance, delivery, verifications, discussions, agentRuns, reviewReport, timeline）
+        ├── attachments/          # 附件二进制文件（<attId>.<ext>，元数据只存 state.json）
         ├── history/              # 历史批准过的 spec/design 快照 (如 design.v1.md)，用于版本对比
         ├── evidence/             # 真实运行的验证输出日志与元数据 (如 verify-<id>.json / .log)
-        └── runs/                 # （v5 新增）主动调度的 Harness 执行记录：元数据 run-<id>.json（MAX_AGENT_RUNS=100）、头尾裁剪原始日志 run-<id>.log（上限 4MB）、结构化过程轨迹 run-<id>.events.jsonl（软上限 8MB，单工具输入<=16KB / 输出<=32KB）、以及交接上下文快照 run-<id>.context.json（重型 trace/context/log 默认保留 30 天，元数据永久留存）
+        └── runs/                 # 主动调度的 Harness 执行记录：run-<id>.json / .log / .events.jsonl / .context.json
 ```
 
 - **隐私与 Git 策略**：首次在项目初始化 `.workbench/` 时，由用户选择：
   - **仅本机跟踪（默认推荐）**：自动将 `/.workbench/` 写入本地 `.git/info/exclude`（不修改团队 `.gitignore`）。
   - **随仓库提交**：不修改排除规则，允许将 `.workbench/` 纳入 Git 版本控制与团队审查。
-- **不兼容旧版数据**：旧版 Tern-Luau 架构存储在 `.omp/workbench/` 中的 v1/v2/v3 数据**不再读取、不再兼容、不再自动迁移**。
+- **一次性显式迁移（Zero Runtime Backward-Compat）**：核心引擎仅接受 `schemaVersion: 6`；历史 v4/v5 项目请运行 `bun run scripts/migrate-v6.ts [--dry-run] <projectRoot>` 完成一次性转换。
 
-### 1.2 全局 Hub 存储（`~/.workbench-hub/`，v5 新增）
+### 1.2 全局 Hub 存储（`~/.workbench-hub/`）
 
-多项目统筹、守护进程状态与多订阅模型路由策略存放在用户主目录 `~/.workbench-hub/` 下，绝不污染具体业务仓库的 Git 工作区：
+多项目统筹、守护进程状态与异步旁路统计存放在用户主目录 `~/.workbench-hub/` 下，绝不污染具体业务仓库的 Git 工作区，且不再存放全局路由配置：
 
 ```text
 ~/.workbench-hub/
-├── uploads/<attId>/              # 附件暂存区（TTL 24h 惰性清扫，认领后移入正式目录）
+├── uploads/<attId>/              # 附件暂存区（TTL 24h 惰性清扫）
 ├── daemon.json                   # 守护进程元数据 (pid, port, url, startedAt, version)
 ├── service.json                  # 用户级原生服务安装记录 (LaunchAgent / systemd --user，权限 0600)
 ├── hub.log                       # 守护进程运行日志（按大小自动轮转截断）
-├── hub.json                      # 多项目注册表 + 分阶段模型路由配置 + 自定义模型目录
-└── evolution/                    # 自进化与 RSI 隔离存储
-    ├── inbox.jsonl               # SHA-256 指纹去重的痛点与缺陷收集箱（上限 300 条）
-    ├── model-stats.json          # 各 Harness/Model 分阶段胜率、耗时与限流冷却账本
-    ├── sandboxes.json            # 活跃 RSI Git Worktree 沙箱登记表（记录分支与分叉基准 HEAD）
-    ├── attachments/<painId>/     # 痛点报修附件二进制（转正时复制到新需求附件目录）
-    └── worktrees/<REQ-ID>/       # 针对 workbench 自身演进需求的隔离 Git Worktree 沙箱目录
+├── hub.json                      # 多项目注册表 + 输出语言 / Gitee Token / 可观测性配置（无 routing 字段）
+├── sandboxes.json                # 活跃 Git Worktree 隔离沙箱登记表
+├── worktrees/<REQ-ID>/           # 隔离 Git Worktree 沙箱目录
+└── telemetry/
+    ├── model-stats.json          # 各 Harness/Model 胜率、耗时与限流冷却账本（异步旁路写入）
+    └── runs-ledger.jsonl         # 全局执行统计与双轨成本台账（异步旁路写入）
 ```
 
-`hub.json` 核心字段约束：
-- `schemaVersion`: 整数（当前 `1`）。
-- `activeProjectId`: 当前选中的默认项目 ID（可为 `null`）。
-- `projects[]`: 已纳管项目条目 `{ id, name, root, addedAt, lastOpenedAt }`（`root` 必须为经过 `canonicalRoot` 校验的真实目录）。
-- `routing`: `{ activePreset: "balanced" | "sota_first" | "quota_saver", stages: Record<"design" | "implement" | "fix" | "review", StageRouteRule> }`，其中每条 `StageRouteRule` 包含 `{ primary: ModelTarget, fallbacks: ModelTarget[] }`，且 `ModelTarget` 为 `{ harness: HarnessId, model: string, reasoningEffort?: string }`。
-- `customModels`: 用户针对任意 Harness 手动追加的模型标识列表（例如付费 Go/API 模型）。
-- `outputLanguage`: 全局默认计划与审查文档输出语言（`"zh-CN" | "en" | "auto"`，缺省默认为 `"zh-CN"`）。
+`project.json.routing` 核心字段约束（v6）：
+- `defaultLead`: `{ primary: ModelTarget, fallbacks: ModelTarget[] }` — 常规需求的主程模型及跨订阅容灾链。
+- `sotaLead`: `{ primary: ModelTarget, fallbacks: ModelTarget[] }` — 旗舰攻坚主程模型及容灾链（仅在人工标记 `tier: "sota"` 或点击「升级 SOTA 接管」时使用）。
+- `reviewer`: `{ primary: ModelTarget, fallbacks: ModelTarget[] }` — 跨模型独立盲审专家及容灾链。
+- `autoReview?`: 布尔值（默认 `true`），验证通过后自动触发一次独立盲审。
+- `autoHeal?`: 布尔值（默认 `true`），验证失败后在当前档位内自动触发最多 2 轮修复。
 
 ---
 
@@ -96,11 +93,11 @@ v5 新增在 `state.json` 上的结构（向后兼容旧记录，缺失时默认
 - **路径安全**：所有项目内部文件与 Hub 目录浏览均限制在合法规范目录之内，严禁 `..` 路径穿越或追踪越界符号链接（symlink）。
 
 ### 3.2 生命周期枚举与双轨规则
-- **持久阶段枚举（8 个清晰状态）**：`draft`、`designing`、`awaiting_approval`、`implementing`、`awaiting_acceptance`、`done`、`blocked`、`cancelled`。
+- **持久阶段枚举（4 个清晰状态）**：`planning`、`coding`、`done`、`cancelled`（"待批准"、"验证失败"、"待验收"均由状态派生）。
 - **双轨模式（`track: "plan_first" | "fast_track"`）**：
-  - **`plan_first`（标准模式）**：必须存在对应当前 `specHash` 与当前 `design.md` 摘要的人工批准记录（`approval`），方可进入 `implementing`。当 `spec.md`、`criteria` 或 `design.md` 发生实质修改时，旧批准自动失效并回退至 `awaiting_approval`。
-  - **`fast_track`（快速通道）**：必须由人类在 UI 显式点击授权后方可从 `draft` 直接进入 `implementing`，允许无 `design.md`，但仍须绑定需求目标与必需验收条件。
-- **终态与阻塞保护**：进入 `blocked` 必须记录非空原因并保存 `blockedFrom`；`done` 与 `cancelled` 允许人工显式 `reopen`，历史批准与验收记录不自动复活。
+  - **`plan_first`（标准模式）**：必须存在对应当前 `specHash` 与当前 `design.md` 摘要的人工批准记录（`approval`），方可进入 `coding`。当 `spec.md`、`criteria` 或 `design.md` 发生实质修改时，旧批准自动失效并回退至 `planning`。
+  - **`fast_track`（快速通道）**：必须由人类在 UI 显式点击授权后方可从 `planning` 直接进入 `coding`，允许无 `design.md`，但仍须绑定需求目标与必需验收条件。
+- **终态与重新打开**：`done` 与 `cancelled` 允许人工显式 `reopen`；`cancelled` 记录可选 `cancelReason`。
 
 ### 3.3 验证驱动与证据真实性（Verification Truthfulness）
 - **禁止口头声明完成**：任何 Agent（无论是通过 MCP、`wb` CLI 还是 `codex`/`qodercn`/`opencode` 子进程）均不得直接将验收条件标为 `passed`。

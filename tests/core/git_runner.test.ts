@@ -10,7 +10,6 @@ import {
   getRequirement,
   getVerificationEvidence,
   initProject,
-  updateTasks,
 } from "../../src/core/engine.ts";
 import { commitFilesInGit, observeGitChanges, observeGitSnapshot } from "../../src/core/git.ts";
 import { isHeavyVerificationCommand, runAllVerifications, runVerification } from "../../src/core/runner.ts";
@@ -176,11 +175,6 @@ describe("WB-02 git observer and verification runner", () => {
 
     // 5. Re-running on new code snapshot enables acceptance
     await runAllVerifications(repo, "REQ-001");
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "修复并验证", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: postEditSnap.fingerprint,
-    });
     const done = await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: postEditSnap.fingerprint });
     expect(done.state.stage).toBe("done");
   });
@@ -240,10 +234,10 @@ describe("WB-02 git observer and verification runner", () => {
 
     const res = await runAllVerifications(repo, "REQ-001");
     expect(res.runs).toHaveLength(2);
-    expect(res.runs[0]!.record.command).toBe("bun test");
-    expect(res.runs[0]!.record.criterionIds).toEqual(["AC-1", "AC-2"]);
-    expect(res.runs[1]!.record.command).toBe("bun test tests/sample.test.ts -t ok");
-    expect(res.runs[1]!.record.criterionIds).toEqual(["AC-3"]);
+    expect(res.runs[0]!.record.command).toBe("bun test tests/sample.test.ts -t ok");
+    expect(res.runs[0]!.record.criterionIds).toEqual(["AC-3"]);
+    expect(res.runs[1]!.record.command).toBe("bun test");
+    expect(res.runs[1]!.record.criterionIds).toEqual(["AC-1", "AC-2"]);
     expect(res.detail.validity.acceptanceGate.ok).toBe(true);
   });
 

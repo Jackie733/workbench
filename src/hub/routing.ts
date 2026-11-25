@@ -1,133 +1,22 @@
-import type { AgentAction } from "../core/types.ts";
+import { DEFAULT_PROJECT_ROUTING, type AgentAction, type RequirementTier } from "../core/types.ts";
 import { isModelCoolingDown } from "./telemetry.ts";
 import {
   HARNESS_IDS,
   REASONING_EFFORTS,
-  ROUTING_PRESETS,
-  ROUTING_STAGES,
+  ROUTING_ROLES,
   type DiscoveredModel,
   type HarnessId,
   type HarnessInfo,
   type ModelTarget,
   type ReasoningEffort,
+  type RoleRouteRule,
   type RoutingConfig,
-  type RoutingPreset,
-  type RoutingStage,
-  type StageRouteRule,
+  type RoutingRole,
 } from "./types.ts";
 
-function buildStaticPresetRouting(preset: RoutingPreset): RoutingConfig {
-  if (preset === "sota_first") {
-    const implRule: StageRouteRule = {
-      primary: { harness: "codex", model: "gpt-6.2-sol" },
-      fallbacks: [
-        { harness: "agy", model: "claude-sonnet-5-5" },
-        { harness: "qodercn", model: "Qwen4-Max" },
-        { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-      ],
-    };
-    return {
-      activePreset: "sota_first",
-      stages: {
-        design: {
-          primary: { harness: "codex", model: "gpt-6.2-astra", reasoningEffort: "high" },
-          fallbacks: [
-            { harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" },
-            { harness: "agy", model: "claude-opus-5-5", reasoningEffort: "high" },
-            { harness: "qodercn", model: "Kimi-K3.1-Pro", reasoningEffort: "high" },
-          ],
-        },
-        implement: implRule,
-        fix: {
-          primary: { ...implRule.primary },
-          fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
-        },
-        review: {
-          primary: { harness: "agy", model: "gemini-4-argon", reasoningEffort: "high" },
-          fallbacks: [
-            { harness: "qodercn", model: "Qwen4-Max" },
-            { harness: "codex", model: "codex-auto-review" },
-          ],
-        },
-      },
-    };
-  }
-
-  if (preset === "quota_saver") {
-    const implRule: StageRouteRule = {
-      primary: { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-      fallbacks: [
-        { harness: "opencode", model: "opencode/glm-5.3-flash-free" },
-        { harness: "qodercn", model: "DeepSeek-Flash" },
-        { harness: "agy", model: "gemini-3.8-flash" },
-      ],
-    };
-    return {
-      activePreset: "quota_saver",
-      stages: {
-        design: {
-          primary: { harness: "qodercn", model: "Qwen4-Max" },
-          fallbacks: [
-            { harness: "agy", model: "gemini-3.8-flash" },
-            { harness: "qodercn", model: "Kimi-K3.1-Pro" },
-            { harness: "qodercn", model: "DeepSeek-V4-Pro" },
-          ],
-        },
-        implement: implRule,
-        fix: {
-          primary: { ...implRule.primary },
-          fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
-        },
-        review: {
-          primary: { harness: "qodercn", model: "Qwen4-Max" },
-          fallbacks: [
-            { harness: "agy", model: "gemini-3.8-flash" },
-            { harness: "qodercn", model: "DeepSeek-Flash" },
-            { harness: "codex", model: "codex-auto-review" },
-          ],
-        },
-      },
-    };
-  }
-
-  // Default: "balanced" — fix matches implement so coding and self-healing stay single-threaded without forced low effort.
-  const implRule: StageRouteRule = {
-    primary: { harness: "qodercn", model: "Qwen4-Max" },
-    fallbacks: [
-      { harness: "codex", model: "gpt-6.1-terra" },
-      { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
-      { harness: "agy", model: "gemini-3.8-flash" },
-    ],
-  };
-  return {
-    activePreset: "balanced",
-    stages: {
-      design: {
-        primary: { harness: "codex", model: "gpt-6.2-sol" },
-        fallbacks: [
-          { harness: "agy", model: "gemini-4-argon" },
-          { harness: "qodercn", model: "Qwen4-Max" },
-          { harness: "qodercn", model: "Kimi-K3.1-Pro" },
-        ],
-      },
-      implement: implRule,
-      fix: {
-        primary: { ...implRule.primary },
-        fallbacks: implRule.fallbacks.map((fb) => ({ ...fb })),
-      },
-      review: {
-        primary: { harness: "codex", model: "codex-auto-review" },
-        fallbacks: [
-          { harness: "agy", model: "gemini-4-argon" },
-          { harness: "qodercn", model: "Qwen4-Max" },
-          { harness: "qodercn", model: "DeepSeek-Flash" },
-        ],
-      },
-    },
-  };
-}
-
 const EFFORT_RANK: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"];
+const EFFORT_SET = new Set<string>(REASONING_EFFORTS);
+const FALLBACK_DEFAULT_ROUTING = DEFAULT_PROJECT_ROUTING;
 
 export function clampEffortForModel(
   model: DiscoveredModel,
@@ -152,254 +41,135 @@ export function clampEffortForModel(
   return best;
 }
 
-function estimateBaseCapability(harnessId: HarnessId, model: DiscoveredModel): number {
-  const lower = model.id.toLowerCase();
-  let score = model.intelligence;
-  if (score === undefined) {
-    if (model.tier === "review") score = 48;
-    else if (lower.includes("astra")) score = 57;
-    else if (lower.includes("opus")) score = 57;
-    else if (lower.includes("hydrogen")) score = 54.5;
-    else if (lower.includes("gpt-6.2-sol")) score = 55;
-    else if (lower.includes("sonnet")) score = 55;
-    else if (lower.includes("argon")) score = 52.5;
-    else if (lower.includes("sol")) score = 51;
-    else if (lower.includes("kimi-k3.1-pro")) score = 46.5;
-    else if (lower.includes("qwen4-max")) score = 43;
-    else if (lower.includes("terra")) score = 42;
-    else if (model.tier === "sota") score = 46;
-    else if (model.tier === "balanced") score = 34;
-    else score = 24;
+function dedupeTargets(list: ModelTarget[], max = 4): ModelTarget[] {
+  const seen = new Set<string>();
+  const out: ModelTarget[] = [];
+  for (const item of list) {
+    const key = `${item.harness}::${item.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= max) break;
   }
-
-  // Prefer current-generation models and official high-priority Codex picks.
-  if (model.isLegacy) score -= 18;
-  if (typeof model.priority === "number" && model.priority <= 2) score += 3;
-  else if (typeof model.priority === "number" && model.priority === 3) score += 1;
-
-  // Prefer native CLI harnesses over multi-provider aggregator harnesses when capabilities match.
-  if (harnessId === "omp") score -= 14;
-  if (harnessId === "opencode" && model.id.startsWith("opencode-go/")) score -= 6;
-  // Slightly prefer proven coding families among unrated fast/free models.
-  if (model.intelligence === undefined && model.tier === "fast" && /(deepseek|glm-5|qwen|gemini)/i.test(lower)) {
-    score += 2;
-  }
-  // Avoid generic Auto/Fast aliases or orchestrator meta-models unless explicitly chosen.
-  if (model.id === "Auto" || model.id === "Fast") score -= 8;
-  if (lower.includes("orchestrator")) score -= 6;
-
-  return score;
+  return out;
 }
 
-function isExpensiveFlagship(model: DiscoveredModel): boolean {
-  if (model.cost && model.cost.output >= 25) return true;
-  const lower = model.id.toLowerCase();
-  return lower.includes("astra") || lower.includes("opus") || lower.includes("hydrogen");
-}
-
-function isWorkhorseCodingModel(model: DiscoveredModel): boolean {
-  const lower = model.id.toLowerCase();
-  return (
-    lower.includes("sol") ||
-    lower.includes("sonnet") ||
-    lower.includes("argon") ||
-    lower.includes("qwen4-max") ||
-    lower.includes("terra")
-  );
-}
-
-function desiredEffortForStage(preset: RoutingPreset, stage: RoutingStage, model: DiscoveredModel): ReasoningEffort | undefined {
-  if (model.tier === "review" || model.effortLocked) return undefined;
-  if (model.supportedEfforts && model.supportedEfforts.length === 0) return undefined;
-  // Never force reasoning effort down to "low"; leave undefined so CLIs use their native default unless sota_first requests high reasoning on design/review.
-  if (preset === "sota_first" && (stage === "design" || stage === "review")) {
-    return clampEffortForModel(model, "high");
-  }
-  return undefined;
-}
-
-interface CandidateScore {
-  harness: HarnessId;
-  model: DiscoveredModel;
-  score: number;
-}
-
-function scoreModelForStage(
-  harness: HarnessId,
-  model: DiscoveredModel,
-  preset: RoutingPreset,
-  stage: RoutingStage,
-  implementPrimaryHarness?: HarnessId,
-): number {
-  const cap = estimateBaseCapability(harness, model);
-  const free = Boolean(model.isFree || /-free$/i.test(model.id));
-  const expensive = isExpensiveFlagship(model);
-  const workhorse = isWorkhorseCodingModel(model);
-  const isReviewModel = model.tier === "review";
-
-  if (preset === "sota_first") {
-    if (stage === "design") {
-      return cap + (expensive ? 4 : 0) + (model.tier === "sota" ? 4 : 0) - (model.tier === "fast" ? 12 : 0) - (isReviewModel ? 14 : 0);
-    }
-    if (stage === "implement" || stage === "fix") {
-      return cap + (workhorse ? 5 : 0) + (model.tier === "sota" ? 3 : 0) - (model.tier === "fast" ? 12 : 0) - (isReviewModel ? 14 : 0);
-    }
-    // review: prefer cross-model reviewer or dedicated review model
-    const crossBonus = implementPrimaryHarness && harness !== implementPrimaryHarness ? 8 : 0;
-    return cap + crossBonus + (isReviewModel ? 8 : 0) - (model.tier === "fast" ? 14 : 0);
-  }
-
-  if (preset === "quota_saver") {
-    if (stage === "design") {
-      const quotaFriendly =
-        harness === "qodercn" ? 14 : free ? 10 : model.tier === "fast" ? 8 : expensive ? -18 : harness === "codex" ? -6 : 4;
-      return cap + quotaFriendly - (isReviewModel ? 10 : 0);
-    }
-    if (stage === "implement" || stage === "fix") {
-      const freeBonus = free ? 36 : model.tier === "fast" ? 22 : harness === "qodercn" ? 8 : expensive ? -20 : 0;
-      return cap * 0.55 + freeBonus - (isReviewModel ? 14 : 0);
-    }
-    // review
-    const reviewFriendly =
-      harness === "qodercn" ? 14 : isReviewModel ? 12 : model.tier === "fast" ? 10 : expensive ? -18 : 2;
-    return cap * 0.7 + reviewFriendly;
-  }
-
-  // balanced
-  if (stage === "design") {
-    return cap + (workhorse ? 4 : 0) - (expensive ? 6 : 0) - (model.tier === "fast" ? 10 : 0) - (isReviewModel ? 12 : 0);
-  }
-  if (stage === "implement" || stage === "fix") {
-    const balancedBonus =
-      model.id === "Qwen4-Max"
-        ? 18
-        : workhorse
-          ? 6
-          : free
-            ? 10
-            : expensive
-              ? -8
-              : 0;
-    const codexQuotaBalance = harness === "codex" ? -4 : 0;
-    return cap + balancedBonus + codexQuotaBalance - (isReviewModel ? 12 : 0);
-  }
-  // review
-  const crossBonus = implementPrimaryHarness && harness !== implementPrimaryHarness ? 4 : 0;
-  return cap * 0.75 + crossBonus + (isReviewModel ? 18 : 0) - (expensive ? 10 : 0);
-}
-
-function bareModelSignature(modelId: string): string {
-  const lower = modelId.trim().toLowerCase();
-  const slashIdx = lower.indexOf("/");
-  const bare = slashIdx >= 0 ? lower.slice(slashIdx + 1) : lower;
-  return bare.replace(/-free$/, "");
-}
-
-function pickStageRule(
-  pool: CandidateScore[],
-  preset: RoutingPreset,
-  stage: RoutingStage,
-): StageRouteRule | null {
-  if (pool.length === 0) return null;
-  const sorted = [...pool].sort((a, b) => b.score - a.score);
-  const chosen: CandidateScore[] = [sorted[0]!];
-  const remaining = sorted.slice(1);
-  const harnessCounts = new Map<HarnessId, number>([[chosen[0]!.harness, 1]]);
-  const usedSignatures = new Set<string>([bareModelSignature(chosen[0]!.model.id)]);
-
-  while (chosen.length < 4 && remaining.length > 0) {
-    let bestIdx = -1;
-    let bestAdjusted = -Infinity;
-    for (let i = 0; i < remaining.length; i++) {
-      const c = remaining[i]!;
-      const sig = bareModelSignature(c.model.id);
-      if (usedSignatures.has(sig)) continue;
-      const usedCount = harnessCounts.get(c.harness) ?? 0;
-      // Encourage multi-harness resilience across fallbacks.
-      const adjusted = c.score - usedCount * 8;
-      if (adjusted > bestAdjusted) {
-        bestAdjusted = adjusted;
-        bestIdx = i;
-      }
-    }
-    if (bestIdx === -1) break;
-    const picked = remaining.splice(bestIdx, 1)[0]!;
-    chosen.push(picked);
-    usedSignatures.add(bareModelSignature(picked.model.id));
-    harnessCounts.set(picked.harness, (harnessCounts.get(picked.harness) ?? 0) + 1);
-  }
-
-  const toTarget = (c: CandidateScore): ModelTarget => {
-    const effort = desiredEffortForStage(preset, stage, c.model);
+function pickCrossHarnessTargets(
+  candidates: Array<{ harness: HarnessId; model: DiscoveredModel; effort?: ReasoningEffort }>,
+  preferredPrimary?: { harness: HarnessId; model: DiscoveredModel; effort?: ReasoningEffort },
+  max = 4,
+): RoleRouteRule | null {
+  if (candidates.length === 0) return null;
+  const primary = preferredPrimary ?? candidates[0]!;
+  const toTarget = (c: { harness: HarnessId; model: DiscoveredModel; effort?: ReasoningEffort }): ModelTarget => {
+    const clamped = clampEffortForModel(c.model, c.effort);
     return {
       harness: c.harness,
       model: c.model.id,
-      ...(effort ? { reasoningEffort: effort } : {}),
+      ...(clamped ? { reasoningEffort: clamped } : {}),
     };
   };
 
+  const ordered: ModelTarget[] = [toTarget(primary)];
+  const usedHarnesses = new Set<HarnessId>([primary.harness]);
+  // First pass: pick one fallback from each distinct harness for cross-subscription resilience.
+  for (const c of candidates) {
+    if (ordered.length >= max) break;
+    if (usedHarnesses.has(c.harness)) continue;
+    usedHarnesses.add(c.harness);
+    ordered.push(toTarget(c));
+  }
+  // Second pass: fill remaining slots from remaining candidates if fewer harnesses are installed.
+  for (const c of candidates) {
+    if (ordered.length >= max) break;
+    ordered.push(toTarget(c));
+  }
+
+  const unique = dedupeTargets(ordered, max);
+  if (unique.length === 0) return null;
   return {
-    primary: toTarget(chosen[0]!),
-    fallbacks: chosen.slice(1).map(toTarget),
+    primary: unique[0]!,
+    fallbacks: unique.slice(1),
   };
 }
 
-export function buildPresetRouting(preset: RoutingPreset, harnesses?: HarnessInfo[] | null): RoutingConfig {
-  const staticFallback = buildStaticPresetRouting(preset);
-  if (!harnesses || harnesses.length === 0) return staticFallback;
+/**
+ * Generates an explicit initial 3-role project routing config from the node's installed CLIs.
+ * Called once on project initialization and persisted into `.workbench/project.json`.
+ */
+export function buildInitialProjectRouting(harnesses?: HarnessInfo[] | null): RoutingConfig {
+  if (!harnesses || harnesses.length === 0) {
+    return structuredClone(FALLBACK_DEFAULT_ROUTING);
+  }
+  const installed = harnesses.filter((h) => h.installed && h.models.length > 0 && h.id !== "omp");
+  const activeHarnesses = installed.length > 0 ? installed : harnesses.filter((h) => h.installed && h.models.length > 0);
+  if (activeHarnesses.length === 0) {
+    return structuredClone(FALLBACK_DEFAULT_ROUTING);
+  }
 
-  const installedWithModels = harnesses.filter((h) => h.installed && h.models.length > 0);
-  if (installedWithModels.length === 0) return staticFallback;
-
-  const entries: Array<{ harness: HarnessId; model: DiscoveredModel }> = [];
-  for (const h of installedWithModels) {
+  type Entry = { harness: HarnessId; model: DiscoveredModel };
+  const allEntries: Entry[] = [];
+  for (const h of activeHarnesses) {
     for (const m of h.models) {
-      entries.push({ harness: h.id, model: m });
+      if (m.isLegacy || m.id === "Auto" || m.id === "Fast") continue;
+      allEntries.push({ harness: h.id, model: m });
     }
   }
-  if (entries.length === 0) return staticFallback;
+  if (allEntries.length === 0) {
+    for (const h of activeHarnesses) {
+      for (const m of h.models) allEntries.push({ harness: h.id, model: m });
+    }
+  }
 
-  const scoreFor = (stage: RoutingStage, implementPrimaryHarness?: HarnessId): CandidateScore[] =>
-    entries.map((e) => ({
-      harness: e.harness,
-      model: e.model,
-      score: scoreModelForStage(e.harness, e.model, preset, stage, implementPrimaryHarness),
-    }));
+  // 1. defaultLead: prefer balanced/workhorse subscription models (then fast, then sota)
+  const workhorsePool = [
+    ...allEntries.filter((e) => e.model.tier === "balanced"),
+    ...allEntries.filter((e) => e.model.tier === "fast"),
+    ...allEntries.filter((e) => e.model.tier === "sota"),
+  ];
+  const defaultLead =
+    pickCrossHarnessTargets(workhorsePool.length > 0 ? workhorsePool : allEntries) ??
+    FALLBACK_DEFAULT_ROUTING.defaultLead;
 
-  const designRule = pickStageRule(scoreFor("design"), preset, "design") ?? staticFallback.stages.design;
-  const implementRule = pickStageRule(scoreFor("implement"), preset, "implement") ?? staticFallback.stages.implement;
-  const fixRule = pickStageRule(scoreFor("fix"), preset, "fix") ?? staticFallback.stages.fix;
-  const reviewRule =
-    pickStageRule(scoreFor("review", implementRule.primary.harness), preset, "review") ?? staticFallback.stages.review;
+  // 2. sotaLead: prefer sota tier models with high reasoning effort when supported
+  const sotaPool = [
+    ...allEntries.filter((e) => e.model.tier === "sota").map((e) => ({ ...e, effort: "high" as ReasoningEffort })),
+    ...allEntries.filter((e) => e.model.tier === "balanced"),
+  ];
+  const sotaLead =
+    pickCrossHarnessTargets(sotaPool.length > 0 ? sotaPool : allEntries) ??
+    FALLBACK_DEFAULT_ROUTING.sotaLead;
+
+  // 3. reviewer: prefer dedicated review model or a different harness from defaultLead for heterogeneous blind review
+  const reviewPool = [
+    ...allEntries.filter((e) => e.model.tier === "review"),
+    ...allEntries.filter((e) => e.harness !== defaultLead.primary.harness && (e.model.tier === "sota" || e.model.tier === "balanced")),
+    ...allEntries.filter((e) => e.harness !== defaultLead.primary.harness),
+    ...allEntries,
+  ];
+  const reviewer =
+    pickCrossHarnessTargets(reviewPool.length > 0 ? reviewPool : allEntries) ??
+    FALLBACK_DEFAULT_ROUTING.reviewer;
 
   return {
-    activePreset: preset,
-    stages: {
-      design: designRule,
-      implement: implementRule,
-      fix: fixRule,
-      review: reviewRule,
-    },
+    defaultLead,
+    sotaLead,
+    reviewer,
+    autoReview: true,
+    autoHeal: true,
   };
 }
 
-export function mapActionToRoutingStage(action: AgentAction): RoutingStage {
-  if (action === "ask") return "design";
-  return action;
+export function resolveRoleForAction(action: AgentAction, tier: RequirementTier = "standard"): RoutingRole {
+  if (action === "review") return "reviewer";
+  return tier === "sota" ? "sotaLead" : "defaultLead";
 }
-
-const EFFORT_SET = new Set<string>(REASONING_EFFORTS);
 
 export function sanitizeModelTarget(raw: unknown, fallback: ModelTarget): ModelTarget {
   if (!raw || typeof raw !== "object") return fallback;
   const obj = raw as Record<string, unknown>;
-  let rawHarness = typeof obj.harness === "string" ? obj.harness : "";
-  let rawModel = typeof obj.model === "string" ? obj.model.trim() : "";
-  // Smooth migration for legacy persisted "gemini" configs -> "agy"
-  if (rawHarness === "gemini") {
-    rawHarness = "agy";
-    if (!rawModel || rawModel === "default") rawModel = "gemini-4-argon";
-  }
+  const rawHarness = typeof obj.harness === "string" ? obj.harness.trim() : "";
+  const rawModel = typeof obj.model === "string" ? obj.model.trim() : "";
   const harness =
     rawHarness && (HARNESS_IDS as readonly string[]).includes(rawHarness)
       ? (rawHarness as HarnessId)
@@ -412,38 +182,31 @@ export function sanitizeModelTarget(raw: unknown, fallback: ModelTarget): ModelT
   return { harness, model, ...(effort ? { reasoningEffort: effort } : {}) };
 }
 
-export function normalizeRoutingConfig(raw: unknown): RoutingConfig {
-  const defaults = buildStaticPresetRouting("balanced");
-  if (!raw || typeof raw !== "object") return defaults;
+export function normalizeRoutingConfig(raw: unknown, fallback: RoutingConfig = FALLBACK_DEFAULT_ROUTING): RoutingConfig {
+  if (!raw || typeof raw !== "object") return structuredClone(fallback);
   const obj = raw as Record<string, unknown>;
-  const activePreset: RoutingPreset =
-    typeof obj.activePreset === "string" && (ROUTING_PRESETS as readonly string[]).includes(obj.activePreset)
-      ? (obj.activePreset as RoutingPreset)
-      : "balanced";
-  const stagesRaw = obj.stages && typeof obj.stages === "object" ? (obj.stages as Record<string, unknown>) : {};
-  const stages = { ...defaults.stages };
-  for (const stage of ROUTING_STAGES) {
-    const defRule = defaults.stages[stage];
-    const candidate = stagesRaw[stage];
-    if (!candidate || typeof candidate !== "object") continue;
+  const rules = {} as Record<RoutingRole, RoleRouteRule>;
+  for (const role of ROUTING_ROLES) {
+    const defRule = fallback[role];
+    const candidate = obj[role];
+    if (!candidate || typeof candidate !== "object") {
+      rules[role] = { primary: { ...defRule.primary }, fallbacks: defRule.fallbacks.map((fb) => ({ ...fb })) };
+      continue;
+    }
     const ruleObj = candidate as Record<string, unknown>;
     const primary = sanitizeModelTarget(ruleObj.primary, defRule.primary);
     const fallbacks = Array.isArray(ruleObj.fallbacks)
       ? ruleObj.fallbacks
           .slice(0, 6)
           .map((item, idx) => sanitizeModelTarget(item, defRule.fallbacks[idx] ?? defRule.primary))
-      : defRule.fallbacks;
-    stages[stage] = { primary, fallbacks };
+      : defRule.fallbacks.map((fb) => ({ ...fb }));
+    rules[role] = { primary, fallbacks };
   }
-  const maxAutoReviewRounds =
-    typeof obj.maxAutoReviewRounds === "number" && Number.isFinite(obj.maxAutoReviewRounds)
-      ? Math.min(5, Math.max(1, Math.floor(obj.maxAutoReviewRounds)))
-      : undefined;
   return {
-    activePreset,
-    stages,
+    defaultLead: rules.defaultLead,
+    sotaLead: rules.sotaLead,
+    reviewer: rules.reviewer,
     ...(typeof obj.autoReview === "boolean" ? { autoReview: obj.autoReview } : {}),
-    ...(maxAutoReviewRounds !== undefined ? { maxAutoReviewRounds } : {}),
     ...(typeof obj.autoHeal === "boolean" ? { autoHeal: obj.autoHeal } : {}),
   };
 }
@@ -451,8 +214,6 @@ export function normalizeRoutingConfig(raw: unknown): RoutingConfig {
 function normalizeTargetWithHarnesses(
   target: ModelTarget,
   harnesses: HarnessInfo[] | null,
-  preset: RoutingPreset,
-  stage: RoutingStage,
 ): { target: ModelTarget; available: boolean } {
   if (!harnesses) return { target, available: true };
   const harnessInfo = harnesses.find((h) => h.id === target.harness);
@@ -473,7 +234,6 @@ function normalizeTargetWithHarnesses(
     };
   }
 
-  // Map legacy suffixed AGY variant IDs (e.g. gemini-4-hydrogen-high) to the aggregated family model.
   for (const m of harnessInfo.models) {
     if (!m.effortVariants) continue;
     for (const [eff, variantId] of Object.entries(m.effortVariants) as Array<[ReasoningEffort, string]>) {
@@ -491,45 +251,23 @@ function normalizeTargetWithHarnesses(
     }
   }
 
-  // When the harness only has an unverified builtin list (CLI discovery not yet completed),
-  // keep the persisted model ID verbatim rather than silently remapping to a builtin default.
-  const hasDetectedCatalog = harnessInfo.models.some((m) => m.source === "detected");
-  if (!hasDetectedCatalog) {
-    return { target, available: true };
-  }
-
-  // Model ID no longer exists in this harness's discovered catalog: remap to best available model on the same harness.
-  const scored = harnessInfo.models
-    .map((m) => ({
-      harness: harnessInfo.id,
-      model: m,
-      score: scoreModelForStage(harnessInfo.id, m, preset, stage),
-    }))
-    .sort((a, b) => b.score - a.score);
-  const replacement = scored[0]?.model;
-  if (replacement) {
-    const effort = clampEffortForModel(replacement, target.reasoningEffort);
-    return {
-      target: {
-        harness: target.harness,
-        model: replacement.id,
-        ...(effort ? { reasoningEffort: effort } : {}),
-      },
-      available: true,
-    };
-  }
-  return { target, available: false };
+  // Keep user-configured model verbatim so explicit project routing is never silently rewritten.
+  return { target, available: true };
 }
 
-/** Returns ordered execution targets for an action, honoring any explicit override first. */
+/**
+ * Returns ordered execution targets for an action + requirement tier, honoring any explicit override first.
+ * Strictly stays within the active tier's role rule (never auto-escalates standard -> sotaLead).
+ */
 export function resolveRouteCandidates(
   routing: RoutingConfig,
   harnesses: HarnessInfo[] | null,
   action: AgentAction,
+  tier: RequirementTier = "standard",
   override?: Partial<ModelTarget> | null,
 ): ModelTarget[] {
-  const stage = mapActionToRoutingStage(action);
-  const rule: StageRouteRule = routing.stages[stage];
+  const role = resolveRoleForAction(action, tier);
+  const rule: RoleRouteRule = routing[role];
   const installedSet = harnesses ? new Set(harnesses.filter((h) => h.installed).map((h) => h.id)) : null;
 
   const rawList: Array<{ target: ModelTarget; isExplicitOverride: boolean }> = [];
@@ -562,31 +300,21 @@ export function resolveRouteCandidates(
     if (entry.isExplicitOverride) {
       normalizedList.push(entry.target);
     } else {
-      const resolved = normalizeTargetWithHarnesses(entry.target, harnesses, routing.activePreset, stage);
+      const resolved = normalizeTargetWithHarnesses(entry.target, harnesses);
       if (resolved.available) {
         normalizedList.push(resolved.target);
       }
     }
   }
 
-  // Deduplicate by harness+model
-  const seen = new Set<string>();
-  const unique: ModelTarget[] = [];
-  for (const item of normalizedList) {
-    const key = `${item.harness}::${item.model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(item);
-  }
+  const unique = dedupeTargets(normalizedList, 12);
 
-  // Prefer targets whose harness is actually installed, while keeping override first if requested.
   let ordered = unique;
   if (installedSet && installedSet.size > 0) {
     const installedFirst = unique.filter((t, idx) => (idx === 0 && Boolean(override?.harness)) || installedSet.has(t.harness));
     if (installedFirst.length > 0) ordered = installedFirst;
   }
 
-  // Demote cooling-down models after healthy candidates unless explicitly forced via override.
   const explicitOverride = Boolean(override?.harness && override?.model);
   const healthy: ModelTarget[] = [];
   const cooling: ModelTarget[] = [];

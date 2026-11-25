@@ -106,18 +106,6 @@ export function requirementAttachmentsDir(root: string, requirementId: string): 
   return resolveSafePath(root, WORKBENCH_DIR, "items", requirementId, "attachments");
 }
 
-/** 自进化痛点附件目录：~/.workbench-hub/evolution/attachments/<painId>/ */
-export function painPointAttachmentsDir(painId: string): string {
-  if (!TOKEN_ID_RE.test(painId)) {
-    throw new WorkbenchError("invalid_input", `无效的痛点 ID: ${painId}`);
-  }
-  const custom = process.env.WORKBENCH_HUB_DIR?.trim();
-  const hubDir = custom ? path.resolve(custom) : path.join(os.homedir(), ".workbench-hub");
-  const base = path.join(hubDir, "evolution", "attachments");
-  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
-  return resolveSafePath(base, painId);
-}
-
 export function attachmentsStagingRoot(): string {
   const custom = process.env.WORKBENCH_HUB_DIR?.trim();
   const hubDir = custom ? path.resolve(custom) : path.join(os.homedir(), ".workbench-hub");

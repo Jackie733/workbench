@@ -32,9 +32,17 @@ const DETAIL = {
   },
 } as unknown as RequirementDetail;
 
+const TONE_CLASS: Record<string, string> = {
+  info: "bg-info/8 text-info-foreground",
+  success: "bg-success/8 text-success-foreground",
+  danger: "bg-destructive/8 text-destructive-foreground",
+  neutral: "bg-secondary text-secondary-foreground",
+};
+
 function badgePattern(tone: string, label: string): RegExp {
+  const cls = (TONE_CLASS[tone] ?? tone).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`class="badge ${tone}"[^>]*>(?:(?!</span>)[\\s\\S])*${escaped}`);
+  return new RegExp(`class="[^"]*${cls}[^"]*"[^>]*data-slot="badge"[^>]*>(?:(?!</span>)[\\s\\S])*${escaped}`);
 }
 
 describe("REQ-009 Agent 运行状态色板", () => {

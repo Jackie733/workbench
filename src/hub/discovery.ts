@@ -835,6 +835,8 @@ export function getLocalCatalogFingerprint(homeDir = os.homedir()): string {
   const watchFiles = [
     path.join(homeDir, ".codex/models_cache.json"),
     path.join(homeDir, ".codex/config.toml"),
+    path.join(homeDir, ".qoder-cn/settings.json"),
+    path.join(homeDir, ".local/share/opencode/auth.json"),
     path.join(homeDir, ".omp/agent/models.db"),
     path.join(homeDir, ".omp/agent/agent.db"),
     path.join(homeDir, ".omp/agent/config.yml"),

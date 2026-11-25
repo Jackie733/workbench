@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "./errors.ts";
@@ -63,9 +64,9 @@ import {
   MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_AGENT_RUNS,
   MAX_DISCUSSIONS,
-  MAX_REVIEW_HISTORY,
   MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TIMELINE,
+  REQUIREMENT_TIERS,
   REVIEW_VERDICTS,
   SCHEMA_VERSION,
   WORKBENCH_DIR,
@@ -82,7 +83,6 @@ import {
   type DiscussionEntry,
   type GitObservation,
   type GitRemoteProvider,
-  type HandoffNote,
   type OutputLanguage,
   type PrivacyMode,
   type ProjectGiteeConfig,
@@ -96,6 +96,7 @@ import {
   type RequirementGitHubPrLink,
   type RequirementState,
   type RequirementSummary,
+  type RequirementTier,
   type ReviewDisposition,
   type ReviewFinding,
   type ReviewReport,
@@ -109,7 +110,6 @@ import {
   type ScreenshotBatch,
   type ScreenshotCaptureResult,
   type Stage,
-  type TaskInput,
   type TimelineEvent,
   type TimelineEventKind,
   type Track,
@@ -121,7 +121,6 @@ import {
   isSafeText,
   normalizeCriteria,
   normalizeReason,
-  normalizeTasks,
   normalizeTitle,
   sanitizeOutput,
   validateAgentRunRecord,
@@ -191,39 +190,38 @@ function buildProgressText(
   state: RequirementState,
   requiredTotal: number,
   requiredPassed: number,
+  gateOk: boolean,
 ): { text: string; key: string; params?: Record<string, string | number> } {
-  const tasksTotal = state.tasks.length;
-  const tasksDone = state.tasks.filter((t) => t.status === "done").length;
   switch (state.stage) {
-    case "draft":
-      return { text: "草稿", key: "progress.draft" };
-    case "designing":
-      return { text: "方案起草中", key: "progress.designing" };
-    case "awaiting_approval":
-      return state.designVersion > 0
-        ? {
-            text: `方案 v${state.designVersion} 待批准`,
-            key: "progress.awaitingApprovalDesign",
-            params: { version: state.designVersion },
-          }
-        : { text: "规范变更待确认", key: "progress.specChanged" };
-    case "implementing": {
-      const parts: string[] = [];
-      parts.push(tasksTotal > 0 ? `任务 ${tasksDone}/${tasksTotal}` : "实施中");
+    case "planning":
+      if (state.designHash !== "" && !state.lastFeedback) {
+        return {
+          text: `方案 v${state.designVersion} 待批准`,
+          key: "progress.awaitingApprovalDesign",
+          params: { version: state.designVersion },
+        };
+      }
+      return state.lastFeedback
+        ? { text: "方案修订中", key: "progress.designing" }
+        : { text: "规划中", key: "progress.draft" };
+    case "coding": {
+      if (gateOk) {
+        return {
+          text: `待验收 · 验证 ${requiredPassed}/${requiredTotal}`,
+          key: "progress.awaitingAcceptance",
+          params: { passed: requiredPassed, total: requiredTotal },
+        };
+      }
+      const parts: string[] = ["编码中"];
       if (requiredTotal > 0) parts.push(`验证 ${requiredPassed}/${requiredTotal}`);
-      const key = tasksTotal > 0 ? "progress.implementingTasks" : "progress.implementing";
-      return { text: parts.join(" · "), key, params: { done: tasksDone, total: tasksTotal, passed: requiredPassed, required: requiredTotal } };
-    }
-    case "awaiting_acceptance":
       return {
-        text: `待验收 · 验证 ${requiredPassed}/${requiredTotal}`,
-        key: "progress.awaitingAcceptance",
-        params: { passed: requiredPassed, total: requiredTotal },
+        text: parts.join(" · "),
+        key: "progress.implementing",
+        params: { passed: requiredPassed, required: requiredTotal },
       };
+    }
     case "done":
       return { text: "已完成", key: "progress.done" };
-    case "blocked":
-      return { text: `已阻塞 · ${state.blockedReason ?? "未记录原因"}`, key: "progress.blocked" };
     case "cancelled":
       return { text: "已取消", key: "progress.cancelled" };
   }
@@ -238,25 +236,28 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     acceptanceSnapshotReasonKey: bundle.acceptanceSnapshotReasonKey,
     acceptanceSnapshotReasonParams: bundle.acceptanceSnapshotReasonParams,
   });
-  const progress = buildProgressText(state, validity.coverage.requiredTotal, validity.coverage.requiredPassed);
+  const progress = buildProgressText(
+    state,
+    validity.coverage.requiredTotal,
+    validity.coverage.requiredPassed,
+    validity.acceptanceGate.ok,
+  );
   return {
     id: state.id,
     ...(state.parentId ? { parentId: state.parentId } : {}),
     title: state.title,
     stage: state.stage,
     track: state.track,
+    tier: state.tier,
     revision: state.revision,
     designVersion: state.designVersion,
     criteriaCount: state.criteria.length,
     requiredTotal: validity.coverage.requiredTotal,
     requiredPassed: validity.coverage.requiredPassed,
-    tasksTotal: state.tasks.length,
-    tasksDone: state.tasks.filter((t) => t.status === "done").length,
     needsDecision: validity.needsDecision,
     decisionReason: validity.decisionReason,
     ...(validity.decisionReasonKey ? { decisionReasonKey: validity.decisionReasonKey } : {}),
     ...(validity.decisionReasonParams ? { decisionReasonParams: validity.decisionReasonParams } : {}),
-    blockedReason: state.blockedReason,
     progressText: progress.text,
     progressKey: progress.key,
     ...(progress.params ? { progressParams: progress.params } : {}),
@@ -531,25 +532,70 @@ export function pruneProjectTraces(
   return pruneProjectRunTraces(root, olderThanDays, activeRunIds);
 }
 
-function normalizeHandoffNoteInput(
-  raw: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] } | undefined,
-  prev: HandoffNote | null | undefined,
-  now: number,
-): HandoffNote | null | undefined {
-  if (raw === undefined) return prev;
-  const clean = (arr: string[] | undefined, fallback: string[]) =>
-    arr === undefined
-      ? fallback
-      : arr
-          .filter((s) => typeof s === "string" && s.trim().length > 0)
-          .slice(0, 32)
-          .map((s) => s.trim().slice(0, 900));
-  return {
-    updatedAt: now,
-    keyDecisions: clean(raw.keyDecisions, prev?.keyDecisions ?? []),
-    deadEnds: clean(raw.deadEnds, prev?.deadEnds ?? []),
-    nextSteps: clean(raw.nextSteps, prev?.nextSteps ?? []),
-  };
+/**
+ * Extracts structured acceptance criteria from an inline ```workbench-criteria JSON block inside design.md.
+ * Returns null if no valid block is present.
+ */
+export function extractInlineCriteriaFromDesign(designMarkdown: string): CriterionInput[] | null {
+  const match = /```workbench-criteria\s*\r?\n([\s\S]*?)```/m.exec(designMarkdown);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]!.trim()) as unknown;
+    const rawList = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { criteria?: unknown }).criteria)
+        ? (parsed as { criteria: unknown[] }).criteria
+        : null;
+    if (!rawList || rawList.length === 0) return null;
+    const out: CriterionInput[] = [];
+    for (const item of rawList) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const description = typeof obj.description === "string" ? obj.description.trim() : "";
+      if (!description) continue;
+      out.push({
+        ...(typeof obj.id === "string" && obj.id.trim() ? { id: obj.id.trim() } : {}),
+        description,
+        required: obj.required === undefined ? true : Boolean(obj.required),
+        ...(typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+      });
+    }
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setRequirementTier(
+  root: string,
+  id: string,
+  tier: RequirementTier,
+  options: { expectedRevision?: number; reason?: string; currentCodeSnapshotHash?: string | null } = {},
+): Promise<RequirementDetail> {
+  if (!REQUIREMENT_TIERS.includes(tier)) {
+    throw new WorkbenchError("invalid_input", `无效的执行档位: ${String(tier)}`);
+  }
+  const bundle = await mutateRequirement(root, id, options.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled") {
+      throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能切换执行档位`);
+    }
+    if (state.tier === tier) {
+      return { state };
+    }
+    const label = tier === "sota" ? "SOTA 主程" : "标准主程";
+    return {
+      state: {
+        ...state,
+        tier,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "tier_changed", "human", `切换执行档位为：${label}`, options.reason),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, options.currentCodeSnapshotHash ?? null);
 }
 
 export async function updateDesign(
@@ -564,7 +610,7 @@ export async function updateDesign(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
+    if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不允许直接修改技术方案`);
     }
     const nextDesign = validateMarkdownContent(input.designMarkdown, "design", true);
@@ -582,9 +628,7 @@ export async function updateDesign(
     let nextStage = state.stage;
     if (designChanged && nextApproval !== null && state.track === "plan_first") {
       nextApproval = null;
-      nextStage = "awaiting_approval";
-    } else if (designChanged && nextDesignHash !== "" && (state.stage === "draft" || state.stage === "designing")) {
-      nextStage = "awaiting_approval";
+      nextStage = "planning";
     }
 
     const actor = input.actor ?? "human";
@@ -597,6 +641,7 @@ export async function updateDesign(
         designHash: nextDesignHash,
         approval: nextApproval,
         stage: nextStage,
+        ...(designChanged && nextDesignHash !== "" ? { lastFeedback: null } : {}),
         timeline: appendTimeline(
           state.timeline,
           makeEvent(now, "design_proposed", actor, designChanged ? `在线更新技术方案 v${nextDesignVersion}` : "保存技术方案"),
@@ -616,11 +661,12 @@ export async function createRequirement(
     parentId?: string;
     criteria?: CriterionInput[];
     track?: Track;
+    tier?: RequirementTier;
     uiRelated?: boolean;
     currentCodeSnapshotHash?: string | null;
     /** 暂存区附件 ID，创建时认领到 .workbench/items/<REQ>/attachments/ */
     attachmentIds?: string[];
-    /** 已落盘附件来源（例如痛点转正），创建时复制到新需求目录 */
+    /** 已落盘附件来源，创建时复制到新需求目录 */
     attachmentSource?: { dir: string; metas: AttachmentMeta[] };
   },
 ): Promise<RequirementDetail> {
@@ -628,10 +674,10 @@ export async function createRequirement(
   const title = input.title?.trim() ? normalizeTitle(input.title) : deriveTitleFromGoal(specMarkdown);
   const criteria = input.criteria ? normalizeCriteria(input.criteria) : [];
   const track: Track = input.track === "fast_track" ? "fast_track" : "plan_first";
+  const tier: RequirementTier = input.tier === "sota" ? "sota" : "standard";
   const specHash = computeSpecHash(specMarkdown, criteria);
   const parentId = input.parentId?.trim() ? assertRequirementId(input.parentId.trim()) : undefined;
   if (parentId) {
-    // Ensure parent exists before linking.
     readRequirementBundle(root, parentId);
   }
 
@@ -651,8 +697,9 @@ export async function createRequirement(
       id,
       ...(parentId ? { parentId } : {}),
       title,
-      stage: "draft",
+      stage: "planning",
       track,
+      tier,
       revision: 1,
       specHash,
       designVersion: 0,
@@ -660,12 +707,9 @@ export async function createRequirement(
       criteria,
       approval: null,
       acceptance: null,
-      tasks: [],
       baseline: null,
       verifications: [],
       lastFeedback: null,
-      blockedFrom: null,
-      blockedReason: null,
       ...(input.uiRelated === true ? { uiRelated: true } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       timeline: [
@@ -774,7 +818,7 @@ export async function updateSpec(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
+    if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不允许直接修改规范`);
     }
     const nextTitle = input.title !== undefined ? normalizeTitle(input.title) : state.title;
@@ -794,7 +838,7 @@ export async function updateSpec(
       summary = "更新需求规范或验收条件";
       if (nextApproval !== null) {
         if (
-          (state.stage === "implementing" || state.stage === "awaiting_acceptance") &&
+          state.stage === "coding" &&
           nextSpec === current.specMarkdown &&
           isHumanCriteriaAdjustmentPreservingApproval(state.criteria, nextCriteria)
         ) {
@@ -802,8 +846,8 @@ export async function updateSpec(
           nextApproval = { ...nextApproval, specHash: nextSpecHash };
         } else {
           nextApproval = null;
-          if (nextStage === "implementing" || nextStage === "awaiting_acceptance") {
-            nextStage = current.designMarkdown.trim() ? "awaiting_approval" : "draft";
+          if (nextStage === "coding") {
+            nextStage = "planning";
           }
         }
       }
@@ -819,32 +863,6 @@ export async function updateSpec(
         approval: nextApproval,
         stage: nextStage,
         timeline: appendTimeline(state.timeline, makeEvent(now, "spec_updated", "human", summary)),
-      },
-    };
-  });
-
-  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
-}
-
-export async function markDesigning(
-  root: string,
-  id: string,
-  input: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
-): Promise<RequirementDetail> {
-  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
-    const { state } = current;
-    if (state.stage !== "draft" && state.stage !== "designing") {
-      throw new WorkbenchError("invalid_transition", `只有草稿或起草中状态才能通知 Agent 整理方案（当前：${state.stage}）`);
-    }
-    const timeline =
-      state.stage === "draft"
-        ? appendTimeline(state.timeline, makeEvent(now, "spec_updated", "human", "已通知 Agent 整理规范与方案"))
-        : state.timeline;
-    return {
-      state: {
-        ...state,
-        stage: "designing",
-        timeline,
       },
     };
   });
@@ -873,7 +891,6 @@ export async function propose(
     criteria?: CriterionInput[];
     designMarkdown?: string;
     summary?: string;
-    handoffNote?: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] };
     expectedRevision?: number;
     actor?: "agent" | "human";
     currentCodeSnapshotHash?: string | null;
@@ -881,7 +898,7 @@ export async function propose(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
+    if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不能提交方案或规范提案`);
     }
     if (
@@ -898,11 +915,20 @@ export async function propose(
       input.specMarkdown !== undefined
         ? validateMarkdownContent(input.specMarkdown, "spec", false)
         : current.specMarkdown;
-    const nextCriteria = input.criteria !== undefined ? normalizeCriteria(input.criteria) : state.criteria;
     const nextDesign =
       input.designMarkdown !== undefined
         ? validateMarkdownContent(input.designMarkdown, "design", true)
         : current.designMarkdown;
+    const inlineCriteria =
+      input.criteria === undefined && input.designMarkdown !== undefined
+        ? extractInlineCriteriaFromDesign(nextDesign)
+        : null;
+    const nextCriteria =
+      input.criteria !== undefined
+        ? normalizeCriteria(input.criteria)
+        : inlineCriteria
+          ? normalizeCriteria(inlineCriteria)
+          : state.criteria;
 
     const nextSpecHash = computeSpecHash(nextSpec, nextCriteria);
     const nextDesignHash = computeDesignHash(nextDesign);
@@ -930,22 +956,20 @@ export async function propose(
         nextSpec === current.specMarkdown &&
         nextTitle === state.title
       ) {
-        // Fast-track started with 0 criteria; allow agent to populate initial testable criteria without resetting approval.
-        nextStage = "implementing";
+        nextStage = "coding";
         nextApproval = {
           ...state.approval,
           specHash: nextSpecHash,
         };
       } else if (
-        (state.stage === "implementing" || state.stage === "awaiting_acceptance") &&
+        state.stage === "coding" &&
         actor === "agent" &&
         nextSpec === current.specMarkdown &&
         nextTitle === state.title &&
         !(state.track === "plan_first" && nextDesignHash === "") &&
         isNonBreakingCriteriaUpdate(state.criteria, nextCriteria)
       ) {
-        // Non-breaking implementation refinements (fixing verify commands, adding tests, or updating design notes) keep approval active.
-        nextStage = state.stage;
+        nextStage = "coding";
         nextApproval = {
           ...nextApproval,
           specHash: nextSpecHash,
@@ -953,13 +977,8 @@ export async function propose(
           designHash: nextDesignHash,
         };
       } else {
-        // Any change to spec/criteria/design invalidates prior approval and forces human re-check.
         nextApproval = null;
-        nextStage = "awaiting_approval";
-      }
-    } else if (state.stage === "draft" || state.stage === "designing") {
-      if (nextDesignHash !== "" || state.track === "plan_first") {
-        nextStage = "awaiting_approval";
+        nextStage = "planning";
       }
     }
 
@@ -969,8 +988,6 @@ export async function propose(
       (designChanged && nextDesignHash !== ""
         ? `提交技术方案 v${nextDesignVersion}`
         : "更新需求规范与验收条件");
-
-    const nextHandoffNote = normalizeHandoffNoteInput(input.handoffNote, state.handoffNote, now);
 
     return {
       specMarkdown: input.specMarkdown !== undefined ? nextSpec : undefined,
@@ -986,7 +1003,6 @@ export async function propose(
         approval: nextApproval,
         stage: nextStage,
         lastFeedback: null,
-        ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
         timeline: appendTimeline(state.timeline, makeEvent(now, kind, actor, eventSummary)),
       },
     };
@@ -1007,7 +1023,7 @@ export async function approveDesign(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage !== "awaiting_approval" && state.stage !== "designing") {
+    if (state.stage !== "planning") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行方案批准`);
     }
     if (!current.designMarkdown.trim() || state.designHash === "" || state.designVersion < 1) {
@@ -1020,7 +1036,7 @@ export async function approveDesign(
       state: {
         ...state,
         track: "plan_first",
-        stage: "implementing",
+        stage: "coding",
         baseline,
         lastFeedback: null,
         approval: {
@@ -1035,7 +1051,7 @@ export async function approveDesign(
         },
         timeline: appendTimeline(
           state.timeline,
-          makeEvent(now, "approved", "human", `批准方案 v${state.designVersion}，进入实施阶段`, note),
+          makeEvent(now, "approved", "human", `批准方案 v${state.designVersion}，进入编码阶段`, note),
         ),
       },
     };
@@ -1059,7 +1075,7 @@ export async function authorizeFastTrack(
 
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage !== "draft" && state.stage !== "designing" && state.stage !== "awaiting_approval") {
+    if (state.stage !== "planning") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不能启用快速通道`);
     }
     const note = input.note?.trim() ? normalizeReason(input.note, "授权说明") : undefined;
@@ -1081,7 +1097,7 @@ export async function authorizeFastTrack(
       state: {
         ...state,
         track: "fast_track",
-        stage: "implementing",
+        stage: "coding",
         criteria: autoCriteria,
         specHash: nextSpecHash,
         baseline,
@@ -1098,7 +1114,7 @@ export async function authorizeFastTrack(
         },
         timeline: appendTimeline(
           state.timeline,
-          makeEvent(now, "fast_tracked", "human", "启用快速通道，跳过方案审批直接进入实施与验证", note),
+          makeEvent(now, "fast_tracked", "human", "启用快速通道，跳过方案审批直接进入编码与验证", note),
         ),
       },
     };
@@ -1116,12 +1132,6 @@ export interface SpawnSubRequirementItem {
 const SPAWN_SKIP_HEADING_RE = /^(?:总体思路|背景|概述|目标|验收|验证|目录|风险|回滚|overview|background|verification|testing|risks?)$/i;
 
 export function extractSpawnCandidatesFromRequirement(detail: RequirementDetail): SpawnSubRequirementItem[] {
-  if (detail.state.tasks.length > 0) {
-    return detail.state.tasks.slice(0, 12).map((t) => ({
-      title: t.title,
-      goal: t.note ? `${t.title}\n\n${t.note}` : t.title,
-    }));
-  }
   const md = detail.designMarkdown.trim();
   if (!md) return [];
   const candidates: SpawnSubRequirementItem[] = [];
@@ -1190,10 +1200,9 @@ export async function spawnSubRequirements(
     .slice(0, 12);
 
   if (items.length === 0) {
-    throw new WorkbenchError("invalid_input", "请提供至少一条子需求条目，或先在父需求生成任务/方案章节");
+    throw new WorkbenchError("invalid_input", "请提供至少一条子需求条目，或先在父需求生成方案章节");
   }
 
-  const keyDecisions = (parent.state.handoffNote?.keyDecisions ?? []).slice(0, 4);
   const created: RequirementDetail[] = [];
   for (const item of items) {
     const goalLines: string[] = [
@@ -1204,14 +1213,12 @@ export async function spawnSubRequirements(
       "",
       item.goal,
     ];
-    if (keyDecisions.length > 0) {
-      goalLines.push("", "## 父架构关键约束", ...keyDecisions.map((d) => `- ${d}`));
-    }
     const child = await createRequirement(base, {
       title: item.title,
       goal: goalLines.join("\n"),
       parentId: parent.state.id,
       track: item.track,
+      tier: parent.state.tier,
       currentCodeSnapshotHash: input.currentCodeSnapshotHash ?? null,
     });
     created.push(child);
@@ -1246,11 +1253,11 @@ export async function requestChanges(
   const feedback = normalizeReason(input.feedback, "修改意见");
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
     const { state } = current;
-    if (state.stage === "awaiting_approval") {
+    if (state.stage === "planning") {
       return {
         state: {
           ...state,
-          stage: "designing",
+          stage: "planning",
           approval: null,
           lastFeedback: feedback,
           timeline: appendTimeline(
@@ -1260,106 +1267,17 @@ export async function requestChanges(
         },
       };
     }
-    if (state.stage === "awaiting_acceptance" || state.stage === "implementing") {
+    if (state.stage === "coding") {
       return {
         state: {
           ...state,
-          stage: "implementing",
+          stage: "coding",
           lastFeedback: feedback,
           timeline: appendTimeline(state.timeline, makeEvent(now, "rejected", "human", "验收打回修改", feedback)),
         },
       };
     }
     throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不支持退回修改`);
-  });
-
-  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
-}
-
-export async function updateTasks(
-  root: string,
-  id: string,
-  input: {
-    tasks?: TaskInput[];
-    readyForAcceptance?: boolean;
-    note?: string;
-    handoffNote?: { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] };
-    expectedRevision?: number;
-    actor?: "agent" | "human";
-    currentCodeSnapshotHash?: string | null;
-  },
-): Promise<RequirementDetail> {
-  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
-    const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
-      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不允许更新任务进度`);
-    }
-    if (input.tasks === undefined && input.readyForAcceptance !== true && input.handoffNote === undefined) {
-      throw new WorkbenchError("invalid_input", "请提供 tasks、handoffNote 或设置 readyForAcceptance=true");
-    }
-
-    const nextTasks = input.tasks !== undefined ? normalizeTasks(input.tasks, state.tasks, now) : state.tasks;
-    if (
-      (state.stage === "draft" || state.stage === "designing" || state.stage === "awaiting_approval") &&
-      nextTasks.some((t) => t.status === "done")
-    ) {
-      throw new WorkbenchError(
-        "approval_required",
-        "方案尚未获得人类批准，不能把实施任务标记为完成；请先提交方案并等待批准",
-      );
-    }
-    const note = input.note?.trim() ? normalizeReason(input.note, "进度说明") : undefined;
-    const actor = input.actor ?? "agent";
-
-    let nextStage: Stage = state.stage;
-    let nextTimeline = state.timeline;
-
-    if (input.tasks !== undefined) {
-      const doneCount = nextTasks.filter((t) => t.status === "done").length;
-      nextTimeline = appendTimeline(
-        nextTimeline,
-        makeEvent(now, "tasks_updated", actor, `更新实施任务进度（${doneCount}/${nextTasks.length}）`, note),
-      );
-    }
-
-    if (input.readyForAcceptance === true) {
-      if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
-        throw new WorkbenchError(
-          "approval_required",
-          `需求必须先经人工批准或授权快速通道并处于实施阶段后才能提交验收（当前：${state.stage}）`,
-        );
-      }
-      const candidateState: RequirementState = { ...state, tasks: nextTasks };
-      const validity = evaluateRequirement(candidateState, input.currentCodeSnapshotHash ?? null);
-      if (!validity.acceptanceGate.ok) {
-        throw new WorkbenchError(
-          "acceptance_gate_failed",
-          `尚不满足提交验收条件：${validity.acceptanceGate.blockers.join("；")}`,
-          {
-            blockers: validity.acceptanceGate.blockers,
-            ...(validity.acceptanceGate.blockerRefs ? { blockerRefs: validity.acceptanceGate.blockerRefs } : {}),
-          },
-        );
-      }
-      nextStage = "awaiting_acceptance";
-      nextTimeline = appendTimeline(
-        nextTimeline,
-        makeEvent(now, "submitted_for_acceptance", actor, "所有必需验证已通过，提交人类最终验收", note),
-      );
-    }
-
-    const nextHandoffNote = normalizeHandoffNoteInput(input.handoffNote, state.handoffNote, now);
-
-    return {
-      state: {
-        ...state,
-        tasks: nextTasks,
-        stage: nextStage,
-        ...(input.readyForAcceptance === true ? { lastFeedback: null } : {}),
-        ...(nextHandoffNote !== undefined ? { handoffNote: nextHandoffNote } : {}),
-        timeline: nextTimeline,
-      },
-    };
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
@@ -1380,10 +1298,10 @@ export async function recordVerification(
     if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能记录新的验证结果`);
     }
-    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+    if (state.stage !== "coding") {
       throw new WorkbenchError(
         "approval_required",
-        `当前阶段（${state.stage}）不能记录验证证据；必须先获得人类方案批准并进入实施阶段`,
+        `当前阶段（${state.stage}）不能记录验证证据；必须先获得人类方案批准并进入编码阶段`,
       );
     }
     const validIds = new Set(state.criteria.map((c) => c.id));
@@ -1393,8 +1311,6 @@ export async function recordVerification(
       }
     }
 
-    const nextStage: Stage =
-      state.stage === "awaiting_acceptance" && !record.passed ? "implementing" : state.stage;
     const summary = record.passed
       ? `验证通过：${record.command}（${record.durationMs}ms）`
       : `验证失败：${record.command}（${record.timedOut ? "超时" : `退出码 ${record.exitCode ?? "未知"}`}）`;
@@ -1403,7 +1319,6 @@ export async function recordVerification(
       evidenceWrite: { record, rawLog: input.rawLog },
       state: {
         ...state,
-        stage: nextStage,
         verifications: [...state.verifications, record],
         timeline: appendTimeline(state.timeline, makeEvent(now, "verified", "system", summary)),
       },
@@ -1419,7 +1334,6 @@ export async function isUiRelatedRequirement(state: RequirementState, codeRoot: 
     const observed = await observeGitChanges(codeRoot, { sinceHead: state.baseline?.head ?? null });
     return observed.files.some((file) => file.path.startsWith("src/web/"));
   } catch {
-    // Git observation is best effort: an unreadable repo should not block acceptance.
     return false;
   }
 }
@@ -1440,10 +1354,10 @@ export async function recordScreenshotBatch(
     if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能记录新的截图证据`);
     }
-    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+    if (state.stage !== "coding") {
       throw new WorkbenchError(
         "approval_required",
-        `当前阶段（${state.stage}）不能记录截图证据；仅实施阶段或待验收阶段允许采集`,
+        `当前阶段（${state.stage}）不能记录截图证据；仅编码阶段允许采集`,
       );
     }
     const existing = state.screenshotBatches ?? [];
@@ -1578,8 +1492,24 @@ export async function getRequirementDiff(
     sinceHead: state.baseline?.head ?? null,
     maxDiffBytes: options.maxDiffBytes ?? MAX_ACCEPTANCE_DIFF_BYTES,
   });
+  let diffForTampering = changes.diff;
+  if (changes.diffStatus === "captured" && changes.diffTruncated && changes.isGitRepo) {
+    const testPaths = changes.files
+      .map((f) => f.path)
+      .filter((p) => /(?:^|\/)(?:__tests__\/.*|test_[^/]+\.py|.*_test\.go|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i.test(p) || p.endsWith(".rs"));
+    if (testPaths.length > 0) {
+      try {
+        const diffArgs = changes.baselineAvailable && changes.baselineHead
+          ? ["-C", codeRoot, "diff", "--no-color", changes.baselineHead, "--", ...testPaths.slice(0, 64)]
+          : ["-C", codeRoot, "diff", "--no-color", "HEAD", "--", ...testPaths.slice(0, 64)];
+        diffForTampering = execFileSync("git", diffArgs, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+      } catch {
+        // Fall back to truncated diff if targeted test diff fails.
+      }
+    }
+  }
   const testTamperingSignals =
-    changes.diffStatus === "captured" ? detectTestTamperingSignals(changes.files, changes.diff) : [];
+    changes.diffStatus === "captured" ? detectTestTamperingSignals(changes.files, diffForTampering) : [];
   return {
     context: "live",
     status: changes.diffStatus,
@@ -1643,7 +1573,7 @@ export async function acceptRequirement(
       },
     );
   }
-  if (preBundle.state.stage !== "implementing" && preBundle.state.stage !== "awaiting_acceptance") {
+  if (preBundle.state.stage !== "coding") {
     throw new WorkbenchError("invalid_transition", `当前阶段（${preBundle.state.stage}）无法执行验收通过`, {
       messageKey: "accept.errInvalidStage",
       messageParams: { stage: preBundle.state.stage },
@@ -1728,7 +1658,7 @@ export async function acceptRequirement(
 
   const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
     const { state } = current;
-    if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+    if (state.stage !== "coding") {
       throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法执行验收通过`, {
         messageKey: "accept.errInvalidStage",
         messageParams: { stage: state.stage },
@@ -2579,59 +2509,6 @@ export async function recordRequirementGitHubSync(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
-export async function blockRequirement(
-  root: string,
-  id: string,
-  input: { reason: string; expectedRevision?: number; currentCodeSnapshotHash?: string | null },
-): Promise<RequirementDetail> {
-  const reason = normalizeReason(input.reason, "阻塞原因");
-  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
-    const { state } = current;
-    if (state.stage === "done" || state.stage === "cancelled" || state.stage === "blocked") {
-      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不能标记为阻塞`);
-    }
-    return {
-      state: {
-        ...state,
-        blockedFrom: state.stage,
-        blockedReason: reason,
-        stage: "blocked",
-        timeline: appendTimeline(state.timeline, makeEvent(now, "blocked", "human", "标记需求受阻", reason)),
-      },
-    };
-  });
-
-  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
-}
-
-export async function unblockRequirement(
-  root: string,
-  id: string,
-  input: { expectedRevision?: number; currentCodeSnapshotHash?: string | null } = {},
-): Promise<RequirementDetail> {
-  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
-    const { state } = current;
-    if (state.stage !== "blocked") {
-      throw new WorkbenchError("invalid_transition", `只有处于阻塞状态的需求才能解除阻塞（当前：${state.stage}）`);
-    }
-    const targetStage: Stage =
-      state.blockedFrom && state.blockedFrom !== "blocked" && state.blockedFrom !== "done" && state.blockedFrom !== "cancelled"
-        ? state.blockedFrom
-        : "draft";
-    return {
-      state: {
-        ...state,
-        stage: targetStage,
-        blockedFrom: null,
-        blockedReason: null,
-        timeline: appendTimeline(state.timeline, makeEvent(now, "unblocked", "human", `解除阻塞，恢复至 ${targetStage}`)),
-      },
-    };
-  });
-
-  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
-}
-
 export async function cancelRequirement(
   root: string,
   id: string,
@@ -2647,8 +2524,7 @@ export async function cancelRequirement(
       state: {
         ...state,
         stage: "cancelled",
-        blockedFrom: null,
-        blockedReason: reason,
+        cancelReason: reason,
         timeline: appendTimeline(state.timeline, makeEvent(now, "cancelled", "human", "取消需求", reason)),
       },
     };
@@ -2677,12 +2553,11 @@ export async function reopenRequirement(
     return {
       state: {
         ...state,
-        stage: canKeepApproval ? "implementing" : "draft",
+        stage: canKeepApproval ? "coding" : "planning",
         approval: canKeepApproval ? state.approval : null,
         acceptance: null,
         delivery: null,
-        blockedFrom: null,
-        blockedReason: null,
+        cancelReason: null,
         timeline: appendTimeline(
           state.timeline,
           makeEvent(
@@ -2690,7 +2565,7 @@ export async function reopenRequirement(
             "reopened",
             "human",
             canKeepApproval
-              ? "退回实施阶段（保留既有方案批准，历史验收记录仅作存档）"
+              ? "退回编码阶段（保留既有方案批准，历史验收记录仅作存档）"
               : "重新打开需求（历史批准与验收仅作存档，不自动复用）",
             reason,
           ),
@@ -2928,8 +2803,6 @@ export async function recordReviewReport(
     findings?: ReviewFinding[];
     reviewedSpecHash: string;
     reviewedCodeSnapshotHash: string;
-    reviewMode?: "full" | "delta";
-    changedFiles?: string[];
   },
 ): Promise<RequirementDetail> {
   if (!REVIEW_VERDICTS.includes(input.verdict)) {
@@ -2965,23 +2838,8 @@ export async function recordReviewReport(
             : {}),
         }))
       : undefined;
-  const cleanChangedFiles =
-    Array.isArray(input.changedFiles) && input.changedFiles.length > 0
-      ? input.changedFiles
-          .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
-          .map((f) => sanitizeOutput(f.trim(), 480).text.trim())
-          .filter(Boolean)
-          .slice(0, 64)
-      : undefined;
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
-    const prevHistory: ReviewReport[] = Array.isArray(state.reviewHistory)
-      ? [...state.reviewHistory]
-      : state.reviewReport
-        ? [{ ...state.reviewReport, round: state.reviewReport.round ?? 1 }]
-        : [];
-    const round = prevHistory.length + 1;
-    const reviewMode = input.reviewMode ?? (round > 1 ? "delta" : "full");
     const report: ReviewReport = {
       id: `REV-${now}-${randomUUID().slice(0, 6)}`,
       reviewerHarness: input.reviewerHarness.trim(),
@@ -2993,28 +2851,19 @@ export async function recordReviewReport(
       reviewedSpecHash: input.reviewedSpecHash,
       reviewedCodeSnapshotHash: input.reviewedCodeSnapshotHash,
       reviewedAt: now,
-      round,
-      reviewMode,
-      ...(cleanChangedFiles && cleanChangedFiles.length > 0 ? { changedFiles: cleanChangedFiles } : {}),
     };
-    const archivedReport: ReviewReport = {
-      ...report,
-      markdown: sanitizeOutput(report.markdown, 8192).text,
-    };
-    const nextHistory = [...prevHistory, archivedReport].slice(-MAX_REVIEW_HISTORY);
     const verdictLabel = input.verdict === "pass" ? "建议通过" : input.verdict === "concern" ? "有关注点" : "建议阻塞修复";
     return {
       state: {
         ...state,
         reviewReport: report,
-        reviewHistory: nextHistory,
         timeline: appendTimeline(
           state.timeline,
           makeEvent(
             now,
             "review_submitted",
             "agent",
-            `跨模型审查 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}${round > 1 ? `（第 ${round} 轮）` : ""}`,
+            `跨模型审查 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}`,
             report.summary,
           ),
         ),
@@ -3057,12 +2906,9 @@ export async function syncRequirementBaseline(
     if (state.stage === "cancelled" || (state.stage === "done" && !input.preserveStage)) {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能刷新基线`);
     }
-    const nextStage: Stage =
-      !input.preserveStage && state.stage === "awaiting_acceptance" ? "implementing" : state.stage;
     return {
       state: {
         ...state,
-        stage: nextStage,
         baseline: {
           head: input.baselineHead,
           fingerprint: input.baselineFingerprint,
@@ -3085,7 +2931,7 @@ export async function syncRequirementBaseline(
 }
 
 /**
- * Transitions an approved requirement from `done` or `awaiting_acceptance` to `implementing`
+ * Transitions an approved requirement from `done` to `coding`
  * specifically for sandbox conflict resolution without invalidating `approval` or polluting `lastFeedback`.
  */
 export async function prepareRequirementForConflictSync(
@@ -3095,10 +2941,10 @@ export async function prepareRequirementForConflictSync(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
-    if (state.stage === "implementing") {
+    if (state.stage === "coding") {
       return { state };
     }
-    if (state.stage !== "done" && state.stage !== "awaiting_acceptance") {
+    if (state.stage !== "done") {
       throw new WorkbenchError(
         "invalid_transition",
         `当前阶段（${state.stage}）不能直接进入主干同步消解冲突，请先批准方案`,
@@ -3107,22 +2953,19 @@ export async function prepareRequirementForConflictSync(
     if (!evaluateApproval(state).valid) {
       throw new WorkbenchError("approval_required", `${id} 尚未获得有效方案批准，请先批准方案`);
     }
-    const wasDone = state.stage === "done";
     return {
       state: {
         ...state,
-        stage: "implementing",
-        ...(wasDone ? { acceptance: null, delivery: null } : {}),
+        stage: "coding",
+        acceptance: null,
+        delivery: null,
         timeline: appendTimeline(
           state.timeline,
           makeEvent(
             now,
             "sandbox_synced",
             "system",
-            input.summary ??
-              (wasDone
-                ? "因主干代码存在合并冲突，已轻量退回实施阶段消解冲突（保留既有方案批准）"
-                : "进入实施阶段同步主干基线并解决合并冲突"),
+            input.summary ?? "因主干代码存在合并冲突，已轻量退回编码阶段消解冲突（保留既有方案批准）",
           ),
         ),
       },

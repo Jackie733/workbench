@@ -11,11 +11,10 @@ import {
   initProject,
   propose,
   recordReviewReport,
-  updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { createOrReuseWorktree, inspectRsiSandboxDrift } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree, inspectSandboxDrift } from "../../src/core/worktree.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
@@ -111,11 +110,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "implemented", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
     await recordReviewReport(repo, "REQ-001", {
       reviewerHarness: "codex",
       reviewerModel: "gpt-6.2-sol",
@@ -271,7 +265,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       }
       await page.waitForFunction(
         () =>
-          Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("实施中")) &&
+          Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")) &&
           !document.querySelector('[data-testid="live-agent-banner"]'),
         { timeout: 5000 },
       );
@@ -285,7 +279,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
 
       const afterFixState = getRequirement(repo, "REQ-001").state;
       expect(afterFixState.approval).not.toBeNull();
-      expect(afterFixState.stage).toBe("implementing");
+      expect(afterFixState.stage).toBe("coding");
 
       expect(pageErrors).toEqual([]);
     } finally {
@@ -305,12 +299,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     await propose(repo, "REQ-001", { designMarkdown: "# Design\n等待跨模型审查。", actor: "agent" });
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    const snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "实现完成", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
 
     const executor = new HubExecutor({
       initialHarnesses: [
@@ -389,16 +377,11 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
     execFileSync("git", ["add", "app.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main conflicts after squash"], { cwd: repo, stdio: "ignore" });
-    const driftCheck = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const driftCheck = await inspectSandboxDrift(repo, "REQ-001");
     expect(driftCheck?.conflictFiles).toEqual(["app.ts"]);
 
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const wtSnap = (await observeGitSnapshot(sb.worktreePath))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: wtSnap.fingerprint,
-    });
     await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: wtSnap.fingerprint });
 
     // REQ-002: awaiting_approval requirement for testing RightDrawer refine runner override
@@ -505,7 +488,17 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
   test("stage-aware RightDrawer routes refine to fix in implementing stage and disables refine in done stage", async () => {
     makeTempHub();
     const repo = makeGitRepo();
-    await initProject(repo, { name: "StageDrawer", privacyMode: "local" });
+    await initProject(repo, {
+      name: "StageDrawer",
+      privacyMode: "local",
+      routing: {
+        defaultLead: { primary: { harness: "codex", model: "gpt-6.2-sol" }, fallbacks: [] },
+        sotaLead: { primary: { harness: "codex", model: "gpt-6.2-sol" }, fallbacks: [] },
+        reviewer: { primary: { harness: "codex", model: "gpt-6.2-sol" }, fallbacks: [] },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
     registerHubProject(repo);
 
     await createRequirement(repo, {
@@ -516,11 +509,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
     await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap.fingerprint });
 
     await createRequirement(repo, {
@@ -607,11 +595,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
 
     const specHash = getRequirement(repo, "REQ-001").state.specHash;
     await recordReviewReport(repo, "REQ-001", {
@@ -627,11 +610,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap2 = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap2.fingerprint,
-    });
     await recordReviewReport(repo, "REQ-001", {
       reviewerHarness: "codex",
       reviewerModel: "gpt-6.2-sol",
@@ -653,34 +631,12 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="review-round-badge"]', { timeout: 10000 });
-
-      const roundBadgeText = await page.evaluate(
-        () => document.querySelector('[data-testid="review-round-badge"]')?.textContent ?? "",
-      );
-      expect(roundBadgeText).toContain("第 2 轮");
-      expect(roundBadgeText).toContain("增量复审");
+      await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10000 });
 
       const primaryBtnText = await page.evaluate(
         () => document.querySelector('[data-testid="action-accept"]')?.textContent ?? "",
       );
-      expect(primaryBtnText).toContain("确认关注点并验收通过");
-
-      const hasHistory = await page.evaluate(
-        () => Boolean(document.querySelector('[data-testid="review-history-details"]')),
-      );
-      expect(hasHistory).toBe(true);
-
-      await clickReady(page, '[data-testid="review-to-pain-point-btn"]');
-      await page.waitForFunction(
-        () => (document.body.textContent ?? "").includes("已将残余审查项记入自进化痛点收集箱"),
-        { timeout: 8000 },
-      );
-
-      const evoRes = (await (await fetch(`${server.url}/api/hub/evolution`)).json()) as {
-        painPoints: Array<{ title: string }>;
-      };
-      expect(evoRes.painPoints.some((p) => p.title.includes("[后续跟进 REQ-001]"))).toBe(true);
+      expect(primaryBtnText).toContain("接受风险并验收");
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();

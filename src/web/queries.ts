@@ -6,11 +6,11 @@ import type {
   AgentRunRecord,
   CascadeSyncItemResult,
   RequirementDetail,
+  RequirementTier,
   RunTraceEvent,
   SandboxDriftInfo,
   Stage,
 } from "../core/types.ts";
-import type { DispatchOutcome } from "../server/index.ts";
 import type { RoutingConfig } from "../hub/types.ts";
 import {
   api,
@@ -21,7 +21,7 @@ import {
   type InsightsQueryFilter,
   type ProjectInfoResponse,
 } from "./api.ts";
-import { resolveWarningParam, type MessageKey } from "./i18n.ts";
+import { resolveWarningParam } from "./i18n.ts";
 import {
   activeRunnerChoice,
   findLockingRequirementRun,
@@ -48,8 +48,6 @@ export const queryClient = new QueryClient({
 export const queryKeys = {
   authStatus: ["auth", "status"] as const,
   hubState: ["hub", "state"] as const,
-  evolution: ["hub", "evolution"] as const,
-  playbook: (projectId: string | null) => ["playbook", projectId] as const,
   project: (projectId: string | null) => ["project", projectId] as const,
   projectSandboxes: (projectId: string | null) => ["project", "sandboxes", projectId] as const,
   githubStatus: (projectId: string | null) => ["github", "status", projectId] as const,
@@ -157,14 +155,6 @@ export function useGiteeIssuesQuery(
   });
 }
 
-export function useEvolutionQuery(enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.evolution,
-    queryFn: () => api.getEvolution(),
-    enabled,
-  });
-}
-
 export function useRequirementRunsQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.requirementRuns(activeProjectId, id),
@@ -265,19 +255,10 @@ export async function hydrateRunTrace(reqId: string, runId: string, incremental 
   return task;
 }
 
-export function usePlaybookQuery(activeProjectId: string | null, enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.playbook(activeProjectId),
-    queryFn: () => api.getPlaybook(),
-    enabled,
-  });
-}
-
 export function resolveEffectiveRouting(
-  hub?: HubStateResponse | null,
   project?: ProjectInfoResponse | null,
 ): RoutingConfig | null {
-  return project?.project?.routing ?? project?.routing ?? hub?.routing ?? null;
+  return project?.project?.routing ?? project?.routing ?? null;
 }
 
 function applyHubState(hub: HubStateResponse, snapshotStartedAt: number): void {
@@ -639,38 +620,8 @@ export async function runBusy<T>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
-export function shouldUseCliRunner(action?: AgentAction): boolean {
-  const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
-  const draft = useDraftStore.getState();
-  const key = action ? (draft.runnerOverrides[action]?.key ?? "") : draft.selectedRunnerKey;
-  if (key === "manual_copy") return false;
-  if (hub?.hubMode) return hub.harnesses.some((h) => h.installed) || key !== "";
-  return Boolean(key && key !== "manual_copy");
-}
-
-export function handleDispatchOutcome(dispatch: DispatchOutcome | null, fallbackTitle: MessageKey): void {
-  if (!dispatch) return;
-  const ui = useUiStore.getState();
-  if (dispatch.delivered && dispatch.status === "submitted") {
-    ui.showToastKey("toast.dispatchSubmitted");
-    return;
-  }
-  if (dispatch.delivered && dispatch.status === "prefilled") {
-    ui.showToastKey("toast.dispatchPrefilled");
-    return;
-  }
-  const subtitleKey =
-    dispatch.reason === "draft_conflict"
-      ? "fallback.subtitle.draft"
-      : dispatch.reason === "source_busy"
-        ? "fallback.subtitle.busy"
-        : "fallback.subtitle.offline";
-  ui.setModal({
-    kind: "prompt_fallback",
-    titleKey: fallbackTitle,
-    subtitleKey,
-    prompt: dispatch.prompt,
-  });
+export function shouldUseCliRunner(_action?: AgentAction): boolean {
+  return true;
 }
 
 export async function openRequirement(id: string): Promise<void> {
@@ -779,7 +730,17 @@ export async function triggerActiveRun(
     opts?.runnerActionKey && drafts[opts.runnerActionKey]?.key ? drafts[opts.runnerActionKey] : drafts[action];
   const selectedRunnerKey = override?.key ?? "";
   const selectedEffort = override?.effort ?? "";
-  const choice = activeRunnerChoice(selectedRunnerKey, resolveEffectiveRouting(hub, project), action, selectedEffort);
+  const cachedReq = queryClient.getQueryData<{ detail?: RequirementDetail }>(
+    queryKeys.requirement(scope.projectId, reqId),
+  );
+  const reqTier: RequirementTier = cachedReq?.detail?.state.tier ?? "standard";
+  const choice = activeRunnerChoice(
+    selectedRunnerKey,
+    resolveEffectiveRouting(project),
+    action,
+    selectedEffort,
+    reqTier,
+  );
   const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
   const effectiveEffort =
     effortCap.mode === "configurable"
@@ -796,8 +757,8 @@ export async function triggerActiveRun(
     requestStartedAt = Date.now();
     return api.startAgentRun(reqId, {
       action,
-      harness: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
-      model: selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
+      harness: selectedRunnerKey ? choice.harness : undefined,
+      model: selectedRunnerKey ? choice.model : undefined,
       reasoningEffort: effectiveEffort,
       message: opts?.message,
       anchor: opts?.anchor,
@@ -850,7 +811,6 @@ export async function captureUiScreenshots(id: string, label?: string) {
 
 export async function dispatchFixFromReview(
   detail: RequirementDetail,
-  bridgeConnected: boolean,
   opts?: { selectedFindingIds?: string[] },
 ): Promise<void> {
   const id = detail.state.id;
@@ -859,47 +819,59 @@ export async function dispatchFixFromReview(
   const feedback = report
     ? formatReviewFixFeedback(report, opts?.selectedFindingIds)
     : "请根据最新跨模型 Code Review 意见定位修复问题，并重跑全量验证。";
-  const useCli = shouldUseCliRunner("fix");
-  const canMoveStage = detail.state.stage === "awaiting_acceptance" || detail.state.stage === "implementing";
-  if (canMoveStage) {
-    const res = await runBusy(() =>
-      api.requestChanges(id, {
-        feedback,
-        expectedRevision: detail.state.revision,
-        dispatchAgent: !useCli && bridgeConnected,
-      }),
-    );
-    if (!res) return;
-    await invalidateAllWorkbenchQueries();
-    if (useCli) {
-      await triggerActiveRun(id, "fix", { message: feedback });
-    } else {
-      handleDispatchOutcome(res.dispatch, "fallback.title.fixReview");
-    }
-    return;
-  }
-  if (useCli) {
-    await triggerActiveRun(id, "fix", { message: feedback });
-  } else {
-    await runBusy(async () => {
-      const out = await api.dispatch(id, { action: "fix" });
-      await invalidateAllWorkbenchQueries();
-      handleDispatchOutcome(out.dispatch, "fallback.title.fixReview");
-      return out;
+  await triggerActiveRun(id, "fix", { message: feedback });
+}
+
+export async function setRequirementTierAction(
+  detail: RequirementDetail,
+  tier: RequirementTier,
+  opts?: { reason?: string; dispatchFix?: boolean },
+): Promise<void> {
+  const id = detail.state.id;
+  if (guardRequirementRunLock(id)) return;
+  const scope = resolveRunScope();
+  const ui = useUiStore.getState();
+  let requestStartedAt = 0;
+  const res = await runBusy(() => {
+    requestStartedAt = Date.now();
+    return api.setRequirementTier(id, {
+      tier,
+      expectedRevision: detail.state.revision,
+      ...(opts?.reason ? { reason: opts.reason } : {}),
+      ...(opts?.dispatchFix ? { dispatchFix: true } : {}),
     });
+  });
+  if (!res) return;
+  if (res.run && res.target) {
+    useStreamStore.getState().setRunStarted(
+      {
+        ...res.run,
+        requirementId: id,
+        ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+      },
+      requestStartedAt,
+    );
+    ui.setDrawerOpen(true);
+    ui.setDrawerTab("console");
+    ui.showToastKey("toast.runStarted", {
+      target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
+      action: "fix",
+    });
+  } else {
+    ui.showToastKey(tier === "sota" ? "toast.tierSota" : "toast.tierStandard", { id });
   }
+  await invalidateAllWorkbenchQueries();
 }
 
 export async function syncSandboxBaseAction(
   reqId: string,
-  options: { fetchRemote?: boolean; useEvolutionHub?: boolean } = {},
+  options: { fetchRemote?: boolean } = {},
 ): Promise<boolean> {
   if (guardRequirementRunLock(reqId)) return false;
   const ui = useUiStore.getState();
   const res = await runBusy(() =>
-    options.useEvolutionHub
-      ? api.syncRsiSandboxBase(reqId)
-      : api.syncSandboxBase(reqId, { fetchRemote: options.fetchRemote !== false }),
+    api.syncSandboxBase(reqId, { fetchRemote: options.fetchRemote !== false }),
   );
   if (!res) return false;
   await invalidateAllWorkbenchQueries();
@@ -940,7 +912,6 @@ export function notifyCascadeSyncResults(results?: CascadeSyncItemResult[]): voi
 export async function dispatchSyncBaseWithAgent(
   detail: RequirementDetail,
   drift: SandboxDriftInfo,
-  bridgeConnected: boolean,
 ): Promise<void> {
   const id = detail.state.id;
   if (guardRequirementRunLock(id)) return;
@@ -953,8 +924,7 @@ export async function dispatchSyncBaseWithAgent(
     `。本次任务仅聚焦同步主干与解决合并冲突，切勿重复返工已通过的功能或已过期的旧审查意见。同步步骤：\n` +
     `1. 检查 git status：若存在未提交业务/测试改动，使用 git add -u 与显式业务文件路径暂存后 git commit -m "chore(${id}): wip before base sync"（或 git stash）保存当前进度；严禁提交 node_modules 或临时目录；\n` +
     `2. 执行 git merge --no-edit ${drift.mainHead}，手工解决冲突并保留当前需求全部功能与主干新增改动，完成后提交合并（若 stash 过请 pop）；\n` +
-    `3. 运行 wb verify ${id} --all 与 wb tasks ${id} --ready（提交验收状态）。`;
-  const useCli = shouldUseCliRunner("fix");
+    `3. 运行 wb verify ${id} --all。`;
   const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const project = queryClient.getQueryData<ProjectInfoResponse>(queryKeys.project(scope.projectId));
@@ -962,7 +932,13 @@ export async function dispatchSyncBaseWithAgent(
   const override = drafts.fix;
   const selectedRunnerKey = override?.key ?? "";
   const selectedEffort = override?.effort ?? "";
-  const choice = activeRunnerChoice(selectedRunnerKey, resolveEffectiveRouting(hub, project), "fix", selectedEffort);
+  const choice = activeRunnerChoice(
+    selectedRunnerKey,
+    resolveEffectiveRouting(project),
+    "fix",
+    selectedEffort,
+    detail.state.tier ?? "standard",
+  );
   const effortCap = getModelEffortCapability(hub?.harnesses ?? [], choice.harness, choice.model);
   const effectiveEffort =
     effortCap.mode === "configurable"
@@ -975,13 +951,11 @@ export async function dispatchSyncBaseWithAgent(
   const res = await runBusy(() => {
     requestStartedAt = Date.now();
     return api.syncResolveSandbox(id, {
-      approveFirst: detail.state.stage === "awaiting_approval",
+      approveFirst: detail.state.stage === "planning" && Boolean(detail.state.designHash),
       expectedRevision: detail.state.revision,
-      useCli,
-      dispatchAgent: !useCli && bridgeConnected,
-      harness: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.harness : undefined,
-      model: useCli && selectedRunnerKey && selectedRunnerKey !== "manual_copy" ? choice.model : undefined,
-      reasoningEffort: useCli ? effectiveEffort : undefined,
+      harness: selectedRunnerKey ? choice.harness : undefined,
+      model: selectedRunnerKey ? choice.model : undefined,
+      reasoningEffort: effectiveEffort,
       message: msg,
     });
   });
@@ -999,13 +973,11 @@ export async function dispatchSyncBaseWithAgent(
       target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
       action: "fix",
     });
-  } else if (res.dispatch) {
-    handleDispatchOutcome(res.dispatch, "fallback.title.syncBase");
   }
   await invalidateAllWorkbenchQueries();
 }
 
-export async function handleBannerAction(detail: RequirementDetail, actionId: string, bridgeConnected: boolean): Promise<void> {
+export async function handleBannerAction(detail: RequirementDetail, actionId: string): Promise<void> {
   const id = detail.state.id;
   if (guardRequirementRunLock(id)) return;
   const rev = detail.state.revision;
@@ -1013,21 +985,12 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
 
   switch (actionId) {
     case "dispatch_design": {
-      if (shouldUseCliRunner("design")) {
-        await triggerActiveRun(id, "design");
-        break;
-      }
-      await runBusy(async () => {
-        const out = await api.dispatch(id, { action: "design" });
-        await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "fallback.title.design");
-        return out;
-      });
+      await triggerActiveRun(id, "design");
       break;
     }
     case "approve":
     case "approve_only": {
-      const res = await runBusy(() => api.approve(id, { expectedRevision: rev, dispatchAgent: false }));
+      const res = await runBusy(() => api.approve(id, { expectedRevision: rev }));
       if (res) {
         await invalidateAllWorkbenchQueries();
         ui.showToastKey("toast.approved", { id });
@@ -1035,83 +998,48 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "approve_and_implement": {
-      const useCli = shouldUseCliRunner("implement");
       const res = await runBusy(() =>
         api.approve(id, {
           expectedRevision: rev,
-          dispatchAgent: !useCli,
         }),
       );
       if (res) {
         await invalidateAllWorkbenchQueries();
-        if (useCli) {
-          await triggerActiveRun(id, "implement");
-        } else {
-          handleDispatchOutcome(res.dispatch, "fallback.title.approve");
-        }
+        await triggerActiveRun(id, "implement");
       }
       break;
     }
     case "fast_track":
     case "authorize_fast_track": {
-      const useCli = shouldUseCliRunner("implement");
       const res = await runBusy(() =>
         api.fastTrack(id, {
           expectedRevision: rev,
-          dispatchAgent: !useCli && bridgeConnected,
         }),
       );
       if (res) {
         await invalidateAllWorkbenchQueries();
-        if (useCli) {
-          await triggerActiveRun(id, "implement");
-        } else {
-          handleDispatchOutcome(res.dispatch, "fallback.title.fastTrack");
-        }
+        await triggerActiveRun(id, "implement");
       }
       break;
     }
     case "dispatch_implement": {
-      if (shouldUseCliRunner("implement")) {
-        await triggerActiveRun(id, "implement");
-        break;
-      }
-      await runBusy(async () => {
-        const out = await api.dispatch(id, { action: "implement" });
-        await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "fallback.title.implement");
-        return out;
-      });
+      await triggerActiveRun(id, "implement");
       break;
     }
     case "dispatch_fix": {
-      if (shouldUseCliRunner("fix")) {
-        await triggerActiveRun(id, "fix");
-        break;
-      }
-      await runBusy(async () => {
-        const out = await api.dispatch(id, { action: "fix" });
-        await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "fallback.title.fix");
-        return out;
-      });
+      await triggerActiveRun(id, "fix");
+      break;
+    }
+    case "escalate_sota": {
+      await setRequirementTierAction(detail, "sota", { dispatchFix: true });
       break;
     }
     case "dispatch_review": {
-      if (shouldUseCliRunner("review")) {
-        await triggerActiveRun(id, "review");
-        break;
-      }
-      await runBusy(async () => {
-        const out = await api.dispatch(id, { action: "review" });
-        await invalidateAllWorkbenchQueries();
-        handleDispatchOutcome(out.dispatch, "fallback.title.dispatchReview");
-        return out;
-      });
+      await triggerActiveRun(id, "review");
       break;
     }
     case "dispatch_fix_review": {
-      await dispatchFixFromReview(detail, bridgeConnected);
+      await dispatchFixFromReview(detail);
       break;
     }
     case "sync_base": {
@@ -1119,14 +1047,10 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       break;
     }
     case "request_changes": {
-      const targetAction: AgentAction =
-        detail.state.stage === "awaiting_approval" || detail.state.stage === "draft" || detail.state.stage === "designing"
-          ? "design"
-          : "fix";
       ui.setModal({
         kind: "feedback",
         feedback: "",
-        dispatchAgent: shouldUseCliRunner(targetAction) || bridgeConnected,
+        dispatchAgent: true,
       });
       break;
     }
@@ -1174,14 +1098,6 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       if (res) {
         await invalidateAllWorkbenchQueries();
         ui.showToastKey("toast.accepted", { id });
-      }
-      break;
-    }
-    case "unblock": {
-      const res = await runBusy(() => api.unblock(id, { expectedRevision: rev }));
-      if (res) {
-        await invalidateAllWorkbenchQueries();
-        ui.showToastKey("toast.unblocked");
       }
       break;
     }
@@ -1282,10 +1198,9 @@ export async function initProjectSubmit(): Promise<void> {
 export async function submitNewRequirement(
   goalRaw: string,
   dispatchAgent: boolean,
-  _bridgeConnected: boolean,
   createGitHubIssue?: boolean,
   attachmentIds: string[] = [],
-  sandboxOpts?: { createSandbox?: boolean; stackedOnReqId?: string },
+  sandboxOpts?: { createSandbox?: boolean; stackedOnReqId?: string; tier?: RequirementTier },
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
@@ -1293,11 +1208,10 @@ export async function submitNewRequirement(
     ui.showToastKey("toast.needGoal", undefined, true);
     return;
   }
-  const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.createRequirement({
       goal,
-      dispatchAgent: dispatchAgent && !useCli,
+      ...(sandboxOpts?.tier ? { tier: sandboxOpts.tier } : {}),
       ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
       ...(sandboxOpts?.createSandbox ? { createSandbox: true } : {}),
       ...(sandboxOpts?.stackedOnReqId ? { stackedOnReqId: sandboxOpts.stackedOnReqId } : {}),
@@ -1308,7 +1222,6 @@ export async function submitNewRequirement(
     ui.setModal(null);
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
-    await invalidateAllWorkbenchQueries();
     if (res.githubWarning) {
       ui.showToastKey(
         "toast.createdWithIssueWarn",
@@ -1318,14 +1231,7 @@ export async function submitNewRequirement(
         },
         true,
       );
-    }
-    if (dispatchAgent) {
-      if (useCli) {
-        await triggerActiveRun(res.detail.state.id, "design");
-      } else {
-        handleDispatchOutcome(res.dispatch, "fallback.title.newReq");
-      }
-    } else if (!res.githubWarning) {
+    } else if (!dispatchAgent) {
       if (res.detail.state.github?.issue) {
         ui.showToastKey("toast.createdIssue", {
           id: res.detail.state.id,
@@ -1334,6 +1240,10 @@ export async function submitNewRequirement(
       } else {
         ui.showToastKey("toast.created", { id: res.detail.state.id });
       }
+    }
+    await invalidateAllWorkbenchQueries();
+    if (dispatchAgent) {
+      await triggerActiveRun(res.detail.state.id, "design");
     }
   }
 }
@@ -1345,12 +1255,10 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     ui.showToastKey("toast.needIssueRef", undefined, true);
     return;
   }
-  const useCli = dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.importGitHubIssue({
       provider: "github",
       issueRef,
-      dispatchAgent: dispatchAgent && !useCli,
     }),
   );
   if (res) {
@@ -1368,11 +1276,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
       return;
     }
     if (dispatchAgent) {
-      if (useCli) {
-        await triggerActiveRun(res.detail.state.id, "design");
-      } else {
-        handleDispatchOutcome(res.dispatch ?? null, "fallback.title.import");
-      }
+      await triggerActiveRun(res.detail.state.id, "design");
     } else {
       ui.showToastKey("toast.createdFromIssue", {
         number: issueNumber,
@@ -1393,12 +1297,10 @@ export async function submitImportGiteeIssue(opts: {
     ui.showToastKey("gitee.toastNeedRef", undefined, true);
     return;
   }
-  const useCli = opts.dispatchAgent && shouldUseCliRunner("design");
   const res = await runBusy(() =>
     api.importGitHubIssue({
       provider: "gitee",
       ...(opts.issue ? { giteeIssue: opts.issue } : { issueRef }),
-      dispatchAgent: opts.dispatchAgent && !useCli,
     }),
   );
   if (res) {
@@ -1412,11 +1314,7 @@ export async function submitImportGiteeIssue(opts: {
       return;
     }
     if (opts.dispatchAgent) {
-      if (useCli) {
-        await triggerActiveRun(res.detail.state.id, "design");
-      } else {
-        handleDispatchOutcome(res.dispatch ?? null, "gitee.toastDispatchAction");
-      }
+      await triggerActiveRun(res.detail.state.id, "design");
     } else {
       ui.showToastKey("gitee.toastCreated", { ident, id: res.detail.state.id });
     }
@@ -1431,30 +1329,18 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     return;
   }
   if (guardRequirementRunLock(detail.state.id)) return;
-  const targetAction: AgentAction =
-    detail.state.stage === "awaiting_approval" || detail.state.stage === "draft" || detail.state.stage === "designing"
-      ? "design"
-      : "fix";
-  const useCli = dispatchAgent && shouldUseCliRunner(targetAction);
+  const targetAction: AgentAction = detail.state.stage === "planning" ? "design" : "fix";
   const res = await runBusy(() =>
     api.requestChanges(detail.state.id, {
       feedback,
       expectedRevision: detail.state.revision,
-      dispatchAgent: dispatchAgent && !useCli,
     }),
   );
   if (res) {
     ui.setModal(null);
     await invalidateAllWorkbenchQueries();
     if (dispatchAgent) {
-      if (useCli) {
-        await triggerActiveRun(detail.state.id, targetAction, { message: feedback });
-      } else {
-        handleDispatchOutcome(
-          res.dispatch,
-          targetAction === "design" ? "fallback.title.feedback" : "fallback.title.feedbackFix",
-        );
-      }
+      await triggerActiveRun(detail.state.id, targetAction, { message: feedback });
     } else {
       ui.showToastKey("toast.changesRecordedFix");
     }
@@ -1490,7 +1376,7 @@ export async function submitAcceptOverride(
 
 export async function submitLifecycle(
   detail: RequirementDetail,
-  action: "block" | "cancel" | "reopen",
+  action: "cancel" | "reopen",
   reasonRaw: string,
   opts?: { preserveApproval?: boolean },
 ): Promise<void> {
@@ -1502,7 +1388,6 @@ export async function submitLifecycle(
   }
   if (guardRequirementRunLock(detail.state.id)) return;
   const res = await runBusy(async () => {
-    if (action === "block") return api.block(detail.state.id, { reason, expectedRevision: detail.state.revision });
     if (action === "cancel") return api.cancel(detail.state.id, { reason, expectedRevision: detail.state.revision });
     return api.reopen(detail.state.id, {
       reason,
@@ -1567,10 +1452,10 @@ export async function runAskFromDrawer(reqId: string): Promise<void> {
 }
 
 function resolveRefineActionForStage(stage?: Stage): "design" | "fix" | "readonly" {
-  if (stage === "done" || stage === "cancelled" || stage === "blocked") {
+  if (stage === "done" || stage === "cancelled") {
     return "readonly";
   }
-  if (stage === "implementing" || stage === "awaiting_acceptance") {
+  if (stage === "coding") {
     return "fix";
   }
   return "design";

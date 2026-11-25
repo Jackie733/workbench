@@ -1,10 +1,16 @@
+import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import { attachmentFileName, formatAttachmentSize } from "../core/attachments.ts";
 import { discoverProjectContext } from "../core/context.ts";
-import { getProjectStatus, getRequirement, getVerificationEvidence, saveHandoffMarkdown } from "../core/engine.ts";
+import {
+  getAgentRunTrace,
+  getProjectStatus,
+  getRequirement,
+  getVerificationEvidence,
+  saveHandoffMarkdown,
+} from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
 import { resolveEffectiveOutputLanguage, type ResolvedOutputLanguage } from "../core/language.ts";
-import { readPlaybook } from "../core/playbook.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
   WORKBENCH_DIR,
@@ -20,7 +26,6 @@ import { estimateTokens } from "./pricing.ts";
 import { readHubConfig } from "./registry.ts";
 
 const HANDOFF_MAX_BYTES = 8 * 1024;
-const PLAYBOOK_SECTION_MAX_BYTES = 1200;
 
 export interface HandoffComposition {
   totalBytes: number;
@@ -64,10 +69,9 @@ interface BudgetedSection {
 
 const SECTION_LABELS: Record<string, string> = {
   header: "Header & Metadata",
-  playbook: "Playbook",
   steering: "Review & Feedback",
   failures: "Failure Evidence",
-  progress: "Tasks & HandoffNote",
+  trace: "Previous Run Trace Summary",
   contract: "File Pointers & Criteria",
   git: "Git Snapshot",
 };
@@ -100,7 +104,6 @@ function assembleBudgetedPacket(
 
   let assembled = joinAll();
   if (Buffer.byteLength(assembled, "utf8") > maxBytes) {
-    // Trim lowest-priority sections first so review findings, human feedback, and failures survive.
     const byTrimOrder = [...sections].sort((a, b) => b.priority - a.priority);
     for (const sec of byTrimOrder) {
       const currentBytes = Buffer.byteLength(assembled, "utf8");
@@ -164,9 +167,64 @@ function assembleBudgetedPacket(
 }
 
 /**
+ * Deterministically extracts objective execution memory (touched files, failed tool calls,
+ * final assistant summary) from a prior run's Trace JSONL for zero-friction cross-harness handoff.
+ */
+export function extractTraceHandoffSummary(root: string, id: string, runId: string): string | null {
+  try {
+    const trace = getAgentRunTrace(root, id, runId, { afterSeq: 0, limit: 2000 });
+    if (!trace.traceAvailable || trace.events.length === 0) return null;
+
+    const filesTouched = new Set<string>();
+    const failedTools: string[] = [];
+    let lastAssistant = "";
+
+    for (const ev of trace.events) {
+      if ((ev.type === "tool.start" || ev.type === "tool.end") && Array.isArray(ev.filesTouched)) {
+        for (const f of ev.filesTouched) {
+          if (f && filesTouched.size < 20) filesTouched.add(f);
+        }
+      }
+      if (ev.type === "tool.end" && ev.isError) {
+        const line = `${ev.toolName}: ${ev.summary}${ev.exitCode !== undefined && ev.exitCode !== null ? ` (exit ${ev.exitCode})` : ""}`;
+        failedTools.push(sanitizeOutput(line, 220).text);
+      }
+      if (ev.type === "assistant.message" && ev.text.trim()) {
+        lastAssistant = ev.text.trim();
+      }
+    }
+
+    const lines: string[] = [];
+    if (filesTouched.size > 0) {
+      lines.push(`- **前序触达文件**：${Array.from(filesTouched).slice(0, 12).map((f) => `\`${f}\``).join("、")}`);
+    }
+    if (failedTools.length > 0) {
+      lines.push("- **前序失败工具调用（避免重复踩坑）**：");
+      for (const ft of failedTools.slice(-3)) {
+        lines.push(`  - ${ft}`);
+      }
+    }
+    if (lastAssistant) {
+      lines.push(`- **前序最终结论摘要**：${sanitizeOutput(lastAssistant.replace(/\s+/g, " "), 500).text}`);
+    }
+    if (lines.length === 0) return null;
+    return ["## 前序执行客观轨迹摘要", ...lines, ""].join("\n");
+  } catch {
+    return null;
+  }
+}
+
+function isDuplicateText(candidate: string, existing: string | null | undefined): boolean {
+  if (!existing) return false;
+  const a = candidate.trim().replace(/\s+/g, " ");
+  const b = existing.trim().replace(/\s+/g, " ");
+  if (!a || !b) return false;
+  return a === b || b.includes(a) || a.includes(b);
+}
+
+/**
  * Synthesizes a pointer-first, high-signal orientation packet from authoritative disk state,
- * review findings, objective git file status, failed evidence, and human annotations.
- * Never pre-truncates spec.md, design.md, or git diffs so agents read full ground truth natively.
+ * review findings, objective git file status, failed evidence, previous trace memory, and human annotations.
  */
 export async function synthesizeHandoffPacket(
   root: string,
@@ -200,7 +258,7 @@ export async function synthesizeHandoffPacket(
   const headerLines: string[] = [
     `# ${state.id} · ${state.title} — 工作上下文简报`,
     "",
-    `- **当前阶段**：\`${state.stage}\` | **轨道**：\`${state.track}\` | **拟执行动作**：\`${options.action}\``,
+    `- **当前阶段**：\`${state.stage}\` | **轨道**：\`${state.track}\` | **档位**：\`${state.tier}\` | **拟执行动作**：\`${options.action}\``,
     `- **权威文件位置**：规范 \`${itemDirHint}/spec.md\` · 方案 \`${itemDirHint}/design.md\` · 状态 \`${itemDirHint}/state.json\``,
     outputLanguage === "en"
       ? "- **Output Language Policy**：`English (en)`"
@@ -250,38 +308,6 @@ export async function synthesizeHandoffPacket(
 
   const sections: BudgetedSection[] = [];
 
-  // Playbook is omitted during blind review to avoid biasing independent judgment.
-  if (options.action !== "review") {
-    const playbook = readPlaybook(root);
-    if (playbook.rules.length > 0) {
-      const pbLines: string[] = [
-        "## 项目持久避坑与偏好法则（Playbook）",
-        `> 完整法则文件见 \`${WORKBENCH_DIR}/playbook.md\`（共 ${playbook.rules.length} 条）。`,
-      ];
-      let usedBytes = 0;
-      for (const rule of playbook.rules.slice(-12)) {
-        const cleanRule = sanitizeOutput(rule, 480).text.trim();
-        if (!cleanRule) continue;
-        const bullet = `- ${cleanRule}`;
-        const bulletBytes = Buffer.byteLength(bullet, "utf8") + 1;
-        if (usedBytes > 0 && usedBytes + bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) break;
-        if (bulletBytes > PLAYBOOK_SECTION_MAX_BYTES) {
-          pbLines.push(`- ${sanitizeOutput(cleanRule, PLAYBOOK_SECTION_MAX_BYTES - 20).text}`);
-          break;
-        }
-        pbLines.push(bullet);
-        usedBytes += bulletBytes;
-      }
-      pbLines.push("");
-      sections.push({
-        key: "playbook",
-        priority: 6,
-        text: pbLines.join("\n"),
-        minText: "",
-      });
-    }
-  }
-
   // Highest-priority steering: merge conflict / review findings (non-review actions) / human feedback / unresolved annotations
   const allDiscussions = state.discussions ?? [];
   const unresolvedRefineNotes = allDiscussions.filter((d) => d.mode === "refine" && !d.resolved);
@@ -289,7 +315,6 @@ export async function synthesizeHandoffPacket(
   const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
   const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));
   const review = state.reviewReport;
-  // Blind review should not be biased by prior review verdicts; only non-review actions see review findings.
   const includeReviewDetail =
     options.action !== "review" &&
     Boolean(review) &&
@@ -380,15 +405,24 @@ export async function synthesizeHandoffPacket(
     };
 
     const buildHumanLines = (): string[] => {
-      if (!state.lastFeedback && !options.humanInstruction?.trim() && pendingNotes.length === 0) return [];
+      const feedbackText = state.lastFeedback?.trim() ?? "";
+      const instructionText = options.humanInstruction?.trim() ?? "";
+      const showFeedback =
+        Boolean(feedbackText) &&
+        !(includeReviewDetail && review && isDuplicateText(feedbackText, review.summary));
+      const showInstruction =
+        Boolean(instructionText) &&
+        !isDuplicateText(instructionText, showFeedback ? feedbackText : null) &&
+        !(includeReviewDetail && review && isDuplicateText(instructionText, review.summary));
+      if (!showFeedback && !showInstruction && pendingNotes.length === 0) return [];
       const out: string[] = [
         prioritizeHumanOverStaleReview ? "### 人类最新指令与未解决批注（当前最高优先级）" : "### 人类最新指令与未解决批注",
       ];
-      if (state.lastFeedback) {
-        out.push(`- **最新打回/修改意见**：${sanitizeOutput(state.lastFeedback, 1200).text}`);
+      if (showFeedback) {
+        out.push(`- **最新打回/修改意见**：${sanitizeOutput(feedbackText, 1200).text}`);
       }
-      if (options.humanInstruction?.trim()) {
-        out.push(`- **本次执行特别嘱咐**：${sanitizeOutput(options.humanInstruction.trim(), 1200).text}`);
+      if (showInstruction) {
+        out.push(`- **本次执行特别嘱咐**：${sanitizeOutput(instructionText, 1200).text}`);
       }
       for (const d of pendingNotes.slice(-10)) {
         const anchor = d.anchor ? `[${d.anchor}] ` : "";
@@ -475,39 +509,20 @@ export async function synthesizeHandoffPacket(
     }
   }
 
-  // Tasks & HandoffNote (omitted during review to keep blind review clean)
-  if (options.action !== "review" && (state.tasks.length > 0 || state.handoffNote)) {
-    const progLines: string[] = ["## 进度与备忘（Dead-Ends & Decisions）"];
-    if (state.tasks.length > 0) {
-      for (const t of state.tasks) {
-        const mark = t.status === "done" ? "✓" : t.status === "in_progress" ? "●" : t.status === "blocked" ? "!" : "○";
-        progLines.push(`- ${mark} \`${t.id}\` ${t.title}${t.note ? `（${t.note}）` : ""}`);
-      }
-      progLines.push("");
+  // Objective Trace summary from previous run (omitted during blind review)
+  if (options.action !== "review" && options.previousRun) {
+    const traceSummary = extractTraceHandoffSummary(root, id, options.previousRun.id);
+    if (traceSummary) {
+      sections.push({
+        key: "trace",
+        priority: 3,
+        text: clipTextByBytes(traceSummary, 1600),
+        minText: "",
+      });
     }
-    if (state.handoffNote) {
-      if (state.handoffNote.keyDecisions.length > 0) {
-        progLines.push("**关键定位/决策**：");
-        for (const d of state.handoffNote.keyDecisions) progLines.push(`- ${d}`);
-      }
-      if (state.handoffNote.deadEnds.length > 0) {
-        progLines.push("**已证实走不通的死胡同（切勿重复踩坑）**：");
-        for (const d of state.handoffNote.deadEnds) progLines.push(`- ⚠ ${d}`);
-      }
-      if (state.handoffNote.nextSteps.length > 0) {
-        progLines.push("**建议下一步**：");
-        for (const d of state.handoffNote.nextSteps) progLines.push(`- ${d}`);
-      }
-      progLines.push("");
-    }
-    sections.push({
-      key: "progress",
-      priority: 3,
-      text: clipTextByBytes(progLines.join("\n"), 2200),
-    });
   }
 
-  // Authoritative file pointers + criteria coverage (NO spec/design body truncation!)
+  // Authoritative file pointers + criteria coverage
   const contractLines: string[] = [
     "## 权威文件指引与验收条件",
     `- **需求规范**：\`${itemDirHint}/spec.md\`（请用原生工具直接读取全文）`,
@@ -551,7 +566,7 @@ export async function synthesizeHandoffPacket(
     minText: `## 权威文件指引与验收条件\n- 规范：\`${itemDirHint}/spec.md\` · 方案：\`${itemDirHint}/design.md\`\n`,
   });
 
-  // Objective Git file list & baseline hint (NO truncated diff!)
+  // Objective Git file list & baseline hint
   if (options.action !== "design" || gitChanges.files.length > 0) {
     const gitLines: string[] = ["## Git 变更现场"];
     if (!gitChanges.isGitRepo) {
@@ -569,7 +584,23 @@ export async function synthesizeHandoffPacket(
         }
       }
       if (options.action === "review") {
-        const tampering = detectTestTamperingSignals(gitChanges.files, gitChanges.diff);
+        let diffForTampering = gitChanges.diff;
+        if (gitChanges.diffTruncated) {
+          const testPaths = gitChanges.files
+            .map((f) => f.path)
+            .filter((p) => /(?:^|\/)(?:__tests__\/.*|test_[^/]+\.py|.*_test\.go|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i.test(p) || p.endsWith(".rs"));
+          if (testPaths.length > 0) {
+            try {
+              const diffArgs = gitChanges.baselineAvailable && gitChanges.baselineHead
+                ? ["-C", codeRoot, "diff", "--no-color", gitChanges.baselineHead, "--", ...testPaths.slice(0, 64)]
+                : ["-C", codeRoot, "diff", "--no-color", "HEAD", "--", ...testPaths.slice(0, 64)];
+              diffForTampering = execFileSync("git", diffArgs, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+            } catch {
+              // Fallback to truncated diff.
+            }
+          }
+        }
+        const tampering = detectTestTamperingSignals(gitChanges.files, diffForTampering);
         if (tampering.length > 0) {
           gitLines.push(`- ⚠ **测试完整性提示**：${tampering.join("；")}`);
         }

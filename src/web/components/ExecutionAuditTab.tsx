@@ -41,7 +41,6 @@ import {
 } from "../queries.ts";
 import {
   AGENT_RUN_TONE,
-  enrichRunForDisplay,
   formatBytes,
   formatDateTime,
   formatDurationHuman,
@@ -1262,11 +1261,10 @@ function LiveRunsMerge({
     }
     const list = Array.from(byId.values()).map((r) => {
       const m = liveRunMetrics[r.id];
-      const merged = m ? { ...r, ...m } : r;
-      return enrichRunForDisplay(merged, liveRunLogs[r.id]);
+      return m ? { ...r, ...m } : r;
     });
     return list.sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id));
-  }, [initialRuns, fetchedRuns, activeRuns, liveRunMetrics, liveRunLogs, reqId]);
+  }, [initialRuns, fetchedRuns, activeRuns, liveRunMetrics, reqId]);
 
   return <>{children(mergedRuns)}</>;
 }
@@ -1634,7 +1632,6 @@ export function TimelineRunsTab({ d }: { d: RequirementDetail }) {
   const staticRuns = useMemo(
     () =>
       [...(d.state.agentRuns ?? [])]
-        .map((r) => enrichRunForDisplay(r))
         .sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id)),
     [d.state.agentRuns],
   );
@@ -1655,7 +1652,6 @@ export function ExecutionAuditTab({ d }: { d: RequirementDetail }) {
   const staticRuns = useMemo(
     () =>
       [...(d.state.agentRuns ?? [])]
-        .map((r) => enrichRunForDisplay(r))
         .sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id)),
     [d.state.agentRuns],
   );

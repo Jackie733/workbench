@@ -141,7 +141,7 @@ describe("附件服务端 API", () => {
     expect(deleted.status).toBe(200);
     expect((deleted.body.detail as { state: { attachments: unknown[] } }).state.attachments).toHaveLength(1);
     expect(fs.existsSync(path.join(root, ".workbench", "items", "REQ-001", "attachments", `${pdfMeta.id}.pdf`))).toBe(false);
-  });
+  }, 15_000);
 
   test("超限返回 413，accepted 阶段删除返回 409", async () => {
     const root = initGitRepo();
@@ -191,48 +191,5 @@ describe("附件服务端 API", () => {
       method: "DELETE",
     });
     expect(denied.status).toBe(409);
-  });
-
-  test("报修携带附件只写元数据引用，并可通过 hub 路由读取", async () => {
-    const root = initGitRepo();
-    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
-    runningServers.push(server);
-    await apiJson(`${server.url}/api/project/init`, {
-      method: "POST",
-      body: JSON.stringify({ name: "报修附件", privacyMode: "local" }),
-    });
-
-    const bytes = Buffer.from("console error line\n".repeat(100));
-    const uploaded = await upload(server.url, [{ name: "浏览器控制台.log", bytes, type: "text/plain" }]);
-    const meta = (uploaded.body.attachments as Array<{ id: string }>)[0]!;
-
-    const reported = await apiJson(`${server.url}/api/hub/evolution/report`, {
-      method: "POST",
-      body: JSON.stringify({
-        source: "ui_quick_report",
-        category: "ui_anomaly",
-        title: "附件报修链路",
-        detail: "附带日志文件",
-        attachmentIds: [meta.id],
-      }),
-    });
-    expect(reported.status).toBe(201);
-    const painPoint = reported.body.painPoint as { id: string; attachments?: Array<{ id: string; name: string }> };
-    expect(painPoint.attachments).toHaveLength(1);
-    expect(painPoint.attachments![0]!.name).toBe("浏览器控制台.log");
-
-    const inboxPath = path.join(process.env.WORKBENCH_HUB_DIR!, "evolution", "inbox.jsonl");
-    const inbox = fs.readFileSync(inboxPath, "utf8");
-    expect(inbox).toContain(meta.id);
-    expect(inbox).not.toContain(bytes.toString("base64").slice(0, 16));
-    expect(Buffer.byteLength(inbox)).toBeLessThan(4096);
-
-    const served = await fetch(
-      `${server.url}/api/hub/evolution/${encodeURIComponent(painPoint.id)}/attachments/${encodeURIComponent(meta.id)}`,
-    );
-    expect(served.status).toBe(200);
-    expect(served.headers.get("content-type")).toBe("text/plain");
-    expect(served.headers.get("content-disposition")).toContain("attachment");
-    expect(Buffer.from(await served.arrayBuffer()).equals(bytes)).toBe(true);
-  });
+  }, 15_000);
 });

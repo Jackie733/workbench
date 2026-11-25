@@ -1,24 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Activity,
   AlertTriangle,
   ArrowLeft,
   ArrowUp,
-  Ban,
-  BarChart3,
-  BookOpen,
   Bug,
   Check,
-  CircleAlert,
   CircleHelp,
-  CircleOff,
   ClipboardCheck,
-  Copy,
-  Crosshair,
   Download,
   ExternalLink,
   FileText,
-  Flame,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -26,8 +17,6 @@ import {
   GitCommit,
   GitFork,
   GitPullRequest,
-  Globe,
-  Inbox,
   Info,
   Laptop,
   Lightbulb,
@@ -42,35 +31,20 @@ import {
   Send,
   Server,
   Settings,
-  Sparkles,
-  Terminal,
   Trash2,
   Wrench,
   X,
   XCircle,
   Zap,
 } from "lucide-react";
-import type { StructuredMessageRef } from "../../core/errors.ts";
-import type { GitRemoteProvider, OutputLanguage, PrivacyMode, RunBillingMode, Track } from "../../core/types.ts";
-import type { PainPointCategory } from "../../hub/evolution.ts";
-import {
-  ROUTING_STAGES,
-  type HarnessId,
-  type ModelPriceOverride,
-  type ReasoningEffort,
-  type RoutingPreset,
-  type RoutingStage,
-} from "../../hub/types.ts";
-import { api, evolutionAttachmentUrl, setApiProjectScope, type HubStateResponse, type ProjectInfoResponse } from "../api.ts";
+import type { PrivacyMode, RequirementTier, RunBillingMode, Track } from "../../core/types.ts";
+import type { ModelPriceOverride } from "../../hub/types.ts";
+import { api, setApiProjectScope } from "../api.ts";
 import {
   dispatchSyncBaseWithAgent,
   guardRequirementRunLock,
   invalidateAllWorkbenchQueries,
-  notifyCascadeSyncResults,
   openRequirement,
-  queryClient,
-  queryKeys,
-  resolveEffectiveRouting,
   runBusy,
   submitAcceptOverride,
   submitAnnotation,
@@ -81,13 +55,11 @@ import {
   submitNewRequirement,
   syncSandboxBaseAction,
   useDeliveryQuery,
-  useEvolutionQuery,
   useGiteeIssuesQuery,
   useGiteeStatusQuery,
   useGitHubStatusQuery,
   useHubPricingQuery,
   useHubStateQuery,
-  usePlaybookQuery,
   useProjectQuery,
   useProjectSandboxesQuery,
   useRequirementQuery,
@@ -95,32 +67,18 @@ import {
 } from "../queries.ts";
 import {
   describeClientError,
-  describeClientErrorRef,
-  formatAgentActionLabel,
   formatGitFileStatusLabel,
   formatGiteeStatusReason,
   formatGitHubStatusReason,
-  formatPrStateLabel,
-  prStateRef,
   resolveWarningParam,
   t,
-  translateRef,
-  type MessageKey,
 } from "../i18n.ts";
-import {
-  effortLabel,
-  formatBytes,
-  formatDateTime,
-  formatReviewFixFeedback,
-  getModelEffortCapability,
-  parseRunnerKey,
-} from "../state.ts";
-import { useDraftStore } from "../stores/draftStore.ts";
+import { formatBytes, formatReviewFixFeedback } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
-import { AttachmentGallery } from "./AttachmentGallery.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell, RunLockNotice } from "./Primitives.tsx";
+import { RoutingSettingsModal } from "./RoutingSettingsModal.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
@@ -129,23 +87,9 @@ import { DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogTitle
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
 import { Radio, RadioGroup, RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
-import { RoutingModelPicker } from "./ui/RoutingModelPicker.tsx";
 import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
 import { SimpleSelect } from "./ui/select.tsx";
 import { Textarea } from "./ui/textarea.tsx";
-
-const STAGE_LABEL_KEYS: Record<RoutingStage, MessageKey> = {
-  design: "routing.stage.design",
-  implement: "routing.stage.implement",
-  fix: "routing.stage.fix",
-  review: "routing.stage.review",
-};
-
-const PRESET_KEYS: Array<{ id: RoutingPreset; nameKey: MessageKey; descKey: MessageKey }> = [
-  { id: "balanced", nameKey: "preset.balanced.name", descKey: "preset.balanced.desc" },
-  { id: "sota_first", nameKey: "preset.sota_first.name", descKey: "preset.sota_first.desc" },
-  { id: "quota_saver", nameKey: "preset.quota_saver.name", descKey: "preset.quota_saver.desc" },
-];
 
 const STANDARD_QUOTA_POOLS = [
   "opencode-go",
@@ -397,8 +341,6 @@ export function Modals() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const setModal = useUiStore((s) => s.setModal);
-  const setMainView = useUiStore((s) => s.setMainView);
-  const showToast = useUiStore((s) => s.showToast);
   const showToastKey = useUiStore((s) => s.showToastKey);
   const setActiveProjectId = useUiStore((s) => s.setActiveProjectId);
   const setSelectedId = useUiStore((s) => s.setSelectedId);
@@ -415,11 +357,6 @@ export function Modals() {
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const modalRequirementId = m?.kind === "link_issue" ? m.requirementId : selectedId;
   const runLock = useRequirementRunLock(modalRequirementId);
-  const { data: evolutionData } = useEvolutionQuery(m?.kind === "evolution");
-  const { data: playbookData } = usePlaybookQuery(
-    activeProjectId,
-    m?.kind === "evolution" && m.tab === "playbook" && !noHubProject,
-  );
   const { data: deliveryPreview } = useDeliveryQuery(
     activeProjectId,
     selectedId,
@@ -431,7 +368,7 @@ export function Modals() {
       !noHubProject &&
         project?.initialized &&
         m &&
-        (m.kind === "new_req" || m.kind === "routing" || m.kind === "link_issue" || m.kind === "deliver"),
+        (m.kind === "new_req" || m.kind === "link_issue" || m.kind === "deliver"),
     ),
   );
   const { data: giteeStatus } = useGiteeStatusQuery(
@@ -440,7 +377,7 @@ export function Modals() {
       !noHubProject &&
         project?.initialized &&
         m &&
-        (m.kind === "new_req" || m.kind === "routing" || m.kind === "link_issue" || m.kind === "deliver"),
+        (m.kind === "new_req" || m.kind === "link_issue" || m.kind === "deliver"),
     ),
   );
   const isGiteeProject =
@@ -459,14 +396,10 @@ export function Modals() {
     ),
   );
 
-  const fallbackAreaRef = useRef<HTMLTextAreaElement | null>(null);
   if (!m) return null;
 
   const close = () => setModal(null);
   const runLocked = runLock !== null;
-  const bridgeConnected = Boolean(project?.bridge.connected);
-  const harnesses = hub?.harnesses ?? [];
-  const routing = resolveEffectiveRouting(hub, project);
   const detail = reqData?.detail ?? null;
 
   if (m.kind === "new_req") {
@@ -534,6 +467,37 @@ export function Modals() {
                     setModal((prev) => (prev?.kind === "new_req" ? { ...prev, goal: e.target.value } : prev))
                   }
                 />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground">{t(language, "tier.label")}</span>
+                <SegmentedControl
+                  size="sm"
+                  aria-label={t(language, "tier.label")}
+                  render={
+                    <RadioGroupPrimitive
+                      className="flex items-center"
+                      value={m.tier ?? "standard"}
+                      onValueChange={(next) => {
+                        if (next === "standard" || next === "sota") {
+                          setModal((prev) =>
+                            prev?.kind === "new_req" ? { ...prev, tier: next as RequirementTier } : prev,
+                          );
+                        }
+                      }}
+                    />
+                  }
+                >
+                  <SegmentedControlItem
+                    render={<RadioPrimitive.Root value="standard" data-testid="new-req-tier-standard" />}
+                  >
+                    {t(language, "tier.standard")}
+                  </SegmentedControlItem>
+                  <SegmentedControlItem
+                    render={<RadioPrimitive.Root value="sota" data-testid="new-req-tier-sota" />}
+                  >
+                    <Icon icon={Zap} size={14} /> {t(language, "tier.sota")}
+                  </SegmentedControlItem>
+                </SegmentedControl>
               </div>
               <AttachmentPicker
                 value={m.attachments ?? []}
@@ -616,10 +580,9 @@ export function Modals() {
                   void submitNewRequirement(
                     m.goal,
                     false,
-                    bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
-                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId, tier: m.tier },
                   )
                 }
               >
@@ -634,10 +597,9 @@ export function Modals() {
                   void submitNewRequirement(
                     m.goal,
                     true,
-                    bridgeConnected,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
-                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId },
+                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId, tier: m.tier },
                   )
                 }
               >
@@ -661,8 +623,8 @@ export function Modals() {
                       onClick={() =>
                         setModal({
                           kind: "routing",
-                          tab: "global",
-                          draft: hub?.routing ?? null,
+                          tab: "project",
+                          draft: null,
                         })
                       }
                     >
@@ -1211,901 +1173,7 @@ export function Modals() {
   }
 
   if (m.kind === "routing") {
-    const tab = m.tab ?? (!noHubProject && project?.initialized ? "project" : "global");
-    const cfg = m.draft ?? routing;
-    const hubLangValue = m.hubLangDraft ?? hub?.outputLanguage ?? "zh-CN";
-    const savedHubLang = hub?.outputLanguage ?? "zh-CN";
-    const giteeTokenValue = m.giteeTokenDraft ?? "";
-    const projLangValue = m.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
-    const projProviderValue: GitRemoteProvider = m.projProviderDraft ?? (isGiteeProject ? "gitee" : "github");
-    const ghRepoValue = m.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
-    const ghBaseValue =
-      m.ghBaseBranchDraft ?? project?.project?.github?.defaultBaseBranch ?? githubStatus?.defaultBaseBranch ?? "main";
-    const ghAutoCreateValue = m.ghAutoCreateDraft ?? Boolean(project?.project?.github?.autoCreateIssue);
-    const ghAutoSyncValue = m.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
-    const giteeRepoValue = m.giteeRepoDraft ?? project?.project?.gitee?.repo ?? giteeStatus?.repo ?? "";
-    const giteeEnterpriseValue =
-      m.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
-    const giteeBaseValue =
-      m.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
-    const fastCmdValue = m.fastCmdDraft ?? project?.project?.verification?.fastCommand ?? "";
-    const fullCmdValue = m.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
-    const existingAutoScreenshots = project?.project?.verification?.autoScreenshots;
-    const autoScreenshotsValue = m.autoScreenshotsDraft ?? (existingAutoScreenshots === true);
-
-    const syncHubStatePatch = async (
-      patch: Partial<
-        Pick<HubStateResponse, "routing" | "harnesses" | "outputLanguage" | "giteeTokenConfigured" | "giteeTokenMasked">
-      >,
-    ) => {
-      await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
-      queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
-        prev ? { ...prev, ...patch } : prev,
-      );
-      if (patch.routing) {
-        const projKey = queryKeys.project(activeProjectId);
-        queryClient.setQueryData<ProjectInfoResponse>(projKey, (prev) =>
-          prev
-            ? {
-                ...prev,
-                routing: patch.routing,
-                project: prev.project ? { ...prev.project, routing: patch.routing } : prev.project,
-              }
-            : prev,
-        );
-      }
-      void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
-      void queryClient.invalidateQueries({ queryKey: ["project"] });
-    };
-
-    const refreshHarnesses = async () => {
-      const targetNodeId = hub?.activeNodeId;
-      const res = await runBusy(() => api.refreshHarnesses(targetNodeId));
-      if (res) {
-        await syncHubStatePatch({ harnesses: res.harnesses });
-        const nodeLabel = hub?.nodes?.find((n) => n.nodeId === targetNodeId)?.name ?? t(useUiStore.getState().language, "common.localNode");
-        showToastKey("routing.refreshedModels", { node: nodeLabel });
-      }
-    };
-
-    const applyPreset = async (preset: RoutingPreset) => {
-      const startModal = useUiStore.getState().modal;
-      const draftAtStart = startModal?.kind === "routing" ? startModal.draft : undefined;
-      const res = await runBusy(() => api.applyPreset(preset));
-      if (res) {
-        useDraftStore.getState().clearRunnerOverrides();
-        setModal((prev) =>
-          prev?.kind === "routing" && prev.draft === draftAtStart ? { ...prev, draft: res.routing } : prev,
-        );
-        await syncHubStatePatch({ routing: res.routing });
-        showToastKey("routing.presetApplied", { preset });
-      }
-    };
-
-    const saveGlobal = async () => {
-      const tokenPatch = m.clearGiteeToken
-        ? null
-        : giteeTokenValue.trim()
-          ? giteeTokenValue.trim()
-          : undefined;
-      const res = await runBusy(() =>
-        api.updateHubPreferences({
-          outputLanguage: hubLangValue,
-          ...(tokenPatch !== undefined ? { giteeAccessToken: tokenPatch } : {}),
-        }),
-      );
-      if (res) {
-        await syncHubStatePatch({
-          outputLanguage: res.outputLanguage,
-          ...(res.giteeTokenConfigured !== undefined
-            ? { giteeTokenConfigured: res.giteeTokenConfigured }
-            : {}),
-          ...(res.giteeTokenMasked !== undefined ? { giteeTokenMasked: res.giteeTokenMasked } : {}),
-        });
-        await queryClient.invalidateQueries({ queryKey: ["gitee"] });
-        setModal(null);
-        showToastKey("routing.savedGlobal");
-      }
-    };
-
-    const saveProject = async () => {
-      const snapModal = useUiStore.getState().modal;
-      const lm = snapModal?.kind === "routing" ? snapModal : m;
-      const latestCfg = lm.draft ?? routing;
-      const latestProjLang = lm.projLangDraft ?? project?.project?.outputLanguage ?? "inherit";
-      const latestProjProvider: GitRemoteProvider = lm.projProviderDraft ?? (isGiteeProject ? "gitee" : "github");
-      const latestGhRepo = lm.ghRepoDraft ?? project?.project?.github?.repo ?? githubStatus?.repo ?? "";
-      const latestGhBase =
-        lm.ghBaseBranchDraft ?? project?.project?.github?.defaultBaseBranch ?? githubStatus?.defaultBaseBranch ?? "main";
-      const latestGhAutoCreate = lm.ghAutoCreateDraft ?? Boolean(project?.project?.github?.autoCreateIssue);
-      const latestGhAutoSync = lm.ghAutoSyncDraft ?? (project?.project?.github?.autoSyncIssue ?? true);
-      const latestGiteeRepo = lm.giteeRepoDraft ?? project?.project?.gitee?.repo ?? giteeStatus?.repo ?? "";
-      const latestGiteeEnterprise =
-        lm.giteeEnterpriseDraft ?? project?.project?.gitee?.enterprise ?? giteeStatus?.enterprise ?? "";
-      const latestGiteeBase =
-        lm.giteeBaseBranchDraft ?? project?.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
-      const latestFastCmd = lm.fastCmdDraft ?? project?.project?.verification?.fastCommand ?? "";
-      const latestFullCmd = lm.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
-
-      const out = await runBusy(() =>
-        api.updateProjectSettings({
-          outputLanguage: latestProjLang,
-          ...(latestCfg ? { routing: latestCfg } : {}),
-          verification: {
-            fastCommand: latestFastCmd.trim(),
-            fullCommand: latestFullCmd.trim(),
-            ...(lm.autoScreenshotsDraft !== undefined
-              ? { autoScreenshots: lm.autoScreenshotsDraft }
-              : existingAutoScreenshots !== undefined
-                ? { autoScreenshots: existingAutoScreenshots }
-                : {}),
-          },
-          ...(latestProjProvider === "gitee"
-            ? {
-                gitee: {
-                  repo: latestGiteeRepo.trim(),
-                  enterprise: latestGiteeEnterprise.trim(),
-                  defaultBaseBranch: latestGiteeBase.trim() || "master",
-                },
-                github: null,
-              }
-            : {
-                github: {
-                  repo: latestGhRepo.trim(),
-                  defaultBaseBranch: latestGhBase.trim() || "main",
-                  autoCreateIssue: latestGhAutoCreate,
-                  autoSyncIssue: latestGhAutoSync,
-                },
-                gitee: null,
-              }),
-        }),
-      );
-      if (out) {
-        if (lm.draft) {
-          useDraftStore.getState().clearRunnerOverrides();
-        }
-        const savedProject = out.project;
-        const projKey = queryKeys.project(activeProjectId);
-        await queryClient.cancelQueries({ queryKey: projKey });
-        queryClient.setQueryData<ProjectInfoResponse>(projKey, (prev) =>
-          prev
-            ? {
-                ...prev,
-                project: savedProject,
-                ...(savedProject.routing ? { routing: savedProject.routing } : {}),
-              }
-            : prev,
-        );
-        if (savedProject.routing) {
-          await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
-          queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (prev) =>
-            prev ? { ...prev, routing: savedProject.routing ?? prev.routing } : prev,
-          );
-        }
-        setModal(null);
-        showToastKey("routing.savedProject");
-        void invalidateAllWorkbenchQueries();
-      }
-    };
-
-    return (
-      <ModalShell
-        onClose={close}
-        wide
-        testId="routing-modal"
-        hasExplicitTitle
-        className="[&_[data-slot=dialog-header]]:px-5 [&_[data-slot=dialog-header]]:py-2 [&_[data-slot=dialog-panel]]:px-5 [&_[data-slot=dialog-panel]]:py-1.5 [&_[data-slot=dialog-footer]]:px-5 [&_[data-slot=dialog-footer]]:py-2 [&_.routing-row]:py-1 [&_.preset-card]:py-1.5"
-      >
-        <DialogHeader>
-          <div className="flex flex-wrap items-center justify-between gap-2 pe-6">
-            <DialogTitle className="flex items-center gap-2">
-              <Icon icon={Settings} size={20} />
-              <span>{t(language, "routing.title")}</span>
-            </DialogTitle>
-            <div className="flex items-center gap-2">
-              <SegmentedControl
-                size="sm"
-                aria-label={t(language, "routing.scopeAria")}
-                render={
-                  <RadioGroupPrimitive
-                    className="flex items-center"
-                    value={tab}
-                    onValueChange={(next) => {
-                      if (next === "project" || next === "global") {
-                        setModal((prev) => (prev?.kind === "routing" ? { ...prev, tab: next } : prev));
-                      }
-                    }}
-                  />
-                }
-              >
-                <SegmentedControlItem
-                  render={<RadioPrimitive.Root value="project" data-testid="settings-tab-project" />}
-                >
-                  <Icon icon={Folder} size={14} /> {t(language, "routing.project")}
-                </SegmentedControlItem>
-                <SegmentedControlItem
-                  render={<RadioPrimitive.Root value="global" data-testid="settings-tab-global" />}
-                >
-                  <Icon icon={Globe} size={14} /> {t(language, "routing.global")}
-                </SegmentedControlItem>
-              </SegmentedControl>
-              {tab === "project" && (
-                <Button
-                  variant="outline"
-                  size="xs"
-                  type="button"
-                  data-testid="refresh-harnesses-btn"
-                  disabled={busy}
-                  onClick={() => void refreshHarnesses()}
-                >
-                  <Icon icon={RefreshCw} size={14} /> {t(language, "routing.refreshHarnesses")}
-                </Button>
-              )}
-            </div>
-          </div>
-        </DialogHeader>
-
-        {tab === "global" ? (
-          <div data-testid="settings-pane-global" className="contents">
-            <DialogPanel className="space-y-3">
-              <Alert variant="info">
-                <Icon icon={Info} size={14} />
-                <AlertDescription>{t(language, "routing.outputLanguageCallout")}</AlertDescription>
-              </Alert>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:items-end">
-                <div>
-                  <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                    {t(language, "routing.hubLangLabel")}
-                  </Label>
-                  <SimpleSelect
-                    className="w-full"
-                    data-testid="hub-output-language-select"
-                    value={hubLangValue}
-                    onValueChange={(next) =>
-                      setModal((prev) =>
-                        prev?.kind === "routing" ? { ...prev, hubLangDraft: next as OutputLanguage } : prev,
-                      )
-                    }
-                    options={[
-                      { value: "zh-CN", label: t(language, "routing.langZhDefault") },
-                      { value: "en", label: t(language, "init.langEn") },
-                      { value: "auto", label: t(language, "routing.langAuto") },
-                    ]}
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-1 flex items-center justify-between gap-1.5">
-                    <Label
-                      className="text-xs text-muted-foreground font-normal"
-                      htmlFor="hub-gitee-token-input"
-                      title={t(language, "gitee.tokenTooltip")}
-                    >
-                      {t(language, "gitee.tokenLabel")}
-                    </Label>
-                    <Badge
-                      variant={
-                        m.clearGiteeToken
-                          ? "secondary"
-                          : hub?.giteeTokenConfigured
-                            ? "success"
-                            : "warning"
-                      }
-                      size="sm"
-                      data-testid="hub-gitee-token-status"
-                    >
-                      <Icon
-                        icon={
-                          m.clearGiteeToken
-                            ? Trash2
-                            : hub?.giteeTokenConfigured
-                              ? Check
-                              : AlertTriangle
-                        }
-                        size={14}
-                      />{" "}
-                      {m.clearGiteeToken
-                        ? t(language, "gitee.tokenClearOnSave")
-                        : hub?.giteeTokenConfigured
-                          ? t(language, "gitee.tokenConfigured", { masked: hub.giteeTokenMasked ?? "••••" })
-                          : t(language, "gitee.tokenUnconfigured")}
-                    </Badge>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <Input
-                      id="hub-gitee-token-input"
-                      type="password"
-                      className="flex-1"
-                      data-testid="hub-gitee-token-input"
-                      value={giteeTokenValue}
-                      placeholder={
-                        hub?.giteeTokenConfigured
-                          ? t(language, "gitee.tokenPlaceholderReplace")
-                          : t(language, "gitee.tokenPlaceholderNew")
-                      }
-                      onChange={(e) =>
-                        setModal((prev) =>
-                          prev?.kind === "routing"
-                            ? { ...prev, giteeTokenDraft: e.target.value, clearGiteeToken: false }
-                            : prev,
-                        )
-                      }
-                    />
-                    {hub?.giteeTokenConfigured && !m.clearGiteeToken && (
-                      <Button
-                        variant="outline"
-                        type="button"
-                        data-testid="hub-gitee-token-clear"
-                        onClick={() =>
-                          setModal((prev) =>
-                            prev?.kind === "routing"
-                              ? { ...prev, giteeTokenDraft: "", clearGiteeToken: true }
-                              : prev,
-                          )
-                        }
-                      >
-                        <Icon icon={X} size={14} /> {t(language, "gitee.tokenClear")}
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </DialogPanel>
-
-            <DialogFooter>
-              <Button variant="ghost" type="button" onClick={close}>
-                <Icon icon={X} size={14} /> {t(language, "common.cancel")}
-              </Button>
-              <Button
-                variant="default"
-                type="button"
-                data-testid="save-routing-btn"
-                disabled={busy}
-                onClick={() => void saveGlobal()}
-              >
-                <Icon icon={Save} size={14} /> {t(language, "routing.saveGlobal")}
-              </Button>
-            </DialogFooter>
-          </div>
-        ) : (
-          <div data-testid="settings-pane-project" className="contents">
-            {noHubProject || !project?.initialized ? (
-              <>
-                <DialogPanel>
-                  <div className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">
-                    {t(language, "routing.projectEmpty")}
-                  </div>
-                </DialogPanel>
-                <DialogFooter>
-                  <Button variant="ghost" type="button" onClick={close}>
-                    <Icon icon={X} size={14} /> {t(language, "common.close")}
-                  </Button>
-                </DialogFooter>
-              </>
-            ) : (
-              <>
-                <DialogPanel className="space-y-1.5 py-1.5">
-                  <div className="space-y-1">
-                    <div className="preset-grid" data-testid="routing-presets">
-                      {PRESET_KEYS.map((p) => (
-                        <button
-                          key={p.id}
-                          className={`preset-card ${cfg?.activePreset === p.id ? "active" : ""}`}
-                          type="button"
-                          data-testid={`preset-${p.id}`}
-                          onClick={() => void applyPreset(p.id)}
-                        >
-                          <strong>{t(language, p.nameKey)}</strong>
-                          <div className="xs muted truncate mt-0.5" title={t(language, p.descKey)}>
-                            {t(language, p.descKey)}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-
-                    {cfg && (
-                      <div className="routing-table mt-1.5">
-                        {ROUTING_STAGES.map((stg) => {
-                          const rule = cfg.stages[stg];
-                          const selectedVal = `${rule.primary.harness}::${rule.primary.model}`;
-                          const effortCap = getModelEffortCapability(harnesses, rule.primary.harness, rule.primary.model);
-                          const efforts = effortCap.efforts;
-                          const lockedEffort = effortCap.defaultEffort ?? efforts[0];
-                          const lockedLabel = t(language, "routing.effortLockedLabel", {
-                            effort: lockedEffort ? effortLabel(language, lockedEffort) : t(language, "routing.effortBuiltin"),
-                          });
-
-                          const changePrimaryModel = (key: string) => {
-                            const parsed = parseRunnerKey(key);
-                            if (!parsed || !cfg) return;
-                            const { harness, model } = parsed;
-                            const nextCap = getModelEffortCapability(harnesses, harness, model);
-                            setModal((prev) => {
-                              if (prev?.kind !== "routing") return prev;
-                              const baseCfg = prev.draft ?? routing;
-                              if (!baseCfg) return prev;
-                              const prevRule = baseCfg.stages[stg];
-                              const keepEffort =
-                                nextCap.mode === "configurable" &&
-                                prevRule.primary.reasoningEffort &&
-                                nextCap.efforts.includes(prevRule.primary.reasoningEffort)
-                                  ? prevRule.primary.reasoningEffort
-                                  : undefined;
-                              return {
-                                ...prev,
-                                draft: {
-                                  ...baseCfg,
-                                  stages: {
-                                    ...baseCfg.stages,
-                                    [stg]: {
-                                      ...prevRule,
-                                      primary: {
-                                        harness: harness as HarnessId,
-                                        model,
-                                        ...(keepEffort ? { reasoningEffort: keepEffort } : {}),
-                                      },
-                                    },
-                                  },
-                                },
-                              };
-                            });
-                          };
-
-                          return (
-                            <div key={stg} className="routing-row">
-                              <div className="min-w-0">
-                                <div className="text-[13px] font-semibold">{t(language, STAGE_LABEL_KEYS[stg])}</div>
-                                <div className="xs muted truncate">
-                                  {t(language, "routing.fallbacks", {
-                                    list:
-                                      rule.fallbacks.map((f) => `${f.harness}/${f.model}`).join(" → ") ||
-                                      t(language, "common.none"),
-                                  })}
-                                </div>
-                              </div>
-                              <div className="flex flex-wrap items-center gap-2">
-                                <RoutingModelPicker
-                                  testId={`route-select-${stg}`}
-                                  harnesses={harnesses}
-                                  value={selectedVal}
-                                  onChange={changePrimaryModel}
-                                  ariaLabel={t(language, "routing.primaryModelAria", { stage: t(language, STAGE_LABEL_KEYS[stg]) })}
-                                />
-                                {effortCap.mode === "configurable" ? (
-                                  <SimpleSelect
-                                    size="sm"
-                                    className="w-[135px] font-mono"
-                                    data-testid={`route-effort-${stg}`}
-                                    title={t(language, "routing.effortTitle")}
-                                    value={
-                                      rule.primary.reasoningEffort && efforts.includes(rule.primary.reasoningEffort)
-                                        ? rule.primary.reasoningEffort
-                                        : ""
-                                    }
-                                    onValueChange={(next) => {
-                                      const eff = next as ReasoningEffort | "";
-                                      setModal((prev) => {
-                                        if (prev?.kind !== "routing") return prev;
-                                        const baseCfg = prev.draft ?? routing;
-                                        if (!baseCfg) return prev;
-                                        const prevRule = baseCfg.stages[stg];
-                                        const nextPrimary = { ...prevRule.primary };
-                                        if (eff) nextPrimary.reasoningEffort = eff;
-                                        else delete nextPrimary.reasoningEffort;
-                                        return {
-                                          ...prev,
-                                          draft: {
-                                            ...baseCfg,
-                                            stages: {
-                                              ...baseCfg.stages,
-                                              [stg]: { ...prevRule, primary: nextPrimary },
-                                            },
-                                          },
-                                        };
-                                      });
-                                    }}
-                                    options={[
-                                      {
-                                        value: "",
-                                        label: `${t(language, "routing.defaultEffort")}${
-                                          effortCap.defaultEffort ? ` (${effortLabel(language, effortCap.defaultEffort)})` : ""
-                                        }`,
-                                      },
-                                      ...efforts.map((eff) => ({
-                                        value: eff,
-                                        label: effortLabel(language, eff),
-                                      })),
-                                    ]}
-                                  />
-                                ) : effortCap.mode === "locked" ? (
-                                  <span
-                                    className="inline-flex h-7 w-[135px] items-center justify-center overflow-hidden rounded-md border border-border px-2 py-0.5 font-mono text-xs text-muted-foreground"
-                                    data-testid={`route-effort-${stg}-locked`}
-                                    title={`${lockedLabel} · ${t(language, "routing.effortLockedTitle")}`}
-                                  >
-                                    <span className="min-w-0 truncate">{lockedLabel}</span>
-                                  </span>
-                                ) : (
-                                  <span
-                                    className="inline-flex h-7 w-[135px] items-center justify-center overflow-hidden rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground"
-                                    data-testid={`route-effort-${stg}-unsupported`}
-                                    title={`${t(language, "routing.effortUnsupportedLabel")} · ${t(language, "routing.effortUnsupportedTitle")}`}
-                                  >
-                                    <span className="min-w-0 truncate">
-                                      {t(language, "routing.effortUnsupportedLabel")}
-                                    </span>
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {cfg && (
-                      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-3">
-                        <Label className="flex items-center gap-2 text-[13px] font-normal">
-                          <Checkbox
-                            data-testid="routing-auto-review-checkbox"
-                            checked={cfg.autoReview !== false}
-                            onCheckedChange={(checked) => {
-                              setModal((prev) => {
-                                if (prev?.kind !== "routing") return prev;
-                                const baseCfg = prev.draft ?? routing;
-                                return baseCfg ? { ...prev, draft: { ...baseCfg, autoReview: Boolean(checked) } } : prev;
-                              });
-                            }}
-                          />
-                          <span>{t(language, "routing.autoReviewLabel")}</span>
-                        </Label>
-                        {cfg.autoReview !== false && (
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="muted">{t(language, "routing.maxAutoReviewRoundsLabel")}</span>
-                            <SimpleSelect
-                              size="sm"
-                              data-testid="routing-max-auto-review-rounds"
-                              value={String(cfg.maxAutoReviewRounds ?? 1)}
-                              onValueChange={(next) => {
-                                const val = Number(next);
-                                setModal((prev) => {
-                                  if (prev?.kind !== "routing") return prev;
-                                  const baseCfg = prev.draft ?? routing;
-                                  return baseCfg
-                                    ? {
-                                        ...prev,
-                                        draft: {
-                                          ...baseCfg,
-                                          maxAutoReviewRounds: Number.isFinite(val) ? val : 1,
-                                        },
-                                      }
-                                    : prev;
-                                });
-                              }}
-                              options={[
-                                { value: "1", label: "1" },
-                                { value: "2", label: "2" },
-                                { value: "3", label: "3" },
-                                { value: "5", label: "5" },
-                              ]}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="border-t pt-2">
-                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <strong className="text-[13px]">{t(language, "gitee.providerTitle")}</strong>
-                        <SegmentedControl
-                          size="sm"
-                          aria-label={t(language, "gitee.providerTitle")}
-                          render={
-                            <RadioGroupPrimitive
-                              className="flex items-center"
-                              value={projProviderValue}
-                              onValueChange={(next) => {
-                                if (next === "github" || next === "gitee") {
-                                  setModal((prev) =>
-                                    prev?.kind === "routing" ? { ...prev, projProviderDraft: next } : prev,
-                                  );
-                                }
-                              }}
-                            />
-                          }
-                        >
-                          <SegmentedControlItem
-                            render={<RadioPrimitive.Root value="github" data-testid="project-provider-github" />}
-                          >
-                            GitHub
-                          </SegmentedControlItem>
-                          <SegmentedControlItem
-                            render={<RadioPrimitive.Root value="gitee" data-testid="project-provider-gitee" />}
-                          >
-                            Gitee
-                          </SegmentedControlItem>
-                        </SegmentedControl>
-                      </div>
-                      {projProviderValue === "gitee"
-                        ? giteeStatus && (
-                            <Badge
-                              variant={giteeStatus.ready ? "success" : "warning"}
-                              size="sm"
-                              data-testid="project-provider-status"
-                            >
-                              <Icon icon={giteeStatus.ready ? Check : AlertTriangle} size={14} />
-                              {giteeStatus.ready
-                                ? t(language, "gitee.statusReady", { account: giteeStatus.account ?? "authenticated" })
-                                : formatGiteeStatusReason(language, giteeStatus)}
-                            </Badge>
-                          )
-                        : githubStatus && (
-                            <Badge
-                              variant={githubStatus.ready ? "success" : "warning"}
-                              size="sm"
-                              data-testid="project-provider-status"
-                            >
-                              <Icon icon={githubStatus.ready ? Check : AlertTriangle} size={14} />
-                              {githubStatus.ready
-                                ? t(language, "gitee.statusGhReady", { account: githubStatus.account ?? "authenticated" })
-                                : formatGitHubStatusReason(language, githubStatus)}
-                            </Badge>
-                          )}
-                    </div>
-
-                    {projProviderValue === "gitee" ? (
-                      <>
-                        <div className="mb-1.5 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_150px]">
-                          <div>
-                            <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                              {t(language, "gitee.repoLabel")}
-                            </Label>
-                            <Input
-                              size="sm"
-                              data-testid="project-gitee-repo-input"
-                              value={giteeRepoValue}
-                              placeholder="openstring/deepmdt-frontend-pc"
-                              onChange={(e) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, giteeRepoDraft: e.target.value } : prev,
-                                )
-                              }
-                            />
-                          </div>
-                          <div>
-                            <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                              {t(language, "gitee.enterpriseLabel")}
-                            </Label>
-                            <Input
-                              size="sm"
-                              data-testid="project-gitee-enterprise-input"
-                              value={giteeEnterpriseValue}
-                              placeholder="openstring"
-                              onChange={(e) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, giteeEnterpriseDraft: e.target.value } : prev,
-                                )
-                              }
-                            />
-                          </div>
-                          <div>
-                            <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                              {t(language, "gitee.baseBranchLabel")}
-                            </Label>
-                            <Input
-                              size="sm"
-                              data-testid="project-gitee-base-input"
-                              value={giteeBaseValue}
-                              placeholder="master"
-                              onChange={(e) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, giteeBaseBranchDraft: e.target.value } : prev,
-                                )
-                              }
-                            />
-                          </div>
-                        </div>
-                        {!giteeRepoValue.trim() && !giteeStatus?.repo && (
-                          <div className="xs mb-1 text-warning-foreground">
-                            {t(language, "gitee.missingRemoteHint")}
-                          </div>
-                        )}
-                        <div className="xs muted">
-                          {t(language, "gitee.syncBehaviorHint")}
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div className="mb-1.5 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_180px]">
-                          <div>
-                            <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                              {t(language, "gitee.ghRepoLabel")}
-                            </Label>
-                            <Input
-                              size="sm"
-                              data-testid="project-github-repo-input"
-                              value={ghRepoValue}
-                              placeholder="Jackie733/workbench"
-                              onChange={(e) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, ghRepoDraft: e.target.value } : prev,
-                                )
-                              }
-                            />
-                          </div>
-                          <div>
-                            <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                              {t(language, "gitee.baseBranchLabel")}
-                            </Label>
-                            <Input
-                              size="sm"
-                              data-testid="project-github-base-input"
-                              value={ghBaseValue}
-                              placeholder="main"
-                              onChange={(e) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, ghBaseBranchDraft: e.target.value } : prev,
-                                )
-                              }
-                            />
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-4">
-                          <Label className="flex items-center gap-2 text-[13px] font-normal">
-                            <Checkbox
-                              data-testid="project-github-autocreate"
-                              checked={ghAutoCreateValue}
-                              onCheckedChange={(checked) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, ghAutoCreateDraft: Boolean(checked) } : prev,
-                                )
-                              }
-                            />
-                            <span>{t(language, "routing.ghAutoCreate")}</span>
-                          </Label>
-                          <Label className="flex items-center gap-2 text-[13px] font-normal">
-                            <Checkbox
-                              data-testid="project-github-autosync"
-                              checked={ghAutoSyncValue}
-                              onCheckedChange={(checked) =>
-                                setModal((prev) =>
-                                  prev?.kind === "routing" ? { ...prev, ghAutoSyncDraft: Boolean(checked) } : prev,
-                                )
-                              }
-                            />
-                            <span>{t(language, "routing.ghAutoSync")}</span>
-                          </Label>
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  <div className="border-t pt-2">
-                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                      <strong className="text-[13px]">
-                        {t(language, "routing.verificationTitle")}
-                      </strong>
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <Label className="flex items-center gap-1.5 text-xs font-normal">
-                          <Checkbox
-                            data-testid="project-auto-screenshots"
-                            checked={autoScreenshotsValue}
-                            onCheckedChange={(checked) =>
-                              setModal((prev) =>
-                                prev?.kind === "routing" ? { ...prev, autoScreenshotsDraft: Boolean(checked) } : prev,
-                              )
-                            }
-                          />
-                          <span>{t(language, "routing.autoScreenshotsLabel")}</span>
-                        </Label>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="muted xs">
-                            {t(language, "routing.archDocsLabel")}
-                          </span>
-                          {project.context?.archDocs && project.context.archDocs.length > 0 ? (
-                            <div className="flex flex-wrap gap-1.5">
-                              {project.context.archDocs.map((doc) => (
-                                <Badge
-                                  key={doc.path}
-                                  variant="info"
-                                  size="sm"
-                                  title={doc.headings.join(" / ")}
-                                  data-testid={`proj-arch-doc-${doc.path}`}
-                                >
-                                  {doc.path}
-                                </Badge>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="xs muted">{t(language, "routing.archDocsNone")}</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      <div>
-                        <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                          {t(language, "routing.projectLangLabel", { name: project.project?.name ?? "" })}
-                        </Label>
-                        <SimpleSelect
-                          size="sm"
-                          className="w-full"
-                          data-testid="project-output-language-select"
-                          value={projLangValue}
-                          onValueChange={(next) =>
-                            setModal((prev) =>
-                              prev?.kind === "routing"
-                                ? { ...prev, projLangDraft: next as OutputLanguage | "inherit" }
-                                : prev,
-                            )
-                          }
-                          options={[
-                            { value: "inherit", label: t(language, "routing.inheritHub", { lang: savedHubLang }) },
-                            { value: "zh-CN", label: t(language, "init.langZh") },
-                            { value: "en", label: t(language, "init.langEn") },
-                            { value: "auto", label: t(language, "routing.langAuto") },
-                          ]}
-                        />
-                      </div>
-                      <div>
-                        <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                          {t(language, "routing.fastCmdLabel")}
-                        </Label>
-                        <Input
-                          size="sm"
-                          data-testid="project-fast-cmd-input"
-                          value={fastCmdValue}
-                          placeholder={project.context?.fastCommand ?? t(language, "routing.fastCmdPlaceholder")}
-                          onChange={(e) =>
-                            setModal((prev) =>
-                              prev?.kind === "routing" ? { ...prev, fastCmdDraft: e.target.value } : prev,
-                            )
-                          }
-                        />
-                      </div>
-                      <div>
-                        <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-                          {t(language, "routing.fullCmdLabel")}
-                        </Label>
-                        <Input
-                          size="sm"
-                          data-testid="project-full-cmd-input"
-                          value={fullCmdValue}
-                          placeholder={project.context?.fullCommand ?? t(language, "routing.fullCmdPlaceholder")}
-                          onChange={(e) =>
-                            setModal((prev) =>
-                              prev?.kind === "routing" ? { ...prev, fullCmdDraft: e.target.value } : prev,
-                            )
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </DialogPanel>
-
-                <DialogFooter>
-                  <Button variant="ghost" type="button" onClick={close}>
-                    <Icon icon={X} size={14} /> {t(language, "common.cancel")}
-                  </Button>
-                  <Button
-                    variant="default"
-                    type="button"
-                    data-testid="save-project-btn"
-                    disabled={busy}
-                    onClick={() => void saveProject()}
-                  >
-                    <Icon icon={Save} size={14} /> {t(language, "routing.saveProject")}
-                  </Button>
-                </DialogFooter>
-              </>
-            )}
-          </div>
-        )}
-      </ModalShell>
-    );
+    return <RoutingSettingsModal modal={m} onClose={close} />;
   }
 
   if (m.kind === "annotate_anchor") {
@@ -2184,10 +1252,7 @@ export function Modals() {
   }
 
   if (m.kind === "feedback") {
-    const isDesignStage =
-      detail?.state.stage === "awaiting_approval" ||
-      detail?.state.stage === "draft" ||
-      detail?.state.stage === "designing";
+    const isDesignStage = detail?.state.stage === "planning";
     const reviewReport = detail?.state.reviewReport;
     return (
       <ModalShell onClose={close} testId="feedback-modal" hasExplicitTitle>
@@ -2335,11 +1400,9 @@ export function Modals() {
 
   if (m.kind === "lifecycle") {
     const title =
-      m.action === "block"
-        ? t(language, "lifecycle.blockTitle")
-        : m.action === "cancel"
-          ? t(language, "lifecycle.cancelTitle")
-          : t(language, "lifecycle.reopenTitle");
+      m.action === "cancel"
+        ? t(language, "lifecycle.cancelTitle")
+        : t(language, "lifecycle.reopenTitle");
     const canPreserveApproval = m.action === "reopen" && Boolean(detail?.validity.approval.valid);
     const keepApproval = canPreserveApproval ? m.preserveApproval !== false : false;
     return (
@@ -2347,7 +1410,7 @@ export function Modals() {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Icon
-              icon={m.action === "block" ? Ban : m.action === "cancel" ? XCircle : RotateCcw}
+              icon={m.action === "cancel" ? XCircle : RotateCcw}
               size={20}
             />
             <span>{title}</span>
@@ -2413,760 +1476,6 @@ export function Modals() {
             onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
           >
             <Icon icon={Check} size={14} /> {t(language, "common.confirm")}
-          </Button>
-        </DialogFooter>
-      </ModalShell>
-    );
-  }
-
-  if (m.kind === "prompt_fallback") {
-    const copyPrompt = async () => {
-      try {
-        await navigator.clipboard.writeText(m.prompt);
-        showToastKey("fallback.copied");
-      } catch {
-        fallbackAreaRef.current?.select();
-        showToastKey("fallback.copyHint");
-      }
-    };
-
-    return (
-      <ModalShell onClose={close} testId="prompt-fallback-modal" hasExplicitTitle>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon icon={Terminal} size={20} />
-            <span>{t(language, m.titleKey, m.titleParams)}</span>
-          </DialogTitle>
-          <DialogDescription>{t(language, m.subtitleKey, m.subtitleParams)}</DialogDescription>
-        </DialogHeader>
-        <DialogPanel>
-          <Textarea
-            ref={fallbackAreaRef}
-            id="fallback-prompt-text"
-            readOnly
-            className="min-h-44 font-mono text-xs"
-            value={m.prompt}
-          />
-        </DialogPanel>
-        <DialogFooter>
-          <Button variant="ghost" type="button" data-action="close-modal" onClick={close}>
-            <Icon icon={X} size={14} /> {t(language, "common.close")}
-          </Button>
-          <Button variant="default" type="button" onClick={() => void copyPrompt()}>
-            <Icon icon={Copy} size={14} /> {t(language, "fallback.copy")}
-          </Button>
-        </DialogFooter>
-      </ModalShell>
-    );
-  }
-
-  if (m.kind === "quick_report") {
-    if (m.pickingElement) return null;
-
-    const submitQuickReport = async () => {
-      const title = m.title.trim();
-      if (!title) {
-        showToastKey("report.needTitle", undefined, true);
-        return;
-      }
-      const attachmentIds = (m.attachments ?? []).map((a) => a.id);
-      const res = await runBusy(async () => {
-        const rep = await api.reportPainPoint({
-          source: "ui_quick_report",
-          category: m.category,
-          title,
-          detail: m.detail.trim() || undefined,
-          ...(attachmentIds.length > 0 ? { attachmentIds } : {}),
-          context: {
-            nodeId: hub?.activeNodeId && hub.activeNodeId !== "local" ? hub.activeNodeId : undefined,
-            projectRoot: project?.root,
-            requirementId: selectedId ?? undefined,
-            domSelector: m.domSelector.trim() || undefined,
-            viewport: typeof window !== "undefined" ? `${window.innerWidth}x${window.innerHeight}` : undefined,
-            theme: useUiStore.getState().theme,
-            urlPath: typeof window !== "undefined" ? window.location.pathname : undefined,
-          },
-        });
-        let promoted: {
-          id: string;
-          projectId: string;
-          warning?: string;
-          warningRef?: StructuredMessageRef;
-        } | null = null;
-        if (m.autoPromote && rep.painPoint) {
-          const out = await api.promotePainPoint(rep.painPoint.id, {
-            createSandbox: true,
-            ...(m.createGitHubIssue !== undefined ? { createGitHubIssue: m.createGitHubIssue } : {}),
-          });
-          promoted = {
-            id: out.requirement.state.id,
-            projectId: out.workbenchProjectId,
-            warning: out.githubIssueWarning,
-            warningRef: out.githubIssueWarningRef,
-          };
-        }
-        return { painPoint: rep.painPoint, promoted };
-      });
-      if (res) {
-        setModal(null);
-        await invalidateAllWorkbenchQueries();
-        if (res.promoted) {
-          setApiProjectScope(res.promoted.projectId);
-          setActiveProjectId(res.promoted.projectId);
-          await openRequirement(res.promoted.id);
-          if (res.promoted.warning) {
-            showToastKey(
-              "report.promotedWarn",
-              {
-                id: res.promoted.id,
-                warning: resolveWarningParam(res.promoted.warning, res.promoted.warningRef),
-              },
-              true,
-            );
-          } else {
-            showToastKey("report.promoted", { id: res.promoted.id });
-          }
-        } else {
-          showToastKey("report.recorded");
-        }
-      }
-    };
-
-    return (
-      <ModalShell onClose={close} testId="quick-report-modal" hasExplicitTitle>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon icon={Zap} size={20} />
-            <span>{t(language, "report.title")}</span>
-          </DialogTitle>
-        </DialogHeader>
-        <DialogPanel className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <SimpleSelect
-              aria-label={t(language, "report.categoryAria")}
-              data-testid="quick-report-category"
-              value={m.category}
-              onValueChange={(next) =>
-                setModal((prev) =>
-                  prev?.kind === "quick_report"
-                    ? { ...prev, category: next as PainPointCategory }
-                    : prev,
-                )
-              }
-              options={[
-                { value: "ui_anomaly", label: t(language, "report.cat.ui_anomaly") },
-                { value: "cli_ergonomics", label: t(language, "report.cat.cli_ergonomics") },
-                { value: "harness_bug", label: t(language, "report.cat.harness_bug") },
-                { value: "feature_gap", label: t(language, "report.cat.feature_gap") },
-              ]}
-            />
-            <Input
-              aria-label={t(language, "report.selectorAria")}
-              className="min-w-40 flex-1"
-              data-testid="quick-report-selector"
-              value={m.domSelector}
-              placeholder={t(language, "report.selectorPlaceholder")}
-              onChange={(e) =>
-                setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, domSelector: e.target.value } : prev))
-              }
-            />
-            <Button
-              variant="outline"
-              type="button"
-              data-testid="pick-element-btn"
-              title={t(language, "report.pickTitle")}
-              onClick={() =>
-                setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, pickingElement: true } : prev))
-              }
-            >
-              <Icon icon={Crosshair} size={14} /> {t(language, "report.pick")}
-            </Button>
-          </div>
-          <Input
-            aria-label={t(language, "report.titleAria")}
-            data-testid="quick-report-title"
-            autoFocus
-            value={m.title}
-            placeholder={t(language, "report.titlePlaceholder")}
-            onChange={(e) =>
-              setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, title: e.target.value } : prev))
-            }
-          />
-          <Textarea
-            aria-label={t(language, "report.detailAria")}
-            data-testid="quick-report-detail"
-            value={m.detail}
-            placeholder={t(language, "report.detailPlaceholder")}
-            onChange={(e) =>
-              setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, detail: e.target.value } : prev))
-            }
-          />
-          <AttachmentPicker
-            value={m.attachments ?? []}
-            onChange={(attachments) =>
-              setModal((prev) => (prev?.kind === "quick_report" ? { ...prev, attachments } : prev))
-            }
-            disabled={busy}
-            scope="hub"
-          />
-          <Label className="flex items-center gap-2 text-[13px] font-normal">
-            <Checkbox
-              data-testid="quick-report-autopromote"
-              checked={m.autoPromote}
-              onCheckedChange={(checked) =>
-                setModal((prev) =>
-                  prev?.kind === "quick_report" ? { ...prev, autoPromote: Boolean(checked) } : prev,
-                )
-              }
-            />
-            <span>{t(language, "report.autoPromote")}</span>
-          </Label>
-          {m.autoPromote && (
-            <Label className="ms-5 flex items-center gap-2 text-xs font-normal">
-              <Checkbox
-                data-testid="quick-report-create-issue"
-                checked={m.createGitHubIssue ?? false}
-                onCheckedChange={(checked) =>
-                  setModal((prev) =>
-                    prev?.kind === "quick_report" ? { ...prev, createGitHubIssue: Boolean(checked) } : prev,
-                  )
-                }
-              />
-              <span>{t(language, "report.createIssue")}</span>
-            </Label>
-          )}
-        </DialogPanel>
-        <DialogFooter>
-          <Button variant="ghost" type="button" onClick={close}>
-            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
-          </Button>
-          <Button
-            variant="default"
-            type="button"
-            data-testid="submit-quick-report-btn"
-            disabled={busy}
-            onClick={() => void submitQuickReport()}
-          >
-            <Icon icon={Send} size={14} /> {t(language, "report.submit")}
-          </Button>
-        </DialogFooter>
-      </ModalShell>
-    );
-  }
-
-  if (m.kind === "evolution") {
-    const painPoints = evolutionData?.painPoints ?? [];
-    const telemetry = evolutionData?.telemetry ?? { entries: [], activeCooldowns: [] };
-    const sandboxes = evolutionData?.sandboxes ?? [];
-    const currentPlaybook = m.playbookDraft ?? playbookData?.markdown ?? evolutionData?.playbook.markdown ?? "";
-
-    const openWorkbenchReq = async (reqId: string, projectIdOverride?: string | null) => {
-      const targetProjId =
-        projectIdOverride ??
-        evolutionData?.workbenchProjectId ??
-        hub?.projects.find((p) => p.root === evolutionData?.workbenchRoot)?.id ??
-        null;
-      if (targetProjId) {
-        setApiProjectScope(targetProjId);
-        setActiveProjectId(targetProjId);
-      }
-      setModal(null);
-      await openRequirement(reqId);
-    };
-
-    const handlePromote = async (painId: string) => {
-      const out = await runBusy(() => api.promotePainPoint(painId, { createSandbox: true }));
-      if (out) {
-        await invalidateAllWorkbenchQueries();
-        if (out.githubIssueWarning) {
-          showToastKey(
-            "report.promotedWarn",
-            {
-              id: out.requirement.state.id,
-              warning: resolveWarningParam(out.githubIssueWarning, out.githubIssueWarningRef),
-            },
-            true,
-          );
-        } else {
-          showToastKey(
-            out.sandbox ? "evo.createdSandbox" : "evo.created",
-            { id: out.requirement.state.id },
-          );
-        }
-        await openWorkbenchReq(out.requirement.state.id, out.workbenchProjectId);
-      }
-    };
-
-    const handleDismiss = async (painId: string) => {
-      const out = await runBusy(() => api.dismissPainPoint(painId));
-      if (out) {
-        await invalidateAllWorkbenchQueries();
-        showToastKey("evo.dismissed");
-      }
-    };
-
-    const handleApplySandbox = async (reqId: string) => {
-      const out = await runBusy(() => api.applyRsiSandbox(reqId));
-      if (out) {
-        await invalidateAllWorkbenchQueries();
-        if (out.webReloaded) {
-          showToastKey("evo.appliedReload", { id: reqId });
-        } else {
-          showToastKey("evo.applied", { id: reqId, count: out.appliedFiles.length });
-        }
-        notifyCascadeSyncResults(out.cascadeResults);
-      }
-    };
-
-    const handleSyncSandboxPr = async (reqId: string) => {
-      const out = await runBusy(() => api.syncRsiSandboxPr(reqId));
-      if (out) {
-        await invalidateAllWorkbenchQueries();
-        if (out.pr.state === "merged") {
-          if (!out.cleanedSandbox) {
-            showToastKey("toast.prMerged", { num: out.pr.number });
-          } else if (out.mainUpdated) {
-            showToastKey("toast.prMergedMain", { num: out.pr.number });
-          } else if (out.mainSyncReason) {
-            showToastKey("toast.prMergedReason", {
-              num: out.pr.number,
-              reason: resolveWarningParam(out.mainSyncReason, out.mainSyncReasonRef),
-            });
-          } else {
-            showToastKey("toast.prMergedClean", { num: out.pr.number });
-          }
-        } else {
-          showToastKey("toast.prStatus", { num: out.pr.number, state: prStateRef(out.pr.state) });
-        }
-        notifyCascadeSyncResults(out.cascadeResults);
-      }
-    };
-
-    const handleSavePlaybook = async () => {
-      const out = await runBusy(() => api.savePlaybook(currentPlaybook));
-      if (out) {
-        setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
-        await invalidateAllWorkbenchQueries();
-        showToastKey("evo.savedPlaybook", { count: out.rules.length });
-      }
-    };
-
-    const handleDistillPlaybook = async () => {
-      const out = await runBusy(() => api.distillPlaybook());
-      if (out) {
-        setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: out.markdown } : prev));
-        await invalidateAllWorkbenchQueries();
-        if (out.added > 0) {
-          showToastKey("evo.distilled", { count: out.added });
-        } else {
-          showToastKey("evo.nothingDistilled");
-        }
-      }
-    };
-
-    return (
-      <ModalShell onClose={close} wide testId="evolution-modal" hasExplicitTitle>
-        <DialogHeader>
-          <div className="flex flex-wrap items-center justify-between gap-2 pe-6">
-            <DialogTitle className="flex items-center gap-2">
-              <Icon icon={Sparkles} size={20} />
-              <span>{t(language, "evo.title")}</span>
-            </DialogTitle>
-            <SegmentedControl
-              size="sm"
-              aria-label={t(language, "evo.tabsAria")}
-              render={
-                <RadioGroupPrimitive
-                  className="flex items-center"
-                  value={m.tab}
-                  onValueChange={(next) => {
-                    if (next === "inbox" || next === "telemetry") {
-                      setModal({ ...m, tab: next });
-                    } else if (next === "playbook") {
-                      setModal({ ...m, tab: "playbook", playbookDraft: null });
-                    }
-                  }}
-                />
-              }
-            >
-              <SegmentedControlItem
-                render={<RadioPrimitive.Root value="inbox" data-testid="evo-tab-inbox" />}
-              >
-                <Icon icon={Inbox} size={14} />{" "}
-                {t(language, "evo.tab.inbox", { count: painPoints.filter((p) => p.status === "open").length })}
-              </SegmentedControlItem>
-              <SegmentedControlItem
-                render={<RadioPrimitive.Root value="playbook" data-testid="evo-tab-playbook" />}
-              >
-                <Icon icon={BookOpen} size={14} />{" "}
-                {t(language, "evo.tab.playbook", {
-                  count: playbookData?.rules.length ?? evolutionData?.playbook.rules.length ?? 0,
-                })}
-              </SegmentedControlItem>
-              <SegmentedControlItem
-                render={<RadioPrimitive.Root value="telemetry" data-testid="evo-tab-telemetry" />}
-              >
-                <Icon icon={Activity} size={14} /> {t(language, "evo.tab.telemetry", { count: telemetry.entries.length })}
-              </SegmentedControlItem>
-            </SegmentedControl>
-          </div>
-        </DialogHeader>
-
-        <DialogPanel>
-          {m.tab === "inbox" && (
-            <div role="tabpanel" data-testid="evo-pane-inbox" className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="xs muted">
-                  {t(language, "evo.inboxHintPrefix")}
-                  <code>wb issue</code>
-                  {t(language, "evo.inboxHintSuffix")}
-                </span>
-                <Button
-                  variant="outline"
-                  size="xs"
-                  type="button"
-                  onClick={() =>
-                    setModal({
-                      kind: "quick_report",
-                      title: "",
-                      detail: "",
-                      category: "ui_anomaly",
-                      domSelector: "",
-                      pickingElement: false,
-                      autoPromote: false,
-                    })
-                  }
-                >
-                  <Icon icon={Zap} size={14} /> {t(language, "evo.addPain")}
-                </Button>
-              </div>
-              {painPoints.length === 0 ? (
-                <div className="rounded-xl border border-dashed p-6 text-center text-xs text-muted-foreground">
-                  {t(language, "evo.inboxEmpty")}
-                </div>
-              ) : (
-                <div className="flex max-h-[52vh] flex-col gap-2 overflow-y-auto">
-                  {painPoints.map((p) => {
-                    const sandboxItem = p.promotedReqId ? sandboxes.find((s) => s.requirementId === p.promotedReqId) : undefined;
-                    return (
-                      <div
-                        key={p.id}
-                        className="rounded-xl border bg-card p-3 text-card-foreground shadow-xs/5"
-                        data-testid={`pain-item-${p.id}`}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <div className="mb-1 flex flex-wrap items-center gap-1.5">
-                              <Badge
-                                variant={p.status === "open" ? "warning" : p.status === "promoted" ? "info" : "secondary"}
-                                size="sm"
-                              >
-                                <Icon
-                                  icon={p.status === "open" ? CircleAlert : p.status === "promoted" ? Sparkles : CircleOff}
-                                  size={14}
-                                />{" "}
-                                {p.status === "open"
-                                  ? t(language, "evo.status.open")
-                                  : p.status === "promoted"
-                                    ? t(language, "evo.status.promoted", { id: p.promotedReqId ?? "" })
-                                    : t(language, "evo.status.dismissed")}
-                              </Badge>
-                              <Badge variant="outline" size="sm">
-                                {translateRef(language, `report.cat.${p.category}`, p.category)}
-                              </Badge>
-                              {p.occurrences > 1 && (
-                                <Badge variant="info" size="sm">
-                                  {t(language, "evo.occurrences", { count: p.occurrences })}
-                                </Badge>
-                              )}
-                              {sandboxItem?.stage && sandboxItem.stage !== "done" && (
-                                <Badge variant="outline" size="sm">
-                                  {t(language, "evo.sandbox", { stage: sandboxItem.stage })}
-                                </Badge>
-                              )}
-                              {sandboxItem?.drift && sandboxItem.drift.behindCount > 0 && (
-                                <Badge variant={sandboxItem.drift.conflictFiles.length > 0 ? "error" : "warning"} size="sm">
-                                  {t(language, "evo.driftBadge", {
-                                    count: sandboxItem.drift.behindCount,
-                                    conflict:
-                                      sandboxItem.drift.conflictFiles.length > 0
-                                        ? t(language, "evo.driftConflictPart", { count: sandboxItem.drift.conflictFiles.length })
-                                        : "",
-                                  })}
-                                </Badge>
-                              )}
-                              {sandboxItem?.github?.issue && (
-                                <Badge variant="info" size="sm">
-                                  <Icon icon={Link2} size={14} /> Issue #{sandboxItem.github.issue.number}
-                                </Badge>
-                              )}
-                              {sandboxItem?.github?.pr && (
-                                <Badge variant={sandboxItem.github.pr.state === "merged" ? "success" : "info"} size="sm">
-                                  <Icon icon={GitPullRequest} size={14} /> PR #{sandboxItem.github.pr.number} ·{" "}
-                                  {formatPrStateLabel(language, sandboxItem.github.pr.state)}
-                                </Badge>
-                              )}
-                              <span className="xs muted">{formatDateTime(p.updatedAt, language)}</span>
-                            </div>
-                            <div className="font-semibold">{p.title}</div>
-                            {p.detail && p.detail !== p.title && (
-                              <div className="xs muted mt-1 whitespace-pre-wrap">
-                                {p.detail.slice(0, 260)}
-                              </div>
-                            )}
-                            {p.attachments && p.attachments.length > 0 && (
-                              <div className="mt-1.5">
-                                <AttachmentGallery
-                                  attachments={p.attachments}
-                                  urlFor={(attId) => evolutionAttachmentUrl(p.id, attId)}
-                                />
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex shrink-0 flex-wrap gap-1.5">
-                            {p.status === "open" && (
-                              <>
-                                <Button
-                                  variant="default"
-                                  size="xs"
-                                  type="button"
-                                  data-testid={`promote-pain-${p.id}`}
-                                  disabled={busy}
-                                  onClick={() => void handlePromote(p.id)}
-                                >
-                                  <Icon icon={Flame} size={14} /> {t(language, "evo.promote")}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="xs"
-                                  type="button"
-                                  data-testid={`dismiss-pain-${p.id}`}
-                                  disabled={busy}
-                                  onClick={() => void handleDismiss(p.id)}
-                                >
-                                  <Icon icon={Trash2} size={14} /> {t(language, "evo.dismiss")}
-                                </Button>
-                              </>
-                            )}
-                            {p.status === "promoted" && p.promotedReqId && (
-                              <Button
-                                variant="outline"
-                                size="xs"
-                                type="button"
-                                data-testid={`open-promoted-${p.id}`}
-                                disabled={busy}
-                                onClick={() => void openWorkbenchReq(p.promotedReqId!)}
-                              >
-                                <Icon icon={ExternalLink} size={14} /> {t(language, "evo.viewReq")}
-                              </Button>
-                            )}
-                            {sandboxItem?.drift?.canAutoSync && p.promotedReqId && (
-                              <Button
-                                variant="outline"
-                                size="xs"
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void syncSandboxBaseAction(p.promotedReqId!, { useEvolutionHub: true })}
-                              >
-                                <Icon icon={RefreshCw} size={14} /> {t(language, "evo.syncBase")}
-                              </Button>
-                            )}
-                            {sandboxItem?.canApply && p.promotedReqId && sandboxItem.github?.pr && (
-                              <Button
-                                variant="default"
-                                size="xs"
-                                type="button"
-                                data-testid={`sync-pain-pr-${p.id}`}
-                                disabled={busy}
-                                onClick={() => void handleSyncSandboxPr(p.promotedReqId!)}
-                              >
-                                <Icon icon={RefreshCw} size={14} /> {t(language, "evo.syncPr")}
-                              </Button>
-                            )}
-                            {sandboxItem?.canApply && p.promotedReqId && (
-                              <Button
-                                variant={sandboxItem.github?.pr ? "outline" : "default"}
-                                size="xs"
-                                type="button"
-                                data-testid={`apply-pain-sandbox-${p.id}`}
-                                disabled={busy}
-                                onClick={() => void handleApplySandbox(p.promotedReqId!)}
-                              >
-                                <Icon icon={Check} size={14} /> {t(language, "evo.applySandbox")}
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {m.tab === "playbook" && (
-            <div role="tabpanel" data-testid="evo-pane-playbook" className="space-y-2.5">
-              {noHubProject ? (
-                <div className="rounded-xl border border-dashed p-6 text-center text-xs text-muted-foreground">
-                  {t(language, "evo.playbookNoProject")}
-                </div>
-              ) : (
-                <>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="xs muted">
-                      {t(language, "evo.playbookHintPrefix")}
-                      <code>.workbench/playbook.md</code>
-                      {t(language, "evo.playbookHintSuffix")}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      type="button"
-                      data-testid="distill-playbook-btn"
-                      disabled={busy}
-                      onClick={() => void handleDistillPlaybook()}
-                    >
-                      <Icon icon={RefreshCw} size={14} /> {t(language, "evo.distill")}
-                    </Button>
-                  </div>
-                  <Textarea
-                    aria-label={t(language, "evo.playbookAria")}
-                    data-testid="playbook-editor"
-                    className="min-h-60 font-mono text-xs"
-                    value={currentPlaybook}
-                    placeholder={t(language, "evo.playbookPlaceholder")}
-                    onChange={(e) =>
-                      setModal((prev) => (prev?.kind === "evolution" ? { ...prev, playbookDraft: e.target.value } : prev))
-                    }
-                  />
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      variant="default"
-                      size="xs"
-                      type="button"
-                      data-testid="save-playbook-btn"
-                      disabled={busy}
-                      onClick={() => void handleSavePlaybook()}
-                    >
-                      <Icon icon={Save} size={14} /> {t(language, "evo.savePlaybook")}
-                    </Button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {m.tab === "telemetry" && (
-            <div role="tabpanel" data-testid="evo-pane-telemetry" className="space-y-2.5">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="xs muted">
-                  {t(language, "evo.telemetryHint")}
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    type="button"
-                    data-testid="evo-open-insights-btn"
-                    onClick={() => {
-                      close();
-                      setMainView("insights");
-                    }}
-                  >
-                    <Icon icon={BarChart3} size={14} /> {t(language, "evo.openInsights")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    type="button"
-                    data-testid="evo-open-pricing-btn"
-                    onClick={() => setModal({ kind: "observability_pricing" })}
-                  >
-                    <Icon icon={Settings} size={14} /> {t(language, "evo.openPricingConfig")}
-                  </Button>
-                  {telemetry.activeCooldowns.length > 0 && (
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      type="button"
-                      data-testid="clear-cooldown-btn"
-                      disabled={busy}
-                      onClick={async () => {
-                        const out = await runBusy(() => api.clearModelCooldown());
-                        if (out) {
-                          await invalidateAllWorkbenchQueries();
-                          showToastKey("evo.clearedCooldowns");
-                        }
-                      }}
-                    >
-                      <Icon icon={RotateCcw} size={14} /> {t(language, "evo.clearCooldown", { count: telemetry.activeCooldowns.length })}
-                    </Button>
-                  )}
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    type="button"
-                    data-testid="reload-web-btn"
-                    disabled={busy}
-                    onClick={async () => {
-                      const out = await runBusy(() => api.reloadWebBundle());
-                      if (out?.reloaded) showToastKey("evo.reloadedWeb");
-                    }}
-                  >
-                    <Icon icon={RefreshCw} size={14} /> {t(language, "evo.reloadWeb")}
-                  </Button>
-                </div>
-              </div>
-              {telemetry.entries.length === 0 ? (
-                <div className="rounded-xl border border-dashed p-6 text-center text-xs text-muted-foreground">
-                  {t(language, "evo.telemetryEmpty")}
-                </div>
-              ) : (
-                <div className="flex max-h-[48vh] flex-col gap-1.5 overflow-y-auto">
-                  {telemetry.entries.map((e) => {
-                    const rate = e.totalRuns > 0 ? Math.round((e.succeededRuns / e.totalRuns) * 100) : 0;
-                    const cooling = telemetry.activeCooldowns.some((c) => c.harness === e.harness && c.model === e.model);
-                    return (
-                      <div
-                        key={`${e.harness}::${e.model}::${e.action}`}
-                        className="routing-row"
-                      >
-                        <div>
-                          <div className="flex flex-wrap items-center gap-1.5 text-[13px] font-semibold">
-                            <span>{e.harness} · {e.model}</span>
-                            <Badge variant="outline" size="sm" data-testid="telemetry-action-badge">
-                              {formatAgentActionLabel(language, e.action)}
-                            </Badge>
-                            {cooling && <Badge variant="warning" size="sm">{t(language, "evo.cooling")}</Badge>}
-                          </div>
-                          <div className="xs muted">
-                            {t(language, "evo.telemetryStats", {
-                              total: e.totalRuns,
-                              avg: (e.avgDurationMs / 1000).toFixed(1),
-                            })}
-                            {e.timedOutRuns > 0 ? t(language, "evo.timeouts", { count: e.timedOutRuns }) : ""}
-                            {e.rateLimitedRuns > 0
-                              ? t(language, "evo.rateLimited", { count: e.rateLimitedRuns })
-                              : ""}
-                            {e.degradedRuns > 0 ? t(language, "evo.degraded", { count: e.degradedRuns }) : ""}
-                          </div>
-                        </div>
-                        <Badge variant={rate >= 70 ? "success" : rate >= 40 ? "warning" : "error"} size="sm">
-                          {t(language, "evo.successRate", { rate })}
-                        </Badge>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-        </DialogPanel>
-
-        <DialogFooter>
-          <Button variant="ghost" type="button" data-action="close-modal" onClick={close}>
-            <Icon icon={X} size={14} /> {t(language, "common.close")}
           </Button>
         </DialogFooter>
       </ModalShell>
@@ -3493,7 +1802,7 @@ export function Modals() {
                       disabled={busy}
                       onClick={async () => {
                         close();
-                        await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!, bridgeConnected);
+                        await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!);
                       }}
                     >
                       <Icon icon={Wrench} size={14} /> {t(language, "deliver.driftResolveBtn")}

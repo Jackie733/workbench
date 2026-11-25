@@ -8,7 +8,7 @@ import { isRecord } from "../src/core/validate.ts";
 
 const STEP_TIMEOUT = 10_000;
 const CLI_ENTRY = path.resolve(import.meta.dir, "../src/cli/index.ts");
-const TOOL_NAMES = ["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_verify", "wb_screenshot"].sort();
+const TOOL_NAMES = ["wb_list", "wb_get", "wb_propose", "wb_verify", "wb_screenshot"].sort();
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -57,35 +57,15 @@ async function checkWebSocket(base: string): Promise<void> {
   // Bun exposes terminate in addition to the DOM WebSocket API, allowing bounded cleanup.
   const socket = new WebSocket(url) as WebSocket & { terminate(): void };
   const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const timer = setTimeout(() => reject(new Error("Timed out waiting for WebSocket bridge.status (10s).")), STEP_TIMEOUT);
-  socket.onmessage = (event) => {
-    try {
-      if (typeof event.data !== "string") throw new Error("Expected a text WebSocket message.");
-      const value: unknown = JSON.parse(event.data);
-      if (!isRecord(value) || value.type !== "bridge.status" || !isRecord(value.bridge)) {
-        throw new Error("WebSocket did not send a bridge.status envelope.");
-      }
-      const bridge = value.bridge;
-      if (typeof bridge.connected !== "boolean" ||
-          !["offline", "idle", "working", "waiting_user"].includes(String(bridge.state)) ||
-          !(bridge.agent === null || typeof bridge.agent === "string") ||
-          !(bridge.sessionId === null || typeof bridge.sessionId === "string") ||
-          !(bridge.model === null || typeof bridge.model === "string") ||
-          typeof bridge.updatedAt !== "number" || !Number.isFinite(bridge.updatedAt)) {
-        throw new Error("WebSocket bridge.status contains invalid bridge fields.");
-      }
-      resolve();
-    } catch (error) {
-      reject(error);
-    }
-  };
+  const timer = setTimeout(() => reject(new Error("Timed out waiting for WebSocket /ws?role=ui open (10s).")), STEP_TIMEOUT);
+  socket.onopen = () => resolve();
   socket.onerror = () => reject(new Error(`WebSocket connection failed: ${url}`));
-  socket.onclose = (event) => reject(new Error(`WebSocket closed before bridge.status (code ${event.code}).`));
+  socket.onclose = (event) => reject(new Error(`WebSocket closed before opening (code ${event.code}).`));
   try {
     await promise;
   } finally {
     clearTimeout(timer);
-    socket.onmessage = null;
+    socket.onopen = null;
     socket.onerror = null;
     socket.onclose = null;
     try {
@@ -212,7 +192,7 @@ async function checkMcp(root: string): Promise<void> {
       }
       const names = listed.tools.map((tool: Record<string, unknown>) => tool.name as string).sort();
       if (names.length !== TOOL_NAMES.length || names.some((name, index) => name !== TOOL_NAMES[index])) {
-        throw new Error(`MCP tools/list did not expose the six Workbench tools: ${JSON.stringify(names)}.`);
+        throw new Error(`MCP tools/list did not expose the five Workbench tools: ${JSON.stringify(names)}.`);
       }
       const result = await rpc("tools/call", { name: "wb_list", arguments: { scope: "all" } });
       if (result.isError === true) throw new Error(`MCP wb_list failed: ${JSON.stringify(result.content)}`);
@@ -293,7 +273,7 @@ export async function checkDeployment(args: string[]): Promise<boolean> {
   });
   await check("HTTP /app.js", async () => { await fetchText(base, "/app.js", ["application/javascript", "text/javascript"]); });
   await check("HTTP /styles.css", async () => { await fetchText(base, "/styles.css", ["text/css"]); });
-  await check("WS /ws?role=ui bridge.status", () => checkWebSocket(base));
+  await check("WS /ws?role=ui handshake", () => checkWebSocket(base));
   await check("MCP stdio initialize / tools/list / wb_list(scope=all)", () => checkMcp(options.root));
   return passed;
 }

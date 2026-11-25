@@ -19,7 +19,6 @@ import { buildExecutionPrompt } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import { readHubConfig, updateHubPreferences } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
-import { buildAgentPrompt } from "../../src/server/prompts.ts";
 
 const tempDirs: string[] = [];
 const originalHubDir = process.env.WORKBENCH_HUB_DIR;
@@ -140,12 +139,8 @@ describe("Output language policy & configuration", () => {
       expect(resumedZh).toContain("简体中文 (zh-CN)");
     }
 
-    expect(buildAgentPrompt(detail, "design", { outputLanguage: "zh-CN" })).toContain(
-      buildOutputLanguageDirective("zh-CN", "plan"),
-    );
-    expect(buildAgentPrompt(detail, "design", { outputLanguage: "en" })).toContain(
-      buildOutputLanguageDirective("en", "plan"),
-    );
+    expect(buildOutputLanguageDirective("zh-CN", "plan")).toContain("简体中文");
+    expect(buildOutputLanguageDirective("en", "plan")).toContain("English");
 
     // Precedence through hub -> project override -> handoff.md
     updateHubPreferences({ outputLanguage: "en" });
@@ -195,7 +190,7 @@ describe("Output language policy & configuration", () => {
     expect(warnPropose.outputLanguage).toBe("zh-CN");
     expect(warnPropose.languageWarning).toContain("简体中文");
     // Non-blocking: proposal still persisted
-    expect(warnPropose.stage).toBe("awaiting_approval");
+    expect(warnPropose.stage).toBe("planning");
 
     const chinesePropose = (await executeWorkbenchTool(root, "wb_propose", {
       id: reqId,
@@ -227,7 +222,7 @@ describe("Output language policy & configuration", () => {
     expect(projJson.project.outputLanguage).toBe("auto");
 
     const validProject = {
-      schemaVersion: 4,
+      schemaVersion: 6 as const,
       projectId: "proj-test",
       name: "lang-ok",
       nextNumber: 1,

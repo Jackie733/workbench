@@ -9,12 +9,13 @@ import { atomicWriteJson, canonicalRoot, readJsonStrict, withNamedAdvisoryLock }
 import { observeGitSnapshot } from "./git.ts";
 import { resolveCodeRoot } from "./sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
-import { isSafeText, sanitizeOutput } from "./validate.ts";
+import { clipHeadTailUtf8, isSafeText, sanitizeOutput } from "./validate.ts";
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const MIN_TIMEOUT_MS = 500;
 const MAX_TIMEOUT_MS = 1_800_000;
-const PREVIEW_MAX_BYTES = 4096;
+const PREVIEW_HEAD_BYTES = 1024;
+const PREVIEW_TAIL_BYTES = 3072;
 
 export interface RunVerificationInput {
   command: string;
@@ -286,7 +287,7 @@ export async function runVerification(
   }
 
   const fullSanitized = sanitizeOutput(execResult.rawOutput, MAX_EVIDENCE_BYTES);
-  const previewSanitized = sanitizeOutput(fullSanitized.text, PREVIEW_MAX_BYTES);
+  const previewSanitized = clipHeadTailUtf8(fullSanitized.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
   const verificationId = `V-${execResult.endedAt}-${randomUUID().slice(0, 8)}`;
   const passed = !execResult.timedOut && execResult.exitCode === 0;
 
@@ -345,7 +346,7 @@ function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
 export async function runAllVerifications(
   root: string,
   id: string,
-  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean } = {},
+  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean; failFast?: boolean } = {},
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
@@ -390,7 +391,13 @@ export async function runAllVerifications(
   const preSnapshot = options.force === true ? null : await observeGitSnapshot(codeRoot);
   const runs: RunVerificationResult[] = [];
   let latestDetail = current;
-  for (const [command, criterionIds] of groups.entries()) {
+  // Run fast commands (typecheck, targeted tests) before heavy full-suite commands so failFast catches errors quickly.
+  const orderedGroups = Array.from(groups.entries()).sort(([cmdA], [cmdB]) => {
+    const heavyA = isHeavyVerificationCommand(cmdA) ? 1 : 0;
+    const heavyB = isHeavyVerificationCommand(cmdB) ? 1 : 0;
+    return heavyA - heavyB;
+  });
+  for (const [command, criterionIds] of orderedGroups) {
     if (options.force !== true && preSnapshot) {
       const existing = [...latestDetail.state.verifications].reverse().find(
         (v) =>
@@ -414,7 +421,7 @@ export async function runAllVerifications(
             `[workbench] 命中同快照跨需求验证缓存 (${preSnapshot.fingerprint.slice(0, 12)})\n${cached.rawLog}`,
             MAX_EVIDENCE_BYTES,
           );
-          const preview = sanitizeOutput(rawWithNote.text, PREVIEW_MAX_BYTES);
+          const preview = clipHeadTailUtf8(rawWithNote.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
           const record: VerificationRecord = {
             id: verificationId,
             command,
@@ -449,6 +456,9 @@ export async function runAllVerifications(
     });
     runs.push(result);
     latestDetail = result.detail;
+    if (options.failFast === true && !result.record.passed) {
+      break;
+    }
   }
 
   return { detail: latestDetail, runs };

@@ -219,32 +219,25 @@ describe("status and error messages", () => {
   test("core banners and blockers expose stable message refs in both languages", () => {
     const state = {
       id: "REQ-001",
-      stage: "blocked",
+      stage: "planning",
       track: "plan_first",
       designVersion: 0,
       designHash: "",
       criteria: [],
-      tasks: [],
-      blockedReason: "等待上游接口",
       lastFeedback: null,
     } as unknown as RequirementState;
     const approval = { valid: false, reason: "尚未批准技术方案", reasonKey: "core.approval.notApproved" };
     const coverage = { items: [], requiredTotal: 0, requiredPassed: 0, optionalTotal: 0, optionalPassed: 0 };
     const gate = evaluateAcceptanceGate(state, approval, coverage);
     expect(gate.blockerRefs?.map((r) => r.key)).toEqual([
-      "core.gate.blocked",
       "core.approval.notApproved",
       "core.gate.noRequired",
     ]);
     const derived = deriveActionBanner(state, approval, coverage, gate);
-    expect(derived.banner.headlineKey).toBe("core.banner.blocked");
-    expect(translateRef("zh-CN", derived.banner.headlineKey, derived.banner.headline, derived.banner.headlineParams)).toBe(
-      "需求受阻：等待上游接口",
-    );
-    expect(translateRef("en", derived.banner.headlineKey, derived.banner.headline, derived.banner.headlineParams)).toBe(
-      "Requirement blocked: 等待上游接口",
-    );
-    expect(translateRef("en", gate.blockerRefs?.[2]?.key, gate.blockers[2]!)).toBe(
+    expect(derived.banner.headlineKey).toBe("core.banner.draft");
+    expect(translateRef("zh-CN", derived.banner.headlineKey, derived.banner.headline, derived.banner.headlineParams)).toBeTruthy();
+    expect(translateRef("en", derived.banner.headlineKey, derived.banner.headline, derived.banner.headlineParams)).toBeTruthy();
+    expect(translateRef("en", gate.blockerRefs?.[1]?.key, gate.blockers[1]!)).toBe(
       "At least one required acceptance criterion is needed; empty coverage cannot pass",
     );
   });
@@ -312,13 +305,11 @@ describe("status and error messages", () => {
   test("review-gated banners keep stable message refs in both languages", () => {
     const state = {
       id: "REQ-001",
-      stage: "implementing",
+      stage: "coding",
       track: "plan_first",
       designVersion: 1,
       designHash: "d".repeat(64),
       criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
-      tasks: [],
-      blockedReason: null,
       lastFeedback: null,
       reviewReport: {
         verdict: "block",

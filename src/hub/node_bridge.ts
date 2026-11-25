@@ -21,14 +21,13 @@ import {
   jsonResponse,
   type LocalProjectSnapshot,
 } from "../server/project_api.ts";
-import type { PainPointReportInput } from "./evolution.ts";
 import { HubExecutor, type CustomCommandBuilder, type TelemetryOutcomeInput } from "./executor.ts";
 import type { RunLedgerEntry } from "./ledger.ts";
 import { enrichAgentRunRecord } from "./pricing.ts";
 import { browseDirectory, readHubConfig } from "./registry.ts";
-import { buildPresetRouting } from "./routing.ts";
+import { buildInitialProjectRouting } from "./routing.ts";
 import type { NodeUpdateReport } from "../cli/node_update.ts";
-import type { HarnessInfo, HubObservabilityConfig, RemoteNodeInfo, RoutingConfig } from "./types.ts";
+import type { HarnessInfo, HubObservabilityConfig, RemoteNodeInfo } from "./types.ts";
 
 export interface NodeRpcRequest {
   type: "node.rpc.request";
@@ -47,7 +46,6 @@ export interface NodeRpcRequest {
   search?: string;
   bodyText?: string;
   projectRoot?: string;
-  routing?: RoutingConfig;
   outputLanguage?: OutputLanguage;
   giteeAccessToken?: string | null;
   observability?: HubObservabilityConfig;
@@ -75,7 +73,6 @@ interface ConnectedNode {
 }
 
 export interface RemoteNodeCallbacks {
-  onPainPoint: (nodeId: string, input: PainPointReportInput) => void;
   onTelemetry: (nodeId: string, outcome: TelemetryOutcomeInput) => void;
   onLedgerEntry?: (nodeId: string, nodeName: string, entry: RunLedgerEntry) => void;
   onEvent: (nodeId: string, event: Record<string, unknown>) => void;
@@ -112,7 +109,6 @@ export class RemoteNodeRegistry {
       hostname: string;
       platform: string;
       workbenchVersion?: string;
-      routing: RoutingConfig;
       outputLanguage: OutputLanguage;
       giteeAccessToken?: string | null;
       observability?: HubObservabilityConfig;
@@ -150,7 +146,6 @@ export class RemoteNodeRegistry {
         JSON.stringify({
           type: "node.welcome",
           nodeId: meta.nodeId,
-          routing: meta.routing,
           outputLanguage: meta.outputLanguage,
           giteeAccessToken: meta.giteeAccessToken ?? null,
           ...(meta.observability ? { observability: meta.observability } : {}),
@@ -229,11 +224,6 @@ export class RemoteNodeRegistry {
       return;
     }
 
-    if (parsed.type === "node.pain_point" && isRecord(parsed.input)) {
-      cb.onPainPoint(nodeId, parsed.input as unknown as PainPointReportInput);
-      return;
-    }
-
     if (parsed.type === "node.telemetry" && isRecord(parsed.outcome)) {
       cb.onTelemetry(nodeId, parsed.outcome as unknown as TelemetryOutcomeInput);
     }
@@ -252,14 +242,12 @@ export class RemoteNodeRegistry {
   }
 
   broadcastConfigSync(
-    routing: RoutingConfig,
     outputLanguage: OutputLanguage,
     giteeAccessToken?: string | null,
     observability?: HubObservabilityConfig,
   ): void {
     const payload = JSON.stringify({
       type: "node.config.sync",
-      routing,
       outputLanguage,
       ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
       ...(observability !== undefined ? { observability } : {}),
@@ -336,7 +324,6 @@ export class RemoteNodeRegistry {
     projectRoot: string,
     req: Request,
     url: URL,
-    routing: RoutingConfig,
     outputLanguage: OutputLanguage,
     giteeAccessToken?: string | null,
     observability?: HubObservabilityConfig,
@@ -360,7 +347,6 @@ export class RemoteNodeRegistry {
         search: url.search,
         ...(bodyText ? { bodyText } : {}),
         projectRoot,
-        routing,
         outputLanguage,
         ...(giteeAccessToken !== undefined ? { giteeAccessToken } : {}),
         ...(observability !== undefined ? { observability } : {}),
@@ -520,12 +506,10 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
   const wsUrl = buildNodeWebSocketUrl(options.hubUrl, { nodeId, nodeName, hostname, platform, version });
 
   let syncedPrefs: {
-    routing: RoutingConfig;
     outputLanguage: OutputLanguage;
     giteeAccessToken: string | null;
     observability?: HubObservabilityConfig;
   } = {
-    routing: buildPresetRouting("balanced"),
     outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
     giteeAccessToken: null,
     observability: undefined,
@@ -556,10 +540,6 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       getHubPreferences: () => syncedPrefs,
       onTelemetryOutcome: (outcome) => {
         sendEnvelope({ type: "node.telemetry", outcome });
-      },
-      onPainPoint: (input) => {
-        sendEnvelope({ type: "node.pain_point", input });
-        return null;
       },
       onLedgerEntry: (entry) => {
         sendEnvelope({ type: "node.run_ledger", entry });
@@ -603,20 +583,6 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
 
   const handleProjectApi = createProjectApiHandler({
     executor,
-    getBridgeStatus: () => ({
-      connected: false,
-      agent: null,
-      sessionId: null,
-      state: "offline",
-      model: null,
-      updatedAt: Date.now(),
-    }),
-    dispatchToBridge: async (_reqId, _action, _mode, prompt) => ({
-      delivered: false,
-      status: "offline",
-      reason: "no_live_bridge",
-      prompt,
-    }),
     broadcastUi: (event) => {
       sendEnvelope({ type: "node.event", event });
     },
@@ -674,9 +640,11 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
         const statusBefore = getProjectStatus(base);
         let projectName = req.name?.trim() || statusBefore.project?.name;
         if ((req.initPrivacy === "local" || req.initPrivacy === "tracked") && !statusBefore.initialized) {
+          const nodeHarnesses = await executor.getHarnesses(false, true);
           const meta = await initProject(base, {
             name: projectName,
             privacyMode: req.initPrivacy,
+            routing: buildInitialProjectRouting(nodeHarnesses),
           });
           projectName = meta.name;
         }
@@ -734,9 +702,8 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       }
 
       if (req.kind === "project_http") {
-        if (req.routing || req.outputLanguage || req.giteeAccessToken !== undefined) {
+        if (req.outputLanguage || req.giteeAccessToken !== undefined || req.observability !== undefined) {
           syncedPrefs = {
-            routing: req.routing ?? syncedPrefs.routing,
             outputLanguage: req.outputLanguage ?? syncedPrefs.outputLanguage,
             giteeAccessToken:
               req.giteeAccessToken !== undefined ? req.giteeAccessToken : syncedPrefs.giteeAccessToken,
@@ -876,15 +843,11 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
 
       if (parsed.type === "node.welcome" || parsed.type === "node.config.sync") {
         if (
-          (parsed.routing && isRecord(parsed.routing)) ||
+          typeof parsed.outputLanguage === "string" ||
           parsed.giteeAccessToken !== undefined ||
           (parsed.observability && isRecord(parsed.observability))
         ) {
           syncedPrefs = {
-            routing:
-              parsed.routing && isRecord(parsed.routing)
-                ? (parsed.routing as unknown as RoutingConfig)
-                : syncedPrefs.routing,
             outputLanguage: (typeof parsed.outputLanguage === "string"
               ? parsed.outputLanguage
               : syncedPrefs.outputLanguage) as OutputLanguage,

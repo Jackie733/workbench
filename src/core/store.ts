@@ -36,6 +36,7 @@ import {
   type ProjectMetadata,
   type RequirementState,
   type RoutingConfig,
+  DEFAULT_PROJECT_ROUTING,
   type RunContextSnapshot,
   type RunTraceEvent,
   type ScreenshotBatch,
@@ -123,7 +124,10 @@ export async function initProject(
     if (options.outputLanguage !== undefined && !outputLanguage) {
       throw new WorkbenchError("invalid_input", `不支持的输出语言: ${String(options.outputLanguage)}`);
     }
-    const routing = options.routing !== undefined ? validateProjectRoutingConfig(options.routing) : undefined;
+    const routing =
+      options.routing !== undefined
+        ? validateProjectRoutingConfig(options.routing)
+        : structuredClone(DEFAULT_PROJECT_ROUTING);
     const now = Date.now();
     const metadata: ProjectMetadata = {
       schemaVersion: SCHEMA_VERSION,

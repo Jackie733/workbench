@@ -3,16 +3,10 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { ensureServerForProject, removeServerDiscovery } from "../../src/server/runtime.ts";
-import workbenchExtension, {
-  executeBridgeDispatch,
-  resolveDeliveryRejection,
-} from "../../omp/index.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
-import { reportPainPoint } from "../../src/hub/evolution.ts";
 
 const tempDirs: string[] = [];
 const runningServers: WorkbenchServerHandle[] = [];
@@ -75,20 +69,17 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
 
       const createRes = await apiJson(`${server.url}/api/requirements`, {
         method: "POST",
-        body: JSON.stringify({ goal: "添加服务端接口测试", dispatchAgent: true }),
+        body: JSON.stringify({ goal: "添加服务端接口测试" }),
       });
       expect(createRes.status).toBe(201);
       const createdDetail = createRes.body.detail as { state: { id: string; stage: string; revision: number } };
       expect(createdDetail.state.id).toBe("REQ-001");
-      expect(createdDetail.state.stage).toBe("designing");
-      // Without connected bridge, dispatch cleanly falls back to offline prompt
-      expect((createRes.body.dispatch as { status: string; prompt: string }).status).toBe("offline");
-      expect((createRes.body.dispatch as { prompt: string }).prompt).toContain("REQ-001");
+      expect(createdDetail.state.stage).toBe("planning");
 
       // CAS conflict returns 409
       const conflictRes = await apiJson(`${server.url}/api/requirements/REQ-001/spec`, {
         method: "PATCH",
-        body: JSON.stringify({ title: "过期编辑", expectedRevision: 1 }),
+        body: JSON.stringify({ title: "过期编辑", expectedRevision: 999 }),
       });
       expect(conflictRes.status).toBe(409);
 
@@ -128,178 +119,7 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     } finally {
       uiWs.close();
     }
-  });
-
-  test("delivers prompts safely over live WS bridge and preserves drafts/busy/stale guards", async () => {
-    const root = initGitRepo();
-    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
-    runningServers.push(server);
-
-    await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({}) });
-    await apiJson(`${server.url}/api/requirements`, {
-      method: "POST",
-      body: JSON.stringify({ goal: "测试 WS 会话桥接" }),
-    });
-
-    let currentDraft = "";
-    let isBusy = false;
-    const sentPrompts: string[] = [];
-    const prefilledPrompts: string[] = [];
-
-    const bridgeWs = new WebSocket(`${server.url.replace("http", "ws")}/ws?role=bridge`);
-    await new Promise<void>((resolve) => {
-      bridgeWs.addEventListener("open", () => {
-        bridgeWs.send(
-          JSON.stringify({
-            type: "bridge.hello",
-            agent: "omp",
-            sessionId: "sess-1",
-            state: "idle",
-            model: "test/model",
-          }),
-        );
-        resolve();
-      });
-    });
-
-    bridgeWs.addEventListener("message", async (ev) => {
-      const msg = JSON.parse(String(ev.data)) as { type: string; dispatchId: string; mode: "send" | "prefill"; prompt: string };
-      if (msg.type !== "bridge.dispatch") return;
-      const ack = await executeBridgeDispatch(
-        msg,
-        { available: true, projectReady: true, identityFresh: true, busy: isBusy, draftText: currentDraft },
-        {
-          setEditorText: (t) => {
-            currentDraft = t;
-            prefilledPrompts.push(t);
-          },
-          sendUserMessage: async (t) => {
-            sentPrompts.push(t);
-          },
-        },
-      );
-      bridgeWs.send(JSON.stringify(ack));
-    });
-
-    await new Promise((r) => setTimeout(r, 40));
-    expect(server.getBridgeStatus().connected).toBe(true);
-    expect(server.getBridgeStatus().sessionId).toBe("sess-1");
-
-    // 1. Send when idle & empty draft succeeds
-    const sendRes = await apiJson(`${server.url}/api/requirements/REQ-001/dispatch`, {
-      method: "POST",
-      body: JSON.stringify({ action: "design", mode: "send" }),
-    });
-    expect(sendRes.status).toBe(200);
-    expect((sendRes.body.dispatch as { status: string }).status).toBe("submitted");
-    expect(sentPrompts).toHaveLength(1);
-
-    // 2. Whitespace draft is preserved and causes draft_conflict rejection
-    currentDraft = " ";
-    const conflictRes = await apiJson(`${server.url}/api/requirements/REQ-001/dispatch`, {
-      method: "POST",
-      body: JSON.stringify({ action: "design", mode: "prefill" }),
-    });
-    expect((conflictRes.body.dispatch as { status: string; reason: string }).status).toBe("rejected");
-    expect((conflictRes.body.dispatch as { reason: string }).reason).toBe("draft_conflict");
-    expect(prefilledPrompts).toHaveLength(0);
-
-    // 3. Clearing draft allows prefill without sending
-    currentDraft = "";
-    const prefillRes = await apiJson(`${server.url}/api/requirements/REQ-001/dispatch`, {
-      method: "POST",
-      body: JSON.stringify({ action: "design", mode: "prefill" }),
-    });
-    expect((prefillRes.body.dispatch as { status: string }).status).toBe("prefilled");
-    expect(prefilledPrompts).toHaveLength(1);
-    expect(sentPrompts).toHaveLength(1);
-
-    // 4. Busy session rejects dispatch
-    currentDraft = "";
-    isBusy = true;
-    const busyRes = await apiJson(`${server.url}/api/requirements/REQ-001/dispatch`, {
-      method: "POST",
-      body: JSON.stringify({ action: "design", mode: "send" }),
-    });
-    expect((busyRes.body.dispatch as { reason: string }).reason).toBe("source_busy");
-
-    // 5. Disconnecting bridge resets status to offline
-    bridgeWs.close();
-    await new Promise((r) => setTimeout(r, 50));
-    expect(server.getBridgeStatus().connected).toBe(false);
-    expect(server.getBridgeStatus().state).toBe("offline");
-  });
-
-  test("omp extension unit guards and registers 5 native tools + /wb command", async () => {
-    expect(
-      resolveDeliveryRejection({ available: false, projectReady: true, identityFresh: true, busy: false, draftText: "" }),
-    ).toBe("unsupported_source");
-    expect(
-      resolveDeliveryRejection({ available: true, projectReady: true, identityFresh: false, busy: false, draftText: "" }),
-    ).toBe("source_changed");
-    expect(
-      resolveDeliveryRejection({ available: true, projectReady: true, identityFresh: true, busy: true, draftText: "" }),
-    ).toBe("source_busy");
-    expect(
-      resolveDeliveryRejection({ available: true, projectReady: true, identityFresh: true, busy: false, draftText: "\n" }),
-    ).toBe("draft_conflict");
-    expect(
-      resolveDeliveryRejection({ available: true, projectReady: true, identityFresh: true, busy: false, draftText: "" }),
-    ).toBeNull();
-
-    const root = initGitRepo();
-    await apiJson(`${(await (async () => { const s = await startWorkbenchServer({ root, port: 0, writeDiscovery: false }); runningServers.push(s); return s; })()).url}/api/project/init`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-
-    const tools = new Map<string, ToolDefinition>();
-    const commands = new Map<string, { description: string; handler: (args: string, ctx: ExtensionContext) => Promise<void> | void }>();
-    const mockPi: ExtensionAPI = {
-      setLabel() {},
-      registerCommand(name, opts) { commands.set(name, opts); },
-      registerTool(def) { tools.set(def.name, def); },
-      async sendUserMessage() {},
-      getAllTools: () => Array.from(tools.keys()).map((name) => ({ name })),
-      getActiveTools: () => Array.from(tools.keys()),
-      on() {},
-    };
-
-    workbenchExtension(mockPi);
-    expect(Array.from(tools.keys())).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_screenshot", "wb_verify"]);
-    expect(tools.get("wb_list")?.approval).toBe("read");
-    expect(tools.get("wb_propose")?.approval).toBe("write");
-    expect(tools.get("wb_verify")?.approval).toBe("exec");
-    expect(commands.has("wb")).toBe(true);
-
-    const fakeCtx = {
-      agent: { kind: "main" },
-      mode: "tui",
-      hasUI: true,
-      isIdle: () => true,
-      hasPendingMessages: () => false,
-      getPendingPlanReview: () => undefined,
-      setInterval: () => 0,
-      clearTimer() {},
-      shutdown() {},
-      sessionManager: {
-        getSessionId: () => "s-1",
-        getCwd: () => root,
-        getBranch: () => [],
-      },
-      ui: {
-        supportsEditor: true,
-        getEditorText: () => "",
-        setEditorText() {},
-        notify() {},
-        setStatus() {},
-        setTitle() {},
-      },
-    } as ExtensionContext;
-
-    const listOut = await tools.get("wb_list")!.execute("call-1", {}, undefined, undefined, fakeCtx);
-    expect(JSON.parse(listOut.content[0]!.text).total).toBe(0);
-  });
+  }, 20_000);
 
   test("ensureServerForProject spawns a healthy background server and reuses it", async () => {
     const root = initGitRepo();
@@ -480,117 +300,6 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     }
   }, 15_000);
 
-  test("POST /api/hub/evolution/sync-pr/:id syncs merged RSI PR, updates clean main, and cleans sandbox", async () => {
-    const origHubDir = process.env.WORKBENCH_HUB_DIR;
-    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-hub-"));
-    const bareRemote = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-bare-"));
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-rsi-repo-"));
-    tempDirs.push(hubDir, bareRemote, root);
-    process.env.WORKBENCH_HUB_DIR = hubDir;
-
-    try {
-      execFileSync("git", ["init", "--bare", "--initial-branch=main"], { cwd: bareRemote, stdio: "ignore" });
-      execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
-      execFileSync("git", ["config", "user.name", "RSI Server"], { cwd: root, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "rsi-srv@example.com"], { cwd: root, stdio: "ignore" });
-      execFileSync("git", ["remote", "add", "origin", bareRemote], { cwd: root, stdio: "ignore" });
-      fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "workbench", version: "0.1.0" }, null, 2) + "\n");
-      fs.mkdirSync(path.join(root, "src/core"), { recursive: true });
-      fs.writeFileSync(path.join(root, "src/core/flag.ts"), "export const fixed = false;\n");
-      execFileSync("git", ["add", "."], { cwd: root, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", "init"], { cwd: root, stdio: "ignore" });
-      execFileSync("git", ["push", "-u", "origin", "main"], { cwd: root, stdio: "ignore" });
-
-      let prState: "OPEN" | "MERGED" = "OPEN";
-      const deps: GitHubCommandDeps = {
-        whichGh: () => "/usr/local/bin/gh",
-        resolveDefaultBaseBranch: async () => "main",
-        runGh: async (_bin, args) => {
-          const [group, sub] = args;
-          if (group === "auth" && sub === "status") {
-            return { code: 0, stdout: "✓ Logged in to github.com account Jackie733\n", stderr: "" };
-          }
-          if (group === "repo" && sub === "view") {
-            return { code: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }), stderr: "" };
-          }
-          if (group === "pr" && sub === "list") return { code: 0, stdout: "[]", stderr: "" };
-          if (group === "pr" && sub === "create") {
-            return { code: 0, stdout: "https://github.com/Jackie733/workbench/pull/31\n", stderr: "" };
-          }
-          if (group === "pr" && sub === "view") {
-            return {
-              code: 0,
-              stdout: JSON.stringify({
-                number: 31,
-                url: "https://github.com/Jackie733/workbench/pull/31",
-                title: "RSI fix",
-                state: prState,
-                mergedAt: prState === "MERGED" ? "2026-11-17T13:00:00Z" : null,
-                baseRefName: "main",
-                headRefName: "rsi/REQ-001",
-              }),
-              stderr: "",
-            };
-          }
-          return { code: 1, stdout: "", stderr: `unexpected ${args.join(" ")}` };
-        },
-      };
-
-      const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, githubDeps: deps });
-      runningServers.push(server);
-
-      await apiJson(`${server.url}/api/project/init`, { method: "POST", body: JSON.stringify({ name: "workbench" }) });
-      await apiJson(`${server.url}/api/project/settings`, {
-        method: "PATCH",
-        body: JSON.stringify({ github: { repo: "Jackie733/workbench", defaultBaseBranch: "main" } }),
-      });
-
-      const pain = reportPainPoint({ source: "ui_quick_report", category: "harness_bug", title: "修复核心开关" });
-      const promoRes = await apiJson(`${server.url}/api/hub/evolution/${pain!.id}/promote`, {
-        method: "POST",
-        body: JSON.stringify({ createSandbox: true, createGitHubIssue: false }),
-      });
-      expect(promoRes.status).toBe(201);
-      const reqId = (promoRes.body.requirement as { state: { id: string } }).state.id;
-      const sandboxPath = (promoRes.body.sandbox as { worktreePath: string }).worktreePath;
-
-      fs.writeFileSync(path.join(sandboxPath, "src/core/flag.ts"), "export const fixed = true;\n");
-      await executeWorkbenchTool(root, "wb_propose", { id: reqId, design: "# RSI 修复设计" });
-      await apiJson(`${server.url}/api/requirements/${reqId}/approve`, { method: "POST", body: JSON.stringify({}) });
-      await apiJson(`${server.url}/api/requirements/${reqId}/verify`, {
-        method: "POST",
-        body: JSON.stringify({ command: "echo ok", criterionIds: ["AC-1", "AC-2"] }),
-      });
-      await apiJson(`${server.url}/api/requirements/${reqId}/accept`, { method: "POST", body: JSON.stringify({}) });
-
-      const deliverRes = await apiJson(`${server.url}/api/requirements/${reqId}/deliver`, {
-        method: "POST",
-        body: JSON.stringify({ files: ["src/core/flag.ts"], commitMessage: "fix: toggle flag", createPr: true }),
-      });
-      expect(deliverRes.status).toBe(200);
-      expect((deliverRes.body.pr as { number: number }).number).toBe(31);
-
-      const rsiSha = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", `refs/heads/rsi/${reqId}`], {
-        encoding: "utf8",
-      }).trim();
-      execFileSync("git", ["--git-dir", bareRemote, "update-ref", "refs/heads/main", rsiSha], { stdio: "ignore" });
-      prState = "MERGED";
-
-      const syncRes = await apiJson(`${server.url}/api/hub/evolution/sync-pr/${reqId}`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      expect(syncRes.status).toBe(200);
-      expect((syncRes.body.pr as { state: string }).state).toBe("merged");
-      expect(syncRes.body.mainUpdated).toBe(true);
-      expect(syncRes.body.cleanedSandbox).toBe(true);
-      expect(fs.readFileSync(path.join(root, "src/core/flag.ts"), "utf8")).toContain("fixed = true");
-    } finally {
-      if (origHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
-      else process.env.WORKBENCH_HUB_DIR = origHubDir;
-    }
-  }, 15_000);
-
   test("GET /api/requirements isolates a single corrupt record instead of failing the whole list", async () => {
     const root = initGitRepo();
     const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
@@ -671,7 +380,7 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
     const subReqs = (parentGet.body.detail as { subRequirements?: Array<{ id: string }> }).subRequirements ?? [];
     expect(subReqs.map((s) => s.id).sort()).toEqual(["REQ-002", "REQ-003"]);
 
-    // Human can resolve a blocked task via PATCH /api/requirements/:id/tasks
+    // Fast-track authorization transitions REQ-002 to coding
     await executeWorkbenchTool(root, "wb_propose", {
       id: "REQ-002",
       criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
@@ -681,19 +390,6 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
       body: JSON.stringify({}),
     });
     expect(ftRes.status).toBe(200);
-    await executeWorkbenchTool(root, "wb_update_tasks", {
-      id: "REQ-002",
-      tasks: [{ id: "T-1", title: "需要真机核对", status: "blocked", note: "等待登录" }],
-    });
-    const taskPatchRes = await apiJson(`${server.url}/api/requirements/REQ-002/tasks`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        tasks: [{ id: "T-1", title: "需要真机核对", status: "done", note: "人工已放行" }],
-        note: "人工解除阻塞",
-      }),
-    });
-    expect(taskPatchRes.status).toBe(200);
-    const patchedTasks = (taskPatchRes.body.detail as { state: { tasks: Array<{ status: string }> } }).state.tasks;
-    expect(patchedTasks[0]?.status).toBe("done");
+    expect((ftRes.body.detail as { state: { stage: string } }).state.stage).toBe("coding");
   });
 });

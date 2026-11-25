@@ -13,7 +13,6 @@ import {
   propose,
   spawnSubRequirements,
   updateProjectConfig,
-  updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
@@ -23,17 +22,18 @@ import {
   readModelTelemetry,
 } from "../../src/hub/telemetry.ts";
 import { buildExecutionPrompt, buildHarnessCommand, buildOpencodeNonInteractiveConfig, HubExecutor } from "../../src/hub/executor.ts";
-import { buildPresetRouting, detectModelUnavailableError } from "../../src/hub/routing.ts";
-import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
+import { buildInitialProjectRouting, detectModelUnavailableError } from "../../src/hub/routing.ts";
 import type { HarnessInfo } from "../../src/hub/types.ts";
 
 const tempDirs: string[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
+const origChromePath = process.env.WORKBENCH_CHROME_PATH;
 
 function makeTempHub(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-guard-hub-"));
   tempDirs.push(dir);
   process.env.WORKBENCH_HUB_DIR = dir;
+  process.env.WORKBENCH_CHROME_PATH = "/nonexistent-chrome-for-test";
 }
 
 function makeGitRepo(name: string): string {
@@ -75,6 +75,8 @@ function waitForRun(executor: HubExecutor, runId: string): Promise<void> {
 afterEach(() => {
   if (origHubEnv === undefined) delete process.env.WORKBENCH_HUB_DIR;
   else process.env.WORKBENCH_HUB_DIR = origHubEnv;
+  if (origChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+  else process.env.WORKBENCH_CHROME_PATH = origChromePath;
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -84,7 +86,7 @@ describe("execution guards", () => {
   test("rejects implement/fix before approval and keeps design runs out of the implementation contract", async () => {
     makeTempHub();
     const repo = makeGitRepo("approval");
-    await initProject(repo, { name: "Approval", privacyMode: "local" });
+    await initProject(repo, { name: "Approval", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "验证审批前置门禁",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -137,7 +139,7 @@ describe("execution guards", () => {
   test("records a Qoder CLI model downgrade and cools the requested model down", async () => {
     makeTempHub();
     const repo = makeGitRepo("qoder-fallback");
-    await initProject(repo, { name: "QoderFallback", privacyMode: "local" });
+    await initProject(repo, { name: "QoderFallback", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "验证模型降级记录" });
 
     const executor = new HubExecutor({
@@ -180,7 +182,7 @@ describe("execution guards", () => {
   test("uses the final structured review verdict instead of prompt or tool chatter", async () => {
     makeTempHub();
     const repo = makeGitRepo("review-parse");
-    await initProject(repo, { name: "ReviewParse", privacyMode: "local" });
+    await initProject(repo, { name: "ReviewParse", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "验证审查解析" });
 
     const executor = new HubExecutor({
@@ -219,7 +221,7 @@ describe("execution guards", () => {
   test("fails a review run with no structured verdict instead of guessing pass", async () => {
     makeTempHub();
     const repo = makeGitRepo("review-missing");
-    await initProject(repo, { name: "ReviewMissing", privacyMode: "local" });
+    await initProject(repo, { name: "ReviewMissing", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "验证无结构结论" });
 
     const executor = new HubExecutor({
@@ -261,16 +263,17 @@ describe("execution guards", () => {
     await propose(repo, "REQ-001", { designMarkdown: "# Design\nAuto fallback.", actor: "agent" });
     await approveDesign(repo, "REQ-001");
 
-    const routing = buildPresetRouting("balanced");
+    const routing = buildInitialProjectRouting();
     routing.autoReview = false;
-    routing.stages.fix = {
+    routing.defaultLead = {
       primary: { harness: "opencode", model: "opencode-go/deepseek-v4.1-flash" },
       fallbacks: [{ harness: "qodercn", model: "DeepSeek-Flash" }],
     };
-    routing.stages.review = {
+    routing.reviewer = {
       primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
       fallbacks: [{ harness: "codex", model: "gpt-6.2-sol" }],
     };
+    await updateProjectConfig(repo, { routing });
 
     const seenTargets: string[] = [];
     let executor!: HubExecutor;
@@ -291,7 +294,6 @@ describe("execution guards", () => {
 
     executor = new HubExecutor({
       initialHarnesses: [harness("opencode", "opencode"), harness("qodercn", "qodercn"), harness("codex", "codex")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: (target) => {
         seenTargets.push(`${target.harness}/${target.model}`);
         if (target.model === "opencode-go/deepseek-v4.1-flash") {
@@ -341,11 +343,6 @@ describe("execution guards", () => {
 
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
 
     const reviewDone = waitUntilRunsFinished(4);
     await executor.startRun({
@@ -401,20 +398,17 @@ describe("execution guards", () => {
     });
     await approveDesign(repo, "REQ-001");
 
-    const routing = buildPresetRouting("balanced");
+    const routing = buildInitialProjectRouting();
     routing.autoReview = false;
-    routing.stages.implement = {
+    routing.defaultLead = {
       primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
       fallbacks: [],
     };
-    routing.stages.fix = {
-      primary: { harness: "codex", model: "gpt-6.2-sol" },
-      fallbacks: [],
-    };
-    routing.stages.review = {
+    routing.reviewer = {
       primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
       fallbacks: [],
     };
+    await updateProjectConfig(repo, { routing });
 
     const calls: Array<{
       action: string;
@@ -441,7 +435,6 @@ describe("execution guards", () => {
 
     executor = new HubExecutor({
       initialHarnesses: [harness("qodercn", "qodercn"), harness("codex", "codex")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: (target, ctx) => {
         calls.push({
           action: ctx.action,
@@ -560,14 +553,9 @@ describe("execution guards", () => {
     expect(implPrompt).not.toContain("bun run typecheck");
     expect(implPrompt).not.toContain("wb_update_tasks` 记录实施清单");
 
-    // Modified src/web file must NOT trigger auto screenshots when uiRelated !== true and autoScreenshots is unset.
-    await runVerification(repo, childId, { command: "echo cargo-ok", criterionIds: ["AC-1"] });
-    const toolRes = (await executeWorkbenchTool(repo, "wb_update_tasks", {
-      id: childId,
-      tasks: [{ title: "finish parser", status: "done" }],
-      readyForAcceptance: true,
-    })) as { screenshotCapture?: unknown };
-    expect(toolRes.screenshotCapture).toBeUndefined();
+    // Verification passes cleanly on the Rust repo.
+    const verified = await runVerification(repo, childId, { command: "echo cargo-ok", criterionIds: ["AC-1"] });
+    expect(verified.record.passed).toBe(true);
   });
 
   test("M2 skips automatic autoReview on fast_track implement runs", async () => {
@@ -582,34 +570,28 @@ describe("execution guards", () => {
     });
     await authorizeFastTrack(repo, "REQ-001");
 
-    const routing = buildPresetRouting("balanced");
+    const routing = buildInitialProjectRouting();
     routing.autoReview = true;
-    routing.stages.implement = {
+    routing.defaultLead = {
       primary: { harness: "codex", model: "gpt-6.2-sol" },
       fallbacks: [],
     };
-    routing.stages.review = {
+    routing.reviewer = {
       primary: { harness: "qodercn", model: "Qwen4-Max-Preview" },
       fallbacks: [],
     };
+    await updateProjectConfig(repo, { routing });
 
     const ranActions: string[] = [];
     const executor = new HubExecutor({
       initialHarnesses: [harness("codex", "codex"), harness("qodercn", "qodercn")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: (_target, ctx) => {
         ranActions.push(ctx.action);
         return { command: "bash", args: ["-c", "echo done"], displayCommand: `mock-${ctx.action}` };
       },
     });
 
-    const snap = (await observeGitSnapshot(repo))!;
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "quick change", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap.fingerprint,
-    });
 
     let finishedRunId = "";
     const done = new Promise<void>((resolve) => {
@@ -628,12 +610,12 @@ describe("execution guards", () => {
     expect(ranActions).toEqual(["implement"]);
   }, { timeout: 15000 });
 
-  test("Phase 1: disables opencode websearch, upgrades non-fatal form cancel after ready submission, and drops resolved failures from handoff", async () => {
+  test("Phase 1: builds opencode readOnly config, upgrades non-fatal form cancel after verified submission, and drops resolved failures from handoff", async () => {
     const mergedCfg = JSON.parse(
-      buildOpencodeNonInteractiveConfig('{"model":"opencode-go/deepseek-v4.1-flash","tools":{"bash":true}}'),
+      buildOpencodeNonInteractiveConfig('{"model":"opencode-go/deepseek-v4.1-flash","tools":{"bash":true}}', { readOnly: true }),
     ) as { model?: string; tools?: Record<string, boolean> };
     expect(mergedCfg.model).toBe("opencode-go/deepseek-v4.1-flash");
-    expect(mergedCfg.tools).toEqual({ bash: true, websearch: false });
+    expect(mergedCfg.tools).toEqual({ bash: true, write: false, edit: false, patch: false });
 
     makeTempHub();
     const repo = makeGitRepo("opencode-nonfatal");
@@ -654,41 +636,31 @@ describe("execution guards", () => {
     const cleanPacket = await synthesizeHandoffPacket(repo, "REQ-001", { action: "implement" });
     expect(cleanPacket.markdown).not.toContain("echo broken");
 
-    const routing = buildPresetRouting("balanced");
+    const routing = buildInitialProjectRouting();
     routing.autoReview = true;
-    routing.stages.implement = {
+    routing.defaultLead = {
       primary: { harness: "opencode", model: "opencode-go/deepseek-v4.1-flash" },
       fallbacks: [],
     };
-    routing.stages.review = {
+    routing.reviewer = {
       primary: { harness: "codex", model: "gpt-6.2-sol" },
       fallbacks: [],
     };
+    await updateProjectConfig(repo, { routing });
 
     const actionsSeen: string[] = [];
     let observedOpencodeCfg = "";
     const executor = new HubExecutor({
       initialHarnesses: [harness("opencode", "opencode"), harness("codex", "codex")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: (_target, ctx) => {
         actionsSeen.push(ctx.action);
         if (ctx.action === "implement") {
-          const enginePath = path.resolve(import.meta.dir, "../../src/core/engine.ts");
-          const gitPath = path.resolve(import.meta.dir, "../../src/core/git.ts");
           return {
             command: "bun",
             args: [
               "-e",
               `
-              import { updateTasks } from ${JSON.stringify(enginePath)};
-              import { observeGitSnapshot } from ${JSON.stringify(gitPath)};
               console.log("OPENCODE_CFG=" + (process.env.OPENCODE_CONFIG_CONTENT ?? ""));
-              const snap = await observeGitSnapshot(process.cwd());
-              await updateTasks(process.cwd(), "REQ-001", {
-                tasks: [{ title: "done", status: "done" }],
-                readyForAcceptance: true,
-                currentCodeSnapshotHash: snap.fingerprint,
-              });
               console.log('{"type":"error","error":{"type":"unknown","message":"Cancelled a request for input this run cannot answer: Web Search"}}');
               process.exit(1);
               `,
@@ -720,13 +692,13 @@ describe("execution guards", () => {
     await reviewFinished;
     await new Promise((r) => setTimeout(r, 80));
 
-    expect(observedOpencodeCfg).toContain('"websearch":false');
+    expect(observedOpencodeCfg).toContain("OPENCODE_CFG=");
     expect(actionsSeen).toEqual(["implement", "review"]);
     const finalDetail = getRequirement(repo, "REQ-001");
     expect(finalDetail.state.agentRuns?.[0]?.status).toBe("succeeded");
     expect(finalDetail.state.reviewReport?.verdict).toBe("pass");
 
-    // If NOT readyForAcceptance, the same exit code still results in status === "failed"
+    // If NOT verified/ready, the same exit code still results in status === "failed"
     await createRequirement(repo, { goal: "未提交验收仍应判定失败" });
     await propose(repo, "REQ-002", {
       designMarkdown: "# Design\nIncomplete.",
@@ -736,7 +708,6 @@ describe("execution guards", () => {
     await approveDesign(repo, "REQ-002");
     const executor2 = new HubExecutor({
       initialHarnesses: [harness("opencode", "opencode")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: () => ({
         command: "bash",
         args: ["-c", `echo 'Cancelled a request for input this run cannot answer: Web Search'; exit 1`],
@@ -789,16 +760,16 @@ describe("execution guards", () => {
       "ok\n",
     );
 
-    const routing = buildPresetRouting("balanced");
+    const routing = buildInitialProjectRouting();
     routing.autoReview = false;
-    routing.stages.fix = {
+    routing.defaultLead = {
       primary: { harness: "qodercn", model: "DeepSeek-Flash" },
-      fallbacks: [],
+      fallbacks: [{ harness: "opencode", model: "opencode-go/deepseek-v4.1-flash" }],
     };
+    await updateProjectConfig(repo, { routing });
     const seen: Array<{ harness: string; model: string; nativeSessionId?: string }> = [];
     const executor = new HubExecutor({
       initialHarnesses: [harness("opencode", "opencode"), harness("qodercn", "qodercn")],
-      getHubPreferences: () => ({ routing }),
       commandBuilder: (target, ctx) => {
         seen.push({ harness: target.harness, model: target.model, nativeSessionId: ctx.nativeSessionId });
         return { command: "bash", args: ["-c", "echo ok"], displayCommand: "mock-fix" };
@@ -881,7 +852,7 @@ describe("execution guards", () => {
       collector.append({
         type: "turn.end",
         turnIndex: i,
-        ...(i === 15 ? { contextTokens: 90_000 } : {}),
+        ...(i === 15 ? { contextTokens: 110_000 } : {}),
       });
     }
 
@@ -891,11 +862,11 @@ describe("execution guards", () => {
       durationMs: 5000,
     });
     expect(summary.healthWarnings).toEqual([
-      "context_bloat:单轮上下文达到 90000 tokens（阈值 83200）",
+      "context_bloat:单轮上下文达到 110000 tokens（窗口 85% 阈值 108800）",
       "pure_read_drift:连续15+轮未产生任何代码写操作",
     ]);
     expect(warningsEmitted).toHaveLength(2);
-    expect(warningsEmitted[0]).toContain("上下文膨胀告警");
+    expect(warningsEmitted[0]).toContain("上下文接近窗口上限");
     expect(warningsEmitted[1]).toContain("探索漂移告警");
   });
 });

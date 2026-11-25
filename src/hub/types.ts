@@ -1,32 +1,28 @@
 import {
   HARNESS_IDS,
   REASONING_EFFORTS,
-  ROUTING_PRESETS,
-  ROUTING_STAGES,
+  ROUTING_ROLES,
   type AgentRunRecord,
   type HarnessId,
   type ModelTarget,
   type OutputLanguage,
   type ReasoningEffort,
+  type RoleRouteRule,
   type RoutingConfig,
-  type RoutingPreset,
-  type RoutingStage,
+  type RoutingRole,
   type RunBillingMode,
-  type StageRouteRule,
 } from "../core/types.ts";
 
 export {
   HARNESS_IDS,
   REASONING_EFFORTS,
-  ROUTING_PRESETS,
-  ROUTING_STAGES,
+  ROUTING_ROLES,
   type HarnessId,
   type ModelTarget,
   type ReasoningEffort,
+  type RoleRouteRule,
   type RoutingConfig,
-  type RoutingPreset,
-  type RoutingStage,
-  type StageRouteRule,
+  type RoutingRole,
 };
 
 export interface DiscoveredModel {
@@ -76,8 +72,6 @@ export interface HubProjectEntry {
   pinned?: boolean;
   /** 用户自定义项目分类标签（如 "前端"、"核心"） */
   category?: string;
-  /** 项目级模型路由缓存（主要用于远程/未初始化项目兜底） */
-  routing?: RoutingConfig;
 }
 
 export interface NodeUpdateStatus {
@@ -121,7 +115,6 @@ export interface HubConfig {
   schemaVersion: 1;
   activeProjectId: string | null;
   projects: HubProjectEntry[];
-  routing: RoutingConfig;
   outputLanguage?: OutputLanguage;
   giteeAccessToken?: string;
   observability?: HubObservabilityConfig;

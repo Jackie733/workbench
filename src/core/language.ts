@@ -66,7 +66,7 @@ export function buildOutputLanguageDirective(
         ? "the code review Markdown body and the JSON `summary` field"
         : scope === "ask"
           ? "your consultation response"
-          : "all human-readable planning and delivery fields (`title`, `spec.md`, `design.md`, `criteria[].description`, `summary`, `tasks[].title/note`, `handoffNote`, review report, and responses)";
+          : "all human-readable planning and delivery fields (`title`, `spec.md`, `design.md`, `criteria[].description`, `summary`, review report, and responses)";
     return [
       "[Mandatory Output Language: English (en)]",
       `- Write ${scopeHint} strictly in clear, concise English.`,
@@ -80,7 +80,7 @@ export function buildOutputLanguageDirective(
       ? "审查报告正文与末尾 JSON 中的 `summary` 字段"
       : scope === "ask"
         ? "问答探讨回复正文"
-        : "所有面向人类阅读的规划与交付字段——包括 `title`、`spec.md`、`design.md`、`criteria[].description`、`summary`、`tasks[].title/note`、`handoffNote`、代码审查报告正文与 `summary`";
+        : "所有面向人类阅读的规划与交付字段——包括 `title`、`spec.md`、`design.md`、`criteria[].description`、`summary`、代码审查报告正文与 `summary`";
 
   return [
     "【强制输出语言规范：简体中文 (zh-CN)】",

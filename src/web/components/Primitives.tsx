@@ -2,7 +2,7 @@ import React from "react";
 import { Lock, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AgentAction } from "../../core/types.ts";
+import type { AgentAction, RequirementTier } from "../../core/types.ts";
 import { t, type UiLanguage } from "../i18n.ts";
 import { cn } from "../lib/utils.ts";
 import { useUiStore } from "../stores/uiStore.ts";
@@ -151,13 +151,13 @@ export function MarkdownView({
 export function RunnerSelect({
   stageAction,
   testId,
-  includeManualCopy = false,
+  tier = "standard",
 }: {
   stageAction: AgentAction;
   testId: string;
-  includeManualCopy?: boolean;
+  tier?: RequirementTier;
 }) {
-  return <ModelRunnerBar stageAction={stageAction} testId={testId} includeManualCopy={includeManualCopy} />;
+  return <ModelRunnerBar stageAction={stageAction} testId={testId} tier={tier} />;
 }
 
 export function ModalShell({

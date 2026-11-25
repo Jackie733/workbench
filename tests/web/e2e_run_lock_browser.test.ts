@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { approveDesign, createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, registerHubProject } from "../../src/hub/registry.ts";
+import { registerHubProject } from "../../src/hub/registry.ts";
 import { recordModelRunOutcome } from "../../src/hub/telemetry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
@@ -264,7 +264,17 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
     process.env.WORKBENCH_HUB_DIR = hubDir;
 
     const repo = initGitRepo();
-    await initProject(repo, { name: "RunLifecycle", privacyMode: "local" });
+    await initProject(repo, {
+      name: "RunLifecycle",
+      privacyMode: "local",
+      routing: {
+        defaultLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        sotaLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        reviewer: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
     await createRequirement(repo, {
       goal: "运行生命周期恢复",
       criteria: [{ id: "AC-1", description: "echo 验证", required: true, command: "echo ok" }],
@@ -548,7 +558,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 12000 });
       await page.waitForSelector('[data-testid="run-lock-hint"]', { timeout: 5000 });
       expect(await disabled('[data-testid="action-run_all_verifications"]')).toBe(true);
-      expect(await page.evaluate(() => (document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "").includes("实施中"))).toBe(
+      expect(await page.evaluate(() => (document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "").includes("研发中"))).toBe(
         true,
       );
 

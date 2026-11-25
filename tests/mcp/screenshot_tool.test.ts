@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { authorizeFastTrack, createRequirement, initProject, recordVerification } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
+import { captureRequirementScreenshots } from "../../src/core/screenshots.ts";
 import { handleMcpMessage } from "../../src/mcp/server.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import type { VerificationRecord } from "../../src/core/types.ts";
@@ -110,29 +111,24 @@ describe("REQ-011 MCP screenshot tool and automatic trigger", () => {
     expect((missingId?.result as { isError: boolean }).isError).toBe(true);
   });
 
-  test("AC-4: auto capture on submit records a skipped batch without blocking acceptance", async () => {
-    const { root, id, snapshot } = await prepareReadyRequirement();
+  test("AC-4: auto capture records a skipped batch without blocking acceptance", async () => {
+    const { root, id } = await prepareReadyRequirement();
     process.env.WORKBENCH_CHROME_PATH = path.join(root, "missing-chrome");
     process.env.WORKBENCH_PUPPETEER_PATH = path.join(root, "missing-puppeteer.js");
 
-    const res = (await executeWorkbenchTool(root, "wb_update_tasks", {
-      id,
-      readyForAcceptance: true,
-    })) as {
-      stage: string;
-      screenshotCapture?: { status: string; reason: string | null; batchId: string | null };
-    };
-    expect(res.stage).toBe("awaiting_acceptance");
-    expect(res.screenshotCapture).toBeTruthy();
-    expect(res.screenshotCapture!.status).toBe("skipped");
-    expect(res.screenshotCapture!.reason).toContain("WORKBENCH_CHROME_PATH");
-    expect(res.screenshotCapture!.batchId).toBeTruthy();
+    const shot = await captureRequirementScreenshots(root, id, {
+      trigger: "auto_submit",
+      actor: "system",
+    });
+    expect(shot.status).toBe("skipped");
+    expect(shot.reason).toContain("WORKBENCH_CHROME_PATH");
+    expect(shot.batch?.id).toBeTruthy();
 
     const detail = (await executeWorkbenchTool(root, "wb_get", { id })) as {
       stage: string;
       screenshotBatches?: Array<{ status: string; skipReason: string | null }>;
     };
-    expect(detail.stage).toBe("awaiting_acceptance");
+    expect(detail.stage).toBe("coding");
     const batches = detail.screenshotBatches ?? [];
     expect(batches).toHaveLength(1);
     expect(batches[0]!.status).toBe("skipped");

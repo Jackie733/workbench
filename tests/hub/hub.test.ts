@@ -11,7 +11,6 @@ import { classifyTier, discoverHarnesses, discoverHarnessesQuick } from "../../s
 import { buildHarnessCommand, HubExecutor, resolveRunTimeouts } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import {
-  applyHubRoutingPreset,
   browseDirectory,
   isAutoRegistrableProjectRoot,
   readHubConfig,
@@ -20,7 +19,7 @@ import {
   setActiveHubProject,
   updateHubProjectMeta,
 } from "../../src/hub/registry.ts";
-import { buildPresetRouting, detectRateLimitOrQuotaError, resolveRouteCandidates } from "../../src/hub/routing.ts";
+import { buildInitialProjectRouting, detectRateLimitOrQuotaError, resolveRouteCandidates } from "../../src/hub/routing.ts";
 import { clearModelCooldown, isModelCoolingDown, recordModelRunOutcome } from "../../src/hub/telemetry.ts";
 import type { HarnessInfo, ModelTarget } from "../../src/hub/types.ts";
 import type { AgentAction } from "../../src/core/types.ts";
@@ -31,6 +30,7 @@ const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
 const origHubPidEnv = process.env.WORKBENCH_HUB_PID;
+const origChromePath = process.env.WORKBENCH_CHROME_PATH;
 let activeTempHub: string | null = null;
 
 function makeTempHub(): string {
@@ -43,6 +43,7 @@ function makeTempHub(): string {
 
 beforeEach(() => {
   makeTempHub();
+  process.env.WORKBENCH_CHROME_PATH = "/nonexistent-chrome-for-test";
 });
 
 function makeGitRepo(name = "repo"): string {
@@ -69,6 +70,8 @@ afterEach(async () => {
   else process.env.WORKBENCH_HUB_PID = origHubPidEnv;
   if (origHubEnv === undefined) delete process.env.WORKBENCH_HUB_DIR;
   else process.env.WORKBENCH_HUB_DIR = origHubEnv;
+  if (origChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+  else process.env.WORKBENCH_CHROME_PATH = origChromePath;
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -361,16 +364,13 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
     expect(omp.models.some((m) => m.id === "opencode-go/deepseek-v4.1-flash")).toBe(true);
   });
 
-  test("applies presets, routing overrides, and rate-limit detection", () => {
+  test("builds 3-role project routing, applies overrides, and detects rate limits", () => {
     makeTempHub();
-    const sota = buildPresetRouting("sota_first");
-    expect(sota.stages.design.primary.model).toBe("gpt-6.2-astra");
-    expect(sota.stages.review.primary.harness).toBe("agy");
+    const initial = buildInitialProjectRouting();
+    expect(initial.sotaLead.primary.model).toBe("gpt-6.2-astra");
+    expect(initial.reviewer.primary.harness).toBe("agy");
 
-    const cfg = applyHubRoutingPreset("quota_saver");
-    expect(cfg.routing.activePreset).toBe("quota_saver");
-
-    const candidates = resolveRouteCandidates(cfg.routing, null, "implement", {
+    const candidates = resolveRouteCandidates(initial, null, "implement", "standard", {
       harness: "qodercn",
       model: "DeepSeek-V4-Pro",
     });
@@ -500,11 +500,11 @@ describe("WB-09 harness discovery and stage-based model routing", () => {
       },
       agy,
     ];
-    const dynamicSota = buildPresetRouting("sota_first", upgradedHarnesses);
-    expect(dynamicSota.stages.design.primary.model).toBe("gpt-7.0-astra");
+    const dynamicRouting = buildInitialProjectRouting(upgradedHarnesses);
+    expect(dynamicRouting.sotaLead.primary.model).toBe("gpt-7.0-astra");
 
-    const legacyRouting = buildPresetRouting("sota_first");
-    legacyRouting.stages.design.primary = { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "high" };
+    const legacyRouting = buildInitialProjectRouting();
+    legacyRouting.defaultLead.primary = { harness: "agy", model: "gemini-4-hydrogen-high", reasoningEffort: "high" };
     const normalizedResolved = resolveRouteCandidates(legacyRouting, upgradedHarnesses, "design");
     expect(normalizedResolved[0]).toEqual({ harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" });
   });
@@ -544,10 +544,14 @@ describe("REQ-013 AGY 启动参数按动作边界构建", () => {
       detectedAt: Date.now(),
     },
   ];
-  const build = (action: AgentAction, nativeSessionId: string | undefined = "conv-1") =>
+  const build = (
+    action: AgentAction,
+    nativeSessionId: string | undefined = "conv-1",
+    allowResumeOnReview = false,
+  ) =>
     buildHarnessCommand(
       { harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" },
-      { root: "/repo", action, prompt: "PROMPT_MARKER", nativeSessionId, harnesses: agyHarnesses },
+      { root: "/repo", action, prompt: "PROMPT_MARKER", nativeSessionId, allowResumeOnReview, harnesses: agyHarnesses },
     );
 
   test("ask 与 review 显式使用计划模式且不自动批准工具", () => {
@@ -564,14 +568,18 @@ describe("REQ-013 AGY 启动参数按动作边界构建", () => {
         "gemini-4-hydrogen-high",
         "--effort",
         "high",
-        "--conversation",
-        "conv-1",
+        ...(action === "ask" ? ["--conversation", "conv-1"] : []),
       ]);
       expect(built.args).not.toContain("--dangerously-skip-permissions");
       expect(built.displayCommand).toBe("agy -p --output-format stream-json --mode plan (model=gemini-4-hydrogen-high)");
       expect(built.displayCommand).not.toContain("PROMPT_MARKER");
       expect(built.displayCommand).not.toContain("conv-1");
     }
+    const rescueBuilt = build("review", "conv-1", true);
+    expect(rescueBuilt.args).toContain("--conversation");
+    expect(rescueBuilt.args).toContain("conv-1");
+    expect(rescueBuilt.args).toContain("--mode");
+    expect(rescueBuilt.args).toContain("plan");
   });
 
   test("design、implement 与 fix 省略模式参数并保留自动批准工具", () => {
@@ -619,7 +627,12 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
   test("executes ask/review/fallback/cancel flows and preserves git ground truth in handoff.md", async () => {
     makeTempHub();
     const repo = makeGitRepo("exec");
-    await initProject(repo, { name: "ExecRepo", privacyMode: "local" });
+    const baseRouting = buildInitialProjectRouting();
+    await initProject(repo, {
+      name: "ExecRepo",
+      privacyMode: "local",
+      routing: { ...baseRouting, autoReview: false, autoHeal: false },
+    });
     registerHubProject(repo);
     await createRequirement(repo, {
       goal: "Add subtraction helper",
@@ -627,11 +640,6 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     });
     await propose(repo, "REQ-001", {
       designMarkdown: "# Design\nAdd `sub(a, b)`.",
-      handoffNote: {
-        keyDecisions: ["Keep pure helper in app.ts"],
-        deadEnds: ["Do not rewrite git.ts"],
-        nextSteps: ["Implement sub helper"],
-      },
       actor: "agent",
     });
     await approveDesign(repo, "REQ-001");
@@ -721,7 +729,7 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     });
     await waitForRunFinished(askStart.run.id);
     const afterAsk = getRequirement(repo, "REQ-001");
-    expect(afterAsk.state.stage).toBe("implementing");
+    expect(afterAsk.state.stage).toBe("coding");
     expect(afterAsk.validity.approval.valid).toBe(true);
     expect(afterAsk.state.discussions?.length).toBe(2);
     expect(afterAsk.state.discussions?.[1]?.actor).toBe("agent");
@@ -741,7 +749,6 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     await waitForRunFinished(run2.run.id);
     expect(seenCommands[1]).toBe("codex:gpt-6-astra:sess-abc123");
     expect(seenPrompts[1]).toContain("同会话原生续接");
-    expect(seenPrompts[1]).not.toContain("Do not rewrite git.ts");
 
     // 3. Rate limit detection + fallback retry switches cleanly and injects handoff.md
     const rlRun = await executor.startRun({
@@ -753,10 +760,9 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     });
     await waitForRunFinished(rlRun.run.id);
     const afterRl = getRequirement(repo, "REQ-001");
-    const lastRun = afterRl.state.agentRuns?.slice(-1)[0];
+    const lastRun = afterRl.state.agentRuns?.find((r) => r.id === rlRun.run.id);
     expect(lastRun?.status).toBe("failed");
     expect(lastRun?.rateLimited).toBe(true);
-    expect(afterRl.handoffMarkdown).toContain("Do not rewrite git.ts");
     expect(afterRl.handoffMarkdown).toContain("app.ts");
 
     const fbRun = await executor.startRun({
@@ -767,7 +773,9 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
     });
     await waitForRunFinished(fbRun.run.id);
     // Fallback did not pick rate-limit-me and saw cross-harness handoff!
-    expect(seenPrompts.slice(-1)[0]).toContain("已证实走不通的死胡同");
+    expect(seenPrompts.slice(-1)[0]).toContain("429 quota exceeded");
+    expect(seenPrompts.slice(-1)[0]).toContain("## 失败与运行现场");
+    expect(seenPrompts.slice(-1)[0]).toContain("app.ts");
 
     // 4. Cross-model review records verdict & goes stale on subsequent code edit
     const revRun = await executor.startRun({
@@ -808,7 +816,7 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
   test("builds valid codex/qodercn CLI flags and parses qodercn stream-json cleanly", async () => {
     makeTempHub();
     const repo = makeGitRepo("stream-repo");
-    await initProject(repo, { name: "StreamRepo", privacyMode: "local" });
+    await initProject(repo, { name: "StreamRepo", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "测试模型命令与流式解析",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -949,7 +957,7 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
   test("passes the Hub process environment, including proxy variables, to agent CLI children", async () => {
     makeTempHub();
     const repo = makeGitRepo("env-repo");
-    await initProject(repo, { name: "EnvRepo", privacyMode: "local" });
+    await initProject(repo, { name: "EnvRepo", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "测试代理环境透传",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -1002,7 +1010,12 @@ describe("WB-10 active executor, two-tier handoff, co-design discussions, and cr
 
     makeTempHub();
     const repo = makeGitRepo("watchdog-repo");
-    await initProject(repo, { name: "WatchdogRepo", privacyMode: "local" });
+    const baseRouting = buildInitialProjectRouting();
+    await initProject(repo, {
+      name: "WatchdogRepo",
+      privacyMode: "local",
+      routing: { ...baseRouting, autoReview: false, autoHeal: false },
+    });
     await createRequirement(repo, {
       goal: "Verify sliding inactivity watchdog",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -1200,7 +1213,26 @@ printf 'done\\n'
 
   async function createBoundaryRepo(): Promise<string> {
     const repo = makeGitRepo("codex-boundary");
-    await initProject(repo, { name: "BoundaryRepo", privacyMode: "local" });
+    await initProject(repo, {
+      name: "BoundaryRepo",
+      privacyMode: "local",
+      routing: {
+        defaultLead: {
+          primary: { harness: "codex", model: CLI_DEFAULT_MODEL },
+          fallbacks: [{ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" }],
+        },
+        sotaLead: {
+          primary: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" },
+          fallbacks: [],
+        },
+        reviewer: {
+          primary: { harness: "codex", model: "codex-auto-review" },
+          fallbacks: [],
+        },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
     await createRequirement(repo, {
       goal: "在原生续接时保持所选模型与推理强度",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -1331,7 +1363,6 @@ printf 'done\\n'
 
   test("spawns the production Codex command with the selected model and effort across resume, model change, and review", async () => {
     makeTempHub();
-    applyHubRoutingPreset("sota_first");
     const repo = await createBoundaryRepo();
     const codeRoot = fs.realpathSync(repo);
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fake-codex-"));
@@ -1451,7 +1482,6 @@ printf 'done\\n'
 
   test("dispatches a deliberate fallback target consistently across argv, response, record, and event", async () => {
     makeTempHub();
-    applyHubRoutingPreset("sota_first");
     const repo = await createBoundaryRepo();
     const codeRoot = fs.realpathSync(repo);
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fake-codex-fallback-"));
@@ -1497,7 +1527,26 @@ printf 'done\\n'
   test("keeps native session isolation for review, cancelled, rate-limited, cross-harness, and fallback runs", async () => {
     makeTempHub();
     const repo = makeGitRepo("iso");
-    await initProject(repo, { name: "IsoRepo", privacyMode: "local" });
+    await initProject(repo, {
+      name: "IsoRepo",
+      privacyMode: "local",
+      routing: {
+        defaultLead: {
+          primary: { harness: "codex", model: SELECTED_MODEL },
+          fallbacks: [{ harness: "qodercn", model: "DeepSeek-V4-Pro" }],
+        },
+        sotaLead: {
+          primary: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" },
+          fallbacks: [{ harness: "qodercn", model: "DeepSeek-V4-Pro" }],
+        },
+        reviewer: {
+          primary: { harness: "codex", model: "codex-auto-review" },
+          fallbacks: [],
+        },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
 
     const seen: string[] = [];
     let sessionSeq = 0;
@@ -1692,21 +1741,27 @@ printf 'done\\n'
     expect(lastDispatch()).toBe("qodercn/DeepSeek-V4-Pro:none");
   }, { timeout: 25000 });
 
-  test("prioritizes an explicit selection over a conflicting preset and cooldown while automatic routing keeps stage semantics", () => {
+  test("prioritizes an explicit selection over project routing and cooldown while automatic routing keeps tier semantics", () => {
     makeTempHub();
-    applyHubRoutingPreset("quota_saver");
     const harnesses = [fakeCodexHarness("codex"), qoderHarness()];
-    const cfg = readHubConfig();
-    expect(cfg.routing.stages.design.primary).toEqual({ harness: "qodercn", model: "Qwen4-Max" });
+    const routing = buildInitialProjectRouting(harnesses);
+    routing.defaultLead = {
+      primary: { harness: "qodercn", model: "DeepSeek-V4-Pro" },
+      fallbacks: [{ harness: "codex", model: SELECTED_MODEL }],
+    };
+    routing.sotaLead = {
+      primary: { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" },
+      fallbacks: [{ harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" }],
+    };
 
-    // Automatic mode keeps action routing semantics: ask maps onto the design stage rule (remapped to available qodercn model).
-    const automatic = resolveRouteCandidates(cfg.routing, harnesses, "ask");
+    // Automatic mode keeps tier routing semantics: ask and design both map to defaultLead on standard tier.
+    const automatic = resolveRouteCandidates(routing, harnesses, "ask", "standard");
     expect(automatic[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro" });
-    expect(resolveRouteCandidates(cfg.routing, harnesses, "design")[0]).toEqual(automatic[0]);
+    expect(resolveRouteCandidates(routing, harnesses, "design", "standard")[0]).toEqual(automatic[0]);
 
     const explicit: ModelTarget = { harness: "codex", model: SELECTED_MODEL, reasoningEffort: "medium" };
-    expect(resolveRouteCandidates(cfg.routing, harnesses, "design", explicit)[0]).toEqual(explicit);
-    expect(resolveRouteCandidates(buildPresetRouting("sota_first"), harnesses, "implement", explicit)[0]).toEqual(explicit);
+    expect(resolveRouteCandidates(routing, harnesses, "design", "standard", explicit)[0]).toEqual(explicit);
+    expect(resolveRouteCandidates(routing, harnesses, "implement", "sota", explicit)[0]).toEqual(explicit);
 
     recordModelRunOutcome({
       harness: "codex",
@@ -1717,17 +1772,16 @@ printf 'done\\n'
       rateLimited: true,
     });
     expect(isModelCoolingDown("codex", SELECTED_MODEL)).toBe(true);
-    expect(resolveRouteCandidates(cfg.routing, harnesses, "design", explicit)[0]).toEqual(explicit);
+    expect(resolveRouteCandidates(routing, harnesses, "design", "standard", explicit)[0]).toEqual(explicit);
 
     // Automatic routing only demotes the cooling model instead of substituting a selection.
-    const sota = buildPresetRouting("sota_first");
-    const cooled = resolveRouteCandidates(sota, harnesses, "design");
+    const cooled = resolveRouteCandidates(routing, harnesses, "design", "sota");
     expect(cooled[0]).toEqual({ harness: "qodercn", model: "DeepSeek-V4-Pro", reasoningEffort: "high" });
     expect(cooled.at(-1)).toEqual({ harness: "codex", model: SELECTED_MODEL, reasoningEffort: "high" });
 
     clearModelCooldown("codex", SELECTED_MODEL);
     expect(isModelCoolingDown("codex", SELECTED_MODEL)).toBe(false);
-    expect(resolveRouteCandidates(sota, harnesses, "design")[0]).toEqual({
+    expect(resolveRouteCandidates(routing, harnesses, "design", "sota")[0]).toEqual({
       harness: "codex",
       model: SELECTED_MODEL,
       reasoningEffort: "high",
@@ -1737,7 +1791,7 @@ printf 'done\\n'
   test("recovers orphaned running agent runs from dead Hub hosts and preserves live-flushed logs", async () => {
     makeTempHub();
     const repo = makeGitRepo("orphan-recovery");
-    await initProject(repo);
+    await initProject(repo, { routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "验证孤儿运行自动回收",
       criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
@@ -1778,7 +1832,7 @@ printf 'done\\n'
   test("streams live agent output to disk log before run finishes", async () => {
     makeTempHub();
     const repo = makeGitRepo("live-disk-log");
-    await initProject(repo);
+    await initProject(repo, { routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "验证运行日志实时落盘",
       criteria: [{ id: "AC-1", description: "ok", command: "echo ok", required: true }],
@@ -1876,12 +1930,12 @@ printf 'done\\n'
     });
     servers.push(server);
 
-    const routingA = buildPresetRouting("sota_first");
-    routingA.stages.design.primary = { harness: "codex", model: "gpt-6-astra", reasoningEffort: "high" };
-    const routingB = buildPresetRouting("quota_saver");
-    routingB.stages.design.primary = { harness: "qodercn", model: "DeepSeek-V4-Pro" };
+    const routingA = buildInitialProjectRouting();
+    routingA.defaultLead.primary = { harness: "codex", model: "gpt-6-astra", reasoningEffort: "high" };
+    const routingB = buildInitialProjectRouting();
+    routingB.defaultLead.primary = { harness: "qodercn", model: "DeepSeek-V4-Pro" };
 
-    const putA = await fetch(`${server.url}/api/hub/routing?project=${encodeURIComponent(pA.id)}`, {
+    const putA = await fetch(`${server.url}/api/project/routing?project=${encodeURIComponent(pA.id)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(routingA),
@@ -1897,37 +1951,33 @@ printf 'done\\n'
 
     // Project metadata on disk stores independent routing configs
     const projMetaA = JSON.parse(fs.readFileSync(path.join(repoA, ".workbench/project.json"), "utf8")) as {
-      routing?: { activePreset?: string; stages?: { design?: { primary?: ModelTarget } } };
+      routing?: { defaultLead?: { primary?: ModelTarget } };
     };
     const projMetaB = JSON.parse(fs.readFileSync(path.join(repoB, ".workbench/project.json"), "utf8")) as {
-      routing?: { activePreset?: string; stages?: { design?: { primary?: ModelTarget } } };
+      routing?: { defaultLead?: { primary?: ModelTarget } };
     };
-    expect(projMetaA.routing?.activePreset).toBe("sota_first");
-    expect(projMetaA.routing?.stages?.design?.primary).toEqual({
+    expect(projMetaA.routing?.defaultLead?.primary).toEqual({
       harness: "codex",
       model: "gpt-6-astra",
       reasoningEffort: "high",
     });
-    expect(projMetaB.routing?.activePreset).toBe("quota_saver");
-    expect(projMetaB.routing?.stages?.design?.primary).toEqual({
+    expect(projMetaB.routing?.defaultLead?.primary).toEqual({
       harness: "qodercn",
       model: "DeepSeek-V4-Pro",
     });
 
-    // Activating project A vs B reflects its own routing in /api/hub/state and /api/project
+    // Activating project A vs B reflects its own routing in /api/project
     await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pA.id)}/activate`, { method: "POST" });
-    const stateA = (await (await fetch(`${server.url}/api/hub/state`)).json()) as {
-      routing: { activePreset: string; stages: { design: { primary: ModelTarget } } };
+    const stateA = (await (await fetch(`${server.url}/api/project`)).json()) as {
+      project: { routing: { defaultLead: { primary: ModelTarget } } };
     };
-    expect(stateA.routing.activePreset).toBe("sota_first");
-    expect(stateA.routing.stages.design.primary.model).toBe("gpt-6-astra");
+    expect(stateA.project.routing.defaultLead.primary.model).toBe("gpt-6-astra");
 
     await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pB.id)}/activate`, { method: "POST" });
-    const stateB = (await (await fetch(`${server.url}/api/hub/state`)).json()) as {
-      routing: { activePreset: string; stages: { design: { primary: ModelTarget } } };
+    const stateB = (await (await fetch(`${server.url}/api/project`)).json()) as {
+      project: { routing: { defaultLead: { primary: ModelTarget } } };
     };
-    expect(stateB.routing.activePreset).toBe("quota_saver");
-    expect(stateB.routing.stages.design.primary.model).toBe("DeepSeek-V4-Pro");
+    expect(stateB.project.routing.defaultLead.primary.model).toBe("DeepSeek-V4-Pro");
 
     // Executor dispatches each project's own routing without cross-project contamination
     const runA = await executor.startRun({ root: repoA, requirementId: "REQ-001", action: "design" });
@@ -1997,8 +2047,8 @@ printf 'done\\n'
         detectedAt: Date.now(),
       },
     ];
-    const customRouting = buildPresetRouting("balanced");
-    customRouting.stages.design.primary = { harness: "agy", model: "gemini-5-neon", reasoningEffort: "high" };
+    const customRouting = buildInitialProjectRouting();
+    customRouting.defaultLead.primary = { harness: "agy", model: "gemini-5-neon", reasoningEffort: "high" };
     const candidates = resolveRouteCandidates(customRouting, builtinHarnesses, "design");
     expect(candidates[0]).toEqual({ harness: "agy", model: "gemini-5-neon", reasoningEffort: "high" });
   });

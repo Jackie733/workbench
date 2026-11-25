@@ -15,6 +15,7 @@ import { HubExecutor } from "../../src/hub/executor.ts";
 import { readRunLedger } from "../../src/hub/ledger.ts";
 import { resolveModelSpec } from "../../src/hub/pricing.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
+import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 import { createHarnessStreamAdapter } from "../../src/hub/stream_adapters.ts";
 import { RunTraceCollector } from "../../src/hub/trace_collector.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
@@ -57,7 +58,7 @@ describe("structured trace hydration, 8MB soft cap, fast-fail fallback, legacy r
   test("writes .events.jsonl + .context.json, supports ?afterSeq= catch-up, and serves legacy runs without trace cleanly", async () => {
     makeTempHub();
     const repo = makeGitRepo("e2e-hyd");
-    await initProject(repo, { name: "HydrationRepo", privacyMode: "local" });
+    await initProject(repo, { name: "HydrationRepo", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "测试结构化轨迹与增量恢复" });
     const reg = registerHubProject(repo, { name: "HydrationRepo" });
 
@@ -248,7 +249,7 @@ describe("structured trace hydration, 8MB soft cap, fast-fail fallback, legacy r
   test("fast-fail retries in plain-text mode when CLI rejects JSON flag (<5s)", async () => {
     makeTempHub();
     const repo = makeGitRepo("fast-fail");
-    await initProject(repo, { name: "FastFail", privacyMode: "local" });
+    await initProject(repo, { name: "FastFail", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "测试 JSON 参数快速回退" });
 
     const fakeCli = path.join(repo, ".mock-codex.sh");

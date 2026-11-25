@@ -3,10 +3,9 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { HarnessInfo } from "../../src/hub/types.ts";
+import type { HarnessInfo, RoutingConfig } from "../../src/hub/types.ts";
 import { createRequirement, initProject } from "../../src/core/engine.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, readHubConfig, writeHubConfig } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
 import { selectUiOption } from "./coss_select_helper.ts";
@@ -57,19 +56,18 @@ function initGitRepo(): string {
 
 async function startScenario(
   harnesses: HarnessInfo[],
-  configure?: () => void,
+  routing?: RoutingConfig,
 ): Promise<{ page: BrowserPage; server: WorkbenchServerHandle; pageErrors: string[]; harnesses: HarnessInfo[] }> {
   const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fav-hub-"));
   tempDirs.push(hubDir);
   process.env.WORKBENCH_HUB_DIR = hubDir;
 
   const repo = initGitRepo();
-  await initProject(repo, { name: "FavRepo", privacyMode: "local" });
+  await initProject(repo, { name: "FavRepo", privacyMode: "local", ...(routing ? { routing } : {}) });
   await createRequirement(repo, {
     goal: "验证模型收藏偏好",
     criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
   });
-  configure?.();
 
   const liveHarnesses = structuredClone(harnesses);
   const executor = new HubExecutor({ initialHarnesses: liveHarnesses });
@@ -119,8 +117,8 @@ async function openRunnerPicker(page: BrowserPage): Promise<void> {
 
 async function openRoutingPicker(page: BrowserPage): Promise<void> {
   await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
-  await clickReady(page, '[data-testid="route-select-design-trigger"]');
-  await page.waitForSelector('[data-testid="route-select-design-search"]', { timeout: 5000 });
+  await clickReady(page, '[data-testid="route-select-defaultLead-trigger"]');
+  await page.waitForSelector('[data-testid="route-select-defaultLead-search"]', { timeout: 5000 });
 }
 
 async function openRoutingStagePicker(page: BrowserPage, stage: string): Promise<void> {
@@ -225,10 +223,13 @@ const suite = HAS_BROWSER ? describe : describe.skip;
 
 suite("REQ-002 模型收藏真实浏览器交互", () => {
   test("工作台与配置弹窗共享收藏、搜索、键盘与持久化，且不改变选择与草稿", async () => {
-    let presetDesign: { harness: string; model: string };
-    const { page, server, pageErrors, harnesses: liveHarnesses } = await startScenario(BASE_HARNESSES, () => {
-      applyHubRoutingPreset("quota_saver");
-      presetDesign = readHubConfig().routing.stages.design.primary;
+    const presetDesign = { harness: "opencode" as const, model: "opencode/deepseek-v4.1-flash-free" };
+    const { page, server, pageErrors, harnesses: liveHarnesses } = await startScenario(BASE_HARNESSES, {
+      defaultLead: { primary: presetDesign, fallbacks: [] },
+      sotaLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+      reviewer: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+      autoReview: false,
+      autoHeal: false,
     });
     expect(HAS_BROWSER).toBe(true);
 
@@ -289,70 +290,70 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const routeDraftBefore = {
-        model: await readSelectValue(page, "route-select-design"),
-        effort: await readSelectValue(page, "route-effort-design"),
+        model: await readSelectValue(page, "route-select-defaultLead"),
+        effort: await readSelectValue(page, "route-effort-defaultLead"),
       };
-      expect(routeDraftBefore.model).toBe(`${presetDesign!.harness}::${presetDesign!.model}`);
+      expect(routeDraftBefore.model).toBe(`${presetDesign.harness}::${presetDesign.model}`);
 
       await openRoutingPicker(page);
       const shared = await page.evaluate(() => ({
         codexFavorited:
           document
-            .querySelector('[data-testid="route-select-design-fav-codex::gpt-6.1-sol"]')
+            .querySelector('[data-testid="route-select-defaultLead-fav-codex::gpt-6.1-sol"]')
             ?.getAttribute("aria-pressed") === "true",
         ompFavorited:
           document
-            .querySelector('[data-testid="route-select-design-fav-omp::gpt-6.1-sol"]')
+            .querySelector('[data-testid="route-select-defaultLead-fav-omp::gpt-6.1-sol"]')
             ?.getAttribute("aria-pressed") === "true",
       }));
       expect(shared).toEqual({ codexFavorited: true, ompFavorited: true });
       expect(
         await page.evaluate(() =>
-          Boolean(document.querySelector('[data-testid="route-select-design-group-opencode"]')),
+          Boolean(document.querySelector('[data-testid="route-select-defaultLead-group-opencode"]')),
         ),
       ).toBe(true);
       expect(
         await page.evaluate(
-          () => document.querySelector('[data-testid="route-select-design-group-opencode"]')?.textContent ?? "",
+          () => document.querySelector('[data-testid="route-select-defaultLead-group-opencode"]')?.textContent ?? "",
         ),
       ).toContain("未安装");
       expect(
         await page.evaluate(
           (key: string) =>
-            document.querySelector(`[data-testid="route-select-design-option-${key}"]`)?.textContent ?? "",
-          `${presetDesign!.harness}::${presetDesign!.model}`,
+            document.querySelector(`[data-testid="route-select-defaultLead-option-${key}"]`)?.textContent ?? "",
+          `${presetDesign.harness}::${presetDesign.model}`,
         ),
       ).toContain("保留");
 
       // 搜索只匹配收藏/普通模型，取消收藏后选择与草稿保持不变
-      await page.type('[data-testid="route-select-design-search"]', "claude-x");
+      await page.type('[data-testid="route-select-defaultLead-search"]', "claude-x");
       await page.waitForFunction(
         () =>
-          Boolean(document.querySelector('[data-testid="route-select-design-option-omp::claude-x"]')) &&
-          !document.querySelector('[data-testid="route-select-design-favorites"]'),
+          Boolean(document.querySelector('[data-testid="route-select-defaultLead-option-omp::claude-x"]')) &&
+          !document.querySelector('[data-testid="route-select-defaultLead-favorites"]'),
         { timeout: 5000 },
       );
       for (let i = 0; i < "claude-x".length; i += 1) await page.keyboard.press("Backspace");
       await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="route-select-design-favorites"]')),
+        () => Boolean(document.querySelector('[data-testid="route-select-defaultLead-favorites"]')),
         { timeout: 5000 },
       );
 
-      await clickReady(page, '[data-testid="route-select-design-fav-codex::gpt-6.1-sol"]');
-      await waitAriaPressed(page, '[data-testid="route-select-design-fav-codex::gpt-6.1-sol"]', false);
+      await clickReady(page, '[data-testid="route-select-defaultLead-fav-codex::gpt-6.1-sol"]');
+      await waitAriaPressed(page, '[data-testid="route-select-defaultLead-fav-codex::gpt-6.1-sol"]', false);
       const routeDraftAfter = {
-        model: await readSelectValue(page, "route-select-design"),
-        effort: await readSelectValue(page, "route-effort-design"),
+        model: await readSelectValue(page, "route-select-defaultLead"),
+        effort: await readSelectValue(page, "route-effort-defaultLead"),
       };
       expect(routeDraftAfter).toEqual(routeDraftBefore);
       expect(await readStoredFavorites(page)).not.toContain("codex::gpt-6.1-sol");
 
       // 收藏配置弹窗中的未安装模型：工作台入口隐藏但记录保留
-      await clickReady(page, '[data-testid="route-select-design-fav-opencode::free-model"]');
-      await waitAriaPressed(page, '[data-testid="route-select-design-fav-opencode::free-model"]', true);
+      await clickReady(page, '[data-testid="route-select-defaultLead-fav-opencode::free-model"]');
+      await waitAriaPressed(page, '[data-testid="route-select-defaultLead-fav-opencode::free-model"]', true);
       await page.keyboard.press("Escape");
       await page.waitForFunction(
-        () => !document.querySelector('[data-testid="route-select-design-search"]'),
+        () => !document.querySelector('[data-testid="route-select-defaultLead-search"]'),
         { timeout: 5000 },
       );
       await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
@@ -515,21 +516,32 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
           detectedAt: Date.now(),
         },
       ],
-      () => {
-        applyHubRoutingPreset("quota_saver");
-        const cfg = readHubConfig();
-        // 设计阶段保存了当前模型已不支持的 xhigh；实现阶段为受支持的 xhigh。
-        cfg.routing.stages.design.primary = {
-          harness: "codex",
-          model: "gpt-6.1-sol",
-          reasoningEffort: "xhigh",
-        };
-        cfg.routing.stages.implement.primary = {
-          harness: "codex",
-          model: "gpt-6-astra",
-          reasoningEffort: "xhigh",
-        };
-        writeHubConfig(cfg);
+      {
+        defaultLead: {
+          primary: {
+            harness: "codex",
+            model: "gpt-6.1-sol",
+            reasoningEffort: "xhigh",
+          },
+          fallbacks: [],
+        },
+        sotaLead: {
+          primary: {
+            harness: "codex",
+            model: "gpt-6-astra",
+            reasoningEffort: "xhigh",
+          },
+          fallbacks: [],
+        },
+        reviewer: {
+          primary: {
+            harness: "codex",
+            model: "gpt-6-astra",
+          },
+          fallbacks: [],
+        },
+        autoReview: false,
+        autoHeal: false,
       },
     );
 
@@ -538,47 +550,47 @@ suite("REQ-002 模型收藏真实浏览器交互", () => {
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
 
-      expect(await readSelectValue(page, "route-select-design")).toBe("codex::gpt-6.1-sol");
-      expect(await readSelectValue(page, "route-select-implement")).toBe("codex::gpt-6-astra");
+      expect(await readSelectValue(page, "route-select-defaultLead")).toBe("codex::gpt-6.1-sol");
+      expect(await readSelectValue(page, "route-select-sotaLead")).toBe("codex::gpt-6-astra");
 
       // 同键点选当前模型：仅关闭面板，不触发变更
-      await openRoutingStagePicker(page, "design");
-      await clickReady(page, '[data-testid="route-select-design-option-codex::gpt-6.1-sol"]');
-      await waitRoutingStagePickerClosed(page, "design");
-      expect(await readSelectValue(page, "route-select-design")).toBe("codex::gpt-6.1-sol");
+      await openRoutingStagePicker(page, "defaultLead");
+      await clickReady(page, '[data-testid="route-select-defaultLead-option-codex::gpt-6.1-sol"]');
+      await waitRoutingStagePickerClosed(page, "defaultLead");
+      expect(await readSelectValue(page, "route-select-defaultLead")).toBe("codex::gpt-6.1-sol");
 
       // 可见菜单选择未安装 Harness 模型；目标不支持 xhigh，强度被清除；保存并重开确认未安装模型已持久化
-      await openRoutingStagePicker(page, "implement");
-      await clickReady(page, '[data-testid="route-select-implement-option-opencode::free-model"]');
-      await waitRoutingStagePickerClosed(page, "implement");
-      expect(await readSelectValue(page, "route-select-implement")).toBe("opencode::free-model");
-      expect(await readSelectValue(page, "route-effort-implement")).toBe("");
+      await openRoutingStagePicker(page, "sotaLead");
+      await clickReady(page, '[data-testid="route-select-sotaLead-option-opencode::free-model"]');
+      await waitRoutingStagePickerClosed(page, "sotaLead");
+      expect(await readSelectValue(page, "route-select-sotaLead")).toBe("opencode::free-model");
+      expect(await readSelectValue(page, "route-effort-sotaLead")).toBe("");
 
-      await clickReady(page, '[data-testid="save-project-btn"]');
+      await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
-      expect(await readSelectValue(page, "route-select-implement")).toBe("opencode::free-model");
-      expect(await readSelectValue(page, "route-effort-implement")).toBe("");
+      expect(await readSelectValue(page, "route-select-sotaLead")).toBe("opencode::free-model");
+      expect(await readSelectValue(page, "route-effort-sotaLead")).toBe("");
 
       // 设置兼容强度后切换到同样支持 high 的模型：强度保留
-      await selectUiOption(page, '[data-testid="route-effort-implement"]', "high");
-      await openRoutingStagePicker(page, "implement");
-      await clickReady(page, '[data-testid="route-select-implement-option-omp::gpt-6.1-sol"]');
-      await waitRoutingStagePickerClosed(page, "implement");
-      expect(await readSelectValue(page, "route-select-implement")).toBe("omp::gpt-6.1-sol");
-      expect(await readSelectValue(page, "route-effort-implement")).toBe("high");
+      await selectUiOption(page, '[data-testid="route-effort-sotaLead"]', "high");
+      await openRoutingStagePicker(page, "sotaLead");
+      await clickReady(page, '[data-testid="route-select-sotaLead-option-omp::gpt-6.1-sol"]');
+      await waitRoutingStagePickerClosed(page, "sotaLead");
+      expect(await readSelectValue(page, "route-select-sotaLead")).toBe("omp::gpt-6.1-sol");
+      expect(await readSelectValue(page, "route-effort-sotaLead")).toBe("high");
 
-      // 保存后确认同键点选未清除设计阶段既有的 xhigh
-      await clickReady(page, '[data-testid="save-project-btn"]');
+      // 保存后确认同键点选未清除 defaultLead 既有的 xhigh
+      await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
       // 重新打开确认可见菜单选择与强度均已持久化
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
-      expect(await readSelectValue(page, "route-select-design")).toBe("codex::gpt-6.1-sol");
-      expect(await readSelectValue(page, "route-select-implement")).toBe("omp::gpt-6.1-sol");
-      expect(await readSelectValue(page, "route-effort-implement")).toBe("high");
+      expect(await readSelectValue(page, "route-select-defaultLead")).toBe("codex::gpt-6.1-sol");
+      expect(await readSelectValue(page, "route-select-sotaLead")).toBe("omp::gpt-6.1-sol");
+      expect(await readSelectValue(page, "route-effort-sotaLead")).toBe("high");
 
       expect(pageErrors).toEqual([]);
     } finally {

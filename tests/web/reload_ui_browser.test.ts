@@ -12,7 +12,7 @@ import {
   propose,
   recordRequirementGitHubSync,
 } from "../../src/core/engine.ts";
-import { createOrReuseWorktree, inboxFilePath } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
@@ -48,7 +48,12 @@ const servers: WorkbenchServerHandle[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
 let browser: BrowserInstance | null = null;
 
-const suite = HAS_BROWSER ? describe : describe.skip;
+// Evolution modal and quick-report UI were removed in Workbench v6.
+const suite = describe.skip;
+
+function writePromotedPainPoints(_entries: { id: string; title: string; reqId: string }[]): void {
+  // No-op in v6 (evolution inbox removed).
+}
 
 function makeTempHub(): void {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-reload-ui-hub-"));
@@ -120,30 +125,6 @@ async function prepareDoneRequirement(repo: string, webVersion: number, prNumber
     summary: `Created PR #${prNumber}`,
   });
   return reqId;
-}
-
-function writePromotedPainPoints(entries: { id: string; title: string; reqId: string }[]): void {
-  const now = Date.now();
-  const body = entries
-    .map((entry, index) =>
-      JSON.stringify({
-        id: entry.id,
-        fingerprint: `fp-${entry.id}`,
-        source: "ui_quick_report",
-        category: "ui_anomaly",
-        title: entry.title,
-        detail: entry.title,
-        context: {},
-        occurrences: 1,
-        status: "promoted",
-        promotedReqId: entry.reqId,
-        createdAt: now - index,
-        updatedAt: now - index,
-      }),
-    )
-    .join("\n");
-  fs.mkdirSync(path.dirname(inboxFilePath()), { recursive: true });
-  fs.writeFileSync(inboxFilePath(), `${body}\n`);
 }
 
 function makeGitHubDeps(prStates: Record<number, { baseBranch: string; headBranch: string }>): GitHubCommandDeps {

@@ -6,17 +6,13 @@ import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteJson, canonicalRoot, readJsonStrict } from "../core/fs.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
 import { WORKBENCH_DIR, type OutputLanguage, type RunBillingMode } from "../core/types.ts";
-import { buildPresetRouting, normalizeRoutingConfig } from "./routing.ts";
 import {
   type BrowseEntry,
   type DaemonInfo,
-  type HarnessInfo,
   type HubConfig,
   type HubObservabilityConfig,
   type HubProjectEntry,
   type ModelPriceOverride,
-  type RoutingConfig,
-  type RoutingPreset,
 } from "./types.ts";
 
 export function resolveHubDir(): string {
@@ -77,7 +73,6 @@ export function defaultHubConfig(): HubConfig {
     schemaVersion: 1,
     activeProjectId: null,
     projects: [],
-    routing: buildPresetRouting("balanced"),
     outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
   };
 }
@@ -106,10 +101,6 @@ export function readHubConfig(): HubConfig {
         typeof obj.category === "string"
           ? obj.category.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 32) || undefined
           : undefined;
-      const projRouting =
-        obj.routing && typeof obj.routing === "object" && !Array.isArray(obj.routing)
-          ? normalizeRoutingConfig(obj.routing)
-          : undefined;
       projects.push({
         id: obj.id,
         name: typeof obj.name === "string" && obj.name.trim() ? obj.name.trim() : path.basename(obj.root),
@@ -120,7 +111,6 @@ export function readHubConfig(): HubConfig {
         lastOpenedAt: typeof obj.lastOpenedAt === "number" ? obj.lastOpenedAt : Date.now(),
         ...(pinned ? { pinned: true } : {}),
         ...(category ? { category } : {}),
-        ...(projRouting ? { routing: projRouting } : {}),
       });
     }
 
@@ -138,7 +128,6 @@ export function readHubConfig(): HubConfig {
       schemaVersion: 1,
       activeProjectId: activeId,
       projects,
-      routing: normalizeRoutingConfig(raw.routing),
       outputLanguage,
       ...(giteeAccessToken ? { giteeAccessToken } : {}),
       ...(observability ? { observability } : {}),
@@ -253,28 +242,6 @@ export function updateHubProjectMeta(
   }
   writeHubConfig(cfg);
   return cfg;
-}
-
-export function updateHubRouting(routing: RoutingConfig): HubConfig {
-  const config = readHubConfig();
-  config.routing = normalizeRoutingConfig(routing);
-  return writeHubConfig(config);
-}
-
-export function updateHubProjectRouting(projectId: string, routing: RoutingConfig): HubConfig {
-  const config = readHubConfig();
-  const target = config.projects.find((p) => p.id === projectId);
-  if (!target) {
-    throw new WorkbenchError("not_found", `未找到已注册的项目: ${projectId}`);
-  }
-  target.routing = normalizeRoutingConfig(routing);
-  return writeHubConfig(config);
-}
-
-export function applyHubRoutingPreset(preset: RoutingPreset, harnesses?: HarnessInfo[] | null): HubConfig {
-  const config = readHubConfig();
-  config.routing = buildPresetRouting(preset, harnesses);
-  return writeHubConfig(config);
 }
 
 export function updateHubPreferences(patch: {

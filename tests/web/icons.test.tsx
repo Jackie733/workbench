@@ -11,7 +11,6 @@ import {
   EVIDENCE_ICONS,
   Icon,
   STAGE_ICONS,
-  TASK_ICONS,
   VERDICT_ICONS,
 } from "../../src/web/components/Icon.tsx";
 import { renderMarkdown } from "../../src/web/render.ts";
@@ -54,6 +53,9 @@ const ALLOWED_GLYPH_LINES: Record<string, RegExp[]> = {
 const EXPECTED_LUCIDE = {
   "Topbar.tsx": [
     "ArrowLeft",
+    "BarChart3",
+    "Laptop",
+    "LogOut",
     "PanelLeftClose",
     "PanelLeftOpen",
     "PanelRightClose",
@@ -61,8 +63,6 @@ const EXPECTED_LUCIDE = {
     "Sun",
     "Moon",
     "Settings",
-    "Sparkles",
-    "Zap",
   ],
   "HubSidebar.tsx": ["Check", "ChevronDown", "ChevronRight", "Folder", "Plus", "Settings", "Star", "X"],
   "HomeView.tsx": [
@@ -83,13 +83,13 @@ const EXPECTED_LUCIDE = {
   ],
   "WorkspaceView.tsx": [
     "AlertTriangle",
-    "Ban",
+    "ArrowUp",
+    "BarChart3",
     "Bug",
     "Check",
     "CheckCircle2",
     "ChevronLeft",
     "ChevronRight",
-    "CircleOff",
     "Columns2",
     "Ellipsis",
     "Eye",
@@ -99,6 +99,7 @@ const EXPECTED_LUCIDE = {
     "FileText",
     "GitBranch",
     "GitCommit",
+    "GitFork",
     "GitMerge",
     "GitPullRequest",
     "History",
@@ -158,18 +159,13 @@ const EXPECTED_LUCIDE = {
     "Zap",
   ],
   "Modals.tsx": [
-    "Activity",
+    "AlertTriangle",
     "ArrowLeft",
     "ArrowUp",
-    "Ban",
-    "BookOpen",
     "Bug",
     "Check",
-    "CircleAlert",
     "CircleHelp",
-    "CircleOff",
     "ClipboardCheck",
-    "Copy",
     "Download",
     "ExternalLink",
     "FileText",
@@ -178,9 +174,11 @@ const EXPECTED_LUCIDE = {
     "FolderPlus",
     "GitBranch",
     "GitCommit",
+    "GitFork",
     "GitPullRequest",
-    "Inbox",
     "Info",
+    "Laptop",
+    "Lightbulb",
     "Link2",
     "ListChecks",
     "MessageSquare",
@@ -190,19 +188,30 @@ const EXPECTED_LUCIDE = {
     "RotateCcw",
     "Save",
     "Send",
+    "Server",
     "Settings",
-    "Sparkles",
-    "Terminal",
     "Trash2",
+    "Wrench",
     "X",
     "XCircle",
     "Zap",
   ],
+  "RoutingSettingsModal.tsx": [
+    "AlertTriangle",
+    "Check",
+    "Folder",
+    "Globe",
+    "Info",
+    "Plus",
+    "RefreshCw",
+    "Save",
+    "Settings",
+    "Trash2",
+    "X",
+  ],
   "Primitives.tsx": ["MessageSquare"],
   "LoginView.tsx": ["AlertTriangle", "KeyRound", "Lock"],
 } as const;
-
-const EXPECTED_LUCIDE_APP = ["Crosshair", "X"] as const;
 
 const EXPECTED_LUCIDE_UI = {
   "ui/ModelPickerMenu.tsx": ["Check", "Search", "Star"],
@@ -272,15 +281,6 @@ describe("shared icon wrapper", () => {
 });
 
 describe("exhaustive status icon maps", () => {
-  test("covers every task status with a real Lucide component", () => {
-    expect([...Object.keys(TASK_ICONS)].sort()).toEqual(["blocked", "done", "in_progress", "pending"]);
-    for (const [status, glyph] of Object.entries(TASK_ICONS)) {
-      const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
-      expect(html).toContain("<svg");
-      expect(html, `status ${status} must stay decorative`).toContain('aria-hidden="true"');
-    }
-  });
-
   test("covers every coverage state with a real Lucide component", () => {
     expect([...Object.keys(COVERAGE_ICONS)].sort()).toEqual(["failed", "passed", "stale", "unavailable", "unverified"]);
     for (const [state, glyph] of Object.entries(COVERAGE_ICONS)) {
@@ -292,14 +292,10 @@ describe("exhaustive status icon maps", () => {
 
   test("covers every stage with a decorative Lucide glyph", () => {
     expect([...Object.keys(STAGE_ICONS)].sort()).toEqual([
-      "awaiting_acceptance",
-      "awaiting_approval",
-      "blocked",
       "cancelled",
-      "designing",
+      "coding",
       "done",
-      "draft",
-      "implementing",
+      "planning",
     ]);
     for (const [stage, glyph] of Object.entries(STAGE_ICONS)) {
       const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
@@ -339,11 +335,11 @@ describe("exhaustive status icon maps", () => {
       "dispatch_fix_review",
       "dispatch_implement",
       "dispatch_review",
+      "escalate_sota",
       "reopen",
       "request_changes",
       "run_all_verifications",
       "sync_base",
-      "unblock",
     ]);
     for (const [action, glyph] of Object.entries(BANNER_ACTION_ICONS)) {
       const html = renderToStaticMarkup(<Icon icon={glyph} size={14} />);
@@ -364,7 +360,7 @@ describe("exhaustive status icon maps", () => {
   test("status metadata carries text labels and no legacy symbols", () => {
     const stateSource = read("src/web/state.ts");
     expect(stateSource).not.toContain("symbol:");
-    for (const label of ["待开始", "进行中", "已完成", "受阻", "通过", "失败", "需重跑", "未验证", "证据不可用"]) {
+    for (const label of ["规划中", "研发中", "已完成", "已取消", "通过", "失败", "需重跑", "未验证", "证据不可用"]) {
       expect(stateSource).toContain(label);
     }
   });
@@ -388,12 +384,6 @@ describe("application icon inventory", () => {
         expect(source, `${file} is missing ${icon}`).toContain(icon);
       }
     }
-    const appSource = read("src/web/app.tsx");
-    expect(appSource, "app.tsx must import from lucide-react").toContain('from "lucide-react"');
-    for (const icon of EXPECTED_LUCIDE_APP) {
-      expect(appSource, `app.tsx is missing ${icon}`).toContain(icon);
-    }
-    expect(appSource).toContain('from "./components/Icon.tsx"');
   });
 
   test("lucide imports are static named imports, never namespace/dynamic imports", () => {
@@ -464,9 +454,8 @@ describe("application icon inventory", () => {
     }
     const primitives = read("src/web/components/Primitives.tsx");
     const modelBar = read("src/web/components/ui/ModelRunnerBar.tsx");
-    const i18n = read("src/web/i18n.ts");
-    expect(modelBar).toContain('"runner.manual"');
-    expect(i18n).toContain("仅生成提示词 (手动复制)");
+    expect(modelBar).toContain('"runner.defaultRoute"');
+    expect(modelBar).not.toContain("manual_copy");
     expect(primitives).not.toContain("📋");
     expect(modelBar).not.toContain("📋");
   });
@@ -570,9 +559,7 @@ describe("shared brand mark and browser icons", () => {
     expect(css).toMatch(rule(".evidence-actions", /flex-wrap:\s*wrap/));
     expect(css).toMatch(rule(".evidence-command", /overflow-wrap:\s*anywhere/));
 
-    // 顶栏连接胶囊保持单行且不被压缩，菜单项保持 flex 单行排版。
-    expect(css).toMatch(rule(".bridge-pill", /white-space:\s*nowrap/));
-    expect(css).toMatch(rule(".bridge-pill", /flex-shrink:\s*0/));
+    // 菜单项保持 flex 单行排版。
     expect(menuSrc).toContain('data-slot="menu-item"');
     expect(menuSrc).toContain("items-center gap-2");
     expect(css).not.toMatch(/\.more-menu button/);

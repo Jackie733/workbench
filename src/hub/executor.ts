@@ -6,60 +6,59 @@ import { discoverProjectContext } from "../core/context.ts";
 import {
   addDiscussion,
   finishAgentRun,
+  getAgentRunContext,
   getProjectStatus,
   getRequirement,
   listRequirements,
-  markDesigning,
-  propose,
   recordReviewReport,
   resolveDiscussions,
   saveAgentRunContext,
   startAgentRun,
-  updateTasks,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
-import { atomicWriteFile, canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
-import { extractMergeConflictContext, observeGitChanges, observeGitSnapshot } from "../core/git.ts";
-import type { ResolvedOutputLanguage } from "../core/language.ts";
-import { runAllVerifications } from "../core/runner.ts";
+import { canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
+import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
-  MAX_DESIGN_BYTES,
   MAX_RUN_LOG_BYTES,
-  MAX_SPEC_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
   type AgentRunRecord,
-  type CriterionInput,
   type OutputLanguage,
   type RequirementDetail,
-  type ReviewFinding,
-  type ReviewVerdict,
   type RunBillingMode,
   type RunContextSnapshot,
   type RunDispatchReason,
   type RunHandoffMode,
   type RunTraceEvent,
 } from "../core/types.ts";
-import { clipHeadTailUtf8, sanitizeOutput, validateMarkdownContent } from "../core/validate.ts";
+import { clipHeadTailUtf8, sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
-import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import {
-  inspectFinishedRunForPainPoints,
-  inspectRsiSandboxDrift,
+  inspectSandboxDrift,
   prepareSandboxConflictResolution,
-  reconcileRsiSandboxBaseline,
+  reconcileSandboxBaseline,
   syncRequirementMirrorToSandbox,
-  type EvolutionPainPoint,
-  type PainPointReportInput,
-} from "./evolution.ts";
+} from "../core/worktree.ts";
+import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
 import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
+import {
+  buildHarnessCommand,
+  buildOpencodeNonInteractiveConfig,
+  ensureWbShim,
+  isSessionExpiredError,
+  NON_FATAL_FORM_CANCEL_RE,
+  resolveRunTimeouts,
+  type BuiltCommand,
+  type CustomCommandBuilder,
+  type TimeoutReason,
+} from "./harness_cmd.ts";
 import { appendRunLedger, type RunLedgerEntry } from "./ledger.ts";
+import { parseReviewOutput, runCodingPostGate, syncDesignRunResult } from "./post_run.ts";
 import { estimateTokens, resolveModelSpec, resolveQuotaPool } from "./pricing.ts";
 import { buildExecutionPrompt } from "./prompt.ts";
-import { readHubConfig, resolveHubDir } from "./registry.ts";
+import { readHubConfig } from "./registry.ts";
 import {
-  buildPresetRouting,
   detectModelUnavailableError,
   detectRateLimitOrQuotaError,
   normalizeRoutingConfig,
@@ -71,12 +70,14 @@ import { RunTraceCollector } from "./trace_collector.ts";
 import type { HarnessId, HarnessInfo, HubObservabilityConfig, ModelTarget, RoutingConfig } from "./types.ts";
 
 export { buildExecutionPrompt } from "./prompt.ts";
-
-export interface BuiltCommand {
-  command: string;
-  args: string[];
-  displayCommand: string;
-}
+export {
+  buildHarnessCommand,
+  buildOpencodeNonInteractiveConfig,
+  resolveRunTimeouts,
+  type BuiltCommand,
+  type CustomCommandBuilder,
+  type TimeoutReason,
+} from "./harness_cmd.ts";
 
 export interface RunExecutorEvent {
   type:
@@ -131,13 +132,14 @@ export interface StartRunInput {
   autoFallbackAttempt?: number;
   autoHealAttempt?: number;
   forcePlainText?: boolean;
+  forceFreshSession?: boolean;
+  reviewFormatRescue?: { sessionId: string; harness: HarnessId; model: string; reasoningEffort?: ModelTarget["reasoningEffort"] };
+  dispatchReasonOverride?: RunDispatchReason;
   isAutoReview?: boolean;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   resolveConflict?: boolean;
 }
-
-export type TimeoutReason = "idle" | "max_duration";
 
 interface ActiveJob {
   runId: string;
@@ -163,469 +165,15 @@ interface ActiveJob {
   killTimer?: ReturnType<typeof setTimeout>;
 }
 
-const ACTION_TIMEOUT_DEFAULTS: Record<AgentAction, { idleTimeoutMs: number; maxDurationMs: number }> = {
-  ask: { idleTimeoutMs: 5 * 60_000, maxDurationMs: 20 * 60_000 },
-  design: { idleTimeoutMs: 10 * 60_000, maxDurationMs: 60 * 60_000 },
-  review: { idleTimeoutMs: 10 * 60_000, maxDurationMs: 60 * 60_000 },
-  implement: { idleTimeoutMs: 15 * 60_000, maxDurationMs: 2 * 60 * 60_000 },
-  fix: { idleTimeoutMs: 15 * 60_000, maxDurationMs: 2 * 60 * 60_000 },
-};
-
-/** Resolves sliding inactivity watchdog and protective wall-clock ceiling for a run. */
-export function resolveRunTimeouts(
-  action: AgentAction,
-  overrides: { timeoutMs?: number; idleTimeoutMs?: number } = {},
-): { idleTimeoutMs: number; maxDurationMs: number } {
-  const defaults = ACTION_TIMEOUT_DEFAULTS[action] ?? ACTION_TIMEOUT_DEFAULTS.implement;
-  const maxDurationMs =
-    typeof overrides.timeoutMs === "number" && Number.isFinite(overrides.timeoutMs) && overrides.timeoutMs > 0
-      ? Math.floor(overrides.timeoutMs)
-      : defaults.maxDurationMs;
-  const rawIdle =
-    typeof overrides.idleTimeoutMs === "number" && Number.isFinite(overrides.idleTimeoutMs) && overrides.idleTimeoutMs > 0
-      ? Math.floor(overrides.idleTimeoutMs)
-      : Math.min(defaults.idleTimeoutMs, maxDurationMs);
-  return {
-    idleTimeoutMs: Math.min(rawIdle, maxDurationMs),
-    maxDurationMs,
-  };
-}
-
-export type CustomCommandBuilder = (
-  target: ModelTarget,
-  ctx: {
-    root: string;
-    requirementId: string;
-    action: AgentAction;
-    prompt: string;
-    nativeSessionId?: string;
-    harnesses: HarnessInfo[];
-    structuredJson?: boolean;
-  },
-) => BuiltCommand;
-
-function ensureWbShim(cliEntryPath: string): string {
-  const binDir = path.join(resolveHubDir(), "bin");
-  fs.mkdirSync(binDir, { recursive: true, mode: 0o755 });
-  const shimPath = path.join(binDir, "wb");
-  const content = `#!/usr/bin/env bash\nexec bun run ${JSON.stringify(cliEntryPath)} "$@"\n`;
-  if (!fs.existsSync(shimPath) || fs.readFileSync(shimPath, "utf8") !== content) {
-    atomicWriteFile(shimPath, content, 0o755);
-  }
-  return binDir;
-}
-
-const QODER_PRINT_MODE_GUARD =
-  "Non-interactive -p print mode: NEVER run Bash/shell commands in the background (never set run_in_background=true, never trail commands with &), and NEVER end your turn waiting for a background notification (ending the turn immediately exits the CLI and kills running child processes). Execute checks synchronously and output the complete final response in this turn.";
-
-const NON_FATAL_FORM_CANCEL_RE = /Cancelled a request for input this run cannot answer:/i;
-
-/** Builds OPENCODE_CONFIG_CONTENT disabling interactive-form tools (such as websearch) in headless runs. */
-export function buildOpencodeNonInteractiveConfig(existingRaw?: string): string {
-  let baseObj: Record<string, unknown> = {};
-  if (existingRaw?.trim()) {
-    try {
-      const parsed = JSON.parse(existingRaw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        baseObj = { ...(parsed as Record<string, unknown>) };
-      }
-    } catch {
-      // Ignore malformed inherited JSON and enforce non-interactive tool policy cleanly.
-    }
-  }
-  const existingTools =
-    baseObj.tools && typeof baseObj.tools === "object" && !Array.isArray(baseObj.tools)
-      ? (baseObj.tools as Record<string, unknown>)
-      : {};
-  return JSON.stringify({
-    ...baseObj,
-    tools: {
-      ...existingTools,
-      websearch: false,
-    },
-  });
-}
-
-export function buildHarnessCommand(
-  target: ModelTarget,
-  ctx: {
-    root: string;
-    action: AgentAction;
-    prompt: string;
-    nativeSessionId?: string;
-    harnesses: HarnessInfo[];
-    structuredJson?: boolean;
-  },
-): BuiltCommand {
-  const info = ctx.harnesses.find((h) => h.id === target.harness);
-  const exe = info?.executable;
-  const model = target.model;
-  const effort = target.reasoningEffort;
-  const structuredJson = ctx.structuredJson !== false;
-
-  switch (target.harness) {
-    case "codex": {
-      const bin = exe || "codex";
-      const isReadOnly = ctx.action === "ask" || ctx.action === "review";
-      const modelFlags = model && model !== "default" ? ["-m", model] : [];
-      const effortFlags = effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : [];
-      const summarySelection = `(model=${model}${effort ? `, effort=${effort}` : ""})`;
-
-      if (ctx.nativeSessionId && ctx.action !== "review") {
-        // Preserve model, reasoning effort, and bypass/read-only sandbox flags across native resume.
-        const resumeSafetyFlags = isReadOnly
-          ? ["-c", 'sandbox_mode="read-only"']
-          : ["--dangerously-bypass-approvals-and-sandbox"];
-        const args = [
-          "exec",
-          "resume",
-          ...(structuredJson ? ["--json"] : []),
-          "--skip-git-repo-check",
-          ...modelFlags,
-          ...effortFlags,
-          ...resumeSafetyFlags,
-          ctx.nativeSessionId,
-          ctx.prompt,
-        ];
-        return {
-          command: bin,
-          args,
-          displayCommand: `${bin} exec resume ${structuredJson ? "--json " : ""}${ctx.nativeSessionId} ${summarySelection}`,
-        };
-      }
-      const safetyFlags = isReadOnly ? ["-s", "read-only"] : ["--dangerously-bypass-approvals-and-sandbox"];
-      const args = [
-        "exec",
-        ...(structuredJson ? ["--json"] : []),
-        "-C",
-        ctx.root,
-        "--skip-git-repo-check",
-        ...modelFlags,
-        ...effortFlags,
-        ...safetyFlags,
-        ctx.prompt,
-      ];
-      return {
-        command: bin,
-        args,
-        displayCommand: `${bin} exec ${structuredJson ? "--json " : ""}-C ${ctx.root} ${safetyFlags.join(" ")} ${summarySelection}`,
-      };
-    }
-
-    case "qodercn": {
-      const bin = exe || "qodercn";
-      const isReadOnly = ctx.action === "ask" || ctx.action === "review";
-      const modelInfo = info?.models.find((m) => m.id === model);
-      const effortAllowed =
-        model !== "Auto" &&
-        model !== "Fast" &&
-        (!modelInfo?.supportedEfforts || modelInfo.supportedEfforts.length > 0) &&
-        !modelInfo?.effortLocked;
-      // Execution stages skip per-command remote permission checks; read-only stages keep auto mode.
-      const permissionFlags = isReadOnly ? ["--permission-mode", "auto"] : ["--dangerously-skip-permissions"];
-      const args = [
-        "-w",
-        ctx.root,
-        ...(structuredJson ? ["-o", "stream-json"] : []),
-        ...permissionFlags,
-        "--append-system-prompt",
-        QODER_PRINT_MODE_GUARD,
-        ...(model && model !== "default" && model !== "Auto" ? ["-m", model] : []),
-        ...(effort && effortAllowed ? ["--reasoning-effort", effort] : []),
-        ...(ctx.nativeSessionId && ctx.action !== "review" ? ["-r", ctx.nativeSessionId] : []),
-        "-p",
-        ctx.prompt,
-      ];
-      return {
-        command: bin,
-        args,
-        displayCommand: `${bin} -p${structuredJson ? " -o stream-json" : ""} ${permissionFlags.join(" ")} -m ${model}${ctx.nativeSessionId && ctx.action !== "review" ? ` -r ${ctx.nativeSessionId}` : ""}`,
-      };
-    }
-
-    case "opencode": {
-      const bin = exe || "opencode";
-      const args = [
-        "run",
-        ...(structuredJson ? ["--format", "json"] : []),
-        "--standalone",
-        "--auto",
-        ...(model && model !== "default" ? ["--model", model] : []),
-        ...(effort && effort !== "minimal" ? ["--thinking"] : []),
-        ...(ctx.nativeSessionId ? ["--session", ctx.nativeSessionId] : []),
-        ctx.prompt,
-      ];
-      return {
-        command: bin,
-        args,
-        displayCommand: `${bin} run${structuredJson ? " --format json" : ""} --standalone --model ${model}`,
-      };
-    }
-
-    case "agy": {
-      const bin = exe || "agy";
-      // Only read-only stages pin plan mode; execution stages let AGY resolve its configured mode
-      // so hosts without a terminal sandbox no longer get an explicitly requested auto mode.
-      const usePlanMode = ctx.action === "ask" || ctx.action === "review";
-      const modelInfo =
-        info?.models.find((m) => m.id === model) ??
-        info?.models.find((m) => m.effortVariants && Object.values(m.effortVariants).includes(model));
-      const agyEffortRaw =
-        effort && (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max")
-          ? effort
-          : undefined;
-      let resolvedModel = model;
-      let resolvedEffort = agyEffortRaw;
-      if (modelInfo?.effortVariants) {
-        const targetEff = resolvedEffort ?? modelInfo.defaultEffort;
-        if (targetEff && modelInfo.effortVariants[targetEff]) {
-          resolvedModel = modelInfo.effortVariants[targetEff]!;
-          resolvedEffort =
-            targetEff === "low" || targetEff === "medium" || targetEff === "high" || targetEff === "xhigh" || targetEff === "max"
-              ? targetEff
-              : resolvedEffort;
-        } else if (modelInfo.defaultEffort && modelInfo.effortVariants[modelInfo.defaultEffort]) {
-          resolvedModel = modelInfo.effortVariants[modelInfo.defaultEffort]!;
-        } else {
-          const firstVariant = Object.values(modelInfo.effortVariants)[0];
-          if (firstVariant) resolvedModel = firstVariant;
-        }
-      } else if (modelInfo?.effortLocked) {
-        resolvedEffort =
-          modelInfo.defaultEffort &&
-          (modelInfo.defaultEffort === "low" ||
-            modelInfo.defaultEffort === "medium" ||
-            modelInfo.defaultEffort === "high" ||
-            modelInfo.defaultEffort === "xhigh" ||
-            modelInfo.defaultEffort === "max")
-            ? modelInfo.defaultEffort
-            : undefined;
-      } else if (modelInfo?.supportedEfforts && modelInfo.supportedEfforts.length === 0) {
-        resolvedEffort = undefined;
-      }
-
-      const modeFlags = usePlanMode ? ["--mode", "plan"] : [];
-      const permissionFlags = usePlanMode ? [] : ["--dangerously-skip-permissions"];
-      const args = [
-        "-p",
-        ctx.prompt,
-        ...(structuredJson ? ["--output-format", "stream-json"] : []),
-        ...modeFlags,
-        ...permissionFlags,
-        ...(resolvedModel && resolvedModel !== "default" ? ["--model", resolvedModel] : []),
-        ...(resolvedEffort ? ["--effort", resolvedEffort] : []),
-        ...(ctx.nativeSessionId ? ["--conversation", ctx.nativeSessionId] : []),
-      ];
-      return {
-        command: bin,
-        args,
-        displayCommand: `${bin} -p${structuredJson ? " --output-format stream-json" : ""}${usePlanMode ? " --mode plan" : ""} (model=${resolvedModel})`,
-      };
-    }
-
-    case "omp": {
-      const bin = exe || "omp";
-      const args = [
-        "-p",
-        ...(structuredJson ? ["--mode=json"] : []),
-        `--cwd=${ctx.root}`,
-        ...(model && model !== "default" ? [`--model=${model}`] : []),
-        ...(effort ? [`--thinking=${effort}`] : []),
-        ...(ctx.nativeSessionId ? [`--resume=${ctx.nativeSessionId}`] : []),
-        ctx.prompt,
-      ];
-      return {
-        command: bin,
-        args,
-        displayCommand: `${bin} -p${structuredJson ? " --mode=json" : ""} --model=${model}`,
-      };
-    }
-  }
-}
-
-function parseReviewFindings(rawFindings: unknown): ReviewFinding[] | undefined {
-  if (!Array.isArray(rawFindings) || rawFindings.length === 0) return undefined;
-  const out: ReviewFinding[] = [];
-  for (let idx = 0; idx < rawFindings.length && out.length < 50; idx++) {
-    const item = rawFindings[idx];
-    if (!item || typeof item !== "object") continue;
-    const obj = item as Record<string, unknown>;
-    const rawTitle = typeof obj.title === "string" ? sanitizeOutput(obj.title.trim(), 380).text.trim() : "";
-    if (!rawTitle) continue;
-    const sev = obj.severity === "high" || obj.severity === "medium" || obj.severity === "low" ? obj.severity : "medium";
-    const id =
-      typeof obj.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(obj.id.trim())
-        ? obj.id.trim()
-        : `F-${out.length + 1}`;
-    const detail =
-      typeof obj.detail === "string" && obj.detail.trim()
-        ? sanitizeOutput(obj.detail.trim(), 1800).text.trim()
-        : undefined;
-    const suggestion =
-      typeof obj.suggestion === "string" && obj.suggestion.trim()
-        ? sanitizeOutput(obj.suggestion.trim(), 1400).text.trim()
-        : undefined;
-    const criterionIds = Array.isArray(obj.criterionIds)
-      ? obj.criterionIds
-          .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(c.trim()))
-          .map((c) => c.trim())
-          .slice(0, 16)
-      : undefined;
-    const files = Array.isArray(obj.files)
-      ? obj.files
-          .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
-          .map((f) => sanitizeOutput(f.trim(), 480).text.trim())
-          .filter(Boolean)
-          .slice(0, 16)
-      : undefined;
-    out.push({
-      id,
-      severity: sev,
-      title: rawTitle,
-      ...(detail ? { detail } : {}),
-      ...(criterionIds && criterionIds.length > 0 ? { criterionIds } : {}),
-      ...(files && files.length > 0 ? { files } : {}),
-      ...(suggestion ? { suggestion } : {}),
-    });
-  }
-  return out.length > 0 ? out : undefined;
-}
-
-function parseReviewOutput(
-  rawOutput: string,
-): { verdict: ReviewVerdict; summary: string; markdown: string; findings?: ReviewFinding[] } | null {
-  const clean = sanitizeOutput(rawOutput, 256 * 1024).text.trim();
-  if (!clean) return null;
-  const jsonBlocks = Array.from(clean.matchAll(/```json\s*([\s\S]*?)```/gi));
-  for (let i = jsonBlocks.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(jsonBlocks[i]![1]!) as { verdict?: string; summary?: string; findings?: unknown };
-      if (parsed.verdict === "pass" || parsed.verdict === "concern" || parsed.verdict === "block") {
-        const findings = parseReviewFindings(parsed.findings);
-        return {
-          verdict: parsed.verdict,
-          summary: parsed.summary?.trim() || `审查结论：${parsed.verdict}`,
-          markdown: clean,
-          ...(findings ? { findings } : {}),
-        };
-      }
-    } catch {
-      // Try an earlier block.
-    }
-  }
-  // Accept a bare JSON verdict object at the tail; never guess from prose or tool chatter.
-  const bareMatches = Array.from(
-    clean.slice(-8192).matchAll(/\{[^{}]*"verdict"\s*:\s*"(pass|concern|block)"[^{}]*\}/g),
-  );
-  const bare = bareMatches.pop();
-  if (bare) {
-    try {
-      const parsed = JSON.parse(bare[0]) as { verdict: ReviewVerdict; summary?: string };
-      return {
-        verdict: parsed.verdict,
-        summary: parsed.summary?.trim() || `审查结论：${parsed.verdict}`,
-        markdown: clean,
-      };
-    } catch {
-      // Malformed bare object.
-    }
-  }
-  return null;
-}
-
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
 const MAX_AUTO_HEAL_ATTEMPTS = 2;
 const globalActiveRunIds = new Set<string>();
 
-/** Allows continuous native session reuse without artificial token/turn cutoffs; CLIs handle auto-compaction natively. */
 function isHealthyForNativeResume(candidate: AgentRunRecord | null | undefined): boolean {
   if (!candidate || !candidate.nativeSessionId) return false;
   if (candidate.status === "cancelled" || candidate.rateLimited) return false;
   if (candidate.errorSummary?.includes("模型不可用")) return false;
   return true;
-}
-
-function readDiskDesignCandidate(
-  base: string,
-  codeRoot: string,
-  id: string,
-  latestReq: RequirementDetail,
-  preSpecMarkdown: string,
-  preDesignMarkdown: string,
-): { specMarkdown: string; designMarkdown: string; criteria?: CriterionInput[]; criteriaPaths: string[] } | null {
-  const itemRel = `${WORKBENCH_DIR}/items/${id}`;
-  const readOpt = (rootDir: string, rel: string, maxBytes: number): string | null => {
-    try {
-      const full = resolveSafePath(rootDir, rel);
-      if (!fs.existsSync(full)) return null;
-      return readBoundedText(full, maxBytes);
-    } catch {
-      return null;
-    }
-  };
-  const criteriaPaths = new Set<string>();
-  const parseCriteriaFile = (rootDir: string): CriterionInput[] | undefined => {
-    const raw = readOpt(rootDir, `${itemRel}/criteria.json`, 64 * 1024);
-    if (!raw) return undefined;
-    try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
-      const valid: CriterionInput[] = [];
-      for (const entry of parsed.slice(0, 32)) {
-        if (!entry || typeof entry !== "object") continue;
-        const obj = entry as Record<string, unknown>;
-        if (typeof obj.description !== "string" || !obj.description.trim()) continue;
-        valid.push({
-          ...(typeof obj.id === "string" && obj.id.trim() ? { id: obj.id.trim() } : {}),
-          description: obj.description.trim(),
-          ...(typeof obj.required === "boolean" ? { required: obj.required } : {}),
-          ...(typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
-        });
-      }
-      if (valid.length > 0) {
-        criteriaPaths.add(resolveSafePath(rootDir, `${itemRel}/criteria.json`));
-        return valid;
-      }
-      return undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
-  let specMarkdown = latestReq.specMarkdown;
-  let designMarkdown = latestReq.designMarkdown;
-  let criteria = parseCriteriaFile(base);
-
-  if (codeRoot !== base) {
-    if (latestReq.specMarkdown === preSpecMarkdown) {
-      const mirrorSpec = readOpt(codeRoot, `${itemRel}/spec.md`, MAX_SPEC_BYTES);
-      if (mirrorSpec !== null && mirrorSpec !== preSpecMarkdown) specMarkdown = mirrorSpec;
-    }
-    if (latestReq.designMarkdown === preDesignMarkdown) {
-      const mirrorDesign = readOpt(codeRoot, `${itemRel}/design.md`, MAX_DESIGN_BYTES);
-      if (mirrorDesign !== null && mirrorDesign !== preDesignMarkdown) designMarkdown = mirrorDesign;
-    }
-    const mirrorCriteria = parseCriteriaFile(codeRoot);
-    if (!criteria && mirrorCriteria) criteria = mirrorCriteria;
-  }
-
-  const sanitizedSpec = validateMarkdownContent(specMarkdown, "spec", true);
-  const sanitizedDesign = validateMarkdownContent(designMarkdown, "design", true);
-  const changedFromBaseline =
-    sanitizedSpec !== preSpecMarkdown ||
-    sanitizedDesign !== preDesignMarkdown ||
-    criteria !== undefined ||
-    (sanitizedDesign.trim().length > 0 &&
-      (latestReq.state.stage === "draft" || latestReq.state.stage === "designing"));
-  if (!changedFromBaseline || !sanitizedDesign.trim()) {
-    return null;
-  }
-  return {
-    specMarkdown: sanitizedSpec,
-    designMarkdown: sanitizedDesign,
-    ...(criteria ? { criteria } : {}),
-    criteriaPaths: [...criteriaPaths],
-  };
 }
 
 export type TelemetryOutcomeInput = Parameters<typeof recordModelRunOutcome>[0];
@@ -639,19 +187,16 @@ export class HubExecutor {
   private readonly cliEntryPath: string;
   private readonly commandBuilder?: CustomCommandBuilder;
   private readonly getHubPreferences?: () => {
-    routing?: RoutingConfig;
     outputLanguage?: OutputLanguage;
     observability?: HubObservabilityConfig;
   };
   private readonly onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
-  private readonly onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
   private readonly onLedgerEntry?: (entry: RunLedgerEntry) => void;
   private readonly nodeId?: string;
   private readonly hasCustomInitialHarnesses: boolean;
   private readonly discoverQuickFn: () => HarnessInfo[];
   private readonly discoverFullFn: (signal?: AbortSignal) => Promise<HarnessInfo[]>;
   private cachedHarnesses: HarnessInfo[] | null = null;
-  private cachedHarnessesAt = 0;
   private lastFullRefreshAt = 0;
   private cachedCatalogFingerprint = "";
   private inFlightRefresh: Promise<HarnessInfo[]> | null = null;
@@ -664,12 +209,10 @@ export class HubExecutor {
     discoverQuick?: () => HarnessInfo[];
     discoverFull?: (signal?: AbortSignal) => Promise<HarnessInfo[]>;
     getHubPreferences?: () => {
-      routing?: RoutingConfig;
       outputLanguage?: OutputLanguage;
       observability?: HubObservabilityConfig;
     };
     onTelemetryOutcome?: (outcome: TelemetryOutcomeInput) => void;
-    onPainPoint?: (input: PainPointReportInput) => EvolutionPainPoint | null;
     onLedgerEntry?: (entry: RunLedgerEntry) => void;
     nodeId?: string;
   } = {}) {
@@ -679,13 +222,11 @@ export class HubExecutor {
     this.discoverFullFn = options.discoverFull ?? ((signal) => discoverHarnesses({ signal }));
     this.getHubPreferences = options.getHubPreferences;
     this.onTelemetryOutcome = options.onTelemetryOutcome;
-    this.onPainPoint = options.onPainPoint;
     this.onLedgerEntry = options.onLedgerEntry;
     this.nodeId = options.nodeId;
     this.hasCustomInitialHarnesses = Boolean(options.initialHarnesses);
     if (options.initialHarnesses) {
       this.cachedHarnesses = options.initialHarnesses;
-      this.cachedHarnessesAt = Date.now();
       this.lastFullRefreshAt = Date.now();
     }
   }
@@ -732,7 +273,6 @@ export class HubExecutor {
         }
         const now = Date.now();
         this.cachedHarnesses = full;
-        this.cachedHarnessesAt = now;
         this.lastFullRefreshAt = now;
         this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
         if (this.harnessesSignature(full) !== prevSig) {
@@ -763,7 +303,6 @@ export class HubExecutor {
     }
     if (!this.cachedHarnesses) {
       this.cachedHarnesses = this.discoverQuickFn();
-      this.cachedHarnessesAt = Date.now();
       this.cachedCatalogFingerprint = getLocalCatalogFingerprint();
       if (!quickOnly && !this.hasCustomInitialHarnesses) {
         void this.runFullHarnessRefresh().catch(() => {});
@@ -781,22 +320,22 @@ export class HubExecutor {
     return this.cachedHarnesses;
   }
 
-  private resolveEffectiveRouting(projectRoot: string, harnesses?: HarnessInfo[] | null): RoutingConfig {
-    try {
-      const status = getProjectStatus(projectRoot);
-      if (status.initialized && status.project?.routing) {
-        return normalizeRoutingConfig(status.project.routing);
-      }
-    } catch {
-      // Fallback if project metadata is unreadable.
+  /**
+   * Strict project-scoped routing resolution (Zero Global Fallback).
+   * Runtime reads ONLY `.workbench/project.json`'s `routing` field.
+   */
+  private resolveProjectRouting(projectRoot: string): RoutingConfig {
+    const status = getProjectStatus(projectRoot);
+    if (!status.initialized || !status.project) {
+      throw new WorkbenchError("not_initialized", "项目尚未初始化 .workbench/，请先执行初始化");
     }
-    const prefs = this.getHubPreferences?.();
-    if (prefs?.routing) return normalizeRoutingConfig(prefs.routing);
-    try {
-      return normalizeRoutingConfig(readHubConfig().routing);
-    } catch {
-      return buildPresetRouting("balanced", harnesses);
+    if (!status.project.routing) {
+      throw new WorkbenchError(
+        "invalid_input",
+        "项目尚未配置模型路由（.workbench/project.json 缺少 routing），请在项目路由设置中保存配置",
+      );
     }
+    return normalizeRoutingConfig(status.project.routing);
   }
 
   getActiveRuns(root?: string): Array<AgentRunRecord & { requirementId: string; root?: string }> {
@@ -854,34 +393,33 @@ export class HubExecutor {
 
     for (const job of this.activeJobs.values()) {
       if (job.root === base && job.requirementId === id) {
-        throw new WorkbenchError("revision_conflict", `${id} 当前已有正在执行的 Agent 任务（${job.target.harness}/${job.target.model}），请等待完成或先终止`);
+        throw new WorkbenchError(
+          "revision_conflict",
+          `${id} 当前已有正在执行的 Agent 任务（${job.target.harness}/${job.target.model}），请等待完成或先终止`,
+        );
       }
     }
 
     const prefs = this.getHubPreferences?.();
     const harnesses = await this.getHarnesses(false);
-    const activeRouting = this.resolveEffectiveRouting(base, harnesses);
-    const cfg = prefs?.outputLanguage !== undefined || prefs?.observability !== undefined ? null : readHubConfig();
+    const activeRouting = this.resolveProjectRouting(base);
+    const cfg = prefs?.outputLanguage !== undefined && prefs?.observability !== undefined ? null : readHubConfig();
     const hubOutputLanguage = prefs?.outputLanguage ?? cfg?.outputLanguage;
-    let observability = prefs?.observability ?? cfg?.observability;
-    if (!observability && prefs?.routing) {
-      try {
-        observability = readHubConfig().observability;
-      } catch {
-        observability = undefined;
-      }
-    }
+    const observability = prefs?.observability ?? cfg?.observability;
+
     const codeRoot = resolveCodeRoot(base, id);
-    let currentDetail = getRequirement(base, id, { currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null });
-    if (input.action === "fix" && input.resolveConflict && (currentDetail.state.stage === "done" || currentDetail.state.stage === "awaiting_acceptance")) {
+    let currentDetail = getRequirement(base, id, {
+      currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null,
+    });
+    if (input.action === "fix" && input.resolveConflict && currentDetail.state.stage === "done") {
       currentDetail = await prepareSandboxConflictResolution(base, id);
     }
     if (input.action === "implement" || input.action === "fix") {
       const stage = currentDetail.state.stage;
-      if (stage !== "implementing" && stage !== "awaiting_acceptance") {
+      if (stage !== "coding") {
         throw new WorkbenchError(
           "approval_required",
-          `${id} 当前阶段（${stage}）不能执行 ${input.action}；必须先由人类批准方案并进入实施阶段`,
+          `${id} 当前阶段（${stage}）不能执行 ${input.action}；必须先由人类批准方案或启用快速通道进入编码阶段`,
         );
       }
       const approval = evaluateApproval(currentDetail.state);
@@ -892,51 +430,64 @@ export class HubExecutor {
         );
       }
     }
+
+    const tier = currentDetail.state.tier;
     const runsList = currentDetail.state.agentRuns ?? [];
     const prevRun = runsList.slice(-1)[0] ?? null;
 
     let sessionAffinityApplied = false;
-    let override: Partial<ModelTarget> | null =
-      input.harness && input.model
+    let override: Partial<ModelTarget> | null = input.reviewFormatRescue
+      ? {
+          harness: input.reviewFormatRescue.harness,
+          model: input.reviewFormatRescue.model,
+          reasoningEffort: input.reviewFormatRescue.reasoningEffort,
+        }
+      : input.harness && input.model
         ? { harness: input.harness as ModelTarget["harness"], model: input.model, reasoningEffort: input.reasoningEffort }
         : input.reasoningEffort
           ? { reasoningEffort: input.reasoningEffort }
           : null;
 
-    // Session affinity: when action is "fix" with no explicit override or fallback request,
-    // keep coding and fixing single-threaded on the most recent implement/fix runner (even if it failed or timed out).
-    if (!input.harness && !input.model && !input.useFallback && input.action === "fix") {
-      const lastImplRun = [...runsList]
+    const tierCandidates = resolveRouteCandidates(activeRouting, harnesses, input.action, tier);
+    const tierCandidateKeys = new Set(tierCandidates.map((c) => `${c.harness}::${c.model}`));
+
+    // Session affinity: keep design/implement/fix single-threaded on the active tier's most recent lead runner
+    // (never locking back onto a standard model after the user escalated to SOTA tier).
+    if (
+      !override &&
+      !input.useFallback &&
+      !input.forceFreshSession &&
+      input.dispatchReasonOverride !== "sota_escalate" &&
+      (input.action === "implement" || input.action === "fix")
+    ) {
+      const lastLeadRun = [...runsList]
         .reverse()
         .find(
           (r) =>
-            (r.action === "implement" || r.action === "fix") &&
+            (r.action === "implement" || r.action === "fix" || r.action === "design") &&
             r.status !== "cancelled" &&
             !r.rateLimited &&
-            !r.errorSummary?.includes("模型不可用"),
+            !r.errorSummary?.includes("模型不可用") &&
+            tierCandidateKeys.has(`${r.harness}::${r.model}`),
         );
       const isRunnable =
-        lastImplRun &&
-        (harnesses.some((h) => h.id === lastImplRun.harness && h.installed) || Boolean(this.commandBuilder));
-      if (
-        lastImplRun &&
-        isRunnable &&
-        !isModelCoolingDown(lastImplRun.harness, lastImplRun.model)
-      ) {
+        lastLeadRun &&
+        (harnesses.some((h) => h.id === lastLeadRun.harness && h.installed) || Boolean(this.commandBuilder));
+      if (lastLeadRun && isRunnable && !isModelCoolingDown(lastLeadRun.harness, lastLeadRun.model)) {
         sessionAffinityApplied = true;
         override = {
-          harness: lastImplRun.harness as HarnessId,
-          model: lastImplRun.model,
+          harness: lastLeadRun.harness as HarnessId,
+          model: lastLeadRun.model,
           ...(input.reasoningEffort
             ? { reasoningEffort: input.reasoningEffort }
-            : lastImplRun.reasoningEffort
-              ? { reasoningEffort: lastImplRun.reasoningEffort as ModelTarget["reasoningEffort"] }
+            : lastLeadRun.reasoningEffort
+              ? { reasoningEffort: lastLeadRun.reasoningEffort as ModelTarget["reasoningEffort"] }
               : {}),
         };
       }
     }
-    const candidates = resolveRouteCandidates(activeRouting, harnesses, input.action, override);
 
+    const candidates = resolveRouteCandidates(activeRouting, harnesses, input.action, tier, override);
     let target = candidates[0]!;
     if (input.useFallback && prevRun) {
       const next = candidates.find((c) => `${c.harness}::${c.model}` !== `${prevRun.harness}::${prevRun.model}`);
@@ -948,6 +499,8 @@ export class HubExecutor {
       input.message?.trim() &&
       !(input.autoFallbackAttempt && input.autoFallbackAttempt > 0) &&
       !input.forcePlainText &&
+      !input.forceFreshSession &&
+      !input.reviewFormatRescue &&
       (input.action === "ask" || input.mode === "refine" || input.action === "design")
     ) {
       await addDiscussion(base, id, {
@@ -958,14 +511,9 @@ export class HubExecutor {
       });
     }
 
-    // Mark draft -> designing only when actually modifying design
-    if (input.action === "design" && currentDetail.state.stage === "draft") {
-      await markDesigning(base, id);
-    }
-
     let conflictContext: ConflictHandoffContext | undefined;
     if (input.action === "fix" && input.resolveConflict) {
-      const driftInfo = await inspectRsiSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(() => null);
+      const driftInfo = await inspectSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(() => null);
       if (driftInfo) {
         let mainCommitsSummary = "";
         try {
@@ -1029,71 +577,105 @@ export class HubExecutor {
       conflictContext,
     });
 
-    // Determine whether we can safely use same-harness native session resume.
-    // Coding (implement/fix) prefers the most recent coding session (skipping intervening ask runs),
-    // and only falls back to a prior design/ask session if no coding run exists yet.
-    const prevWriteRun =
+    // Native session resume across design -> implement -> fix on the same harness.
+    const prevLeadRun =
       input.action === "review"
         ? null
         : input.action === "implement" || input.action === "fix"
           ? ([...runsList].reverse().find((r) => r.action === "implement" || r.action === "fix") ??
+            [...runsList].reverse().find((r) => r.action === "design") ??
             [...runsList].reverse().find((r) => r.action !== "review") ??
             null)
           : ([...runsList].reverse().find((r) => r.action === input.action) ?? null);
-    const canResumeSameHarness =
-      !input.useFallback &&
-      prevWriteRun &&
-      prevWriteRun.harness === target.harness &&
-      isHealthyForNativeResume(prevWriteRun) &&
-      input.action !== "review";
+
+    const canResumeSameHarness = Boolean(
+      input.reviewFormatRescue ||
+        (!input.useFallback &&
+          !input.forceFreshSession &&
+          prevLeadRun &&
+          prevLeadRun.harness === target.harness &&
+          isHealthyForNativeResume(prevLeadRun) &&
+          input.action !== "review"),
+    );
+
+    const resumedSessionId = input.reviewFormatRescue
+      ? input.reviewFormatRescue.sessionId
+      : canResumeSameHarness
+        ? prevLeadRun!.nativeSessionId
+        : undefined;
 
     const handoffMode: RunHandoffMode = canResumeSameHarness
       ? "native_resume"
       : runsList.length > 0
         ? "fresh_handoff"
         : "first_run";
-    const parentRunId = canResumeSameHarness ? prevWriteRun!.id : prevRun?.id;
-    const dispatchReason: RunDispatchReason = input.resolveConflict
-      ? "conflict_resolve"
-      : (input.autoHealAttempt ?? 0) > 0
-        ? "auto_heal"
-        : input.isAutoReview
-          ? "auto_review"
-          : input.useFallback
-            ? "auto_fallback"
-            : input.action === "ask"
-              ? "ask"
-              : input.mode === "refine"
-                ? "refine"
-                : input.harness && input.model
-                  ? prevRun &&
-                    prevRun.status === "failed" &&
-                    `${prevRun.harness}::${prevRun.model}` !== `${input.harness}::${input.model}`
-                    ? "manual_fallback"
-                    : "user"
-                  : sessionAffinityApplied
-                    ? "session_affinity"
-                    : "route_primary";
+    const parentRunId = canResumeSameHarness && prevLeadRun ? prevLeadRun.id : prevRun?.id;
+    const dispatchReason: RunDispatchReason =
+      input.dispatchReasonOverride ??
+      (input.resolveConflict
+        ? "conflict_resolve"
+        : (input.autoHealAttempt ?? 0) > 0
+          ? "auto_heal"
+          : input.isAutoReview
+            ? "auto_review"
+            : input.useFallback
+              ? "auto_fallback"
+              : input.action === "ask"
+                ? "ask"
+                : input.mode === "refine"
+                  ? "refine"
+                  : input.harness && input.model
+                    ? prevRun &&
+                      prevRun.status === "failed" &&
+                      `${prevRun.harness}::${prevRun.model}` !== `${input.harness}::${input.model}`
+                      ? "manual_fallback"
+                      : "user"
+                    : sessionAffinityApplied
+                      ? "session_affinity"
+                      : "route_primary");
 
     const projectMeta = getProjectStatus(base).project;
     const projectContext = discoverProjectContext(codeRoot, projectMeta);
     const preSpecMarkdown = postHandoffDetail.specMarkdown;
     const preDesignMarkdown = postHandoffDetail.designMarkdown;
-    const prompt = buildExecutionPrompt(postHandoffDetail, handoffMd, input, {
-      resumedSession: Boolean(canResumeSameHarness),
-      outputLanguage,
-      fastCommand: projectContext.fastCommand,
-      fullCommand: projectContext.fullCommand,
-    });
+
+    let previousSpecHash: string | null = null;
+    if (canResumeSameHarness && prevLeadRun) {
+      try {
+        previousSpecHash = getAgentRunContext(base, id, prevLeadRun.id)?.specHashBefore ?? null;
+      } catch {
+        previousSpecHash = null;
+      }
+    }
+
+    const prompt = input.reviewFormatRescue
+      ? outputLanguage === "en"
+        ? 'Your previous review response lacked the required structured JSON verdict block. Output ONLY the fenced ```json block now:\n```json\n{"verdict":"pass"|"concern"|"block","summary":"One-sentence core review summary","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"Short title","files":["path"],"suggestion":"Concrete fix"}]}\n```'
+        : '你上一轮审查输出缺少必需的结构化 JSON 结论块。请基于刚才的审查结论，仅输出一个 ```json 代码块：\n```json\n{"verdict":"pass"|"concern"|"block","summary":"一句话核心审查结论","findings":[{"id":"F-1","severity":"high"|"medium"|"low","title":"简明问题描述","files":["path"],"suggestion":"具体修复建议"}]}\n```'
+      : buildExecutionPrompt(
+          postHandoffDetail,
+          handoffMd,
+          { ...input, root: base, conflictContext },
+          {
+            resumedSession: canResumeSameHarness,
+            outputLanguage,
+            fastCommand: projectContext.fastCommand,
+            fullCommand: projectContext.fullCommand,
+            previousSpecHash,
+          },
+        );
+
     const structuredJsonEnabled =
       !input.forcePlainText && !this.plainTextFallbackHarnesses.has(target.harness);
+    const allowResumeOnReview = Boolean(input.reviewFormatRescue);
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
           root: codeRoot,
           requirementId: id,
           action: input.action,
           prompt,
-          nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
+          nativeSessionId: resumedSessionId,
+          allowResumeOnReview,
           harnesses,
           structuredJson: structuredJsonEnabled,
         })
@@ -1101,7 +683,8 @@ export class HubExecutor {
           root: codeRoot,
           action: input.action,
           prompt,
-          nativeSessionId: canResumeSameHarness ? prevWriteRun!.nativeSessionId : undefined,
+          nativeSessionId: resumedSessionId,
+          allowResumeOnReview,
           harnesses,
           structuredJson: structuredJsonEnabled,
         });
@@ -1129,7 +712,7 @@ export class HubExecutor {
       capturedAt: startedAt,
       handoffMode,
       ...(parentRunId ? { parentRunId } : {}),
-      ...(canResumeSameHarness && prevWriteRun?.nativeSessionId ? { resumedSessionId: prevWriteRun.nativeSessionId } : {}),
+      ...(resumedSessionId ? { resumedSessionId } : {}),
       dispatchReason,
       selectedTarget: {
         harness: target.harness,
@@ -1151,7 +734,6 @@ export class HubExecutor {
       promptEstTokens: estimateTokens(prompt),
       sections: composition.sections,
       truncatedSections: composition.truncatedSections,
-      ...(postHandoffDetail.state.handoffNote !== undefined ? { handoffNoteSnapshot: postHandoffDetail.state.handoffNote } : {}),
       handoffMarkdown: handoffMd,
       promptText: prompt,
     };
@@ -1218,7 +800,6 @@ export class HubExecutor {
       },
     });
     this.traceCollectors.set(runId, collector);
-    // Emit agent.run.started before run.init/handoff.snapshot so live UI subscribers always have the active run row ready.
     this.emit({
       type: "agent.run.started",
       root: base,
@@ -1251,7 +832,7 @@ export class HubExecutor {
       dispatchReason,
       handoffMode,
       ...(parentRunId ? { parentRunId } : {}),
-      ...(canResumeSameHarness && prevWriteRun?.nativeSessionId ? { resumedSessionId: prevWriteRun.nativeSessionId } : {}),
+      ...(resumedSessionId ? { resumedSessionId } : {}),
       structuredJson: structuredJsonEnabled,
     });
     collector.append({
@@ -1268,6 +849,7 @@ export class HubExecutor {
     });
 
     const shimBin = ensureWbShim(this.cliEntryPath);
+    const isReadOnly = input.action === "ask" || input.action === "review";
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
@@ -1275,9 +857,8 @@ export class HubExecutor {
       WORKBENCH_REQ_ID: id,
       WORKBENCH_HUB_PID: String(process.pid),
       WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
-      ...(codeRoot !== base ? { WORKBENCH_RSI_DEPTH: "1" } : {}),
       ...(target.harness === "opencode"
-        ? { OPENCODE_CONFIG_CONTENT: buildOpencodeNonInteractiveConfig(process.env.OPENCODE_CONFIG_CONTENT) }
+        ? { OPENCODE_CONFIG_CONTENT: buildOpencodeNonInteractiveConfig(process.env.OPENCODE_CONFIG_CONTENT, { readOnly: isReadOnly }) }
         : {}),
     };
 
@@ -1289,7 +870,7 @@ export class HubExecutor {
           fs.appendFileSync(liveLogPath, text, "utf8");
         }
       } catch {
-        // Real-time disk flush is best-effort; finalize writes the bounded log atomically.
+        // Real-time disk flush is best-effort.
       }
     };
 
@@ -1350,7 +931,6 @@ export class HubExecutor {
     resetIdleTimer();
     const maxDurationTimer = setTimeout(() => triggerTimeout("max_duration"), maxDurationMs);
 
-    // Keep the watchdog alive while long silent verification/task updates advance state.json.
     if (idleTimeoutMs >= 10_000) {
       const stateFile = path.join(base, WORKBENCH_DIR, "items", id, "state.json");
       let lastStateMtimeMs = 0;
@@ -1369,7 +949,7 @@ export class HubExecutor {
             resetIdleTimer();
           }
         } catch {
-          // Ignore transient stat failures while state.json is atomically replaced.
+          // Ignore transient stat failures.
         }
       }, probeIntervalMs);
       livenessTimer.unref?.();
@@ -1407,11 +987,7 @@ export class HubExecutor {
     };
     emitWarningChunk = emitCleanChunk;
 
-    const streamAdapter = createHarnessStreamAdapter(
-      target.harness,
-      target.model,
-      structuredJsonEnabled,
-    );
+    const streamAdapter = createHarnessStreamAdapter(target.harness, target.model, structuredJsonEnabled);
 
     const handleAdapterResult = (
       parsed: ReturnType<typeof streamAdapter.feedLine>,
@@ -1447,7 +1023,7 @@ export class HubExecutor {
       }
     };
 
-    const onStdoutChunk = (buf: Buffer) => {
+    child.stdout?.on("data", (buf: Buffer) => {
       if (buf.length > 0) resetIdleTimer();
       stdoutLineBuf += buf.toString("utf8");
       const lines = stdoutLineBuf.split(/\r?\n/);
@@ -1455,9 +1031,9 @@ export class HubExecutor {
       for (const line of lines) {
         handleAdapterResult(streamAdapter.feedLine(line), true);
       }
-    };
+    });
 
-    const onStderrChunk = (buf: Buffer) => {
+    child.stderr?.on("data", (buf: Buffer) => {
       if (buf.length > 0) resetIdleTimer();
       const cleaned = stripCliNoise(buf.toString("utf8"));
       if (cleaned.trim()) {
@@ -1468,10 +1044,7 @@ export class HubExecutor {
         });
         emitCleanChunk(cleaned);
       }
-    };
-
-    child.stdout?.on("data", onStdoutChunk);
-    child.stderr?.on("data", onStderrChunk);
+    });
 
     const finalize = async (exitCode: number | null, spawnErr?: string) => {
       if (finalized) return;
@@ -1501,6 +1074,13 @@ export class HubExecutor {
 
       const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
       const modelUnavailable = !job.cancelled && !job.timedOut && detectModelUnavailableError(rawLog, exitCode);
+      const sessionExpired =
+        canResumeSameHarness &&
+        !input.forceFreshSession &&
+        !job.cancelled &&
+        !job.timedOut &&
+        !spawnErr &&
+        isSessionExpiredError(rawLog, exitCode);
       const shouldRetryPlainText =
         structuredJsonEnabled &&
         !input.forcePlainText &&
@@ -1518,12 +1098,12 @@ export class HubExecutor {
       let latestReq: RequirementDetail | null = null;
       try {
         if (codeRoot !== base) {
-          await reconcileRsiSandboxBaseline(base, id).catch(() => null);
+          await reconcileSandboxBaseline(base, id).catch(() => null);
         }
         snap = await observeGitSnapshot(codeRoot);
         latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
       } catch {
-        // Ignore git/requirement read errors during finalize pre-observation; handled below.
+        // Ignore git/requirement read errors during finalize pre-observation.
       }
 
       let status: AgentRunRecord["status"] = job.cancelled
@@ -1541,15 +1121,16 @@ export class HubExecutor {
         !modelUnavailable &&
         NON_FATAL_FORM_CANCEL_RE.test(rawLog.slice(-4096)) &&
         latestReq &&
-        latestReq.state.stage === "awaiting_acceptance" &&
+        latestReq.state.stage === "coding" &&
         latestReq.validity.acceptanceGate.ok &&
         latestReq.state.updatedAt >= startedAt
       ) {
         status = "succeeded";
-        const note = "[workbench] 检测到 CLI 非致命交互表单取消退出码，但本轮已完成全部验证并提交验收，按成功终态收尾。\n";
+        const note = "[workbench] 检测到 CLI 非致命交互表单取消退出码，但本轮已完成全部验证，按成功终态收尾。\n";
         rawLog = `${rawLog}${rawLog.endsWith("\n") || !rawLog ? "" : "\n"}${note}`;
         this.runLogs.set(runId, rawLog);
       }
+
       const replySource =
         cleanReplyParts.join("\n\n").trim() ||
         stdoutReplyTail.trim() ||
@@ -1579,7 +1160,6 @@ export class HubExecutor {
         "default",
         "canresumesameharness",
       ]);
-      // Only accept line-anchored CLI header lines like `session id: <uuid>` rather than arbitrary grep/code output.
       const sessMatches = Array.from(
         rawLog.matchAll(/^(?:session id|session_id)\s*:\s*["']?([0-9a-f]{8}-[0-9a-f-]{27}|[A-Za-z0-9][A-Za-z0-9._-]{7,63})["']?\s*$/gim),
       );
@@ -1592,21 +1172,31 @@ export class HubExecutor {
         }
       }
       const nativeSessionId = capturedSessionId ?? matchedSessionId;
+      const canRescueReviewFormat =
+        reviewParseFailed &&
+        !input.reviewFormatRescue &&
+        Boolean(nativeSessionId) &&
+        replySource.length > 80;
+
       const errorSummary =
         status === "failed"
           ? shouldRetryPlainText
             ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
-            : reviewParseFailed
-              ? "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
-              : job.timedOut
-                ? job.timeoutReason === "max_duration"
-                  ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
-                  : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-                : modelUnavailable
-                  ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
-                  : rateLimited
-                    ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-                    : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+            : sessionExpired
+              ? "原生会话已过期或不存在，已自动降级为全新交接重试"
+              : reviewParseFailed
+                ? canRescueReviewFormat
+                  ? "审查输出缺少结构化 JSON 结论块，正在自动补全格式化输出"
+                  : "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
+                : job.timedOut
+                  ? job.timeoutReason === "max_duration"
+                    ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+                    : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
+                  : modelUnavailable
+                    ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
+                    : rateLimited
+                      ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                      : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
           : undefined;
       const codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
 
@@ -1615,50 +1205,25 @@ export class HubExecutor {
         rawLog = this.runLogs.get(runId) ?? rawLog;
       };
 
-      // File-Native Design Sync: if design agent edited spec.md/design.md directly on disk, sync & submit for approval.
+      // 1. File-Native Design Sync (inline ```workbench-criteria, skip duplicate propose)
       if (status === "succeeded" && input.action === "design" && latestReq) {
-        try {
-          const diskDesign = readDiskDesignCandidate(base, codeRoot, id, latestReq, preSpecMarkdown, preDesignMarkdown);
-          if (diskDesign) {
-            let criteriaToSet = diskDesign.criteria;
-            if (!criteriaToSet && latestReq.state.criteria.length === 0) {
-              const fallbackCmd = projectContext.fullCommand ?? projectContext.fastCommand;
-              if (fallbackCmd) {
-                criteriaToSet = [
-                  {
-                    id: "AC-1",
-                    description: "项目自动化验证通过",
-                    required: true,
-                    command: fallbackCmd,
-                  },
-                ];
-              }
-            }
-            latestReq = await propose(base, id, {
-              specMarkdown: diskDesign.specMarkdown,
-              designMarkdown: diskDesign.designMarkdown,
-              ...(criteriaToSet ? { criteria: criteriaToSet } : {}),
-              actor: "agent",
-              currentCodeSnapshotHash: snap?.fingerprint ?? null,
-            });
-            for (const criteriaFilePath of diskDesign.criteriaPaths) {
-              try {
-                if (fs.existsSync(criteriaFilePath)) fs.unlinkSync(criteriaFilePath);
-              } catch {
-                // Ignore cleanup failure for consumed criteria.json.
-              }
-            }
-            appendFinalizeNote("[workbench] 已自动同步磁盘规范/方案文件并提交人类审阅。\n");
-          }
-        } catch (err) {
-          appendFinalizeNote(
-            `[workbench] 同步磁盘方案文件失败：${err instanceof Error ? err.message : String(err)}\n`,
-          );
-        }
+        latestReq = await syncDesignRunResult({
+          base,
+          codeRoot,
+          id,
+          latestReq,
+          preSpecMarkdown,
+          preDesignMarkdown,
+          codeChanged,
+          projectContext,
+          snapshotFingerprint: snap?.fingerprint ?? null,
+          appendNote: appendFinalizeNote,
+        });
       }
 
-      // Orchestrator-Driven Gate: auto-verify and promote/auto-heal when implement/fix exits cleanly.
+      // 2. Deterministic Post-Coding Gate (auto-verify + auto-screenshot + auto-heal signal)
       let autoHealPending = false;
+      let readyForReview = false;
       if (
         status === "succeeded" &&
         (input.action === "implement" || input.action === "fix") &&
@@ -1669,64 +1234,21 @@ export class HubExecutor {
         !rateLimited &&
         !modelUnavailable
       ) {
-        try {
-          if (latestReq.state.stage === "implementing" && latestReq.validity.acceptanceGate.ok) {
-            latestReq = await updateTasks(base, id, {
-              readyForAcceptance: true,
-              actor: "agent",
-              currentCodeSnapshotHash: snap?.fingerprint ?? null,
-            });
-            appendFinalizeNote("[workbench] 全部必需验收条件已通过，已自动提交人工验收。\n");
-          } else if (
-            codeChanged &&
-            (latestReq.state.stage === "implementing" || latestReq.state.stage === "awaiting_acceptance") &&
-            latestReq.validity.approval.valid &&
-            !latestReq.validity.acceptanceGate.ok &&
-            latestReq.state.criteria.some((c) => c.required && c.command?.trim())
-          ) {
-            appendFinalizeNote("\n[workbench] Agent 已完成修改，正在自动执行必需验收命令...\n");
-            await runAllVerifications(base, id);
-            snap = await observeGitSnapshot(codeRoot);
-            latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-            const requiredCommandItems = latestReq.validity.coverage.items.filter(
-              (item) => item.criterion.required && Boolean(item.criterion.command?.trim()),
-            );
-            const hasFailedCommandVerification = requiredCommandItems.some((item) => item.state === "failed");
-            const allCommandCriteriaPassed =
-              requiredCommandItems.length > 0 && requiredCommandItems.every((item) => item.state === "passed");
-            if (latestReq.validity.acceptanceGate.ok || (allCommandCriteriaPassed && !hasFailedCommandVerification)) {
-              if (latestReq.state.stage !== "awaiting_acceptance" && latestReq.validity.acceptanceGate.ok) {
-                latestReq = await updateTasks(base, id, {
-                  readyForAcceptance: true,
-                  actor: "agent",
-                  currentCodeSnapshotHash: snap?.fingerprint ?? null,
-                });
-              }
-              appendFinalizeNote(
-                latestReq.validity.acceptanceGate.ok
-                  ? "[workbench] 全部必需验收命令通过，已自动提交人工验收。\n"
-                  : `[workbench] 全部自动化验收命令通过，待人工确认非命令条件：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
-              );
-            } else if (hasFailedCommandVerification) {
-              appendFinalizeNote(
-                `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
-              );
-              autoHealPending = true;
-            } else {
-              appendFinalizeNote(
-                `[workbench] 自动验收未就绪：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
-              );
-            }
-          }
-        } catch (err) {
-          appendFinalizeNote(
-            `[workbench] 自动验收执行异常：${err instanceof Error ? err.message : String(err)}\n`,
-          );
-        }
+        const gateResult = await runCodingPostGate({
+          base,
+          codeRoot,
+          id,
+          latestReq,
+          snap,
+          appendNote: appendFinalizeNote,
+        });
+        latestReq = gateResult.latestReq;
+        snap = gateResult.snap;
+        autoHealPending = gateResult.autoHealPending;
+        readyForReview = gateResult.readyForReview;
       }
 
       const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
-
       const traceSummary = collector.finalizeRun({
         status,
         exitCode,
@@ -1736,38 +1258,8 @@ export class HubExecutor {
         errorSummary,
       });
 
-      if (!shouldRetryPlainText) {
-        try {
-          const outcome: TelemetryOutcomeInput = {
-            harness: target.harness,
-            model: target.model,
-            action: input.action,
-            status,
-            durationMs,
-            rateLimited,
-            timedOut: job.timedOut,
-            modelFallback: job.modelFallback === true,
-            modelUnavailable,
-            now: endedAt,
-            ...(traceSummary.usage?.totalTokens ? { tokens: traceSummary.usage.totalTokens } : {}),
-            ...(traceSummary.usage?.cacheReadTokens ? { cacheReadTokens: traceSummary.usage.cacheReadTokens } : {}),
-            apiCostUsd: traceSummary.cost.apiCostUsd,
-            equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
-            toolCalls: traceSummary.toolCallsCount,
-          };
-          if (this.onTelemetryOutcome) {
-            this.onTelemetryOutcome(outcome);
-          } else {
-            recordModelRunOutcome(outcome);
-          }
-        } catch {
-          // Telemetry write failure must not abort run finalization.
-        }
-      }
-
       let postRunDetail: RequirementDetail | null = null;
       try {
-        // Post-run side effects by action
         if (status === "succeeded" && input.action === "ask") {
           const cleanAnswer =
             cleanReplyParts.join("\n\n").trim() ||
@@ -1785,18 +1277,6 @@ export class HubExecutor {
             });
           }
         } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview && latestReq) {
-          let changedFiles: string[] | undefined;
-          try {
-            const obs = await observeGitChanges(codeRoot, {
-              sinceHead: latestReq.state.baseline?.head ?? null,
-              maxDiffBytes: 1024,
-            });
-            if (obs.files.length > 0) {
-              changedFiles = obs.files.map((f) => f.path).slice(0, 64);
-            }
-          } catch {
-            changedFiles = undefined;
-          }
           await recordReviewReport(base, id, {
             reviewerHarness: target.harness,
             reviewerModel: target.model,
@@ -1806,8 +1286,6 @@ export class HubExecutor {
             ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
             reviewedSpecHash: latestReq.state.specHash,
             reviewedCodeSnapshotHash: snap.fingerprint,
-            reviewMode: "full",
-            ...(changedFiles ? { changedFiles } : {}),
           });
         } else if (status === "succeeded" && (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0))) {
           if (input.anchorIds && input.anchorIds.length > 0) {
@@ -1855,85 +1333,100 @@ export class HubExecutor {
         postRunDetail = finishedDetail;
 
         const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
-        const postHandoff = await synthesizeHandoffPacket(base, id, {
+        await synthesizeHandoffPacket(base, id, {
           action: input.action,
           previousRun: lastRunObj,
           previousLogTail: rawLog.slice(-1500),
         });
-        if (lastRunObj) {
-          inspectFinishedRunForPainPoints({
-            root: base,
-            requirementId: id,
-            run: lastRunObj,
-            detail: postHandoff.detail,
-            rawLog,
-            timedOut: job.timedOut,
-            timeoutReason: job.timeoutReason,
-            isRsiSandbox: codeRoot !== base,
-            ...(this.nodeId ? { nodeId: this.nodeId } : {}),
-            ...(this.onPainPoint ? { onReport: this.onPainPoint } : {}),
-          });
-        }
         if (codeRoot !== base) {
           syncRequirementMirrorToSandbox(base, id, codeRoot);
         }
       } catch (error) {
-        // Keep daemon alive even if workspace disappeared during run, but surface the failure.
         console.error(
           `[workbench] finalize failed for ${id}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
 
-      if (!shouldRetryPlainText) {
-        try {
-          const ledgerEntry: RunLedgerEntry = {
-            schemaVersion: 1,
-            runId,
-            projectRoot: base,
-            nodeId: this.nodeId ?? "local",
-            requirementId: id,
-            requirementTitle: (postRunDetail ?? latestReq ?? currentDetail).state.title,
-            action: input.action,
-            harness: target.harness,
-            model: target.model,
-            ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
-            ...(job.modelFallback ? { modelFallback: true } : {}),
-            ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
-            quotaPool: poolInfo.quotaPool,
-            billingMode: poolInfo.billingMode,
-            status,
-            dispatchReason,
-            handoffMode,
-            startedAt,
-            endedAt,
-            durationMs,
-            llmDurationMs: traceSummary.llmDurationMs,
-            toolDurationMs: traceSummary.toolDurationMs,
-            ...(traceSummary.ttftMs !== undefined ? { ttftMs: traceSummary.ttftMs } : {}),
-            ...(traceSummary.usage ? { usage: traceSummary.usage } : {}),
-            apiCostUsd: traceSummary.cost.apiCostUsd,
-            equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
-            costSource: traceSummary.cost.costSource,
-            turnsCount: traceSummary.turnsCount,
-            toolCallsCount: traceSummary.toolCallsCount,
-            toolErrorCount: traceSummary.toolErrorCount,
-            compactionCount: traceSummary.compactionCount,
-            ...(traceSummary.peakContextTokens !== undefined ? { peakContextTokens: traceSummary.peakContextTokens } : {}),
-            contextWindow: traceSummary.contextWindow,
-            ...(composition.truncatedSections.length > 0 ? { handoffTruncated: true } : {}),
-            ...(rateLimited ? { rateLimited: true } : {}),
-            ...(job.timedOut ? { timedOut: true } : {}),
-            specChanged,
-            codeChanged,
-          };
-          if (this.onLedgerEntry) {
-            this.onLedgerEntry(ledgerEntry);
-          } else if (!this.nodeId) {
-            appendRunLedger(ledgerEntry);
+      // Decoupled fire-and-forget telemetry & ledger sidecars
+      if (!shouldRetryPlainText && !sessionExpired) {
+        queueMicrotask(() => {
+          try {
+            const outcome: TelemetryOutcomeInput = {
+              harness: target.harness,
+              model: target.model,
+              action: input.action,
+              status,
+              durationMs,
+              rateLimited,
+              timedOut: job.timedOut,
+              modelFallback: job.modelFallback === true,
+              modelUnavailable,
+              now: endedAt,
+              ...(traceSummary.usage?.totalTokens ? { tokens: traceSummary.usage.totalTokens } : {}),
+              ...(traceSummary.usage?.cacheReadTokens ? { cacheReadTokens: traceSummary.usage.cacheReadTokens } : {}),
+              apiCostUsd: traceSummary.cost.apiCostUsd,
+              equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
+              toolCalls: traceSummary.toolCallsCount,
+            };
+            if (this.onTelemetryOutcome) {
+              this.onTelemetryOutcome(outcome);
+            } else {
+              recordModelRunOutcome(outcome);
+            }
+          } catch {
+            // Sidecar telemetry must never crash executor.
           }
-        } catch {
-          // Ledger recording must never break run finalization.
-        }
+
+          try {
+            const ledgerEntry: RunLedgerEntry = {
+              schemaVersion: 1,
+              runId,
+              projectRoot: base,
+              nodeId: this.nodeId ?? "local",
+              requirementId: id,
+              requirementTitle: (postRunDetail ?? latestReq ?? currentDetail).state.title,
+              action: input.action,
+              harness: target.harness,
+              model: target.model,
+              ...(job.effectiveModel ? { effectiveModel: job.effectiveModel } : {}),
+              ...(job.modelFallback ? { modelFallback: true } : {}),
+              ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
+              quotaPool: poolInfo.quotaPool,
+              billingMode: poolInfo.billingMode,
+              status,
+              dispatchReason,
+              handoffMode,
+              startedAt,
+              endedAt,
+              durationMs,
+              llmDurationMs: traceSummary.llmDurationMs,
+              toolDurationMs: traceSummary.toolDurationMs,
+              ...(traceSummary.ttftMs !== undefined ? { ttftMs: traceSummary.ttftMs } : {}),
+              ...(traceSummary.usage ? { usage: traceSummary.usage } : {}),
+              apiCostUsd: traceSummary.cost.apiCostUsd,
+              equivalentCostUsd: traceSummary.cost.equivalentCostUsd,
+              costSource: traceSummary.cost.costSource,
+              turnsCount: traceSummary.turnsCount,
+              toolCallsCount: traceSummary.toolCallsCount,
+              toolErrorCount: traceSummary.toolErrorCount,
+              compactionCount: traceSummary.compactionCount,
+              ...(traceSummary.peakContextTokens !== undefined ? { peakContextTokens: traceSummary.peakContextTokens } : {}),
+              contextWindow: traceSummary.contextWindow,
+              ...(composition.truncatedSections.length > 0 ? { handoffTruncated: true } : {}),
+              ...(rateLimited ? { rateLimited: true } : {}),
+              ...(job.timedOut ? { timedOut: true } : {}),
+              specChanged,
+              codeChanged,
+            };
+            if (this.onLedgerEntry) {
+              this.onLedgerEntry(ledgerEntry);
+            } else if (!this.nodeId) {
+              appendRunLedger(ledgerEntry);
+            }
+          } catch {
+            // Sidecar ledger must never crash executor.
+          }
+        });
       }
 
       this.traceCollectors.delete(runId);
@@ -1970,76 +1463,87 @@ export class HubExecutor {
         at: endedAt,
       });
 
-      if (shouldRetryPlainText) {
-        const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
-        if (!alreadyRunning) {
-          void this.startRun({
-            ...input,
+      const alreadyRunning = () => this.getActiveRuns(base).some((r) => r.requirementId === id);
+
+      if (shouldRetryPlainText && !alreadyRunning()) {
+        void this.startRun({
+          ...input,
+          harness: target.harness,
+          model: target.model,
+          reasoningEffort: target.reasoningEffort,
+          forcePlainText: true,
+        }).catch(() => {});
+        return;
+      }
+
+      if (sessionExpired && !alreadyRunning()) {
+        void this.startRun({
+          ...input,
+          forceFreshSession: true,
+        }).catch(() => {});
+        return;
+      }
+
+      if (canRescueReviewFormat && nativeSessionId && !alreadyRunning()) {
+        void this.startRun({
+          root: base,
+          requirementId: id,
+          action: "review",
+          isAutoReview: input.isAutoReview,
+          reviewFormatRescue: {
+            sessionId: nativeSessionId,
             harness: target.harness,
             model: target.model,
             reasoningEffort: target.reasoningEffort,
-            forcePlainText: true,
-          }).catch((err) => {
-            console.error(
-              `[workbench] plain-text fallback retry failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
-        }
+          },
+        }).catch(() => {});
         return;
       }
 
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
 
-      // Deterministic Auto-Heal: if orchestrator auto-verify failed after coding, resume same session to fix it.
+      // Deterministic Auto-Heal: strictly stays within the current tier (never silently escalates to SOTA).
       const healAttempt = input.autoHealAttempt ?? 0;
       if (autoHealPending && healAttempt < MAX_AUTO_HEAL_ATTEMPTS) {
         try {
-          const latestRouting = this.resolveEffectiveRouting(base);
-          const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
-          if (latestRouting.autoHeal !== false && !alreadyRunning) {
+          const latestRouting = this.resolveProjectRouting(base);
+          if (latestRouting.autoHeal !== false && !alreadyRunning()) {
             void this.startRun({
               root: base,
               requirementId: id,
               action: "fix",
               autoHealAttempt: healAttempt + 1,
-            }).catch((err) => {
-              console.error(
-                `[workbench] auto-heal failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            });
+            }).catch(() => {});
             return;
           }
         } catch {
-          // Never crash finalize if auto-heal dispatch encounters a routing error.
+          // Ignore routing errors on auto-heal.
         }
       }
 
-      // One-shot blind cross-model review once plan_first implement/fix passes verification and submits for acceptance.
-      // Fast-track skips automatic review so humans can inspect Diff and accept directly (or trigger review manually).
+      // One-shot blind cross-model review once plan_first coding passes verification.
       if (
         status === "succeeded" &&
         (input.action === "implement" || input.action === "fix") &&
+        readyForReview &&
         postRunDetail &&
         postRunDetail.state.track !== "fast_track" &&
-        postRunDetail.state.stage === "awaiting_acceptance" &&
+        postRunDetail.state.stage === "coding" &&
         postRunDetail.validity.acceptanceGate.ok &&
         postRunDetail.validity.reviewValidity.effectiveState !== "current"
       ) {
         try {
           const availHarnesses = await this.getHarnesses(false);
-          const latestRouting = this.resolveEffectiveRouting(base, availHarnesses);
-          const reviewHistoryCount =
-            postRunDetail.state.reviewHistory?.length ?? (postRunDetail.state.reviewReport ? 1 : 0);
-          const maxAutoReviewRounds = Math.min(5, Math.max(1, latestRouting.maxAutoReviewRounds ?? 1));
-          if (latestRouting.autoReview !== false && reviewHistoryCount < maxAutoReviewRounds) {
-            const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review").filter((c) =>
+          const latestRouting = this.resolveProjectRouting(base);
+          const alreadyReviewedOnce = Boolean(postRunDetail.state.reviewReport);
+          if (latestRouting.autoReview !== false && !alreadyReviewedOnce) {
+            const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review", tier).filter((c) =>
               isHarnessRunnable(c.harness, availHarnesses),
             );
             const reviewTarget =
               reviewCandidates.find((c) => c.harness !== target.harness) ?? reviewCandidates[0];
-            const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
-            if (reviewTarget && !alreadyRunning) {
+            if (reviewTarget && !alreadyRunning()) {
               void this.startRun({
                 root: base,
                 requirementId: id,
@@ -2048,19 +1552,15 @@ export class HubExecutor {
                 model: reviewTarget.model,
                 ...(reviewTarget.reasoningEffort ? { reasoningEffort: reviewTarget.reasoningEffort } : {}),
                 isAutoReview: true,
-              }).catch((err) => {
-                console.error(
-                  `[workbench] auto-review failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-                );
-              });
+              }).catch(() => {});
             }
           }
         } catch {
-          // Never crash finalize if auto-review dispatch encounters a routing error.
+          // Ignore routing errors on auto-review.
         }
       }
 
-      // Bounded single-hop automatic fallback on unavailable model, fast rate-limit, or auto-review parse failure.
+      // Bounded single-hop automatic fallback within the SAME tier's fallbacks on 429 / model unavailable.
       const attempt = input.autoFallbackAttempt ?? 0;
       const isExplicitOverride = Boolean(input.harness && input.model);
       const shouldAutoFallback =
@@ -2071,18 +1571,17 @@ export class HubExecutor {
         ((!isExplicitOverride && (modelUnavailable || (rateLimited && durationMs < 60_000))) ||
           (input.isAutoReview === true && (reviewParseFailed || modelUnavailable || rateLimited)));
 
-      if (shouldAutoFallback) {
+      if (shouldAutoFallback && !alreadyRunning()) {
         try {
           const availHarnesses = await this.getHarnesses(false);
-          const latestRouting = this.resolveEffectiveRouting(base, availHarnesses);
-          const candidates = resolveRouteCandidates(latestRouting, availHarnesses, input.action);
-          const fallbackCandidate = candidates.find(
+          const latestRouting = this.resolveProjectRouting(base);
+          const fallbackPool = resolveRouteCandidates(latestRouting, availHarnesses, input.action, tier);
+          const fallbackCandidate = fallbackPool.find(
             (c) =>
               `${c.harness}::${c.model}` !== `${target.harness}::${target.model}` &&
               isHarnessRunnable(c.harness, availHarnesses),
           );
-          const alreadyRunning = this.getActiveRuns(base).some((r) => r.requirementId === id);
-          if (fallbackCandidate && !alreadyRunning) {
+          if (fallbackCandidate) {
             void this.startRun({
               ...input,
               harness: undefined,
@@ -2090,14 +1589,10 @@ export class HubExecutor {
               reasoningEffort: undefined,
               useFallback: true,
               autoFallbackAttempt: attempt + 1,
-            }).catch((err) => {
-              console.error(
-                `[workbench] auto-fallback failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            });
+            }).catch(() => {});
           }
         } catch {
-          // Never crash finalize if auto-fallback dispatch encounters a routing error.
+          // Ignore routing errors on auto-fallback.
         }
       }
     };
@@ -2150,7 +1645,6 @@ export class HubExecutor {
     return true;
   }
 
-  /** Marks orphaned `running` records from dead Hub hosts as failed while preserving any flushed logs. */
   async recoverOrphanedRuns(roots: string[]): Promise<Array<{ root: string; requirementId: string; runId: string }>> {
     const recovered: Array<{ root: string; requirementId: string; runId: string }> = [];
     const seenRoots = new Set<string>();
@@ -2240,7 +1734,7 @@ export class HubExecutor {
               at: endedAt,
             });
           } catch {
-            // Best-effort recovery; never abort Hub startup on a single requirement error.
+            // Best-effort recovery.
           }
         }
       }

@@ -29,7 +29,7 @@ import {
   type GitHubCommandDeps,
 } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 
 const tempDirs: string[] = [];
 
@@ -359,7 +359,7 @@ describe("GitHub Issue & PR integration", () => {
     const previewA = await getRequirementDeliveryPreview(repo, idA, mock.deps);
     expect(previewA.codeRootKind).toBe("sandbox");
     expect(previewA.sandboxActive).toBe(true);
-    expect(previewA.branch).toBe(`rsi/${idA}`);
+    expect(previewA.branch).toBe(wtA.branch);
     expect(previewA.baseBranch).toBe("main");
     expect(previewA.candidates.some((f) => f.path === "src/web/app.ts")).toBe(true);
     expect(previewA.candidates.some((f) => f.path.includes(".workbench"))).toBe(false);
@@ -373,18 +373,18 @@ describe("GitHub Issue & PR integration", () => {
       mock.deps,
     );
     expect(deliverA.pr).toBeDefined();
-    expect(deliverA.pr!.headBranch).toBe(`rsi/${idA}`);
+    expect(deliverA.pr!.headBranch).toBe(wtA.branch);
     expect(deliverA.pr!.baseBranch).toBe("main");
     expect(deliverA.delivery.prNumber).toBe(deliverA.pr!.number);
     expect(deliverA.detail.state.delivery?.prNumber).toBe(deliverA.pr!.number);
     expect(deliverA.detail.state.github?.pr?.number).toBe(deliverA.pr!.number);
     expect(deliverA.detail.state.timeline.some((e) => e.kind === "github_pr_created")).toBe(true);
 
-    const remoteBranchA = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", "--verify", `refs/heads/rsi/${idA}`], {
+    const remoteBranchA = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", "--verify", `refs/heads/${wtA.branch}`], {
       encoding: "utf8",
     }).trim();
     expect(remoteBranchA.length).toBe(40);
-    const treeFilesA = execFileSync("git", ["--git-dir", bareRemote, "ls-tree", "-r", "--name-only", `refs/heads/rsi/${idA}`], {
+    const treeFilesA = execFileSync("git", ["--git-dir", bareRemote, "ls-tree", "-r", "--name-only", `refs/heads/${wtA.branch}`], {
       encoding: "utf8",
     });
     expect(treeFilesA).toContain("src/web/app.ts");
@@ -432,7 +432,7 @@ describe("GitHub Issue & PR integration", () => {
     expect(deliverB.pr).toBeDefined();
     expect(deliverB.delivery.files).toEqual(["src/web/app.ts"]);
     expect(deliverB.delivery.prNumber).toBe(deliverB.pr!.number);
-    const remoteBranchB = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", "--verify", `refs/heads/rsi/${idB}`], {
+    const remoteBranchB = execFileSync("git", ["--git-dir", bareRemote, "rev-parse", "--verify", `refs/heads/${wtB.branch}`], {
       encoding: "utf8",
     }).trim();
     expect(remoteBranchB.length).toBe(40);
@@ -486,7 +486,7 @@ describe("GitHub Issue & PR integration", () => {
     expect(mock.comments.some((c) => c.issueNumber === 77 && c.body.includes(deliverC.pr!.url))).toBe(true);
 
     const reopened = await reopenRequirement(repo, idC, { reason: "补充边界校验" });
-    expect(reopened.state.stage).toBe("draft");
+    expect(reopened.state.stage).toBe("planning");
     expect(reopened.state.github?.issue?.number).toBe(77);
     expect(reopened.state.github?.pr?.number).toBe(deliverC.pr!.number);
   }, 15_000);

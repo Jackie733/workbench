@@ -113,13 +113,22 @@ function runTestFile(file: string, workerTmpDir: string): Promise<FileRunResult>
   });
 }
 
+function isHeavyBrowserTest(relPath: string): boolean {
+  return relPath.endsWith("_browser.test.ts") || relPath.endsWith("web/acceptance_history.test.ts");
+}
+
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (args.length > 0) {
     return runPassthrough(args);
   }
 
-  const files = collectTestFiles(TESTS_DIR).sort((a, b) => estimateWeight(b) - estimateWeight(a) || a.localeCompare(b));
+  const files = collectTestFiles(TESTS_DIR).sort(
+    (a, b) =>
+      Number(isHeavyBrowserTest(a)) - Number(isHeavyBrowserTest(b)) ||
+      estimateWeight(b) - estimateWeight(a) ||
+      a.localeCompare(b),
+  );
   const rawWorkers = Number(process.env.WORKBENCH_TEST_WORKERS ?? "");
   const defaultWorkers = Math.min(3, Math.max(2, Math.floor(os.cpus().length / 2)));
   const concurrency = Math.max(1, Math.min(files.length, Number.isFinite(rawWorkers) && rawWorkers > 0 ? Math.floor(rawWorkers) : defaultWorkers));
@@ -128,22 +137,57 @@ async function main(): Promise<number> {
   const queue = [...files];
   const results: FileRunResult[] = [];
   let completed = 0;
+  let browserRunning = false;
+  const browserWaiters: Array<() => void> = [];
+
+  const acquireNextFile = async (): Promise<{ file: string; isBrowser: boolean } | null> => {
+    while (queue.length > 0) {
+      if (!browserRunning) {
+        const next = queue.shift()!;
+        const isBrowser = isHeavyBrowserTest(next);
+        if (isBrowser) browserRunning = true;
+        return { file: next, isBrowser };
+      }
+      const nonBrowserIdx = queue.findIndex((f) => !isHeavyBrowserTest(f));
+      if (nonBrowserIdx !== -1) {
+        const [nonBrowser] = queue.splice(nonBrowserIdx, 1);
+        return { file: nonBrowser!, isBrowser: false };
+      }
+      // Only browser tests remain while another worker holds the Chromium slot.
+      await new Promise<void>((resolve) => {
+        browserWaiters.push(resolve);
+      });
+    }
+    return null;
+  };
+
+  const releaseBrowserSlot = () => {
+    browserRunning = false;
+    while (browserWaiters.length > 0) {
+      browserWaiters.shift()!();
+    }
+  };
 
   process.stdout.write(`Running ${files.length} test files across ${concurrency} isolated workers...\n`);
 
   const workers = Array.from({ length: concurrency }, async () => {
     const workerTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-test-worker-"));
     try {
-      while (queue.length > 0) {
-        const file = queue.shift();
-        if (!file) break;
-        const res = await runTestFile(file, workerTmpDir);
+      for (;;) {
+        const next = await acquireNextFile();
+        if (!next) break;
+        let res: FileRunResult;
+        try {
+          res = await runTestFile(next.file, workerTmpDir);
+        } finally {
+          if (next.isBrowser) releaseBrowserSlot();
+        }
         results.push(res);
         completed += 1;
         const status = res.code === 0 ? "PASS" : "FAIL";
         const sec = (res.durationMs / 1000).toFixed(1);
         process.stdout.write(
-          `[${completed}/${files.length}] ${status} ${file} (${sec}s, ${res.passCount} pass, ${res.failCount} fail)\n`,
+          `[${completed}/${files.length}] ${status} ${next.file} (${sec}s, ${res.passCount} pass, ${res.failCount} fail)\n`,
         );
       }
     } finally {

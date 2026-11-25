@@ -15,19 +15,17 @@ function summary(id: string, extra: Partial<RequirementSummary> = {}): Requireme
   return {
     id,
     title: `需求 ${id}`,
-    stage: "awaiting_acceptance",
+    stage: "coding",
     track: "plan_first",
+    tier: "standard",
     revision: 1,
     designVersion: 1,
     criteriaCount: 1,
     requiredTotal: 1,
     requiredPassed: 1,
-    tasksTotal: 1,
-    tasksDone: 1,
     needsDecision: true,
     decisionReason: "待审查/验收",
     decisionReasonKey: "core.decision.reviewPending",
-    blockedReason: null,
     progressText: "",
     createdAt: 1,
     updatedAt: 1,
@@ -121,12 +119,12 @@ describe("IDE 默认需求选中、项目排序与分类", () => {
   test("pickDefaultRequirementId 按阻塞待拍板 -> 普通待拍板 -> 活跃需求 -> 首个需求选择", () => {
     expect(pickDefaultRequirementId([], [], "proj-a")).toBeNull();
     const doneItem = summary("REQ-001", { stage: "done", needsDecision: false });
-    const activeItem = summary("REQ-002", { stage: "implementing", needsDecision: false, updatedAt: 5 });
-    const pendingItem = summary("REQ-003", { stage: "awaiting_approval", needsDecision: true, updatedAt: 10 });
+    const activeItem = summary("REQ-002", { stage: "coding", needsDecision: false, updatedAt: 5 });
+    const pendingItem = summary("REQ-003", { stage: "planning", needsDecision: true, updatedAt: 10 });
     const blockedItem = summary("REQ-004", {
-      stage: "blocked",
+      stage: "coding",
       needsDecision: true,
-      decisionReasonKey: "core.decision.blocked",
+      decisionReasonKey: "core.decision.reviewBlock",
       updatedAt: 20,
     });
     expect(pickDefaultRequirementId([doneItem], [], "proj-a")).toBe("REQ-001");
@@ -187,12 +185,12 @@ describe("IDE 默认需求选中、项目排序与分类", () => {
   });
 
   test("orderUnifiedRequirements 统一单列表：阻塞/待拍板置顶去重、支持 sandboxes 合并排序", () => {
-    const req1 = summary("REQ-001", { stage: "implementing", needsDecision: false, updatedAt: 500 });
-    const req2 = summary("REQ-002", { stage: "awaiting_approval", needsDecision: true, updatedAt: 200 });
+    const req1 = summary("REQ-001", { stage: "coding", needsDecision: false, updatedAt: 500 });
+    const req2 = summary("REQ-002", { stage: "planning", needsDecision: true, updatedAt: 200 });
     const req3 = summary("REQ-003", {
-      stage: "blocked",
+      stage: "coding",
       needsDecision: true,
-      decisionReasonKey: "core.decision.blocked",
+      decisionReasonKey: "core.decision.reviewBlock",
       updatedAt: 100,
     });
     const req4 = summary("REQ-004", { stage: "done", needsDecision: false, updatedAt: 600 });

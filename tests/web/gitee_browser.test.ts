@@ -186,11 +186,11 @@ describe("Gitee Web UI workflow", () => {
       // 1. Open Settings -> configure Gitee Token.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
-      await page.click('[data-testid="settings-tab-global"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
-      await page.click('[data-testid="save-routing-btn"]');
+      await page.click('[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       // 2. Open New Requirement -> switch to Gitee import tab -> list and select #I8WEB1 -> import draft.
@@ -323,11 +323,11 @@ describe("Gitee Web UI workflow", () => {
       // 1. Save an invalid token that triggers mock HTTP 401 Unauthorized, then switch UI to English.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
-      await page.click('[data-testid="settings-tab-global"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "bad-gitee-token");
-      await page.click('[data-testid="save-routing-btn"]');
+      await page.click('[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
@@ -388,11 +388,11 @@ describe("Gitee Web UI workflow", () => {
       // 1. Configure valid token so manual import pane submits to backend validation.
       await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="open-routing-btn"]');
-      await page.waitForSelector('[data-testid="settings-tab-global"]', { timeout: 10_000 });
-      await page.click('[data-testid="settings-tab-global"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
       await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
-      await page.click('[data-testid="save-routing-btn"]');
+      await page.click('[data-testid="save-project-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
 
       // 2. Submit invalid work item ref in English -> localized validation toast without Chinese text.

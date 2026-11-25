@@ -6,7 +6,6 @@ import {
   addRequirementAttachments,
   approveDesign,
   authorizeFastTrack,
-  blockRequirement,
   cancelRequirement,
   createRequirement,
   deliverRequirement,
@@ -23,19 +22,17 @@ import {
   linkRequirementGitHubIssue,
   listRequirementAgentRuns,
   listRequirements,
-  markDesigning,
   pruneProjectTraces,
   recordRequirementGitHubSync,
   removeRequirementAttachment,
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
+  setRequirementTier,
   spawnSubRequirements,
-  unblockRequirement,
   updateDesign,
   updateProjectConfig,
   updateSpec,
-  updateTasks,
   type CorruptRequirementEntry,
   type SpawnSubRequirementItem,
 } from "../core/engine.ts";
@@ -72,13 +69,13 @@ import {
   type GitHubCommandDeps,
 } from "../core/github.ts";
 import { normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
-import { distillRequirementToPlaybook, readPlaybook, writePlaybook } from "../core/playbook.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, listProjectSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
 import { isProjectInitialized, readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
+  REQUIREMENT_TIERS,
   WORKBENCH_DIR,
   type AgentAction,
   type AgentRunRecord,
@@ -88,52 +85,32 @@ import {
   type ProjectGitHubConfig,
   type ProjectVerificationConfig,
   type RequirementDetail,
+  type RequirementTier,
   type Stage,
-  type TaskInput,
   type Track,
 } from "../core/types.ts";
 import { isRecord, sanitizeOutput, validateGiteeIssueIdent } from "../core/validate.ts";
 import {
   applySandboxToMain,
   createOrReuseWorktree,
-  inspectRsiSandboxDrift,
+  inspectSandboxDrift,
   prepareSandboxConflictResolution,
   recommendSandboxMergeOrder,
-  reconcileRsiSandboxBaseline,
+  reconcileSandboxBaseline,
   syncRequirementMirrorToSandbox,
-  syncRsiSandboxBase,
-  syncRsiSandboxPrAndCleanup,
-} from "../hub/evolution.ts";
+  syncSandboxBase,
+  syncSandboxPrAndCleanup,
+} from "../core/worktree.ts";
 import type { HubExecutor } from "../hub/executor.ts";
 import { synthesizeHandoffPacket } from "../hub/handoff.ts";
 import { enrichAgentRunRecord } from "../hub/pricing.ts";
 import { readHubConfig } from "../hub/registry.ts";
-import { buildPresetRouting, normalizeRoutingConfig } from "../hub/routing.ts";
+import { buildInitialProjectRouting, normalizeRoutingConfig } from "../hub/routing.ts";
 import {
   REASONING_EFFORTS,
-  ROUTING_PRESETS,
-  type HarnessInfo,
   type ReasoningEffort,
   type RoutingConfig,
-  type RoutingPreset,
 } from "../hub/types.ts";
-import { buildAgentPrompt, type DispatchAction } from "./prompts.ts";
-
-export interface BridgeStatus {
-  connected: boolean;
-  agent: string | null;
-  sessionId: string | null;
-  state: "idle" | "working" | "waiting_user" | "offline";
-  model: string | null;
-  updatedAt: number;
-}
-
-export interface DispatchOutcome {
-  delivered: boolean;
-  status: "submitted" | "prefilled" | "rejected" | "offline";
-  reason?: string;
-  prompt: string;
-}
 
 export interface LocalProjectSnapshot {
   initialized: boolean;
@@ -252,18 +229,10 @@ export async function buildLocalProjectSnapshot(
 
 export interface ProjectApiDeps {
   executor: HubExecutor;
-  getBridgeStatus: () => BridgeStatus;
-  dispatchToBridge: (
-    requirementId: string,
-    action: DispatchAction,
-    mode: "send" | "prefill",
-    prompt: string,
-  ) => Promise<DispatchOutcome>;
   broadcastUi: (event: Record<string, unknown>) => void;
   ensureWatcherFor: (projectRoot: string) => void;
   reloadWebBundle: (opts?: { manual?: boolean }) => Promise<{ reloaded: boolean }>;
   getHubOutputLanguage: () => OutputLanguage | undefined;
-  getFallbackRouting?: () => RoutingConfig;
   getGiteeAccessToken?: () => string | null;
   githubDeps?: GitHubCommandDeps;
   giteeDeps?: GiteeApiDeps;
@@ -274,14 +243,6 @@ export interface ProjectApiDeps {
  * Shared identically by the Hub server (local projects) and `wb node` (remote projects).
  */
 export function createProjectApiHandler(deps: ProjectApiDeps) {
-  const resolveOutputLang = (projectRoot: string, detail?: RequirementDetail) => {
-    const projectMeta = getProjectStatus(projectRoot).project;
-    return resolveEffectiveOutputLanguage({
-      projectLanguage: projectMeta?.outputLanguage,
-      hubLanguage: deps.getHubOutputLanguage(),
-      contextText: detail ? `${detail.state.title}\n${detail.specMarkdown}` : undefined,
-    });
-  };
 
   const tryCreateAndLinkIssue = async (
     projectRoot: string,
@@ -380,18 +341,17 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     }
   };
 
-  const resolveProjectRouting = (projectRoot: string, harnesses?: HarnessInfo[] | null): RoutingConfig => {
+  const resolveProjectRouting = (projectRoot: string): RoutingConfig | null => {
     const status = getProjectStatus(projectRoot);
     if (status.initialized && status.project?.routing) {
       return normalizeRoutingConfig(status.project.routing);
     }
-    return deps.getFallbackRouting?.() ?? buildPresetRouting("balanced", harnesses);
+    return null;
   };
 
   return async function handleProjectApi(req: Request, url: URL, base: string): Promise<Response | null> {
     const pathname = url.pathname;
     const method = req.method.toUpperCase();
-    const bridgeStatus = deps.getBridgeStatus();
 
     if (method === "GET" && pathname === "/api/project") {
       const status = getProjectStatus(base);
@@ -413,13 +373,12 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         projectLanguage: status.project?.outputLanguage,
         hubLanguage: deps.getHubOutputLanguage(),
       });
-      const effectiveRouting = resolveProjectRouting(base);
+      const projectRouting = resolveProjectRouting(base);
       return jsonResponse({
         ...status,
-        project: status.project ? { ...status.project, routing: status.project.routing ?? effectiveRouting } : null,
-        routing: effectiveRouting,
+        project: status.project,
+        routing: projectRouting,
         root: base,
-        bridge: bridgeStatus,
         effectiveOutputLanguage,
         remoteProvider,
         remoteRepo,
@@ -429,32 +388,17 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
     }
 
     if (method === "GET" && pathname === "/api/project/routing") {
-      const harnesses = await deps.executor.getHarnesses(false);
-      return jsonResponse({ routing: resolveProjectRouting(base, harnesses) });
+      return jsonResponse({ routing: resolveProjectRouting(base) });
     }
 
     if (method === "PUT" && pathname === "/api/project/routing") {
+      if (!isProjectInitialized(base)) {
+        throw new WorkbenchError("not_initialized", "项目尚未初始化 .workbench/，无法保存项目路由");
+      }
       const body = await readBody(req);
       const routing = normalizeRoutingConfig(body);
-      if (isProjectInitialized(base)) {
-        await updateProjectConfig(base, { routing });
-      }
+      await updateProjectConfig(base, { routing });
       deps.broadcastUi({ type: "workbench.updated", reason: "project.routing", root: base, at: Date.now() });
-      return jsonResponse({ routing });
-    }
-
-    if (method === "POST" && pathname === "/api/project/routing/preset") {
-      const body = await readBody(req);
-      const preset = typeof body.preset === "string" ? body.preset : "";
-      if (!(ROUTING_PRESETS as readonly string[]).includes(preset)) {
-        throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
-      }
-      const harnesses = await deps.executor.getHarnesses(false);
-      const routing = buildPresetRouting(preset as RoutingPreset, harnesses);
-      if (isProjectInitialized(base)) {
-        await updateProjectConfig(base, { routing });
-      }
-      deps.broadcastUi({ type: "workbench.updated", reason: "project.routing.preset", root: base, at: Date.now() });
       return jsonResponse({ routing });
     }
 
@@ -537,7 +481,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const mergeOrder = await recommendSandboxMergeOrder(base, { fetchRemote }).catch(() => null);
       const sandboxes = await Promise.all(
         listProjectSandboxes(base).map(async (sb) => {
-          const drift = await inspectRsiSandboxDrift(base, sb.requirementId, {
+          const drift = await inspectSandboxDrift(base, sb.requirementId, {
             includeSiblings: true,
             fetchRemote: false,
           }).catch(() => null);
@@ -633,45 +577,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       });
     }
 
-    if (method === "GET" && pathname === "/api/project/playbook") {
-      return jsonResponse(readPlaybook(base));
-    }
-
-    if (method === "PUT" && pathname === "/api/project/playbook") {
-      const body = await readBody(req);
-      const markdown = typeof body.markdown === "string" ? body.markdown : "";
-      const saved = await writePlaybook(base, markdown);
-      deps.broadcastUi({ type: "workbench.updated", reason: "playbook.updated", root: base, at: Date.now() });
-      return jsonResponse({ exists: true, ...saved });
-    }
-
-    if (method === "POST" && pathname === "/api/project/playbook/distill") {
-      const body = await readBody(req);
-      const reqId = typeof body.requirementId === "string" ? body.requirementId : null;
-      const { baseSnapshot: snapshot, byReqId } = await resolveProjectRequirementSnapshots(base);
-      let addedTotal = 0;
-      if (reqId) {
-        const snap = await observeGitSnapshot(resolveCodeRoot(base, reqId));
-        const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-        const out = await distillRequirementToPlaybook(base, detail);
-        addedTotal += out.added;
-      } else {
-        const summaries = listRequirements(base, {
-          scope: "all",
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-          codeSnapshotsById: byReqId,
-        });
-        for (const item of summaries) {
-          const itemHash = byReqId.has(item.id) ? (byReqId.get(item.id) ?? null) : (snapshot?.fingerprint ?? null);
-          const detail = getRequirement(base, item.id, { currentCodeSnapshotHash: itemHash });
-          const out = await distillRequirementToPlaybook(base, detail);
-          addedTotal += out.added;
-        }
-      }
-      deps.broadcastUi({ type: "workbench.updated", reason: "playbook.distilled", root: base, at: Date.now() });
-      return jsonResponse({ added: addedTotal, ...readPlaybook(base) });
-    }
-
     if (method === "POST" && pathname === "/api/project/init") {
       const body = await readBody(req);
       let outputLanguage: OutputLanguage | undefined;
@@ -683,7 +588,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
       const routing = isRecord(body.routing)
         ? normalizeRoutingConfig(body.routing)
-        : (deps.getFallbackRouting?.() ?? buildPresetRouting("balanced", await deps.executor.getHarnesses(false)));
+        : buildInitialProjectRouting(await deps.executor.getHarnesses(false));
       const project = await initProject(base, {
         name: typeof body.name === "string" ? body.name : undefined,
         privacyMode: body.privacyMode === "tracked" ? "tracked" : "local",
@@ -714,7 +619,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         items,
         ...(corruptItems.length > 0 ? { corruptItems } : {}),
         codeSnapshotHash: snapshot?.fingerprint ?? null,
-        bridge: bridgeStatus,
       });
     }
 
@@ -868,17 +772,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
 
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          detail = await markDesigning(base, detail.state.id, {
-            currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-          });
-          const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
-          dispatch = await deps.dispatchToBridge(detail.state.id, "design", "send", prompt);
-        }
-
         deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
-        return jsonResponse({ detail, dispatch, alreadyExisted: false, issue: giteeIssue, provider: "gitee" }, 201);
+        return jsonResponse({ detail, alreadyExisted: false, issue: giteeIssue, provider: "gitee" }, 201);
       }
 
       const issueRef =
@@ -938,17 +833,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
       });
 
-      let dispatch: DispatchOutcome | null = null;
-      if (body.dispatchAgent === true) {
-        detail = await markDesigning(base, detail.state.id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
-        dispatch = await deps.dispatchToBridge(detail.state.id, "design", "send", prompt);
-      }
-
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
-      return jsonResponse({ detail, dispatch, alreadyExisted: false, issue, provider: "github" }, 201);
+      return jsonResponse({ detail, alreadyExisted: false, issue, provider: "github" }, 201);
     }
 
     if (method === "POST" && pathname === "/api/requirements") {
@@ -956,6 +842,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const goal = typeof body.goal === "string" ? body.goal : "";
       const title = typeof body.title === "string" ? body.title : undefined;
       const track: Track = body.track === "fast_track" ? "fast_track" : "plan_first";
+      const tier: RequirementTier = body.tier === "sota" ? "sota" : "standard";
       const snapshot = await observeGitSnapshot(base);
       const attachmentIds = readStringArray(body.attachmentIds);
       let detail = await createRequirement(base, {
@@ -964,6 +851,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         ...(typeof body.parentId === "string" && body.parentId.trim() ? { parentId: body.parentId.trim() } : {}),
         criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
         track,
+        tier,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
       });
@@ -991,21 +879,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         });
       }
 
-      let dispatch: DispatchOutcome | null = null;
-      if (body.dispatchAgent === true) {
-        detail = await markDesigning(base, detail.state.id, {
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        if (sandbox) syncRequirementMirrorToSandbox(base, detail.state.id, sandbox.worktreePath);
-        const prompt = buildAgentPrompt(detail, "design", { outputLanguage: resolveOutputLang(base, detail) });
-        dispatch = await deps.dispatchToBridge(detail.state.id, "design", "send", prompt);
-      }
-
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
       return jsonResponse(
         {
           detail,
-          dispatch,
           ...(sandbox ? { sandbox } : {}),
           ...(githubWarning ? { githubWarning } : {}),
           ...(githubWarningRef ? { githubWarningRef } : {}),
@@ -1026,13 +903,13 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
         let sandbox = getSandboxForRequirement(base, id);
         if (sandbox && detail.state.stage !== "done" && detail.state.stage !== "cancelled") {
-          const reconciled = await reconcileRsiSandboxBaseline(base, id).catch(() => null);
+          const reconciled = await reconcileSandboxBaseline(base, id).catch(() => null);
           if (reconciled) {
             detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
             sandbox = getSandboxForRequirement(base, id);
           }
         }
-        const sandboxDrift = sandbox ? await inspectRsiSandboxDrift(base, id).catch(() => null) : null;
+        const sandboxDrift = sandbox ? await inspectSandboxDrift(base, id).catch(() => null) : null;
         const obs = readHubConfig().observability;
         const activeById = new Map(
           deps.executor
@@ -1076,7 +953,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         };
         return jsonResponse({
           detail,
-          bridge: bridgeStatus,
           codeSnapshotHash: snapshot?.fingerprint ?? null,
           sandbox,
           ...(sandboxDrift ? { sandboxDrift } : {}),
@@ -1206,20 +1082,31 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         return jsonResponse({ detail });
       }
 
-      if (method === "PATCH" && sub === "tasks") {
+      if (method === "PATCH" && sub === "tier") {
         const body = await readBody(req);
-        if (!Array.isArray(body.tasks)) {
-          throw new WorkbenchError("invalid_input", "tasks 必须是数组");
+        const tier = typeof body.tier === "string" && (REQUIREMENT_TIERS as readonly string[]).includes(body.tier)
+          ? (body.tier as RequirementTier)
+          : null;
+        if (!tier) {
+          throw new WorkbenchError("invalid_input", `无效的执行档位: ${String(body.tier)}（可选 standard | sota）`);
         }
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await updateTasks(base, id, {
-          tasks: body.tasks as TaskInput[],
-          note: typeof body.note === "string" ? body.note : undefined,
+        const detail = await setRequirementTier(base, id, tier, {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          actor: "human",
+          reason: typeof body.reason === "string" ? body.reason : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        deps.broadcastUi({ type: "workbench.updated", reason: "tasks.updated", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "workbench.updated", reason: "tier.updated", root: base, id, at: Date.now() });
+        if (body.dispatchFix === true && tier === "sota" && detail.state.stage === "coding") {
+          const started = await deps.executor.startRun({
+            root: base,
+            requirementId: id,
+            action: "fix",
+            dispatchReasonOverride: "sota_escalate",
+            message: typeof body.message === "string" ? body.message : undefined,
+          });
+          return jsonResponse({ detail: started.detail, run: started.run, target: started.target }, 202);
+        }
         return jsonResponse({ detail });
       }
 
@@ -1289,7 +1176,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       if (method === "POST" && sub === "sandbox") {
         const body = await readBody(req);
         const sandbox = await createOrReuseWorktree(base, id, {
-          branchPrefix: body.branchPrefix === "rsi" ? "rsi" : "feat",
+          branchPrefix: body.branchPrefix === "fix" ? "fix" : "feat",
           ...(typeof body.branchName === "string" && body.branchName.trim() ? { branchName: body.branchName.trim() } : {}),
           ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
             ? { stackedOnReqId: body.stackedOnReqId.trim() }
@@ -1297,7 +1184,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         });
         const snapshot = await observeGitSnapshot(sandbox.worktreePath);
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        const sandboxDrift = await inspectRsiSandboxDrift(base, id).catch(() => null);
+        const sandboxDrift = await inspectSandboxDrift(base, id).catch(() => null);
         deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
         deps.broadcastUi({ type: "hub.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
         return jsonResponse({ sandbox, detail, sandboxDrift }, 201);
@@ -1305,10 +1192,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
 
       if (method === "POST" && sub === "sync-base") {
         const body = await readBody(req);
-        const res = await syncRsiSandboxBase(base, id, {
+        const res = await syncSandboxBase(base, id, {
           fetchRemote: body.fetchRemote !== false,
         });
-        deps.broadcastUi({ type: "hub.updated", reason: "evolution.base_synced", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "hub.updated", reason: "sandbox.base_synced", root: base, id, at: Date.now() });
         deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.base_synced", root: base, id, at: Date.now() });
         return jsonResponse(res);
       }
@@ -1316,7 +1203,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       if (method === "POST" && sub === "apply-sandbox") {
         const applied = await applySandboxToMain(base, id);
         const reloadRes = applied.touchesWeb ? await deps.reloadWebBundle() : { reloaded: false };
-        deps.broadcastUi({ type: "hub.updated", reason: "evolution.applied", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "hub.updated", reason: "sandbox.applied", root: base, id, at: Date.now() });
         deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.applied", root: base, id, at: Date.now() });
         return jsonResponse({
           ...applied,
@@ -1330,54 +1217,37 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const codeRoot = resolveCodeRoot(base, id);
         const snapshot = await observeGitSnapshot(codeRoot);
         let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-        if (detail.state.stage === "awaiting_approval" && body.approveFirst === true) {
+        if (detail.state.stage === "planning" && body.approveFirst === true) {
           detail = await approveDesign(base, id, {
             expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : detail.state.revision,
             baseline: snapshot,
             currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
           });
-        } else if (detail.state.stage === "done" || detail.state.stage === "awaiting_acceptance") {
+        } else if (detail.state.stage === "done") {
           detail = await prepareSandboxConflictResolution(base, id);
-        } else if (detail.state.stage !== "implementing") {
+        } else if (detail.state.stage !== "coding") {
           throw new WorkbenchError(
             "approval_required",
             `${id} 当前阶段（${detail.state.stage}）需要先批准方案后才能同步主干并解决冲突`,
           );
         }
 
-        if (body.useCli === true) {
-          const started = await deps.executor.startRun({
-            root: base,
-            requirementId: id,
-            action: "fix",
-            resolveConflict: true,
-            harness: typeof body.harness === "string" ? body.harness : undefined,
-            model: typeof body.model === "string" ? body.model : undefined,
-            reasoningEffort:
-              typeof body.reasoningEffort === "string" &&
-              (REASONING_EFFORTS as readonly string[]).includes(body.reasoningEffort)
-                ? (body.reasoningEffort as ReasoningEffort)
-                : undefined,
-            message: typeof body.message === "string" ? body.message : undefined,
-          });
-          deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.sync_resolve", root: base, id, at: Date.now() });
-          return jsonResponse({ detail: started.detail, run: started.run, target: started.target, dispatch: null }, 202);
-        }
-
-        const drift = await inspectRsiSandboxDrift(base, id, { includeSiblings: false, fetchRemote: false }).catch(
-          () => null,
-        );
-        const conflicts = drift?.conflictFiles.slice(0, 8).join(", ") ?? "";
-        const prompt =
-          typeof body.message === "string" && body.message.trim()
-            ? body.message.trim()
-            : `请处理工作台需求 ${id} 沙箱分支 ${drift?.branch ?? ""} 的主干同步与合并冲突${
-                conflicts ? `（冲突文件：${conflicts}）` : ""
-              }：保留未提交改动，合并 ${drift?.targetRef ?? drift?.mainHead ?? "main"}，解决冲突后运行 wb verify ${id} --all 与 wb tasks ${id} --ready。`;
-        const dispatch =
-          body.dispatchAgent === true ? await deps.dispatchToBridge(id, "fix", "send", prompt) : null;
+        const started = await deps.executor.startRun({
+          root: base,
+          requirementId: id,
+          action: "fix",
+          resolveConflict: true,
+          harness: typeof body.harness === "string" ? body.harness : undefined,
+          model: typeof body.model === "string" ? body.model : undefined,
+          reasoningEffort:
+            typeof body.reasoningEffort === "string" &&
+            (REASONING_EFFORTS as readonly string[]).includes(body.reasoningEffort)
+              ? (body.reasoningEffort as ReasoningEffort)
+              : undefined,
+          message: typeof body.message === "string" ? body.message : undefined,
+        });
         deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.sync_resolve", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
+        return jsonResponse({ detail: started.detail, run: started.run, target: started.target }, 202);
       }
 
       if (method === "GET" && sub === "runs") {
@@ -1522,13 +1392,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           note: typeof body.note === "string" ? body.note : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
-          dispatch = await deps.dispatchToBridge(id, "implement", "send", prompt);
-        }
         deps.broadcastUi({ type: "workbench.updated", reason: "approved", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
+        return jsonResponse({ detail });
       }
 
       if (method === "POST" && sub === "fast-track") {
@@ -1540,13 +1405,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           note: typeof body.note === "string" ? body.note : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const prompt = buildAgentPrompt(detail, "implement", { outputLanguage: resolveOutputLang(base, detail) });
-          dispatch = await deps.dispatchToBridge(id, "implement", "send", prompt);
-        }
         deps.broadcastUi({ type: "workbench.updated", reason: "fast_tracked", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
+        return jsonResponse({ detail });
       }
 
       if (method === "POST" && sub === "request-changes") {
@@ -1561,18 +1421,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         if (codeRoot !== base) {
           syncRequirementMirrorToSandbox(base, id, codeRoot);
         }
-        let dispatch: DispatchOutcome | null = null;
-        if (body.dispatchAgent === true) {
-          const action: DispatchAction = detail.state.stage === "designing" ? "design" : "fix";
-          dispatch = await deps.dispatchToBridge(
-            id,
-            action,
-            "send",
-            buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) }),
-          );
-        }
         deps.broadcastUi({ type: "workbench.updated", reason: "changes_requested", root: base, id, at: Date.now() });
-        return jsonResponse({ detail, dispatch });
+        return jsonResponse({ detail });
       }
 
       if (method === "POST" && sub === "verify") {
@@ -1644,7 +1494,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           giteeToken: resolveGiteeToken(),
         });
         const sandboxDrift = preview.sandboxActive
-          ? await inspectRsiSandboxDrift(base, id, { includeSiblings: true, fetchRemote: false }).catch(() => null)
+          ? await inspectSandboxDrift(base, id, { includeSiblings: true, fetchRemote: false }).catch(() => null)
           : null;
         return jsonResponse({ ...preview, ...(sandboxDrift ? { sandboxDrift } : {}) });
       }
@@ -1827,14 +1677,14 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const body = await readBody(req);
         const hasSandbox = Boolean(getSandboxForRequirement(base, id));
         if (hasSandbox) {
-          const synced = await syncRsiSandboxPrAndCleanup(
+          const synced = await syncSandboxPrAndCleanup(
             base,
             id,
             { forceCleanup: body.forceCleanup === true },
             deps.githubDeps,
           );
           const reloadRes = synced.cleanedSandbox && synced.touchesWeb ? await deps.reloadWebBundle() : { reloaded: false };
-          deps.broadcastUi({ type: "hub.updated", reason: "evolution.pr_synced", root: base, id, at: Date.now() });
+          deps.broadcastUi({ type: "hub.updated", reason: "sandbox.pr_synced", root: base, id, at: Date.now() });
           deps.broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: base, id, at: Date.now() });
           return jsonResponse({
             ...synced,
@@ -1889,29 +1739,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         return jsonResponse({ detail: updated, pr: latestPr, cleanedSandbox: false, mainUpdated: false, mainSyncReason: null });
       }
 
-      if (method === "POST" && sub === "block") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await blockRequirement(base, id, {
-          reason: typeof body.reason === "string" ? body.reason : "",
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        deps.broadcastUi({ type: "workbench.updated", reason: "blocked", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "unblock") {
-        const body = await readBody(req);
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        const detail = await unblockRequirement(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
-          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-        });
-        deps.broadcastUi({ type: "workbench.updated", reason: "unblocked", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
-      }
-
       if (method === "POST" && sub === "cancel") {
         const body = await readBody(req);
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
@@ -1935,25 +1762,6 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         });
         deps.broadcastUi({ type: "workbench.updated", reason: "reopened", root: base, id, at: Date.now() });
         return jsonResponse({ detail });
-      }
-
-      if (method === "POST" && sub === "dispatch") {
-        const body = await readBody(req);
-        const action = (
-          body.action === "implement" || body.action === "fix" || body.action === "review" ? body.action : "design"
-        ) as DispatchAction;
-        const mode = body.mode === "prefill" ? "prefill" : "send";
-        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
-        let detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-
-        if (action === "design" && detail.state.stage === "draft") {
-          detail = await markDesigning(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
-          deps.broadcastUi({ type: "workbench.updated", reason: "designing", root: base, id, at: Date.now() });
-        }
-
-        const prompt = buildAgentPrompt(detail, action, { outputLanguage: resolveOutputLang(base, detail) });
-        const dispatch = await deps.dispatchToBridge(id, action, mode, prompt);
-        return jsonResponse({ detail, dispatch });
       }
     }
 

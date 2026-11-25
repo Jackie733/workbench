@@ -36,7 +36,7 @@ export interface ModelTelemetrySnapshot {
 }
 
 export function telemetryFilePath(): string {
-  return path.join(resolveHubDir(), "evolution", "model-stats.json");
+  return path.join(resolveHubDir(), "telemetry", "model-stats.json");
 }
 
 function telemetryLockPath(): string {

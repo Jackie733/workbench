@@ -18,7 +18,6 @@ import {
 } from "../queries.ts";
 import {
   AGENT_RUN_TONE,
-  enrichRunForDisplay,
   formatDateTime,
   formatDurationHuman,
   formatPercent,
@@ -228,7 +227,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const rawBaseRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
 
   const liveText = useStreamStore((s) => (rawBaseRun ? s.liveRunLogs[rawBaseRun.id] ?? "" : ""));
-  const currentRun = rawBaseRun ? enrichRunForDisplay(rawBaseRun, liveText) : null;
+  const currentRun = rawBaseRun;
   const isLogHydrated = useStreamStore((s) => (currentRun ? Boolean(s.logHydrated[currentRun.id]) : false));
   const traceState = currentRun ? runTraces[currentRun.id] : undefined;
   const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
@@ -252,8 +251,8 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const effectiveWidth = clampDrawerWidth(drawerWidth, maxWidth);
   const discussions = d?.state.discussions ?? [];
   const stage = d?.state.stage;
-  const isImplOrAccept = stage === "implementing" || stage === "awaiting_acceptance";
-  const isReadonlyStage = stage === "done" || stage === "cancelled" || stage === "blocked";
+  const isImplOrAccept = stage === "coding";
+  const isReadonlyStage = stage === "done" || stage === "cancelled";
 
   return (
     <>
@@ -464,7 +463,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       </div>
                     )}
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                      <RunnerSelect stageAction="ask" testId="drawer-runner-select" />
+                      <RunnerSelect stageAction="ask" testId="drawer-runner-select" tier={d.state.tier} />
                     </div>
                     <Textarea
                       size="sm"

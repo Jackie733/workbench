@@ -13,24 +13,21 @@ import {
   MAX_DISCUSSIONS,
   MAX_HANDOFF_BYTES,
   MAX_REASON_CHARS,
-  MAX_REVIEW_HISTORY,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_BATCHES,
   MAX_SCREENSHOTS_PER_BATCH,
   MAX_SPEC_BYTES,
   MAX_SNAPSHOT_VERIFICATIONS,
-  MAX_TASKS,
   MAX_TIMELINE,
   MAX_TITLE_CHARS,
   OUTPUT_LANGUAGES,
   REASONING_EFFORTS,
+  REQUIREMENT_TIERS,
   REVIEW_FINDING_SEVERITIES,
   REVIEW_VERDICTS,
-  ROUTING_PRESETS,
-  ROUTING_STAGES,
+  ROUTING_ROLES,
   SCHEMA_VERSION,
   STAGES,
-  TASK_STATUSES,
   TRACKS,
   type AcceptanceGitEvidence,
   type AcceptanceRecord,
@@ -53,7 +50,6 @@ import {
   type DiscussionEntry,
   type EffectiveVerificationState,
   type GitRemoteProvider,
-  type HandoffNote,
   type HarnessId,
   type ModelTarget,
   type OutputLanguage,
@@ -66,14 +62,15 @@ import {
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
   type RequirementState,
+  type RequirementTier,
   type ReviewDisposition,
   type ReviewFinding,
   type ReviewFindingSeverity,
   type ReviewReport,
   type ReviewVerdict,
+  type RoleRouteRule,
   type RoutingConfig,
-  type RoutingPreset,
-  type RoutingStage,
+  type RoutingRole,
   type RunBillingMode,
   type RunCostSource,
   type RunCostSummary,
@@ -86,10 +83,6 @@ import {
   type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
   type Stage,
-  type StageRouteRule,
-  type TaskInput,
-  type TaskItem,
-  type TaskStatus,
   type TimelineEvent,
   type Track,
   type VerificationRecord,
@@ -208,17 +201,9 @@ export function isSafeInt(value: unknown, min = 0): value is number {
 
 const FORBIDDEN_EXTENSION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-function assertAllowedKeys(obj: Record<string, unknown>, allowed: readonly string[], label: string): void {
-  for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) {
-      throw new WorkbenchError("corrupt_record", `${label} 包含未知字段: ${key}`);
-    }
-  }
-}
-
 /**
- * Validates object keys on versioned persisted records while allowing forward-compatible
- * optional extension fields under the same schemaVersion (e.g. written by an RSI branch).
+ * Validates object keys on persisted records while allowing forward-compatible
+ * optional extension fields (never allowing prototype-pollution keys).
  */
 function assertSafeExtensionKeys(obj: Record<string, unknown>, label: string): void {
   for (const key of Object.keys(obj)) {
@@ -307,59 +292,10 @@ export function normalizeCriteria(inputs: CriterionInput[]): Criterion[] {
   return result;
 }
 
-export function normalizeTasks(inputs: TaskInput[], existing: TaskItem[], now: number): TaskItem[] {
-  if (!Array.isArray(inputs) || inputs.length > MAX_TASKS) {
-    throw new WorkbenchError("invalid_input", `实施任务数量不能超过 ${MAX_TASKS} 条`);
-  }
-  let nextNum = 1;
-  for (const prev of existing) {
-    const match = /^T-(\d+)$/.exec(prev.id);
-    if (match) nextNum = Math.max(nextNum, Number(match[1]) + 1);
-  }
-  const existingMap = new Map(existing.map((t) => [t.id, t]));
-  const usedIds = new Set<string>();
-  const out: TaskItem[] = [];
-  for (let i = 0; i < inputs.length; i++) {
-    const raw = inputs[i];
-    if (!isRecord(raw) || !isSafeText(raw.title, 500)) {
-      throw new WorkbenchError("invalid_input", `第 ${i + 1} 条任务标题无效`);
-    }
-    if (!TASK_STATUSES.includes(raw.status as TaskStatus)) {
-      throw new WorkbenchError("invalid_input", `任务状态无效: ${String(raw.status)}`);
-    }
-    let id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : "";
-    if (!id) {
-      while (usedIds.has(`T-${nextNum}`) || existingMap.has(`T-${nextNum}`)) nextNum++;
-      id = `T-${nextNum++}`;
-    } else if (!TOKEN_ID_RE.test(id)) {
-      throw new WorkbenchError("invalid_input", `任务 ID 无效: ${id}`);
-    }
-    if (usedIds.has(id)) {
-      throw new WorkbenchError("invalid_input", `任务 ID 重复: ${id}`);
-    }
-    usedIds.add(id);
-    const prev = existingMap.get(id);
-    const note = typeof raw.note === "string" && raw.note.trim() ? raw.note.trim() : undefined;
-    if (note && !isSafeText(note, 1000)) {
-      throw new WorkbenchError("invalid_input", `任务 ${id} 的备注无效或过长`);
-    }
-    const unchanged =
-      prev && prev.title === raw.title.trim() && prev.status === raw.status && prev.note === note;
-    out.push({
-      id,
-      title: raw.title.trim(),
-      status: raw.status as TaskStatus,
-      ...(note ? { note } : {}),
-      updatedAt: unchanged ? prev.updatedAt : now,
-    });
-  }
-  return out;
-}
-
 function validateProjectGitHubConfig(raw: unknown): ProjectGitHubConfig | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json github 配置必须是对象");
-  assertAllowedKeys(raw, ["repo", "autoCreateIssue", "autoSyncIssue", "defaultBaseBranch"], "project.github");
+  assertSafeExtensionKeys(raw, "project.github");
   if (raw.repo !== undefined && (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo.trim()))) {
     throw new WorkbenchError("corrupt_record", "project.github.repo 格式不合法");
   }
@@ -381,7 +317,7 @@ function validateProjectGitHubConfig(raw: unknown): ProjectGitHubConfig | undefi
 function validateProjectGiteeConfig(raw: unknown): ProjectGiteeConfig | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json gitee 配置必须是对象");
-  assertAllowedKeys(raw, ["repo", "enterprise", "defaultBaseBranch"], "project.gitee");
+  assertSafeExtensionKeys(raw, "project.gitee");
   if (raw.repo !== undefined && (typeof raw.repo !== "string" || !GITHUB_REPO_RE.test(raw.repo.trim()))) {
     throw new WorkbenchError("corrupt_record", "project.gitee.repo 格式不合法");
   }
@@ -400,7 +336,7 @@ function validateProjectGiteeConfig(raw: unknown): ProjectGiteeConfig | undefine
 function validateProjectVerificationConfig(raw: unknown): ProjectVerificationConfig | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json verification 配置必须是对象");
-  assertAllowedKeys(raw, ["fastCommand", "fullCommand", "autoScreenshots"], "project.verification");
+  assertSafeExtensionKeys(raw, "project.verification");
   if (raw.fastCommand !== undefined && !isSafeText(raw.fastCommand, 512, true)) {
     throw new WorkbenchError("corrupt_record", "project.verification.fastCommand 格式不合法");
   }
@@ -415,13 +351,9 @@ function validateProjectVerificationConfig(raw: unknown): ProjectVerificationCon
 
 function validateModelTarget(raw: unknown, label: string): ModelTarget {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 必须是对象`);
-  assertAllowedKeys(raw, ["harness", "model", "reasoningEffort"], label);
-  let rawHarness = typeof raw.harness === "string" ? raw.harness.trim() : "";
-  let rawModel = typeof raw.model === "string" ? raw.model.trim() : "";
-  if (rawHarness === "gemini") {
-    rawHarness = "agy";
-    if (!rawModel || rawModel === "default") rawModel = "gemini-4-argon";
-  }
+  assertSafeExtensionKeys(raw, label);
+  const rawHarness = typeof raw.harness === "string" ? raw.harness.trim() : "";
+  const rawModel = typeof raw.model === "string" ? raw.model.trim() : "";
   if (!(HARNESS_IDS as readonly string[]).includes(rawHarness)) {
     throw new WorkbenchError("corrupt_record", `${label}.harness 格式不合法: ${String(raw.harness)}`);
   }
@@ -444,47 +376,34 @@ function validateModelTarget(raw: unknown, label: string): ModelTarget {
 export function validateProjectRoutingConfig(raw: unknown): RoutingConfig | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json routing 配置必须是对象");
-  assertAllowedKeys(raw, ["activePreset", "stages", "autoReview", "maxAutoReviewRounds", "autoHeal"], "project.routing");
-  if (typeof raw.activePreset !== "string" || !(ROUTING_PRESETS as readonly string[]).includes(raw.activePreset)) {
-    throw new WorkbenchError("corrupt_record", "project.routing.activePreset 格式不合法");
-  }
-  if (!isRecord(raw.stages)) {
-    throw new WorkbenchError("corrupt_record", "project.routing.stages 必须是对象");
-  }
-  assertAllowedKeys(raw.stages, ROUTING_STAGES, "project.routing.stages");
-  const stages = {} as Record<RoutingStage, StageRouteRule>;
-  for (const stage of ROUTING_STAGES) {
-    const rule = raw.stages[stage];
+  assertSafeExtensionKeys(raw, "project.routing");
+  const rules = {} as Record<RoutingRole, RoleRouteRule>;
+  for (const role of ROUTING_ROLES) {
+    const rule = raw[role];
     if (!isRecord(rule)) {
-      throw new WorkbenchError("corrupt_record", `project.routing.stages.${stage} 必须是对象`);
+      throw new WorkbenchError("corrupt_record", `project.routing.${role} 必须是对象`);
     }
-    assertAllowedKeys(rule, ["primary", "fallbacks"], `project.routing.stages.${stage}`);
-    const primary = validateModelTarget(rule.primary, `project.routing.stages.${stage}.primary`);
+    assertSafeExtensionKeys(rule, `project.routing.${role}`);
+    const primary = validateModelTarget(rule.primary, `project.routing.${role}.primary`);
     if (!Array.isArray(rule.fallbacks) || rule.fallbacks.length > 6) {
-      throw new WorkbenchError("corrupt_record", `project.routing.stages.${stage}.fallbacks 格式不合法`);
+      throw new WorkbenchError("corrupt_record", `project.routing.${role}.fallbacks 格式不合法`);
     }
     const fallbacks = rule.fallbacks.map((item, idx) =>
-      validateModelTarget(item, `project.routing.stages.${stage}.fallbacks[${idx}]`),
+      validateModelTarget(item, `project.routing.${role}.fallbacks[${idx}]`),
     );
-    stages[stage] = { primary, fallbacks };
+    rules[role] = { primary, fallbacks };
   }
   if (raw.autoReview !== undefined && typeof raw.autoReview !== "boolean") {
     throw new WorkbenchError("corrupt_record", "project.routing.autoReview 必须是布尔值");
-  }
-  if (
-    raw.maxAutoReviewRounds !== undefined &&
-    (!isSafeInt(raw.maxAutoReviewRounds, 1) || raw.maxAutoReviewRounds > 5)
-  ) {
-    throw new WorkbenchError("corrupt_record", "project.routing.maxAutoReviewRounds 格式不合法");
   }
   if (raw.autoHeal !== undefined && typeof raw.autoHeal !== "boolean") {
     throw new WorkbenchError("corrupt_record", "project.routing.autoHeal 必须是布尔值");
   }
   return {
-    activePreset: raw.activePreset as RoutingPreset,
-    stages,
+    defaultLead: rules.defaultLead,
+    sotaLead: rules.sotaLead,
+    reviewer: rules.reviewer,
     ...(raw.autoReview !== undefined ? { autoReview: raw.autoReview } : {}),
-    ...(raw.maxAutoReviewRounds !== undefined ? { maxAutoReviewRounds: raw.maxAutoReviewRounds } : {}),
     ...(raw.autoHeal !== undefined ? { autoHeal: raw.autoHeal } : {}),
   };
 }
@@ -518,11 +437,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
 function validateApproval(raw: unknown): ApprovalRecord | null {
   if (raw === null) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "approval 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["approvedAt", "track", "specHash", "designVersion", "designHash", "baselineHead", "baselineFingerprint", "note"],
-    "approval",
-  );
+  assertSafeExtensionKeys(raw, "approval");
   if (
     !isSafeInt(raw.approvedAt, 0) ||
     !TRACKS.includes(raw.track as Track) ||
@@ -542,11 +457,7 @@ function validateApproval(raw: unknown): ApprovalRecord | null {
 function validateAcceptanceSnapshotReference(raw: unknown): AcceptanceSnapshotReference | null | undefined {
   if (raw === null || raw === undefined) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance.snapshot 引用字段无效");
-  assertAllowedKeys(
-    raw,
-    ["id", "path", "schemaVersion", "capturedAt", "contentDigest", "sizeBytes"],
-    "acceptance.snapshot",
-  );
+  assertSafeExtensionKeys(raw, "acceptance.snapshot");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -569,7 +480,7 @@ function validateAcceptanceSnapshotReference(raw: unknown): AcceptanceSnapshotRe
 function validateReviewDisposition(raw: unknown): ReviewDisposition | undefined {
   if (raw === undefined) return undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance.reviewDisposition 字段无效");
-  assertAllowedKeys(raw, ["reviewId", "verdict", "effectiveState", "acceptedRisks"], "acceptance.reviewDisposition");
+  assertSafeExtensionKeys(raw, "acceptance.reviewDisposition");
   if (
     (raw.reviewId !== undefined && (typeof raw.reviewId !== "string" || !TOKEN_ID_RE.test(raw.reviewId))) ||
     (raw.verdict !== undefined && !REVIEW_VERDICTS.includes(raw.verdict as ReviewVerdict)) ||
@@ -587,11 +498,7 @@ function validateReviewDisposition(raw: unknown): ReviewDisposition | undefined 
 function validateAcceptance(raw: unknown): AcceptanceRecord | null {
   if (raw === null) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["acceptedAt", "specHash", "codeSnapshotHash", "verificationIds", "note", "overrideReason", "reviewDisposition", "snapshot"],
-    "acceptance",
-  );
+  assertSafeExtensionKeys(raw, "acceptance");
   if (
     !isSafeInt(raw.acceptedAt, 0) ||
     typeof raw.specHash !== "string" ||
@@ -613,11 +520,7 @@ function validateAcceptance(raw: unknown): AcceptanceRecord | null {
 function validateDelivery(raw: unknown): DeliveryRecord | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "delivery 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["deliveredAt", "commitHash", "shortHash", "commitMessage", "files", "branch", "prNumber", "prUrl", "note"],
-    "delivery",
-  );
+  assertSafeExtensionKeys(raw, "delivery");
   const hasPr = typeof raw.prNumber === "number";
   if (
     !isSafeInt(raw.deliveredAt, 0) ||
@@ -643,7 +546,7 @@ function validateDelivery(raw: unknown): DeliveryRecord | null | undefined {
 function validateBaseline(raw: unknown): BaselineSnapshot | null {
   if (raw === null) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "baseline 字段无效");
-  assertAllowedKeys(raw, ["head", "fingerprint", "dirty", "capturedAt"], "baseline");
+  assertSafeExtensionKeys(raw, "baseline");
   if (
     typeof raw.head !== "string" ||
     typeof raw.fingerprint !== "string" ||
@@ -658,27 +561,7 @@ function validateBaseline(raw: unknown): BaselineSnapshot | null {
 
 export function validateVerificationRecord(raw: unknown): VerificationRecord {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "verification 记录必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "id",
-      "command",
-      "cwd",
-      "criterionIds",
-      "specHash",
-      "codeSnapshotHash",
-      "exitCode",
-      "timedOut",
-      "durationMs",
-      "startedAt",
-      "endedAt",
-      "passed",
-      "outputPath",
-      "outputPreview",
-      "truncated",
-    ],
-    "verification",
-  );
+  assertSafeExtensionKeys(raw, "verification");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -718,7 +601,7 @@ function validateCriterionEntry(raw: unknown, label: string): Criterion {
 
 function validateChangedFileEntry(raw: unknown, label: string): ChangedFile {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 的文件记录无效`);
-  assertAllowedKeys(raw, ["path", "status", "staged", "unstaged"], `${label}.files`);
+  assertSafeExtensionKeys(raw, `${label}.files`);
   if (
     !isSafeText(raw.path, 4096) ||
     raw.path.startsWith("/") ||
@@ -734,7 +617,7 @@ function validateChangedFileEntry(raw: unknown, label: string): ChangedFile {
 
 function validateCommitInfoEntry(raw: unknown, label: string): CommitInfo {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", `${label} 的提交记录无效`);
-  assertAllowedKeys(raw, ["hash", "shortHash", "author", "at", "subject"], `${label}.commits`);
+  assertSafeExtensionKeys(raw, `${label}.commits`);
   if (
     typeof raw.hash !== "string" ||
     !GIT_REF_RE.test(raw.hash) ||
@@ -750,31 +633,7 @@ function validateCommitInfoEntry(raw: unknown, label: string): CommitInfo {
 
 export function validateAcceptanceGitEvidence(raw: unknown): AcceptanceGitEvidence {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance git 证据必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "diffStatus",
-      "reason",
-      "isGitRepo",
-      "baselineRequested",
-      "baselineHead",
-      "baselineAvailable",
-      "observedHead",
-      "fingerprint",
-      "dirty",
-      "files",
-      "filesScope",
-      "commits",
-      "diff",
-      "diffBytes",
-      "diffTruncated",
-      "maxDiffBytes",
-      "binaryFiles",
-      "omittedFiles",
-      "capturedAt",
-    ],
-    "acceptance.git",
-  );
+  assertSafeExtensionKeys(raw, "acceptance.git");
   if (
     !DIFF_STATUSES.includes(raw.diffStatus as DiffEvidenceStatus) ||
     (raw.reason !== null && !isSafeText(raw.reason, 2000)) ||
@@ -812,7 +671,7 @@ export function validateAcceptanceGitEvidence(raw: unknown): AcceptanceGitEviden
 
 export function validateAcceptanceVerificationEvidence(raw: unknown): AcceptanceVerificationEvidence {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "acceptance 验证证据必须是对象");
-  assertAllowedKeys(raw, ["record", "effectiveState", "staleReason", "selectedForAcceptance"], "acceptance.verification");
+  assertSafeExtensionKeys(raw, "acceptance.verification");
   if (
     !EFFECTIVE_STATES.includes(raw.effectiveState as EffectiveVerificationState) ||
     (raw.staleReason !== null && !isSafeText(raw.staleReason, 2000)) ||
@@ -830,7 +689,7 @@ export function validateAcceptanceVerificationEvidence(raw: unknown): Acceptance
 
 export function validateScreenshotShot(raw: unknown): ScreenshotShot {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图记录必须是对象");
-  assertAllowedKeys(raw, ["id", "label", "urlPath", "viewport", "theme", "path", "sha256", "sizeBytes"], "screenshot");
+  assertSafeExtensionKeys(raw, "screenshot");
   if (
     typeof raw.id !== "string" ||
     !SCREENSHOT_SHOT_ID_RE.test(raw.id) ||
@@ -853,23 +712,7 @@ export function validateScreenshotShot(raw: unknown): ScreenshotShot {
 
 export function validateScreenshotBatch(raw: unknown): ScreenshotBatch {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "截图批次必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "id",
-      "createdAt",
-      "trigger",
-      "actor",
-      "specHash",
-      "codeSnapshotHash",
-      "status",
-      "skipReason",
-      "reasonCode",
-      "shots",
-      "durationMs",
-    ],
-    "screenshotBatch",
-  );
+  assertSafeExtensionKeys(raw, "screenshotBatch");
   if (
     raw.reasonCode !== undefined &&
     raw.reasonCode !== null &&
@@ -955,7 +798,7 @@ export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?:
   for (const criterion of raw.criteria) validateCriterionEntry(criterion, "验收快照");
   for (const item of raw.coverage) {
     if (!isRecord(item)) throw new WorkbenchError("corrupt_record", "验收快照覆盖记录损坏");
-    assertAllowedKeys(item, ["criterion", "state", "verificationIds", "reason"], "验收快照.coverage");
+    assertSafeExtensionKeys(item, "验收快照.coverage");
     if (
       !COVERAGE_STATES.includes(item.state as CriterionCoverageState) ||
       (item.reason !== null && !isSafeText(item.reason, 2000)) ||
@@ -975,26 +818,9 @@ export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?:
   return raw as unknown as AcceptanceSnapshot;
 }
 
-function validateHandoffNote(raw: unknown): HandoffNote | null {
-  if (raw === null || raw === undefined) return null;
-
-  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "handoffNote 字段无效");
-  assertAllowedKeys(raw, ["updatedAt", "keyDecisions", "deadEnds", "nextSteps"], "handoffNote");
-  const isStrList = (v: unknown) =>
-    Array.isArray(v) && v.length <= 32 && v.every((item) => isSafeText(item, 1000));
-  if (!isSafeInt(raw.updatedAt, 0) || !isStrList(raw.keyDecisions) || !isStrList(raw.deadEnds) || !isStrList(raw.nextSteps)) {
-    throw new WorkbenchError("corrupt_record", "handoffNote 记录损坏");
-  }
-  return raw as unknown as HandoffNote;
-}
-
 function validateDiscussionEntry(raw: unknown): DiscussionEntry {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "discussion 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["id", "at", "actor", "mode", "anchor", "harness", "model", "message", "resolved"],
-    "discussion",
-  );
+  assertSafeExtensionKeys(raw, "discussion");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -1019,6 +845,7 @@ const RUN_DISPATCH_REASONS: readonly RunDispatchReason[] = [
   "auto_fallback",
   "auto_heal",
   "auto_review",
+  "sota_escalate",
   "conflict_resolve",
   "refine",
   "ask",
@@ -1030,19 +857,7 @@ function isFiniteNonNeg(v: unknown): v is number {
 
 function validateRunTokenUsage(raw: unknown): RunTokenUsage {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun.usage 必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "inputTokens",
-      "uncachedInputTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "outputTokens",
-      "reasoningTokens",
-      "totalTokens",
-    ],
-    "agentRun.usage",
-  );
+  assertSafeExtensionKeys(raw, "agentRun.usage");
   if (
     !isSafeInt(raw.inputTokens, 0) ||
     !isSafeInt(raw.uncachedInputTokens, 0) ||
@@ -1059,11 +874,7 @@ function validateRunTokenUsage(raw: unknown): RunTokenUsage {
 
 function validateRunCostSummary(raw: unknown): RunCostSummary {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun.cost 必须是对象");
-  assertAllowedKeys(
-    raw,
-    ["apiCostUsd", "equivalentCostUsd", "billingMode", "costSource", "quotaPool", "currency"],
-    "agentRun.cost",
-  );
+  assertSafeExtensionKeys(raw, "agentRun.cost");
   if (
     !isFiniteNonNeg(raw.apiCostUsd) ||
     !isFiniteNonNeg(raw.equivalentCostUsd) ||
@@ -1079,51 +890,7 @@ function validateRunCostSummary(raw: unknown): RunCostSummary {
 
 export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "agentRun 记录必须是对象");
-  assertAllowedKeys(
-    raw,
-    [
-      "id",
-      "action",
-      "harness",
-      "model",
-      "effectiveModel",
-      "modelFallback",
-      "reasoningEffort",
-      "nativeSessionId",
-      "hubPid",
-      "status",
-      "startedAt",
-      "endedAt",
-      "exitCode",
-      "durationMs",
-      "rateLimited",
-      "errorSummary",
-      "logPath",
-      "quotaPool",
-      "billingMode",
-      "dispatchReason",
-      "handoffMode",
-      "parentRunId",
-      "usage",
-      "cost",
-      "turnsCount",
-      "toolCallsCount",
-      "toolErrorCount",
-      "compactionCount",
-      "peakContextTokens",
-      "contextWindow",
-      "llmDurationMs",
-      "toolDurationMs",
-      "ttftMs",
-      "specChanged",
-      "codeChanged",
-      "tracePath",
-      "contextPath",
-      "traceTruncated",
-      "healthWarnings",
-    ],
-    "agentRun",
-  );
+  assertSafeExtensionKeys(raw, "agentRun");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -1172,7 +939,7 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
 
 function validateReviewFinding(raw: unknown): ReviewFinding {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "reviewReport.findings 项无效");
-  assertAllowedKeys(raw, ["id", "severity", "title", "detail", "criterionIds", "files", "suggestion"], "reviewReport.finding");
+  assertSafeExtensionKeys(raw, "reviewReport.finding");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -1197,25 +964,7 @@ function validateReviewFinding(raw: unknown): ReviewFinding {
 function validateReviewReport(raw: unknown): ReviewReport | null {
   if (raw === null || raw === undefined) return null;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "reviewReport 字段无效");
-  assertAllowedKeys(
-    raw,
-    [
-      "id",
-      "reviewerHarness",
-      "reviewerModel",
-      "verdict",
-      "summary",
-      "markdown",
-      "findings",
-      "reviewedSpecHash",
-      "reviewedCodeSnapshotHash",
-      "reviewedAt",
-      "round",
-      "reviewMode",
-      "changedFiles",
-    ],
-    "reviewReport",
-  );
+  assertSafeExtensionKeys(raw, "reviewReport");
   if (
     typeof raw.id !== "string" ||
     !TOKEN_ID_RE.test(raw.id) ||
@@ -1229,13 +978,7 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     !SHA256_RE.test(raw.reviewedSpecHash) ||
     typeof raw.reviewedCodeSnapshotHash !== "string" ||
     !SHA256_RE.test(raw.reviewedCodeSnapshotHash) ||
-    !isSafeInt(raw.reviewedAt, 0) ||
-    (raw.round !== undefined && !isSafeInt(raw.round, 1)) ||
-    (raw.reviewMode !== undefined && raw.reviewMode !== "full" && raw.reviewMode !== "delta") ||
-    (raw.changedFiles !== undefined &&
-      (!Array.isArray(raw.changedFiles) ||
-        raw.changedFiles.length > 100 ||
-        raw.changedFiles.some((f) => !isSafeText(f, 512))))
+    !isSafeInt(raw.reviewedAt, 0)
   ) {
     throw new WorkbenchError("corrupt_record", "reviewReport 记录损坏");
   }
@@ -1248,11 +991,7 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
 function validateRequirementGitHubIssue(raw: unknown): RequirementGitHubIssueLink | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "github.issue 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["number", "url", "title", "state", "issueType", "programName", "lastSyncedStage", "lastSyncedAt"],
-    "github.issue",
-  );
+  assertSafeExtensionKeys(raw, "github.issue");
   const validNumber =
     isSafeInt(raw.number, 1) || (typeof raw.number === "string" && GITEE_ISSUE_IDENT_RE.test(raw.number));
   if (
@@ -1273,11 +1012,7 @@ function validateRequirementGitHubIssue(raw: unknown): RequirementGitHubIssueLin
 function validateRequirementGitHubPr(raw: unknown): RequirementGitHubPrLink | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "github.pr 字段无效");
-  assertAllowedKeys(
-    raw,
-    ["number", "url", "title", "headBranch", "baseBranch", "state", "mergedAt", "lastSyncedAt"],
-    "github.pr",
-  );
+  assertSafeExtensionKeys(raw, "github.pr");
   if (
     !isSafeInt(raw.number, 1) ||
     !isSafeHttpsUrl(raw.url) ||
@@ -1296,7 +1031,7 @@ function validateRequirementGitHubPr(raw: unknown): RequirementGitHubPrLink | nu
 function validateRequirementGitHubLink(raw: unknown): RequirementGitHubLink | null | undefined {
   if (raw === undefined || raw === null) return raw === null ? null : undefined;
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "state.github 字段无效");
-  assertAllowedKeys(raw, ["provider", "repo", "enterprise", "issue", "pr"], "state.github");
+  assertSafeExtensionKeys(raw, "state.github");
   if (raw.provider !== undefined && !GIT_REMOTE_PROVIDERS.includes(raw.provider as GitRemoteProvider)) {
     throw new WorkbenchError("corrupt_record", "state.github.provider 格式损坏");
   }
@@ -1326,6 +1061,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     !isSafeText(raw.title, 400) ||
     !STAGES.includes(raw.stage as Stage) ||
     !TRACKS.includes(raw.track as Track) ||
+    !REQUIREMENT_TIERS.includes(raw.tier as RequirementTier) ||
     !isSafeInt(raw.revision, 1) ||
     typeof raw.specHash !== "string" ||
     !SHA256_RE.test(raw.specHash) ||
@@ -1333,16 +1069,13 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     typeof raw.designHash !== "string" ||
     (raw.designHash !== "" && !SHA256_RE.test(raw.designHash)) ||
     !Array.isArray(raw.criteria) ||
-    !Array.isArray(raw.tasks) ||
     !Array.isArray(raw.verifications) ||
     !Array.isArray(raw.timeline) ||
     raw.timeline.length > MAX_TIMELINE ||
     (raw.discussions !== undefined && (!Array.isArray(raw.discussions) || raw.discussions.length > MAX_DISCUSSIONS)) ||
     (raw.agentRuns !== undefined && (!Array.isArray(raw.agentRuns) || raw.agentRuns.length > MAX_AGENT_RUNS)) ||
-    (raw.reviewHistory !== undefined && (!Array.isArray(raw.reviewHistory) || raw.reviewHistory.length > MAX_REVIEW_HISTORY)) ||
     (raw.lastFeedback !== null && !isSafeText(raw.lastFeedback, 8000, true)) ||
-    (raw.blockedFrom !== null && !STAGES.includes(raw.blockedFrom as Stage)) ||
-    (raw.blockedReason !== null && !isSafeText(raw.blockedReason, 8000, true)) ||
+    (raw.cancelReason !== undefined && raw.cancelReason !== null && !isSafeText(raw.cancelReason, 8000, true)) ||
     (raw.uiRelated !== undefined && typeof raw.uiRelated !== "boolean") ||
     !isSafeInt(raw.createdAt, 0) ||
     !isSafeInt(raw.updatedAt, 0)
@@ -1360,30 +1093,11 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
       throw new WorkbenchError("corrupt_record", "criteria 记录损坏");
     }
   }
-  for (const t of raw.tasks) {
-    if (
-      !isRecord(t) ||
-      typeof t.id !== "string" ||
-      !TOKEN_ID_RE.test(t.id) ||
-      !isSafeText(t.title, 500) ||
-      !TASK_STATUSES.includes(t.status as TaskStatus) ||
-      !isSafeInt(t.updatedAt, 0)
-    ) {
-      throw new WorkbenchError("corrupt_record", "tasks 记录损坏");
-    }
-  }
   validateApproval(raw.approval);
   validateAcceptance(raw.acceptance);
   validateDelivery(raw.delivery);
   validateBaseline(raw.baseline);
-  validateHandoffNote(raw.handoffNote);
   validateReviewReport(raw.reviewReport);
-  if (Array.isArray(raw.reviewHistory)) {
-    for (const rev of raw.reviewHistory) {
-      if (!rev || typeof rev !== "object") throw new WorkbenchError("corrupt_record", "reviewHistory 项无效");
-      validateReviewReport(rev);
-    }
-  }
   validateRequirementGitHubLink(raw.github);
   if (raw.screenshotBatches !== undefined) validateScreenshotBatches(raw.screenshotBatches);
   normalizeAttachments(raw.attachments);
@@ -1410,7 +1124,7 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
 
 export function validateMarkdownContent(
   content: string,
-  kind: "spec" | "design" | "handoff" | "playbook",
+  kind: "spec" | "design" | "handoff",
   allowEmpty: boolean,
 ): string {
   const maxBytes =
@@ -1418,9 +1132,7 @@ export function validateMarkdownContent(
       ? MAX_SPEC_BYTES
       : kind === "design"
         ? MAX_DESIGN_BYTES
-        : kind === "playbook"
-          ? 16 * 1024
-          : MAX_HANDOFF_BYTES;
+        : MAX_HANDOFF_BYTES;
   if (!isSafeText(content, maxBytes, allowEmpty)) {
     throw new WorkbenchError("invalid_input", `${kind}.md 内容无效或超出 ${maxBytes} 字节上限`);
   }

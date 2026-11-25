@@ -4,23 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ServerWebSocket } from "bun";
-import {
-  discardStagedAttachments,
-  normalizeAttachments,
-  painPointAttachmentsDir,
-  readAttachmentForServe,
-  stageUpload,
-} from "../core/attachments.ts";
-import { getProjectStatus, getRequirement, initProject, pruneProjectTraces, updateProjectConfig } from "../core/engine.ts";
+import { stageUpload } from "../core/attachments.ts";
+import { getProjectStatus, initProject, pruneProjectTraces } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import type { GiteeApiDeps } from "../core/gitee.ts";
 import type { GitHubCommandDeps } from "../core/github.ts";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage } from "../core/language.ts";
 import { hubBindUrl } from "../core/net.ts";
-import { readPlaybook } from "../core/playbook.ts";
-import { readSandboxes } from "../core/sandbox.ts";
-import { isProjectInitialized } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
   MAX_ATTACHMENT_TOTAL_BYTES,
@@ -30,26 +21,8 @@ import {
   type PrivacyMode,
   type RequirementDetail,
   type RunBillingMode,
-  type Stage,
 } from "../core/types.ts";
 import { isRecord } from "../core/validate.ts";
-import {
-  applySandboxToMain,
-  dismissPainPoint,
-  inspectRsiSandboxDrift,
-  PAIN_POINT_CATEGORIES,
-  PAIN_POINT_SOURCES,
-  promotePainPoint,
-  readPainPoints,
-  reportPainPoint,
-  resolveWorkbenchRepoRoot,
-  syncRsiSandboxBase,
-  syncRsiSandboxPrAndCleanup,
-  type PainPointCategory,
-  type PainPointContext,
-  type PainPointSource,
-  type SandboxDriftInfo,
-} from "../hub/evolution.ts";
 import { HubExecutor } from "../hub/executor.ts";
 import { appendRunLedger, queryHubInsights, type InsightsQueryFilter, type RunLedgerEntry } from "../hub/ledger.ts";
 import { RemoteNodeRegistry } from "../hub/node_bridge.ts";
@@ -72,22 +45,18 @@ import {
   updateHubObservability,
   updateHubPreferences,
   updateHubProjectMeta,
-  updateHubProjectRouting,
-  updateHubRouting,
   writeDaemonInfo,
 } from "../hub/registry.ts";
-import { buildPresetRouting, normalizeRoutingConfig } from "../hub/routing.ts";
+import { buildInitialProjectRouting, normalizeRoutingConfig } from "../hub/routing.ts";
 import { isSourceRevisionPublished, readSourceRevision } from "../core/revision.ts";
 import { clearModelCooldown, readModelTelemetry, recordModelRunOutcome, summarizeTelemetry } from "../hub/telemetry.ts";
 import {
-  ROUTING_PRESETS,
   type HarnessInfo,
   type HubConfig,
   type HubObservabilityConfig,
   type ModelPriceOverride,
   type RemoteNodeInfo,
   type RoutingConfig,
-  type RoutingPreset,
 } from "../hub/types.ts";
 import {
   clearLoginFailures,
@@ -108,18 +77,12 @@ import {
   httpStatusForError,
   jsonResponse,
   readBody,
-  readStringArray,
-  type BridgeStatus,
-  type DispatchOutcome,
   type LocalProjectSnapshot,
 } from "./project_api.ts";
-import { type DispatchAction } from "./prompts.ts";
 import { removeServerDiscovery, writeServerDiscovery, type ServerRuntimeInfo } from "./runtime.ts";
 
-export type { BridgeStatus, DispatchOutcome } from "./project_api.ts";
-
 interface WsClientData {
-  role: "ui" | "bridge" | "node";
+  role: "ui" | "node";
   id: string;
   nodeId?: string;
   nodeMeta?: {
@@ -135,7 +98,6 @@ export interface WorkbenchServerHandle {
   url: string;
   root: string;
   stop(): void;
-  getBridgeStatus(): BridgeStatus;
 }
 
 // 只公开界面与浏览器图标实际使用的四个文件；精确路径映射到 brand 下的固定文件名。
@@ -252,7 +214,6 @@ export async function startWorkbenchServer(options: {
       getHubPreferences: () => {
         const cfg = readHubConfig();
         return {
-          routing: cfg.routing,
           outputLanguage: cfg.outputLanguage,
           observability: cfg.observability,
         };
@@ -276,24 +237,6 @@ export async function startWorkbenchServer(options: {
   });
 
   const uiSockets = new Set<ServerWebSocket<WsClientData>>();
-  let bridgeSocket: ServerWebSocket<WsClientData> | null = null;
-  let bridgeStatus: BridgeStatus = {
-    connected: false,
-    agent: null,
-    sessionId: null,
-    state: "offline",
-    model: null,
-    updatedAt: Date.now(),
-  };
-
-  const pendingDispatches = new Map<
-    string,
-    {
-      resolve: (outcome: Omit<DispatchOutcome, "prompt">) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-
   const watchers = new Map<string, fs.FSWatcher>();
   const watchDebounces = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -444,7 +387,7 @@ export async function startWorkbenchServer(options: {
             nodeId: LOCAL_NODE_ID,
             nodeOnline: true,
             ...snap,
-            routing: snap.routing ?? entry.routing ?? cfg.routing,
+            routing: snap.routing ?? null,
           };
         }
         const nid = entry.nodeId!;
@@ -460,7 +403,7 @@ export async function startWorkbenchServer(options: {
           activeCount: snap?.activeCount ?? 0,
           decisionCount: snap?.decisionCount ?? 0,
           runningCount: snap?.runningCount ?? 0,
-          routing: snap?.routing ?? entry.routing ?? cfg.routing,
+          routing: snap?.routing ?? null,
         };
       }),
     );
@@ -526,51 +469,12 @@ export async function startWorkbenchServer(options: {
     return [localNode, ...connected, ...offlineNodes];
   };
 
-  const dispatchToBridge = async (
-    requirementId: string,
-    action: DispatchAction,
-    mode: "send" | "prefill",
-    prompt: string,
-  ): Promise<DispatchOutcome> => {
-    if (!bridgeSocket || !bridgeStatus.connected) {
-      return { delivered: false, status: "offline", reason: "no_live_bridge", prompt };
-    }
-    const dispatchId = randomUUID();
-    const ack = await new Promise<Omit<DispatchOutcome, "prompt">>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingDispatches.delete(dispatchId);
-        resolve({ delivered: false, status: "rejected", reason: "bridge_timeout" });
-      }, 5_000);
-      pendingDispatches.set(dispatchId, { resolve, timer });
-      try {
-        bridgeSocket!.send(
-          JSON.stringify({
-            type: "bridge.dispatch",
-            dispatchId,
-            mode,
-            requirementId,
-            action,
-            prompt,
-          }),
-        );
-      } catch {
-        clearTimeout(timer);
-        pendingDispatches.delete(dispatchId);
-        resolve({ delivered: false, status: "offline", reason: "bridge_send_failed" });
-      }
-    });
-    return { ...ack, prompt };
-  };
-
   const handleProjectApi = createProjectApiHandler({
     executor,
-    getBridgeStatus: () => bridgeStatus,
-    dispatchToBridge,
     broadcastUi,
     ensureWatcherFor,
     reloadWebBundle,
     getHubOutputLanguage: () => readHubConfig().outputLanguage,
-    getFallbackRouting: () => readHubConfig().routing,
     getGiteeAccessToken: () => resolveEffectiveGiteeToken(readHubConfig()),
     githubDeps: options.githubDeps,
     giteeDeps: options.giteeDeps,
@@ -653,7 +557,6 @@ export async function startWorkbenchServer(options: {
         buildHubProjectsSnapshot(),
         executor.getHarnesses(false, false),
       ]);
-      const evolutionOpenCount = readPainPoints().filter((p) => p.status === "open").length;
       const telemetry = summarizeTelemetry();
       const nodes = buildAllNodesList(cfg, localHarnesses);
       const activeId = hubMode ? (cfg.activeProjectId ?? projects[0]?.id ?? null) : null;
@@ -665,9 +568,9 @@ export async function startWorkbenchServer(options: {
           ? activeNode.harnesses
           : localHarnesses;
       const activeRuns = nodes.flatMap((n) => n.activeRuns);
-      let activeRouting = cfg.routing;
+      let activeRouting: RoutingConfig | null = null;
       if (hubMode) {
-        activeRouting = activeProj?.routing ?? cfg.routing;
+        activeRouting = activeProj?.routing ?? null;
       } else {
         try {
           const localStatus = getProjectStatus(defaultRoot);
@@ -675,7 +578,7 @@ export async function startWorkbenchServer(options: {
             activeRouting = normalizeRoutingConfig(localStatus.project.routing);
           }
         } catch {
-          // Fallback to cfg.routing
+          activeRouting = null;
         }
       }
 
@@ -692,7 +595,6 @@ export async function startWorkbenchServer(options: {
         giteeTokenConfigured: Boolean(effectiveGiteeToken),
         giteeTokenMasked: maskAccessToken(effectiveGiteeToken),
         activeRuns,
-        evolutionOpenCount,
         cooldownCount: telemetry.activeCooldowns.length,
       });
     }
@@ -711,7 +613,7 @@ export async function startWorkbenchServer(options: {
             : undefined;
       const cfg = updateHubPreferences({ outputLanguage, giteeAccessToken });
       const effectiveToken = resolveEffectiveGiteeToken(cfg);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken, cfg.observability);
+      nodeRegistry.broadcastConfigSync(cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, effectiveToken, cfg.observability);
       broadcastUi({ type: "hub.updated", reason: "preferences.updated", at: Date.now() });
       return jsonResponse({
         outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
@@ -761,7 +663,7 @@ export async function startWorkbenchServer(options: {
         await initProject(project.root, {
           name: project.name,
           privacyMode: initPrivacy,
-          routing: buildPresetRouting("balanced", harnesses),
+          routing: buildInitialProjectRouting(harnesses),
         });
       }
       ensureWatcherFor(project.root);
@@ -840,259 +742,6 @@ export async function startWorkbenchServer(options: {
       return jsonResponse({ harnesses });
     }
 
-    if (method === "GET" && pathname === "/api/hub/routing") {
-      const cfg = readHubConfig();
-      const target = resolveRequestTarget(req, url, true);
-      if (target && !isLocalNodeId(target.nodeId)) {
-        if (nodeRegistry.isConnected(target.nodeId)) {
-          return nodeRegistry.forwardProjectHttp(
-            target.nodeId,
-            target.root,
-            req,
-            new URL("/api/project/routing", url.origin),
-            cfg.routing,
-            cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
-            resolveEffectiveGiteeToken(cfg),
-            cfg.observability,
-          );
-        }
-        const cachedProj = target.projectId ? cfg.projects.find((p) => p.id === target.projectId) : undefined;
-        return jsonResponse({ routing: cachedProj?.routing ?? cfg.routing });
-      }
-      if (target && isProjectInitialized(target.root)) {
-        const meta = getProjectStatus(target.root).project;
-        if (meta?.routing) return jsonResponse({ routing: normalizeRoutingConfig(meta.routing) });
-      }
-      const cachedProj = target?.projectId ? cfg.projects.find((p) => p.id === target.projectId) : undefined;
-      return jsonResponse({ routing: cachedProj?.routing ?? cfg.routing });
-    }
-
-    const persistProjectRouting = async (
-      target: { root: string; nodeId: string; projectId: string | null } | null,
-      routing: RoutingConfig,
-    ): Promise<HubConfig> => {
-      const baseCfg = readHubConfig();
-      const token = resolveEffectiveGiteeToken(baseCfg);
-      const lang = baseCfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE;
-      if (target && !isLocalNodeId(target.nodeId)) {
-        if (target.projectId) updateHubProjectRouting(target.projectId, routing);
-        if (nodeRegistry.isConnected(target.nodeId)) {
-          await nodeRegistry
-            .rpc(
-              target.nodeId,
-              {
-                kind: "project_http",
-                method: "PUT",
-                pathname: "/api/project/routing",
-                search: "",
-                bodyText: JSON.stringify(routing),
-                projectRoot: target.root,
-                routing,
-                outputLanguage: lang,
-                ...(token !== undefined ? { giteeAccessToken: token } : {}),
-                ...(baseCfg.observability !== undefined ? { observability: baseCfg.observability } : {}),
-              },
-              15_000,
-            )
-            .catch(() => null);
-        }
-      } else if (target && isProjectInitialized(target.root)) {
-        await updateProjectConfig(target.root, { routing });
-      } else if (target?.projectId) {
-        updateHubProjectRouting(target.projectId, routing);
-      }
-      return updateHubRouting(routing);
-    };
-
-    if (method === "PUT" && pathname === "/api/hub/routing") {
-      const body = await readBody(req);
-      const routing = normalizeRoutingConfig(body);
-      const target = resolveRequestTarget(req, url, true);
-      const cfg = await persistProjectRouting(target, routing);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
-      broadcastUi({ type: "hub.updated", reason: "routing.updated", ...(target?.projectId ? { projectId: target.projectId } : {}), at: Date.now() });
-      return jsonResponse({ routing });
-    }
-
-    if (method === "POST" && pathname === "/api/hub/routing/preset") {
-      const body = await readBody(req);
-      const preset = typeof body.preset === "string" ? body.preset : "";
-      if (!(ROUTING_PRESETS as readonly string[]).includes(preset)) {
-        throw new WorkbenchError("invalid_input", `无效的路由预设: ${preset}`);
-      }
-      const target = resolveRequestTarget(req, url, true);
-      const harnesses =
-        target && !isLocalNodeId(target.nodeId)
-          ? (nodeRegistry.getNode(target.nodeId)?.harnesses ?? (await executor.getHarnesses(false)))
-          : await executor.getHarnesses(false);
-      const routing = buildPresetRouting(preset as RoutingPreset, harnesses);
-      const cfg = await persistProjectRouting(target, routing);
-      nodeRegistry.broadcastConfigSync(cfg.routing, cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE, undefined, cfg.observability);
-      broadcastUi({
-        type: "hub.updated",
-        reason: "routing.preset",
-        preset,
-        ...(target?.projectId ? { projectId: target.projectId } : {}),
-        at: Date.now(),
-      });
-      return jsonResponse({ routing });
-    }
-
-    if (method === "GET" && pathname === "/api/hub/evolution") {
-      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
-      const cfg = readHubConfig();
-      const paramPid = url.searchParams.get("project");
-      const activeProj =
-        (paramPid ? cfg.projects.find((p) => p.id === paramPid) : undefined) ??
-        cfg.projects.find((p) => p.id === cfg.activeProjectId) ??
-        cfg.projects[0];
-      const currentPlaybookRoot = activeProj && isLocalNodeId(activeProj.nodeId) ? activeProj.root : hubMode ? null : defaultRoot;
-      const wbProjectId = cfg.projects.find((p) => isLocalNodeId(p.nodeId) && p.root === wbRoot)?.id ?? null;
-      const sandboxes = await Promise.all(
-        Object.values(readSandboxes()).map(async (sb) => {
-          let stage: Stage | null = null;
-          let canApply = false;
-          let github: RequirementDetail["state"]["github"] = null;
-          let drift: SandboxDriftInfo | null = null;
-          try {
-            if (fs.existsSync(sb.worktreePath)) {
-              const detail = getRequirement(sb.projectRoot, sb.requirementId);
-              stage = detail.state.stage;
-              canApply = detail.state.stage === "done" && detail.state.acceptance !== null;
-              github = detail.state.github ?? null;
-              drift = await inspectRsiSandboxDrift(sb.projectRoot, sb.requirementId).catch(() => null);
-            }
-          } catch {
-            // Ignore stale or inaccessible requirement state.
-          }
-          return { ...sb, stage, canApply, github, ...(drift ? { drift } : {}) };
-        }),
-      );
-      return jsonResponse({
-        painPoints: readPainPoints(),
-        telemetry: summarizeTelemetry(),
-        sandboxes,
-        workbenchRoot: wbRoot,
-        workbenchProjectId: wbProjectId,
-        playbook: currentPlaybookRoot
-          ? readPlaybook(currentPlaybookRoot)
-          : { exists: false, markdown: "", rules: [], updatedAt: null },
-      });
-    }
-
-    if (method === "POST" && pathname === "/api/hub/evolution/report") {
-      const body = await readBody(req);
-      const title = typeof body.title === "string" ? body.title : "";
-      const detail = typeof body.detail === "string" ? body.detail : undefined;
-      const source: PainPointSource =
-        typeof body.source === "string" && (PAIN_POINT_SOURCES as readonly string[]).includes(body.source)
-          ? (body.source as PainPointSource)
-          : "ui_quick_report";
-      const category: PainPointCategory =
-        typeof body.category === "string" && (PAIN_POINT_CATEGORIES as readonly string[]).includes(body.category)
-          ? (body.category as PainPointCategory)
-          : "ui_anomaly";
-      const context = isRecord(body.context) ? (body.context as PainPointContext) : {};
-      const attachmentIds = readStringArray(body.attachmentIds);
-      const painPoint = reportPainPoint({ source, category, title, detail, context, attachmentIds });
-      if (!painPoint && attachmentIds && attachmentIds.length > 0) {
-        discardStagedAttachments(attachmentIds);
-      }
-      broadcastUi({ type: "hub.updated", reason: "evolution.reported", at: Date.now() });
-      return jsonResponse({ painPoint }, 201);
-    }
-
-    const evoAttachmentMatch = /^\/api\/hub\/evolution\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname);
-    if (method === "GET" && evoAttachmentMatch) {
-      const painId = decodeURIComponent(evoAttachmentMatch[1]!);
-      const attId = decodeURIComponent(evoAttachmentMatch[2]!);
-      const pain = readPainPoints().find((p) => p.id === painId);
-      if (!pain) throw new WorkbenchError("not_found", "痛点记录不存在");
-      const metas = normalizeAttachments(pain.attachments) ?? [];
-      const served = readAttachmentForServe(painPointAttachmentsDir(painId), attId, metas);
-      return new Response(Uint8Array.from(served.bytes), { headers: served.headers });
-    }
-
-    const evoPromoteMatch = /^\/api\/hub\/evolution\/([^/]+)\/promote$/.exec(pathname);
-    if (method === "POST" && evoPromoteMatch) {
-      const painId = decodeURIComponent(evoPromoteMatch[1]!);
-      const body = await readBody(req);
-      const result = await promotePainPoint(
-        painId,
-        {
-          workbenchRoot: defaultRoot,
-          createSandbox: body.createSandbox !== false,
-          createGitHubIssue:
-            body.createGitHubIssue === true ? true : body.createGitHubIssue === false ? false : undefined,
-        },
-        options.githubDeps,
-      );
-      ensureWatcherFor(result.workbenchRoot);
-      broadcastUi({ type: "hub.updated", reason: "evolution.promoted", painId, at: Date.now() });
-      broadcastUi({
-        type: "workbench.updated",
-        reason: "requirement.created",
-        root: result.workbenchRoot,
-        id: result.requirement.state.id,
-        at: Date.now(),
-      });
-      return jsonResponse(result, 201);
-    }
-
-    const evoDismissMatch = /^\/api\/hub\/evolution\/([^/]+)\/dismiss$/.exec(pathname);
-    if (method === "POST" && evoDismissMatch) {
-      const painId = decodeURIComponent(evoDismissMatch[1]!);
-      const painPoint = dismissPainPoint(painId);
-      broadcastUi({ type: "hub.updated", reason: "evolution.dismissed", painId, at: Date.now() });
-      return jsonResponse({ painPoint });
-    }
-
-    const evoApplyMatch = /^\/api\/hub\/evolution\/apply\/(REQ-\d{3,})$/.exec(pathname);
-    if (method === "POST" && evoApplyMatch) {
-      const reqId = evoApplyMatch[1]!;
-      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
-      const applied = await applySandboxToMain(wbRoot, reqId);
-      const reloadRes = applied.touchesWeb ? await reloadWebBundle() : { reloaded: false };
-      broadcastUi({ type: "hub.updated", reason: "evolution.applied", reqId, at: Date.now() });
-      broadcastUi({ type: "workbench.updated", reason: "sandbox.applied", root: wbRoot, id: reqId, at: Date.now() });
-      return jsonResponse({
-        ...applied,
-        webReloaded: reloadRes.reloaded,
-        restartRecommended: applied.touchesBackend,
-      });
-    }
-
-    const evoSyncBaseMatch = /^\/api\/hub\/evolution\/sync-base\/(REQ-\d{3,})$/.exec(pathname);
-    if (method === "POST" && evoSyncBaseMatch) {
-      const reqId = evoSyncBaseMatch[1]!;
-      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
-      const res = await syncRsiSandboxBase(wbRoot, reqId);
-      broadcastUi({ type: "hub.updated", reason: "evolution.base_synced", reqId, at: Date.now() });
-      broadcastUi({ type: "workbench.updated", reason: "sandbox.base_synced", root: wbRoot, id: reqId, at: Date.now() });
-      return jsonResponse(res);
-    }
-
-    const evoSyncPrMatch = /^\/api\/hub\/evolution\/sync-pr\/(REQ-\d{3,})$/.exec(pathname);
-    if (method === "POST" && evoSyncPrMatch) {
-      const reqId = evoSyncPrMatch[1]!;
-      const body = await readBody(req);
-      const wbRoot = resolveWorkbenchRepoRoot(defaultRoot);
-      const synced = await syncRsiSandboxPrAndCleanup(
-        wbRoot,
-        reqId,
-        { forceCleanup: body.forceCleanup === true },
-        options.githubDeps,
-      );
-      const reloadRes = synced.cleanedSandbox && synced.touchesWeb ? await reloadWebBundle() : { reloaded: false };
-      broadcastUi({ type: "hub.updated", reason: "evolution.pr_synced", reqId, at: Date.now() });
-      broadcastUi({ type: "workbench.updated", reason: "github.pr_synced", root: wbRoot, id: reqId, at: Date.now() });
-      return jsonResponse({
-        ...synced,
-        webReloaded: reloadRes.reloaded,
-        restartRecommended: synced.cleanedSandbox && synced.touchesBackend,
-      });
-    }
-
     if (method === "POST" && pathname === "/api/hub/telemetry/clear-cooldown") {
       const body = await readBody(req);
       const harness = typeof body.harness === "string" ? body.harness : undefined;
@@ -1168,7 +817,6 @@ export async function startWorkbenchServer(options: {
       }
       const cfg = updateHubObservability(patch);
       nodeRegistry.broadcastConfigSync(
-        cfg.routing,
         cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
         resolveEffectiveGiteeToken(cfg),
         cfg.observability,
@@ -1224,7 +872,6 @@ export async function startWorkbenchServer(options: {
         target.root,
         req,
         url,
-        cfg.routing,
         outputLanguage,
         giteeToken,
         cfg.observability,
@@ -1251,7 +898,6 @@ export async function startWorkbenchServer(options: {
               pathname: remotePath,
               search: "",
               projectRoot: target.root,
-              routing: cfg.routing,
               outputLanguage,
               ...(giteeToken !== undefined ? { giteeAccessToken: giteeToken } : {}),
               ...(cfg.observability !== undefined ? { observability: cfg.observability } : {}),
@@ -1484,7 +1130,7 @@ export async function startWorkbenchServer(options: {
 
       if (url.pathname === "/ws") {
         const roleParam = url.searchParams.get("role");
-        const role = roleParam === "bridge" ? "bridge" : roleParam === "node" ? "node" : "ui";
+        const role = roleParam === "node" ? "node" : "ui";
         let nodeId: string | undefined;
         let nodeMeta: WsClientData["nodeMeta"];
         if (role === "node") {
@@ -1584,7 +1230,6 @@ export async function startWorkbenchServer(options: {
       open(ws) {
         if (ws.data.role === "ui") {
           uiSockets.add(ws);
-          ws.send(JSON.stringify({ type: "bridge.status", bridge: bridgeStatus }));
         } else if (ws.data.role === "node" && ws.data.nodeId) {
           const cfg = readHubConfig();
           nodeRegistry.registerSocket(ws, {
@@ -1593,33 +1238,16 @@ export async function startWorkbenchServer(options: {
             hostname: ws.data.nodeMeta?.hostname ?? ws.data.nodeId,
             platform: ws.data.nodeMeta?.platform ?? "linux",
             workbenchVersion: ws.data.nodeMeta?.workbenchVersion,
-            routing: cfg.routing,
             outputLanguage: cfg.outputLanguage ?? DEFAULT_OUTPUT_LANGUAGE,
             giteeAccessToken: resolveEffectiveGiteeToken(cfg),
             observability: cfg.observability,
           });
           broadcastUi({ type: "hub.updated", reason: "node.connected", nodeId: ws.data.nodeId, at: Date.now() });
-        } else {
-          if (bridgeSocket && bridgeSocket !== ws) {
-            try {
-              bridgeSocket.close(1000, "replaced_by_newer_bridge");
-            } catch {
-              // Ignore close errors.
-            }
-          }
-          bridgeSocket = ws;
         }
       },
       message(ws, message) {
         if (ws.data.role === "node" && ws.data.nodeId) {
           nodeRegistry.handleMessage(ws, ws.data.nodeId, Buffer.isBuffer(message) ? message : String(message), {
-            onPainPoint: (nid, input) => {
-              reportPainPoint({
-                ...input,
-                context: { ...(input.context ?? {}), nodeId: nid },
-              });
-              broadcastUi({ type: "hub.updated", reason: "evolution.reported", nodeId: nid, at: Date.now() });
-            },
             onTelemetry: (_nid, outcome) => {
               recordModelRunOutcome(outcome);
               broadcastUi({ type: "hub.updated", reason: "telemetry.updated", at: Date.now() });
@@ -1641,48 +1269,6 @@ export async function startWorkbenchServer(options: {
               broadcastUi({ type: "hub.updated", reason: "node.updated", nodeId: ws.data.nodeId, at: Date.now() });
             },
           });
-          return;
-        }
-
-        if (ws.data.role !== "bridge") return;
-        let parsed: Record<string, unknown>;
-        try {
-          const text = typeof message === "string" ? message : Buffer.from(message).toString("utf8");
-          const raw = JSON.parse(text) as unknown;
-          if (!isRecord(raw)) return;
-          parsed = raw;
-        } catch {
-          return;
-        }
-
-        if (parsed.type === "bridge.hello" || parsed.type === "bridge.status") {
-          const nextState = parsed.state;
-          const validState =
-            nextState === "idle" || nextState === "working" || nextState === "waiting_user" ? nextState : "idle";
-          bridgeStatus = {
-            connected: true,
-            agent: typeof parsed.agent === "string" ? parsed.agent : "omp",
-            sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
-            state: validState,
-            model: typeof parsed.model === "string" ? parsed.model : null,
-            updatedAt: Date.now(),
-          };
-          broadcastUi({ type: "bridge.status", bridge: bridgeStatus });
-        } else if (parsed.type === "bridge.ack" && typeof parsed.dispatchId === "string") {
-          const pending = pendingDispatches.get(parsed.dispatchId);
-          if (pending) {
-            clearTimeout(pending.timer);
-            pendingDispatches.delete(parsed.dispatchId);
-            const status =
-              parsed.status === "submitted" || parsed.status === "prefilled" || parsed.status === "rejected"
-                ? parsed.status
-                : "rejected";
-            pending.resolve({
-              delivered: parsed.ok === true,
-              status,
-              reason: typeof parsed.reason === "string" ? parsed.reason : undefined,
-            });
-          }
         }
       },
       close(ws) {
@@ -1694,22 +1280,6 @@ export async function startWorkbenchServer(options: {
               broadcastUi({ type: "hub.updated", reason: "node.disconnected", nodeId: ws.data.nodeId, at: Date.now() });
             },
           });
-        } else if (bridgeSocket === ws) {
-          bridgeSocket = null;
-          bridgeStatus = {
-            connected: false,
-            agent: null,
-            sessionId: null,
-            state: "offline",
-            model: null,
-            updatedAt: Date.now(),
-          };
-          for (const [dispatchId, pending] of pendingDispatches.entries()) {
-            clearTimeout(pending.timer);
-            pending.resolve({ delivered: false, status: "offline", reason: "bridge_disconnected" });
-            pendingDispatches.delete(dispatchId);
-          }
-          broadcastUi({ type: "bridge.status", bridge: bridgeStatus });
         }
       },
     },
@@ -1744,7 +1314,6 @@ export async function startWorkbenchServer(options: {
     port: actualPort,
     url: serverUrl,
     root: defaultRoot,
-    getBridgeStatus: () => ({ ...bridgeStatus }),
     stop() {
       unsubExecutor();
       executor.stopAllRuns();
@@ -1754,11 +1323,6 @@ export async function startWorkbenchServer(options: {
       watchDebounces.clear();
       for (const w of watchers.values()) w.close();
       watchers.clear();
-      for (const pending of pendingDispatches.values()) {
-        clearTimeout(pending.timer);
-        pending.resolve({ delivered: false, status: "offline", reason: "server_stopped" });
-      }
-      pendingDispatches.clear();
       if (options.writeDiscovery !== false) {
         removeServerDiscovery(defaultRoot, process.pid);
       }

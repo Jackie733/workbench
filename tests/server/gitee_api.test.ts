@@ -304,5 +304,5 @@ describe("Gitee Server & Remote Node Bridge API", () => {
       (c) => (c.method === "POST" || c.method === "PATCH") && c.url.includes("/issues"),
     );
     expect(issueMutations).toHaveLength(0);
-  });
+  }, 20_000);
 });

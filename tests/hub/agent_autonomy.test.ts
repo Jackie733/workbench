@@ -3,17 +3,24 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { approveDesign, createRequirement, getRequirement, initProject, propose } from "../../src/core/engine.ts";
+import {
+  approveDesign,
+  createRequirement,
+  getRequirement,
+  initProject,
+  propose,
+  updateProjectConfig,
+} from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
-import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
-import { updateHubRouting } from "../../src/hub/registry.ts";
-import { buildPresetRouting } from "../../src/hub/routing.ts";
+import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 import type { HarnessInfo } from "../../src/hub/types.ts";
 
 const tempDirs: string[] = [];
 const origHubDir = process.env.WORKBENCH_HUB_DIR;
+const origChromePath = process.env.WORKBENCH_CHROME_PATH;
 let activeHubDir = "";
 
 function makeTempHub(): string {
@@ -85,36 +92,38 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 10000, label = "c
 
 beforeEach(() => {
   makeTempHub();
+  process.env.WORKBENCH_CHROME_PATH = "/nonexistent-chrome-for-test";
 });
 
 afterEach(() => {
   if (origHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
   else process.env.WORKBENCH_HUB_DIR = origHubDir;
+  if (origChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+  else process.env.WORKBENCH_CHROME_PATH = origChromePath;
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
 });
 
 describe("Agent autonomy, file-native design sync, auto-heal, and blind cross-review", () => {
-  test("routing presets do not force reasoningEffort=low and unify fix with implement", () => {
+  test("initial project routing does not force reasoningEffort=low and assigns 3 explicit roles", () => {
     const harnesses = [
       makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }]),
       makeHarness("qodercn", [{ id: "Qwen4-Max-Preview", tier: "balanced" }]),
       makeHarness("opencode", [{ id: "opencode-go/deepseek-v4.1-flash", tier: "fast" }]),
     ];
-    for (const preset of ["balanced", "quota_saver", "sota_first"] as const) {
-      const cfg = buildPresetRouting(preset, harnesses);
-      expect(cfg.maxAutoReviewRounds ?? 1).toBe(1);
-      for (const stage of ["design", "implement", "fix", "review"] as const) {
-        expect(cfg.stages[stage].primary?.reasoningEffort).not.toBe("low");
-      }
-      expect(cfg.stages.fix.primary).toEqual(cfg.stages.implement.primary);
+    const cfg = buildInitialProjectRouting(harnesses);
+    expect(cfg.autoReview).toBe(true);
+    expect(cfg.autoHeal).toBe(true);
+    for (const role of ["defaultLead", "sotaLead", "reviewer"] as const) {
+      expect(cfg[role].primary.reasoningEffort).not.toBe("low");
     }
+    expect(cfg.reviewer.primary.harness).not.toBe(cfg.defaultLead.primary.harness);
   });
 
   test("File-Native Design Sync imports design.md & criteria.json from main repo and worktree sandbox without wb propose", async () => {
     const repo = makeGitRepo("file-native-design");
-    await initProject(repo, { name: "FileNativeDesign", privacyMode: "local" });
+    await initProject(repo, { name: "FileNativeDesign", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, { goal: "Add JWT helper" });
     await createRequirement(repo, { goal: "Worktree design item" });
     const sandbox = await createOrReuseWorktree(repo, "REQ-002");
@@ -152,7 +161,7 @@ console.log("Design written directly to disk");
     });
     await waitForRun(executor, run1.run.id);
     const d1 = getRequirement(repo, "REQ-001");
-    expect(d1.state.stage).toBe("awaiting_approval");
+    expect(d1.state.stage).toBe("planning");
     expect(d1.state.designVersion).toBeGreaterThanOrEqual(1);
     expect(d1.designMarkdown).toContain("Use JWT verification.");
     expect(d1.state.criteria.some((c) => c.id === "AC-1" && c.command === "echo ok")).toBe(true);
@@ -168,19 +177,19 @@ console.log("Design written directly to disk");
     await waitForRun(executor, run2.run.id);
     expect(fs.realpathSync(seenRoots[1]!)).toBe(fs.realpathSync(sandbox.worktreePath));
     const d2 = getRequirement(repo, "REQ-002");
-    expect(d2.state.stage).toBe("awaiting_approval");
+    expect(d2.state.stage).toBe("planning");
     expect(d2.designMarkdown).toContain("Isolated sandbox plan.");
     expect(d2.state.criteria.some((c) => c.id === "AC-1" && c.command === "echo ok")).toBe(true);
     expect(fs.existsSync(path.join(sandbox.worktreePath, ".workbench", "items", "REQ-002", "criteria.json"))).toBe(false);
   }, { timeout: 15000 });
 
-  test("Orchestrator Auto-Verify promotes passing implement run to awaiting_acceptance without wb verify or wb tasks", async () => {
+  test("Orchestrator Auto-Verify satisfies acceptanceGate on passing implement run without manual wb verify", async () => {
     const repo = makeGitRepo("auto-verify-pass");
     await initProject(repo, { name: "AutoVerifyPass", privacyMode: "local" });
     const harnesses = [makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }])];
-    const routing = buildPresetRouting("balanced", harnesses);
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = false;
-    updateHubRouting(routing);
+    await updateProjectConfig(repo, { routing });
 
     await createRequirement(repo, {
       goal: "Write verified export",
@@ -207,11 +216,11 @@ console.log("Implemented feature");
 
     const impl = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "implement" });
     await waitForRun(executor, impl.run.id);
-    await waitUntil(() => getRequirement(repo, "REQ-001").state.stage === "awaiting_acceptance", 8000, "awaiting_acceptance");
+    await waitUntil(() => getRequirement(repo, "REQ-001").state.verifications.length > 0, 8000, "auto verify");
 
     const snap = await observeGitSnapshot(repo);
     const detail = getRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-    expect(detail.state.stage).toBe("awaiting_acceptance");
+    expect(detail.state.stage).toBe("coding");
     expect(detail.validity.acceptanceGate.ok).toBe(true);
     expect(detail.validity.verifications[0]?.effectiveState).toBe("passed");
   }, { timeout: 15000 });
@@ -220,10 +229,10 @@ console.log("Implemented feature");
     const repo = makeGitRepo("auto-heal");
     await initProject(repo, { name: "AutoHeal", privacyMode: "local" });
     const harnesses = [makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }])];
-    const routing = buildPresetRouting("balanced", harnesses);
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = false;
     routing.autoHeal = true;
-    updateHubRouting(routing);
+    await updateProjectConfig(repo, { routing });
 
     await createRequirement(repo, {
       goal: "Write healed export",
@@ -273,7 +282,7 @@ console.log("Healed feature");
     const snap = await observeGitSnapshot(repo);
     const detail = getRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap?.fingerprint ?? null });
     const runs = detail.state.agentRuns ?? [];
-    expect(detail.state.stage).toBe("awaiting_acceptance");
+    expect(detail.state.stage).toBe("coding");
     expect(calls).toEqual([
       { action: "implement", nativeSessionId: undefined },
       { action: "fix", nativeSessionId: "ses_heal_99" },
@@ -292,10 +301,9 @@ console.log("Healed feature");
       makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }]),
       makeHarness("qodercn", [{ id: "Qwen4-Max-Preview", tier: "balanced" }]),
     ];
-    const routing = buildPresetRouting("balanced", harnesses);
-    expect(routing.maxAutoReviewRounds ?? 1).toBe(1);
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = true;
-    updateHubRouting(routing);
+    await updateProjectConfig(repo, { routing });
 
     await createRequirement(repo, {
       goal: "Test one-shot blind cross review",
@@ -365,10 +373,10 @@ console.log(${JSON.stringify(
     const repo = makeGitRepo("no-false-auto-heal");
     await initProject(repo, { name: "NoFalseHeal", privacyMode: "local" });
     const harnesses = [makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }])];
-    const routing = buildPresetRouting("balanced", harnesses);
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = false;
     routing.autoHeal = true;
-    updateHubRouting(routing);
+    await updateProjectConfig(repo, { routing });
 
     await createRequirement(repo, {
       goal: "Passing command plus manual required check",
@@ -413,10 +421,10 @@ fs.writeFileSync(path.join(${JSON.stringify(ctx.root)}, "app.ts"), "export const
 
     await initProject(repo, { name: "AskIsolationBaseline", privacyMode: "local" });
     const harnesses = [makeHarness("codex", [{ id: "gpt-6-astra", tier: "sota" }])];
-    const routing = buildPresetRouting("balanced", harnesses);
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = false;
     routing.autoHeal = false;
-    updateHubRouting(routing);
+    await updateProjectConfig(repo, { routing });
 
     await createRequirement(repo, {
       goal: "Verify session scoping and committed baseline diff",

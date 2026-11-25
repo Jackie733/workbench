@@ -195,12 +195,12 @@ export class RunTraceCollector {
             );
           }
           this.prevTurnContextTokens = input.contextTokens;
-          const bloatThreshold = Math.min(100_000, Math.floor(this.opts.modelSpec.contextWindow * 0.65));
+          const bloatThreshold = Math.floor(this.opts.modelSpec.contextWindow * 0.85);
           if (bloatThreshold > 0 && input.contextTokens >= bloatThreshold && !this.warnedContextBloat) {
             this.warnedContextBloat = true;
-            this.healthWarnings.push(`context_bloat:单轮上下文达到 ${input.contextTokens} tokens（阈值 ${bloatThreshold}）`);
+            this.healthWarnings.push(`context_bloat:单轮上下文达到 ${input.contextTokens} tokens（窗口 85% 阈值 ${bloatThreshold}）`);
             this.opts.onWarning?.(
-              `[workbench] ⚠️ 上下文膨胀告警：单轮上下文已达 ${input.contextTokens} tokens，建议尽快收敛并完成当前任务。\n`,
+              `[workbench] ⚠️ 上下文接近窗口上限：单轮上下文已达 ${input.contextTokens} tokens（窗口 ${this.opts.modelSpec.contextWindow}），建议收敛并完成当前任务。\n`,
             );
           }
         }
@@ -232,7 +232,7 @@ export class RunTraceCollector {
         this.toolCallsCount += 1;
         if (
           input.category === "write" ||
-          /^(edit|write|patch|apply_patch|multiedit|notebookedit|wb_propose|wb_update_tasks)/i.test(input.toolName)
+          /^(edit|write|patch|apply_patch|multiedit|notebookedit|wb_propose)/i.test(input.toolName)
         ) {
           this.hasWriteActivity = true;
         }

@@ -331,7 +331,7 @@ async function navigateToView(
       const target = document.querySelector('[data-testid="tab-spec"]') as HTMLElement | null;
       target?.click();
     });
-    await page.waitForSelector('[data-testid="tab-spec"].active', { timeout });
+    await page.waitForSelector('[data-testid="tab-spec"]:is([aria-selected="true"], [data-active], .active)', { timeout });
     return;
   }
   await page.waitForSelector('[data-testid="tab-changes"]', { timeout });
@@ -339,7 +339,7 @@ async function navigateToView(
     const target = document.querySelector('[data-testid="tab-changes"]') as HTMLElement | null;
     target?.click();
   });
-  await page.waitForSelector('[data-testid="tab-changes"].active', { timeout });
+  await page.waitForSelector('[data-testid="tab-changes"]:is([aria-selected="true"], [data-active], .active)', { timeout });
   await page.waitForSelector('[data-testid="screenshot-section"]', { timeout });
 }
 
@@ -363,7 +363,7 @@ export async function captureRequirementScreenshots(
   if (state.stage === "done" || state.stage === "cancelled") {
     throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能采集截图证据`);
   }
-  if (state.stage !== "implementing" && state.stage !== "awaiting_acceptance") {
+  if (state.stage !== "coding") {
     throw new WorkbenchError(
       "approval_required",
       `当前阶段（${state.stage}）不能采集截图证据；仅实施阶段或待验收阶段允许采集`,

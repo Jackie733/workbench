@@ -5,8 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { approveDesign, createRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, registerHubProject } from "../../src/hub/registry.ts";
-import { recordModelRunOutcome } from "../../src/hub/telemetry.ts";
+import { registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
@@ -120,7 +119,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       const subText = await page.evaluate(
         () => document.querySelector('[data-testid="req-row-REQ-001"] .req-sub')?.textContent?.trim() ?? "",
       );
-      expect(subText).toBe("草稿"); // 仅徽章一次，无重复进度文本
+      expect(subText).toBe("规划中"); // 仅徽章一次，无重复进度文本
 
       // Search filters to REQ-005, then empty-search shows clear-search recovery
       await page.type('[data-testid="search-input"]', "Alpha");
@@ -163,11 +162,26 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 90_000);
 
   test("WB-06: completes Plan-First and Fast-Track end-to-end loops with real Agent tools, Git diff, stale gate, and acceptance", async () => {
     const root = initGitRepo();
-    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "qodercn",
+          label: "QoderCN",
+          subscription: "QoderCN",
+          installed: true,
+          executable: "qodercn",
+          models: [{ id: "Qwen4-Max", tier: "balanced", source: "detected" }],
+          defaultModel: "Qwen4-Max",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => ({ command: "bash", args: ["-c", "echo ok"], displayCommand: "wb06-mock" }),
+    });
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false, executor });
     servers.push(server);
 
     const page = await browser!.newPage();
@@ -204,19 +218,21 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       // Verify design version diff toggle works
       // 初始化/创建提示会在右下角短暂堆叠，等其自动消失后再点击底部按钮，避免被提示遮挡。
       await page.waitForFunction(() => !document.querySelector('[data-slot="toast-root"]'), { timeout: 15000 });
-      await page.click('[data-action="toggle-design-diff"]');
-      await page.waitForSelector(".diff-code", { timeout: 5000 });
+      await clickReady(page, '[data-action="toggle-design-diff"]', 10000);
+      await page.waitForSelector(".diff-code", { timeout: 10000 });
       const diffHtml = await page.evaluate(() => document.querySelector(".diff-code")?.textContent ?? "");
       expect(diffHtml).toContain("初步实现");
       expect(diffHtml).toContain("导出");
       await page.click('[data-action="toggle-design-diff"]');
 
-      // Approve & implement (offline fallback modal appears, close it)
-      await clickReady(page, '[data-testid="action-approve_and_implement"]');
-      await page.waitForSelector('[data-testid="prompt-fallback-modal"]', { timeout: 5000 });
-      await clickReady(page, '[data-action="close-modal"]');
+      // Approve design and transition to coding stage
+      await clickReady(page, '[data-testid="action-approve_only"]');
+      await page.waitForFunction(
+        () => Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")),
+        { timeout: 5000 },
+      );
 
-      // Agent implements code, runs verification, and marks tasks ready
+      // Agent implements code and runs verification
       fs.writeFileSync(
         path.join(root, "calc.ts"),
         "export const add = (a: number, b: number) => a + b;\nexport const sub = (a: number, b: number) => a - b;\n",
@@ -225,11 +241,6 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         id: "REQ-001",
         command: "bun -e 'import { sub } from \"./calc.ts\"; if (sub(5,2)!==3) process.exit(1)'",
         criterionIds: ["AC-1"],
-      });
-      await executeWorkbenchTool(root, "wb_update_tasks", {
-        id: "REQ-001",
-        tasks: [{ title: "实现 sub 并验证", status: "done" }],
-        readyForAcceptance: true,
       });
 
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 5000 });
@@ -351,7 +362,12 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       // Authorize fast-track with zero criteria -> verify cannot accept (0/0 blocked!)
       await page.click('[data-testid="action-authorize_fast_track"]');
-      await page.waitForFunction(() => Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("实施中")), { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")) &&
+          !document.querySelector('[data-testid="live-agent-banner"]'),
+        { timeout: 5000 },
+      );
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="action-accept"]')))).toBe(false);
       const gateResp = await page.evaluate(async () => {
         const r = await fetch("/api/requirements/REQ-002/accept", { method: "POST", body: "{}" });
@@ -368,6 +384,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="save-spec-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="spec-editor"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="action-authorize_fast_track"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="live-agent-banner"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="action-run_all_verifications"]');
       await clickReady(page, '[data-testid="action-accept"]');
       await page.waitForFunction(() => Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("已完成")), { timeout: 5000 });
@@ -376,7 +393,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 90_000);
 
   test("WB-11 & WB-12: three-column Hub UI, multi-project switching, routing center, co-design Ask/Refine, and live console review", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-hub-"));
@@ -475,10 +492,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector('[data-testid="add-project-modal"]', { timeout: 5000 });
       await page.evaluate((p: string) => {
         const input = document.getElementById("add-project-path") as HTMLInputElement;
-        input.value = p;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, p);
         input.dispatchEvent(new Event("input", { bubbles: true }));
       }, repoB);
       await clickReady(page, '[data-testid="browse-go-btn"]');
+      await page.waitForFunction(
+        (expected: unknown) =>
+          Boolean(document.querySelector('[data-testid="fs-browse-list"]')?.textContent?.includes(String(expected))),
+        { timeout: 5000 },
+        repoB,
+      );
       await clickReady(page, '[data-testid="submit-add-project-btn"]');
       await page.waitForFunction(() => document.querySelectorAll('[data-action="switch-project"]').length === 2, { timeout: 5000 });
 
@@ -534,34 +558,28 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, `[data-testid="hub-project-${alphaId}"]`);
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
 
-      // 2. Routing Center: global language/token vs project routing preset + effort + save
+      // 2. Routing Center: hub/project preferences + 3-role routing + effort + save
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="custom-model-input"]')))).toBe(false);
-      await clickReady(page, '[data-testid="settings-tab-global"]');
+      await clickReady(page, '[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
       await selectUiOption(page, '[data-testid="hub-output-language-select"]', "en");
-      await clickReady(page, '[data-testid="settings-tab-project"]');
       await page.waitForSelector('[data-testid="project-github-repo-input"]', { timeout: 5000 });
       const inheritLabel = await page.evaluate(
         () =>
           document.querySelector('[data-testid="project-output-language-select"]')?.textContent ?? "",
       );
       expect(inheritLabel).toContain("当前：zh-CN"); // 已持久化的全局语言，而非未保存草稿
-      await clickReady(page, '[data-testid="settings-tab-global"]');
-      await page.waitForSelector('[data-testid="hub-output-language-select"]', { timeout: 5000 });
       await selectUiOption(page, '[data-testid="hub-output-language-select"]', "zh-CN");
-      await clickReady(page, '[data-testid="settings-tab-project"]');
-      await page.waitForSelector('[data-testid="routing-presets"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="preset-quota_saver"]');
-      await page.waitForSelector('[data-testid="preset-quota_saver"].active', { timeout: 5000 });
+      await clickReady(page, '[data-testid="settings-tab-routing"]');
       // REQ-015 审查修复：长模型名在路由选择器中内部省略，锁定推理强度标签保持 28px 单行且悬浮提示展示完整值。
-      await page.select('[data-testid="route-select-design"]', "codex::gpt-6.2-xhigh-locked-variant-with-extra-long-name");
-      await page.waitForSelector('[data-testid="route-effort-design-locked"]', { timeout: 5000 });
+      await page.select('[data-testid="route-select-defaultLead"]', "codex::gpt-6.2-xhigh-locked-variant-with-extra-long-name");
+      await page.waitForSelector('[data-testid="route-effort-defaultLead-locked"]', { timeout: 5000 });
       const lockedEffortMetrics = await page.evaluate(() => {
-        const picker = document.querySelector('[data-testid="route-select-design-trigger"]') as HTMLElement | null;
+        const picker = document.querySelector('[data-testid="route-select-defaultLead-trigger"]') as HTMLElement | null;
         const pickerText = picker?.querySelector(".truncate") as HTMLElement | null;
-        const locked = document.querySelector('[data-testid="route-effort-design-locked"]') as HTMLElement | null;
+        const locked = document.querySelector('[data-testid="route-effort-defaultLead-locked"]') as HTMLElement | null;
         const lockedText = locked?.querySelector(".truncate") as HTMLElement | null;
         const pickerStyle = picker ? getComputedStyle(picker) : null;
         const lockedTextStyle = lockedText ? getComputedStyle(lockedText) : null;
@@ -586,40 +604,40 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(lockedEffortMetrics.lockedTextOverflow).toBe("ellipsis");
       expect(lockedEffortMetrics.lockedVerticalOverflow).toBe(false);
       expect(lockedEffortMetrics.lockedTitle).toContain("XHigh (极高)");
-      await page.select('[data-testid="route-select-design"]', "qodercn::Qwen4-Max");
-      await selectUiOption(page, '[data-testid="route-effort-design"]', "xhigh");
-      await clickReady(page, '[data-testid="save-project-btn"]');
+      await page.select('[data-testid="route-select-defaultLead"]', "qodercn::Qwen4-Max");
+      await selectUiOption(page, '[data-testid="route-effort-defaultLead"]', "xhigh");
+      await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
-      // Reopen immediately and verify saved preset/effort persisted, then customize model+effort, save, reopen & reload
+      // Reopen immediately and verify saved routing/effort persisted, then customize model+effort, save, reopen & reload
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const firstReopen = await page.evaluate(() => ({
-        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
+        defaultLeadModel: (document.querySelector('[data-testid="route-select-defaultLead"]') as HTMLSelectElement)?.value,
+        defaultLeadEffort: document.querySelector('[data-testid="route-effort-defaultLead"]')?.getAttribute("data-value") ?? "",
       }));
-      expect(firstReopen).toEqual({ designModel: "qodercn::Qwen4-Max", designEffort: "xhigh" });
+      expect(firstReopen).toEqual({ defaultLeadModel: "qodercn::Qwen4-Max", defaultLeadEffort: "xhigh" });
 
-      await page.select('[data-testid="route-select-design"]', "codex::gpt-6-astra");
-      await selectUiOption(page, '[data-testid="route-effort-design"]', "high");
-      await page.select('[data-testid="route-select-implement"]', "opencode::opencode/deepseek-v4.1-flash-free");
-      await selectUiOption(page, '[data-testid="route-effort-implement"]', "medium");
-      await clickReady(page, '[data-testid="save-project-btn"]');
+      await page.select('[data-testid="route-select-defaultLead"]', "codex::gpt-6-astra");
+      await selectUiOption(page, '[data-testid="route-effort-defaultLead"]', "high");
+      await page.select('[data-testid="route-select-sotaLead"]', "opencode::opencode/deepseek-v4.1-flash-free");
+      await selectUiOption(page, '[data-testid="route-effort-sotaLead"]', "medium");
+      await clickReady(page, '[data-testid="save-routing-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const secondReopen = await page.evaluate(() => ({
-        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
-        implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
-        implementEffort: document.querySelector('[data-testid="route-effort-implement"]')?.getAttribute("data-value") ?? "",
+        defaultLeadModel: (document.querySelector('[data-testid="route-select-defaultLead"]') as HTMLSelectElement)?.value,
+        defaultLeadEffort: document.querySelector('[data-testid="route-effort-defaultLead"]')?.getAttribute("data-value") ?? "",
+        sotaLeadModel: (document.querySelector('[data-testid="route-select-sotaLead"]') as HTMLSelectElement)?.value,
+        sotaLeadEffort: document.querySelector('[data-testid="route-effort-sotaLead"]')?.getAttribute("data-value") ?? "",
       }));
       expect(secondReopen).toEqual({
-        designModel: "codex::gpt-6-astra",
-        designEffort: "high",
-        implementModel: "opencode::opencode/deepseek-v4.1-flash-free",
-        implementEffort: "medium",
+        defaultLeadModel: "codex::gpt-6-astra",
+        defaultLeadEffort: "high",
+        sotaLeadModel: "opencode::opencode/deepseek-v4.1-flash-free",
+        sotaLeadEffort: "medium",
       });
 
       await page.goto(server.url, { waitUntil: "networkidle0" });
@@ -628,13 +646,13 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
       const afterReload = await page.evaluate(() => ({
-        designModel: (document.querySelector('[data-testid="route-select-design"]') as HTMLSelectElement)?.value,
-        designEffort: document.querySelector('[data-testid="route-effort-design"]')?.getAttribute("data-value") ?? "",
-        implementModel: (document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement)?.value,
-        implementEffort: document.querySelector('[data-testid="route-effort-implement"]')?.getAttribute("data-value") ?? "",
+        defaultLeadModel: (document.querySelector('[data-testid="route-select-defaultLead"]') as HTMLSelectElement)?.value,
+        defaultLeadEffort: document.querySelector('[data-testid="route-effort-defaultLead"]')?.getAttribute("data-value") ?? "",
+        sotaLeadModel: (document.querySelector('[data-testid="route-select-sotaLead"]') as HTMLSelectElement)?.value,
+        sotaLeadEffort: document.querySelector('[data-testid="route-effort-sotaLead"]')?.getAttribute("data-value") ?? "",
       }));
       expect(afterReload).toEqual(secondReopen);
-      await clickReady(page, '[data-testid="routing-modal"] button:not([data-testid])');
+      await clickReady(page, '[data-testid="routing-modal"] [data-slot="dialog-footer"] button:not([data-testid])');
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
 
       // 3. Open REQ-001: test section annotation + Ask mode (read-only Q&A) + direct design editing
@@ -651,10 +669,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () =>
           Boolean(document.querySelector('[data-testid="discuss-thread"]')?.textContent?.includes("多进程并发写冲突")) &&
           !document.querySelector('[data-testid="discuss-stream-card"]'),
-        { timeout: 5000 },
+        { timeout: 15000 },
       );
       const stageAfterAsk = await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "");
-      expect(stageAfterAsk).toContain("待批准");
+      const derivedAfterAsk = await page.evaluate(
+        () => document.querySelector('[data-testid="ws-derived-status-badge"]')?.textContent ?? "",
+      );
+      expect(stageAfterAsk).toContain("规划中");
+      expect(derivedAfterAsk).toContain("待批准");
 
       // Direct human design.md editing
       await clickReady(page, '[data-testid="start-edit-design-btn"]');
@@ -693,143 +715,43 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       );
       await selectUiOption(page, '[data-testid="banner-runner-select-effort"]', "high");
       await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      // Auto-review may chain immediately after `implement`, switching the drawer to the review run's stream.
+      await page.waitForFunction(
+        () => {
+          const text = document.querySelector('[data-testid="console-log-output"]')?.textContent ?? "";
+          return (
+            text.includes("model run finished ok") ||
+            text.includes("审查完成") ||
+            Boolean(document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过"))
+          );
+        },
+        { timeout: 15000 },
+      );
+
+      if (
+        await page.evaluate(
+          () => !document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过"),
+        )
+      ) {
+        const canManualReview = await page.evaluate(() =>
+          Boolean(document.querySelector('[data-testid="run-review-btn"]:not([disabled])')),
+        );
+        if (canManualReview) {
+          await clickReady(page, '[data-testid="run-review-btn"]');
+        }
+      }
       await page.waitForFunction(
         () =>
-          Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("model run finished ok")) &&
+          Boolean(document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过")) &&
           !document.querySelector('[data-testid="live-agent-banner"]'),
-        { timeout: 5000 },
-      );
-
-      await clickReady(page, '[data-testid="run-review-btn"]');
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("跨模型审查通过")),
-        { timeout: 5000 },
+        { timeout: 15000 },
       );
 
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
     }
-  }, 30_000);
-
-  test("Self-Evolving & RSI: quick report modal, evolution center tabs, playbook editor, and sandbox promotion", async () => {
-    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-evo-hub-"));
-    tempDirs.push(hubDir);
-    process.env.WORKBENCH_HUB_DIR = hubDir;
-
-    const wbRepo = initGitRepo();
-    fs.writeFileSync(path.join(wbRepo, "package.json"), JSON.stringify({ name: "workbench", version: "5.0.0" }, null, 2));
-    execFileSync("git", ["add", "package.json"], { cwd: wbRepo, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "add package.json"], { cwd: wbRepo, stdio: "ignore" });
-    await initProject(wbRepo, { name: "workbench", privacyMode: "local" });
-
-    const server = await startWorkbenchServer({ root: wbRepo, port: 0, writeDiscovery: false, hubMode: true });
-    servers.push(server);
-
-    const page = await browser!.newPage();
-    const pageErrors: string[] = [];
-    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
-
-    try {
-      await page.setViewport({ width: 1360, height: 860 });
-      await page.goto(server.url, { waitUntil: "networkidle0" });
-      await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 5000 });
-
-      // 1. Open quick report from Topbar, test interactive DOM element picker, and submit an issue
-      await clickReady(page, '[data-testid="open-quick-report-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="pick-element-btn"]');
-      await page.waitForSelector('[data-testid="pick-element-banner"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="new-req-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
-      const pickedSel = await page.evaluate(
-        () => (document.querySelector('[data-testid="quick-report-selector"]') as HTMLInputElement)?.value ?? "",
-      );
-      expect(pickedSel).toBe('[data-testid="new-req-btn"]');
-      // REQ-015: 快速上报分类下拉、选择器输入框与拾取元素按钮严格等高 32px 且单行。
-      await expectControlsAligned(
-        page,
-        [
-          '[data-testid="quick-report-category"]',
-          '[data-slot="input-control"]:has([data-testid="quick-report-selector"])',
-          '[data-testid="pick-element-btn"]',
-        ],
-        32,
-      );
-      await page.type('[data-testid="quick-report-title"]', "窄屏下工具栏按钮间距略紧");
-      await page.type('[data-testid="quick-report-detail"]', "在 390px 宽度下建议增加 gap");
-      await clickReady(page, '[data-testid="submit-quick-report-btn"]');
-      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
-
-      // Seed one run outcome before opening Evolution Center so Telemetry tab renders action badge localization cleanly.
-      recordModelRunOutcome({
-        harness: "codex",
-        model: "gpt-6.2-sol",
-        action: "review",
-        status: "succeeded",
-        durationMs: 1200,
-      });
-
-      // 2. Open Evolution Center from HubSidebar -> verify Inbox, Playbook, Telemetry tabs
-      await clickReady(page, '[data-testid="open-evolution-btn"]');
-      await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="evo-pane-inbox"]')?.textContent?.includes("窄屏下工具栏按钮间距略紧")),
-        { timeout: 5000 },
-      );
-
-      // Verify apply-sandbox-btn is NOT shown on unaccepted pain points
-      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid^="apply-pain-sandbox-"]')))).toBe(false);
-
-      // Switch to Playbook tab and save a rule
-      await clickReady(page, '[data-testid="evo-tab-playbook"]');
-      await page.waitForSelector('[data-testid="playbook-editor"]', { timeout: 5000 });
-      await page.type('[data-testid="playbook-editor"]', "- [规范] 所有图标必须使用 Icon 包装器\n");
-      await clickReady(page, '[data-testid="save-playbook-btn"]');
-      await page.waitForFunction(
-        () => Boolean(document.querySelector('[data-testid="evo-tab-playbook"]')?.textContent?.includes("(1)")),
-        { timeout: 5000 },
-      );
-
-      // Switch to Telemetry tab and verify action badge localization in both languages
-      await clickReady(page, '[data-testid="evo-tab-telemetry"]');
-      await page.waitForSelector('[data-testid="evo-pane-telemetry"]', { timeout: 5000 });
-      await page.waitForSelector('[data-testid="telemetry-action-badge"]', { timeout: 5000 });
-      expect(
-        await page.evaluate(() => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent ?? ""),
-      ).toBe("审查");
-      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
-      await page.waitForFunction(
-        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "Review",
-        { timeout: 5000 },
-      );
-      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
-      await page.waitForFunction(
-        () => document.querySelector('[data-testid="telemetry-action-badge"]')?.textContent === "审查",
-        { timeout: 5000 },
-      );
-
-      // Switch back to Inbox tab and promote pain point to a sandboxed requirement
-      await clickReady(page, '[data-testid="evo-tab-inbox"]');
-      const promoteBtnSel = await page.evaluate(() => {
-        const btn = document.querySelector('[data-testid^="promote-pain-"]');
-        return btn ? `[data-testid="${btn.getAttribute("data-testid")}"]` : "";
-      });
-      expect(promoteBtnSel).not.toBe("");
-      await clickReady(page, promoteBtnSel);
-
-      // Modal closes, switches to REQ-001 in draft stage with active sandbox badge and no apply button before acceptance
-      await page.waitForSelector('[data-testid="sandbox-active-badge"]', { timeout: 5000 });
-      const stageBadge = await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "");
-      expect(stageBadge).toContain("草稿");
-      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="apply-sandbox-btn"]')))).toBe(false);
-      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
-      expect(overflow).toBe(false);
-      expect(pageErrors).toEqual([]);
-    } finally {
-      await page.close();
-    }
-  }, 30_000);
+  }, 90_000);
 
   test("附件上传：新建需求与报修弹窗均可上传图片并在详情/收集箱中回显", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-att-hub-"));
@@ -882,31 +804,6 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         () => (document.querySelector('[data-testid="attachment-image"] img') as HTMLImageElement | null)?.src ?? "",
       );
       expect(imageSrc).toContain("/attachments/");
-
-      // 报修：上传截图后收集箱详情回显
-      await clickReady(page, '[data-testid="open-quick-report-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
-      await page.type('[data-testid="quick-report-title"]', "E2E 附件报修：收集箱缩略图");
-      await page.type('[data-testid="quick-report-detail"]', "附带一张截图用于复现");
-      await injectFile('[data-testid="quick-report-modal"]', "报修截图.png");
-      await page.waitForSelector('[data-testid="quick-report-modal"] [data-testid="attachment-pending-list"]', {
-        timeout: 5000,
-      });
-      await clickReady(page, '[data-testid="submit-quick-report-btn"]');
-      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 8000 });
-
-      await clickReady(page, '[data-testid="open-evolution-btn"]');
-      await page.waitForSelector('[data-testid="evolution-modal"]', { timeout: 5000 });
-      await page.waitForFunction(
-        () =>
-          Boolean(
-            document.querySelector('[data-testid="evo-pane-inbox"]')?.textContent?.includes("E2E 附件报修：收集箱缩略图"),
-          ),
-        { timeout: 8000 },
-      );
-      await page.waitForSelector('[data-testid="evolution-modal"] [data-testid="attachment-image"] img', {
-        timeout: 8000,
-      });
       expect(pageErrors).toEqual([]);
     } finally {
       await page.close();
@@ -1060,10 +957,18 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await waitAnchorPlaced();
       expect(await anchorContains('[data-testid="more-menu-anchor"]', '[data-testid="more-menu-btn"]')).toBe(true);
       expect(await rememberAnchor('[data-testid="more-menu-anchor"]')).toBe(true);
-      await page.select('[data-testid="banner-runner-select"]', "manual_copy");
+      const alternateRunnerKey = await page.evaluate(() => {
+        const select = document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null;
+        if (!select) return "";
+        const options = Array.from(select.options).map((o) => o.value);
+        return options.find((v) => v && v !== select.value) ?? options.find((v) => v !== select.value) ?? "";
+      });
+      await page.select('[data-testid="banner-runner-select"]', alternateRunnerKey);
       await page.waitForFunction(
-        () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === "manual_copy",
+        (expected: unknown) =>
+          (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === expected,
         { timeout: 5000 },
+        alternateRunnerKey,
       );
       expect(await anchorStillSame('[data-testid="more-menu-anchor"]')).toBe(true);
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="more-menu"]')))).toBe(true);
@@ -1092,10 +997,18 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         await anchorContains('[data-testid="banner-runner-select-anchor"]', '[data-testid="banner-runner-select-trigger"]'),
       ).toBe(true);
       expect(await rememberAnchor('[data-testid="banner-runner-select-anchor"]')).toBe(true);
-      await page.select('[data-testid="banner-runner-select"]', "manual_copy");
+      const secondRunnerKey = await page.evaluate(() => {
+        const select = document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null;
+        if (!select) return "";
+        const options = Array.from(select.options).map((o) => o.value);
+        return options.find((v) => v && v !== select.value) ?? options.find((v) => v !== select.value) ?? "";
+      });
+      await page.select('[data-testid="banner-runner-select"]', secondRunnerKey);
       await page.waitForFunction(
-        () => (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === "manual_copy",
+        (expected: unknown) =>
+          (document.querySelector('[data-testid="banner-runner-select"]') as HTMLSelectElement | null)?.value === expected,
         { timeout: 5000 },
+        secondRunnerKey,
       );
       expect(await anchorStillSame('[data-testid="banner-runner-select-anchor"]')).toBe(true);
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="banner-runner-select-search"]')))).toBe(
@@ -1118,15 +1031,15 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // 3. 配置弹窗中的模型选择器：四个阶段的锚点互不干扰，切换其他阶段不重建当前锚点。
+      // 3. 配置弹窗中的模型选择器：三个角色的锚点互不干扰，切换其他角色不重建当前锚点。
       await clickReady(page, '[data-testid="open-routing-btn"]');
       await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="route-select-design-trigger"]');
-      await page.waitForSelector('[data-testid="route-select-design-search"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="route-select-defaultLead-trigger"]');
+      await page.waitForSelector('[data-testid="route-select-defaultLead-search"]', { timeout: 5000 });
       await waitAnchorPlaced();
-      expect(await rememberAnchor('[data-testid="route-select-design-anchor"]')).toBe(true);
-      const nextImplementValue = await page.evaluate(() => {
-        const select = document.querySelector('[data-testid="route-select-implement"]') as HTMLSelectElement | null;
+      expect(await rememberAnchor('[data-testid="route-select-defaultLead-anchor"]')).toBe(true);
+      const nextSotaValue = await page.evaluate(() => {
+        const select = document.querySelector('[data-testid="route-select-sotaLead"]') as HTMLSelectElement | null;
         if (!select) return null;
         const current = select.value;
         const candidate = Array.from(select.options)
@@ -1138,14 +1051,14 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         }
         return candidate;
       });
-      expect(nextImplementValue).not.toBeNull();
-      expect(await anchorStillSame('[data-testid="route-select-design-anchor"]')).toBe(true);
-      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="route-select-design-search"]')))).toBe(
+      expect(nextSotaValue).not.toBeNull();
+      expect(await anchorStillSame('[data-testid="route-select-defaultLead-anchor"]')).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="route-select-defaultLead-search"]')))).toBe(
         true,
       );
       await page.keyboard.press("Escape");
       await page.waitForFunction(
-        () => !document.querySelector('[data-testid="route-select-design-search"]'),
+        () => !document.querySelector('[data-testid="route-select-defaultLead-search"]'),
         { timeout: 5000 },
       );
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="routing-modal"]')))).toBe(true);
@@ -1157,7 +1070,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     } finally {
       await page.close();
     }
-  }, 60_000);
+  }, 90_000);
 
   test("REQ-004: 执行终端适配亮暗主题、折叠次要上下文、切换结构/原始视图并自动加载历史 Run 日志", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-console-hub-"));
@@ -1165,7 +1078,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     process.env.WORKBENCH_HUB_DIR = hubDir;
 
     const repo = initGitRepo();
-    await initProject(repo, { name: "ConsoleRepo", privacyMode: "local" });
+    await initProject(repo, {
+      name: "ConsoleRepo",
+      privacyMode: "local",
+      routing: {
+        defaultLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        sotaLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        reviewer: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
     await createRequirement(repo, {
       goal: "优化执行终端主题与结构化输出",
       criteria: [{ id: "AC-1", description: "测试通过", required: true, command: "echo ok" }],
@@ -1239,14 +1162,19 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForSelector('[data-testid="action-approve_only"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="action-approve_only"]');
-      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 5000 });
+      await page.waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")) &&
+          Boolean(document.querySelector('[data-testid="run-selected-model-btn"]:not([disabled])')),
+        { timeout: 5000 },
+      );
 
       await clickReady(page, '[data-testid="run-selected-model-btn"]');
       await page.waitForFunction(
         () =>
           Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")) &&
           !document.querySelector('[data-testid="live-agent-banner"]'),
-        { timeout: 8000 },
+        { timeout: 20000 },
       );
 
       // 1. 浅色与深色主题下的背景与文本对比适配

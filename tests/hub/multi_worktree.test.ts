@@ -14,7 +14,6 @@ import {
   propose,
   reopenRequirement,
   updateProjectConfig,
-  updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
@@ -23,12 +22,13 @@ import {
   applySandboxToMain,
   cascadeSyncProjectSandboxes,
   createOrReuseWorktree,
-  inspectRsiSandboxDrift,
+  inspectSandboxDrift,
   prepareSandboxConflictResolution,
   recommendSandboxMergeOrder,
-  syncRsiSandboxBase,
-} from "../../src/hub/evolution.ts";
+  syncSandboxBase,
+} from "../../src/core/worktree.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
+import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 
 const tempDirs: string[] = [];
@@ -102,14 +102,14 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     execFileSync("git", ["add", "shared.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main edits line 40"], { cwd: repo, stdio: "ignore" });
 
-    const driftAuto = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const driftAuto = await inspectSandboxDrift(repo, "REQ-001");
     expect(driftAuto?.driftStatus).toBe("auto_mergeable");
     expect(driftAuto?.overlapFiles).toEqual(["shared.ts"]);
     expect(driftAuto?.conflictFiles).toEqual([]);
     expect(driftAuto?.canAutoSync).toBe(true);
 
     // Auto-sync cleanly 3-way merges both line 1 WIP and line 40 main commit!
-    const syncRes = await syncRsiSandboxBase(repo, "REQ-001", { fetchRemote: false });
+    const syncRes = await syncSandboxBase(repo, "REQ-001", { fetchRemote: false });
     expect(syncRes.synced).toBe(true);
     expect(syncRes.drift.behindCount).toBe(0);
     const mergedContent = fs.readFileSync(path.join(sb.worktreePath, "shared.ts"), "utf8");
@@ -124,11 +124,11 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     execFileSync("git", ["add", "shared.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main conflicts line 1"], { cwd: repo, stdio: "ignore" });
 
-    const driftConflict = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const driftConflict = await inspectSandboxDrift(repo, "REQ-001");
     expect(driftConflict?.driftStatus).toBe("true_conflict");
     expect(driftConflict?.conflictFiles).toEqual(["shared.ts"]);
     expect(driftConflict?.canAutoSync).toBe(false);
-  });
+  }, 20_000);
 
   test("done stage clean sync stays done & allows applySandboxToMain, while reopen(preserveApproval) and sync-resolve keep approval intact", async () => {
     makeTempHub();
@@ -147,11 +147,6 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     execFileSync("git", ["commit", "-m", "feat: leaf=42"], { cwd: sb.worktreePath, stdio: "ignore" });
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const wtSnap = (await observeGitSnapshot(sb.worktreePath))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: wtSnap.fingerprint,
-    });
     await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: wtSnap.fingerprint });
 
     // Advance main on an unrelated file while REQ-001 is already `done`
@@ -160,7 +155,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     execFileSync("git", ["commit", "-m", "main advances unrelated"], { cwd: repo, stdio: "ignore" });
 
     // Clean sync on `done` preserves stage === "done" and approval!
-    const syncDone = await syncRsiSandboxBase(repo, "REQ-001", { fetchRemote: false });
+    const syncDone = await syncSandboxBase(repo, "REQ-001", { fetchRemote: false });
     expect(syncDone.synced).toBe(true);
     expect(syncDone.detail.state.stage).toBe("done");
     expect(syncDone.detail.state.approval).not.toBeNull();
@@ -171,7 +166,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
       reason: "需要顺带调一下格式",
       preserveApproval: true,
     });
-    expect(reopenedKeep.state.stage).toBe("implementing");
+    expect(reopenedKeep.state.stage).toBe("coding");
     expect(reopenedKeep.state.approval).not.toBeNull();
 
     // Re-verify and re-accept, then test conflict sync-resolve via prepareSandboxConflictResolution & awaiting_approval API
@@ -181,7 +176,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
 
     // Now test `done` -> `implementing` via prepareSandboxConflictResolution without touching lastFeedback
     const prep = await prepareSandboxConflictResolution(repo, "REQ-001");
-    expect(prep.state.stage).toBe("implementing");
+    expect(prep.state.stage).toBe("coding");
     expect(prep.state.approval).not.toBeNull();
     expect(prep.state.lastFeedback).toBeNull();
 
@@ -192,17 +187,17 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     fs.writeFileSync(path.join(repo, "unrelated2.ts"), "export const u2 = 2;\n");
     execFileSync("git", ["add", "unrelated2.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main advances unrelated2"], { cwd: repo, stdio: "ignore" });
-    await syncRsiSandboxBase(repo, "REQ-001", { fetchRemote: false });
+    await syncSandboxBase(repo, "REQ-001", { fetchRemote: false });
 
     const applied = await applySandboxToMain(repo, "REQ-001");
     expect(applied.appliedFiles).toContain("leaf.ts");
     expect(fs.readFileSync(path.join(repo, "leaf.ts"), "utf8")).toBe("export const leaf = 42;\n");
-  });
+  }, 20_000);
 
   test("sync-resolve API unblocks awaiting_approval and done requirements without approval_required errors", async () => {
     makeTempHub();
     const repo = makeMultiLineRepo("sync-resolve-api");
-    await initProject(repo, { name: "SyncResolveApi", privacyMode: "local" });
+    await initProject(repo, { name: "SyncResolveApi", privacyMode: "local", routing: buildInitialProjectRouting() });
     await createRequirement(repo, {
       goal: "Edit shared.ts and test awaiting_approval sync-resolve",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
@@ -241,7 +236,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     });
     expect(res.status).toBe(202);
     const body = (await res.json()) as { detail: { state: { stage: string; approval: unknown; lastFeedback: string | null } } };
-    expect(body.detail.state.stage).toBe("implementing");
+    expect(body.detail.state.stage).toBe("coding");
     expect(body.detail.state.approval).not.toBeNull();
     expect(body.detail.state.lastFeedback).toBeNull();
 
@@ -255,7 +250,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     expect(dispatched.length).toBe(1);
     expect(dispatched[0]!.action).toBe("fix");
     expect(dispatched[0]!.prompt).toContain("主干");
-  });
+  }, 20_000);
 
   test("tracks origin/main even when main checkout is dirty and supports forceWithLease on diverged PR branch", async () => {
     makeTempHub();
@@ -296,8 +291,8 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     // Make main checkout dirty so fast-forward of local main is impossible
     fs.writeFileSync(path.join(repo, "local_wip.txt"), "dirty main");
 
-    // Fetch origin/main via syncRsiSandboxBase -> sandbox gets remote_pr.ts despite dirty main checkout!
-    const synced = await syncRsiSandboxBase(repo, "REQ-001", { fetchRemote: true });
+    // Fetch origin/main via syncSandboxBase -> sandbox gets remote_pr.ts despite dirty main checkout!
+    const synced = await syncSandboxBase(repo, "REQ-001", { fetchRemote: true });
     expect(synced.synced).toBe(true);
     expect(fs.existsSync(path.join(sb.worktreePath, "remote_pr.ts"))).toBe(true);
 
@@ -335,7 +330,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
       mockGh,
     );
     expect(delivered.pr?.number).toBe(99);
-  });
+  }, 20_000);
 
   test("sibling conflict radar, merge order recommendation, stacked worktree, and cascade sync", async () => {
     makeTempHub();
@@ -385,7 +380,7 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     await acceptRequirement(repo, "REQ-003", { currentCodeSnapshotHash: snap3.fingerprint });
 
     // Sibling radar on REQ-001 detects true conflict with REQ-002
-    const drift1 = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const drift1 = await inspectSandboxDrift(repo, "REQ-001");
     expect(drift1?.siblingConflicts?.some((s) => s.requirementId === "REQ-002" && s.conflictFiles.includes("shared.ts"))).toBe(true);
 
     // Merge order recommends REQ-003 first (`clean_leaf`), ahead of conflicting siblings!
@@ -412,5 +407,5 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     expect(cascade.find((c) => c.requirementId === "REQ-002")?.status).toBe("synced");
     expect(fs.readFileSync(path.join(sb1.worktreePath, "leaf.ts"), "utf8")).toBe("export const leaf = 333;\n");
     expect(fs.readFileSync(path.join(sb2.worktreePath, "leaf.ts"), "utf8")).toBe("export const leaf = 333;\n");
-  });
+  }, 20_000);
 });

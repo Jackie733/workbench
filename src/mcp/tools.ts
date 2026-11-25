@@ -1,4 +1,4 @@
-import { getProjectStatus, getRequirement, getRequirementDiff, isUiRelatedRequirement, listRequirements, propose, updateTasks } from "../core/engine.ts";
+import { getProjectStatus, getRequirement, getRequirementDiff, listRequirements, propose } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
@@ -6,7 +6,7 @@ import { checkLanguageMismatchWarning, normalizeOutputLanguage, resolveEffective
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
-import { STAGES, TASK_STATUSES, type CriterionInput, type ScreenshotCaptureResult, type Stage, type TaskInput } from "../core/types.ts";
+import { STAGES, type CriterionInput, type Stage } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "../hub/registry.ts";
 
@@ -88,61 +88,7 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
         },
         design: { type: "string", description: "Proposed technical design.md Markdown (in configured outputLanguage)." },
         summary: { type: "string", description: "Short timeline summary of this proposal (in configured outputLanguage)." },
-        handoffNote: {
-          type: "object",
-          additionalProperties: false,
-          description: "Optional concise context handoff memo for downstream agents (in configured outputLanguage).",
-          properties: {
-            keyDecisions: { type: "array", items: { type: "string" } },
-            deadEnds: { type: "array", items: { type: "string" } },
-            nextSteps: { type: "array", items: { type: "string" } },
-          },
-        },
         expectedRevision: { type: "integer", minimum: 1, description: "Optional optimistic lock revision." },
-      },
-    },
-  },
-  {
-    name: "wb_update_tasks",
-    description:
-      "Update implementation tasks checklist for a requirement (write task titles and notes in the configured outputLanguage), or submit for human acceptance once all required criteria pass on the current git snapshot.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["id"],
-      properties: {
-        id: { type: "string", pattern: "^REQ-\\d{3,}$", description: "Requirement ID." },
-        tasks: {
-          type: "array",
-          description: "Complete ordered implementation task checklist.",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["title", "status"],
-            properties: {
-              id: { type: "string", description: "Preserve existing T-N ID when updating." },
-              title: { type: "string" },
-              status: { type: "string", enum: [...TASK_STATUSES] },
-              note: { type: "string" },
-            },
-          },
-        },
-        readyForAcceptance: {
-          type: "boolean",
-          description: "Set true after all required criteria pass verification to move stage to awaiting_acceptance.",
-        },
-        note: { type: "string", description: "Short summary of progress or delivery." },
-        handoffNote: {
-          type: "object",
-          additionalProperties: false,
-          description: "Optional concise handoff memo (key decisions, dead ends to avoid, next steps).",
-          properties: {
-            keyDecisions: { type: "array", items: { type: "string" } },
-            deadEnds: { type: "array", items: { type: "string" } },
-            nextSteps: { type: "array", items: { type: "string" } },
-          },
-        },
-        expectedRevision: { type: "integer", minimum: 1 },
       },
     },
   },
@@ -253,6 +199,7 @@ export async function executeWorkbenchTool(
         title: detail.state.title,
         stage: detail.state.stage,
         track: detail.state.track,
+        tier: detail.state.tier,
         revision: detail.state.revision,
         designVersion: detail.state.designVersion,
         outputLanguage,
@@ -260,16 +207,13 @@ export async function executeWorkbenchTool(
         specMarkdown: detail.specMarkdown,
         designMarkdown: detail.designMarkdown,
         handoffMarkdown: detail.handoffMarkdown,
-        handoffNote: detail.state.handoffNote ?? null,
         discussions: (detail.state.discussions ?? []).slice(-20),
         reviewReport: detail.state.reviewReport ?? null,
         lastFeedback: detail.state.lastFeedback,
-        blockedReason: detail.state.blockedReason,
         uiRelated: detail.state.uiRelated ?? false,
         screenshotBatches: detail.state.screenshotBatches ?? [],
         approval: detail.validity.approval,
         coverage: detail.validity.coverage,
-        tasks: detail.state.tasks,
         verifications: detail.validity.verifications.slice(-10).map((ev) => ({
           id: ev.record.id,
           command: ev.record.command,
@@ -308,6 +252,7 @@ export async function executeWorkbenchTool(
               diffTruncated: obs.diffTruncated,
               binaryFiles: obs.binaryFiles,
               omittedFiles: obs.omittedFiles,
+              testTamperingSignals: diffView.testTamperingSignals ?? [],
             }
           : {
               context: diffView.context,
@@ -325,13 +270,14 @@ export async function executeWorkbenchTool(
               diffTruncated: false,
               binaryFiles: [],
               omittedFiles: [],
+              testTamperingSignals: [],
             };
       }
       return response;
     }
 
     case "wb_propose": {
-      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "summary", "handoffNote", "expectedRevision"], name);
+      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "summary", "expectedRevision"], name);
       if (typeof args.id !== "string") {
         throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
       }
@@ -354,9 +300,6 @@ export async function executeWorkbenchTool(
         criteria: args.criteria as CriterionInput[] | undefined,
         designMarkdown: typeof args.design === "string" ? args.design : undefined,
         summary: typeof args.summary === "string" ? args.summary : undefined,
-        handoffNote: isRecord(args.handoffNote)
-          ? (args.handoffNote as { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] })
-          : undefined,
         expectedRevision: args.expectedRevision as number | undefined,
         actor: "agent",
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
@@ -386,78 +329,6 @@ export async function executeWorkbenchTool(
         ...(languageWarning ? { languageWarning } : {}),
         approval: detail.validity.approval,
         nextHeadline: detail.validity.banner.headline,
-      };
-    }
-
-    case "wb_update_tasks": {
-      assertAllowedKeys(args, ["id", "tasks", "readyForAcceptance", "note", "handoffNote", "expectedRevision"], name);
-      if (typeof args.id !== "string") {
-        throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
-      }
-      if (args.tasks !== undefined) {
-        if (!Array.isArray(args.tasks)) {
-          throw new WorkbenchError("invalid_input", "tasks 必须是数组");
-        }
-        for (const item of args.tasks) {
-          if (!isRecord(item)) throw new WorkbenchError("invalid_input", "tasks 元素必须是对象");
-          assertAllowedKeys(item, ["id", "title", "status", "note"], `${name}.tasks`);
-        }
-      }
-      if (args.expectedRevision !== undefined && !Number.isSafeInteger(args.expectedRevision)) {
-        throw new WorkbenchError("invalid_input", "expectedRevision 必须是正整数");
-      }
-      const snapshot = await observeGitSnapshot(resolveCodeRoot(base, args.id));
-      const detail = await updateTasks(base, args.id, {
-        tasks: args.tasks as TaskInput[] | undefined,
-        readyForAcceptance: args.readyForAcceptance === true,
-        note: typeof args.note === "string" ? args.note : undefined,
-        handoffNote: isRecord(args.handoffNote)
-          ? (args.handoffNote as { keyDecisions?: string[]; deadEnds?: string[]; nextSteps?: string[] })
-          : undefined,
-        expectedRevision: args.expectedRevision as number | undefined,
-        actor: "agent",
-        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-      });
-      let latestDetail = detail;
-      let screenshotCapture: ScreenshotCaptureResult | null = null;
-      if (args.readyForAcceptance === true && detail.state.stage === "awaiting_acceptance") {
-        try {
-          const codeRoot = resolveCodeRoot(base, args.id);
-          const autoScreenshots = getProjectStatus(base).project?.verification?.autoScreenshots;
-          const shouldCapture =
-            autoScreenshots === false
-              ? false
-              : autoScreenshots === true
-                ? await isUiRelatedRequirement(detail.state, codeRoot)
-                : detail.state.uiRelated === true;
-          if (shouldCapture) {
-            screenshotCapture = await captureRequirementScreenshots(base, args.id, {
-              trigger: "auto_submit",
-              actor: "agent",
-              currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-            });
-            latestDetail = getRequirement(base, args.id, {
-              currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
-            });
-          }
-        } catch (error) {
-          // Screenshot evidence is best effort and must never block human acceptance submission.
-          screenshotCapture = {
-            status: "skipped",
-            batchId: null,
-            reason: error instanceof Error ? error.message : String(error),
-            batch: null,
-          };
-        }
-      }
-      return {
-        id: latestDetail.state.id,
-        stage: latestDetail.state.stage,
-        revision: latestDetail.state.revision,
-        tasks: latestDetail.state.tasks,
-        acceptanceGate: latestDetail.validity.acceptanceGate,
-        nextHeadline: latestDetail.validity.banner.headline,
-        ...(screenshotCapture ? { screenshotCapture } : {}),
       };
     }
 

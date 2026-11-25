@@ -19,9 +19,9 @@ import type {
   ValidityReport,
 } from "./types.ts";
 
-const TEST_FILE_PATH_RE = /(?:^|\/)(?:__tests__\/.*|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i;
-const TEST_SKIP_LINE_RE = /^\+(?!\+\+)(?:.*\b(?:describe|it|test|suite)\.(?:skip|only)\s*\(|.*\b(?:xit|xtest|xdescribe)\s*\(|.*@pytest\.mark\.skip\b|.*#\[\s*ignore\b)/;
-const ASSERTION_CALL_RE = /\b(?:expect|assert|assertEquals|assertEqual|assertThrows)\s*\(/;
+const TEST_FILE_PATH_RE = /(?:^|\/)(?:__tests__\/.*|test_[^/]+\.py|.*_test\.go|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i;
+const TEST_SKIP_LINE_RE = /^\+(?!\+\+)(?:.*\b(?:describe|it|test|suite)\.(?:skip|only)\s*\(|.*\b(?:xit|xtest|xdescribe)\s*\(|.*@pytest\.mark\.skip\b|.*#\[\s*ignore\b|.*\bt\.(?:Skip|Skipf|SkipNow)\s*\()/;
+const ASSERTION_CALL_RE = /\b(?:expect|assert|assertEquals|assertEqual|assertThrows|assert_eq!|assert_ne!|assert!)\s*\(/;
 
 /**
  * Deterministically inspects changed files and diff hunks for signs of deleted tests,
@@ -40,6 +40,7 @@ export function detectTestTamperingSignals(files: ChangedFile[], diff: string): 
 
   let currentFile = "";
   let inTestFile = false;
+  let inRustCfgTest = false;
   const perFileAssertions = new Map<string, { removed: number; added: number }>();
   const skippedLocations: string[] = [];
 
@@ -48,10 +49,14 @@ export function detectTestTamperingSignals(files: ChangedFile[], diff: string): 
       const m = /^diff --git a\/.+? b\/(.+)$/.exec(line);
       currentFile = m ? m[1]! : "";
       inTestFile = TEST_FILE_PATH_RE.test(currentFile);
+      inRustCfgTest = false;
       continue;
     }
     if (line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ")) continue;
-    if (inTestFile) {
+    if (!inTestFile && currentFile.endsWith(".rs") && /#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(line)) {
+      inRustCfgTest = true;
+    }
+    if (inTestFile || inRustCfgTest) {
       if (TEST_SKIP_LINE_RE.test(line)) {
         const label = currentFile || "diff";
         if (!skippedLocations.includes(label)) skippedLocations.push(label);
@@ -72,10 +77,10 @@ export function detectTestTamperingSignals(files: ChangedFile[], diff: string): 
     signals.push(`新增跳过测试标记（skip/ignore）：${skippedLocations.slice(0, 8).join("、")}`);
   }
   const droppedAssertionFiles = [...perFileAssertions.entries()]
-    .filter(([, counts]) => counts.removed >= 2 && counts.added === 0)
-    .map(([filePath, counts]) => `${filePath}（-${counts.removed}）`);
+    .filter(([, counts]) => counts.removed >= 2 && counts.removed > counts.added)
+    .map(([filePath, counts]) => `${filePath}（-${counts.removed}/+${counts.added}）`);
   if (droppedAssertionFiles.length > 0) {
-    signals.push(`测试文件中移除了断言且未新增替代断言：${droppedAssertionFiles.slice(0, 8).join("、")}`);
+    signals.push(`测试文件中净移除了断言：${droppedAssertionFiles.slice(0, 8).join("、")}`);
   }
   return signals;
 }
@@ -244,10 +249,7 @@ export function evaluateAcceptanceGate(
 ): AcceptanceGate {
   const blockers: string[] = [];
   const blockerRefs: UiMessageRef[] = [];
-  if (state.stage === "blocked") {
-    blockers.push("需求处于阻塞状态");
-    blockerRefs.push({ key: "core.gate.blocked" });
-  } else if (state.stage === "cancelled") {
+  if (state.stage === "cancelled") {
     blockers.push("需求已取消");
     blockerRefs.push({ key: "core.gate.cancelled" });
   } else if (state.stage === "done") {
@@ -268,10 +270,6 @@ export function evaluateAcceptanceGate(
       .map((item) => item.criterion.id);
     blockers.push(`仍有 ${missing.length} 项必需验收条件未在当前代码快照下通过（${missing.join(", ")}）`);
     blockerRefs.push({ key: "core.gate.missing", params: { count: missing.length, ids: missing.join(", ") } });
-  }
-  if (state.tasks.some((task) => task.status === "blocked")) {
-    blockers.push("存在标记为阻塞的实施任务");
-    blockerRefs.push({ key: "core.gate.taskBlocked" });
   }
 
   return { ok: blockers.length === 0, blockers, blockerRefs };
@@ -325,34 +323,6 @@ function deriveReadyAcceptanceBanner(
       };
     }
     if (report.verdict === "concern") {
-      const round = report.round ?? state.reviewHistory?.length ?? 1;
-      const hasHigh = (report.findings ?? []).some((f) => f.severity === "high");
-      const distinctReviewedSnapshots = new Set(
-        (state.reviewHistory ?? []).map((r) => r.reviewedCodeSnapshotHash).filter(Boolean),
-      ).size;
-      if (round >= 2 && !hasHigh && distinctReviewedSnapshots >= 2) {
-        return {
-          needsDecision: true,
-          decisionReason: "审查有关注点",
-          decisionReasonKey: "core.decision.reviewConcern",
-          banner: {
-            headline: `第 ${round} 轮复审仅剩非阻塞关注点：${report.summary}`,
-            headlineKey: "core.banner.review.concernConverged",
-            headlineParams: { round, summary: report.summary },
-            tone: "warning",
-            primaryAction: {
-              id: "accept",
-              label: "确认关注点并验收通过",
-              labelKey: "core.action.acceptConcernConverged",
-            },
-            secondaryActions: [
-              { id: "dispatch_fix_review", label: "按审查意见修复", labelKey: "core.action.fixPerReview" },
-              { id: "dispatch_review", label: "重新审查", labelKey: "core.action.dispatchReview" },
-              { id: "request_changes", label: "打回修改…", labelKey: "core.action.requestChanges" },
-            ],
-          },
-        };
-      }
       return {
         needsDecision: true,
         decisionReason: "审查有关注点",
@@ -460,49 +430,10 @@ export function deriveActionBanner(
   decisionReasonParams?: UiMessageParams;
 } {
   const hasVerifyCommands = state.criteria.some((c) => Boolean(c.command));
-  const doneTasks = state.tasks.filter((t) => t.status === "done").length;
 
   switch (state.stage) {
-    case "draft":
-      return {
-        needsDecision: false,
-        decisionReason: null,
-        banner: {
-          headline: "需求已保存，等待整理规范与方案",
-          headlineKey: "core.banner.draft",
-          tone: "neutral",
-          primaryAction: {
-            id: "dispatch_design",
-            label: "让 Agent 整理并出方案",
-            labelKey: "core.action.dispatchDesign",
-          },
-          secondaryActions: [
-            { id: "authorize_fast_track", label: "快速通道：直接实施", labelKey: "core.action.fastTrack" },
-          ],
-        },
-      };
-
-    case "designing":
-      return {
-        needsDecision: false,
-        decisionReason: null,
-        banner: {
-          headline: state.lastFeedback ? "已记录修改意见，等待 Agent 修订方案" : "Agent 正在调研与起草技术方案",
-          headlineKey: state.lastFeedback ? "core.banner.designing.revising" : "core.banner.designing.working",
-          tone: "info",
-          primaryAction: {
-            id: "dispatch_design",
-            label: "通知 Agent 生成方案",
-            labelKey: "core.action.notifyDesign",
-          },
-          secondaryActions: [
-            { id: "authorize_fast_track", label: "快速通道：直接实施", labelKey: "core.action.fastTrack" },
-          ],
-        },
-      };
-
-    case "awaiting_approval": {
-      if (state.designHash !== "") {
+    case "planning": {
+      if (state.designHash !== "" && !state.lastFeedback) {
         return {
           needsDecision: true,
           decisionReason: "方案待批准",
@@ -524,34 +455,54 @@ export function deriveActionBanner(
           },
         };
       }
+      if (state.lastFeedback) {
+        return {
+          needsDecision: false,
+          decisionReason: null,
+          banner: {
+            headline: "已记录修改意见，等待 Agent 修订方案",
+            headlineKey: "core.banner.designing.revising",
+            tone: "info",
+            primaryAction: {
+              id: "dispatch_design",
+              label: "通知 Agent 修订方案",
+              labelKey: "core.action.notifyDesign",
+            },
+            secondaryActions: [
+              { id: "authorize_fast_track", label: "快速通道：直接实施", labelKey: "core.action.fastTrack" },
+            ],
+          },
+        };
+      }
       return {
-        needsDecision: true,
-        decisionReason: "规范待确认",
-        decisionReasonKey: "core.decision.specConfirm",
+        needsDecision: false,
+        decisionReason: null,
         banner: {
-          headline: `规范或验收条件已更新（共 ${state.criteria.length} 项条件），请确认后继续`,
-          headlineKey: "core.banner.awaitApproval.spec",
-          headlineParams: { count: state.criteria.length },
-          tone: "warning",
+          headline: "需求已保存，等待整理规范与方案",
+          headlineKey: "core.banner.draft",
+          tone: "neutral",
           primaryAction: {
-            id: "authorize_fast_track",
-            label: "确认并继续实施",
-            labelKey: "core.action.confirmContinue",
+            id: "dispatch_design",
+            label: "让 Agent 整理并出方案",
+            labelKey: "core.action.dispatchDesign",
           },
           secondaryActions: [
-            { id: "dispatch_design", label: "让 Agent 补充技术方案", labelKey: "core.action.supplementDesign" },
-            { id: "request_changes", label: "提出修改意见…", labelKey: "core.action.requestChanges" },
+            { id: "authorize_fast_track", label: "快速通道：直接实施", labelKey: "core.action.fastTrack" },
           ],
         },
       };
     }
 
-    case "implementing": {
+    case "coding": {
       const failedCount = coverage.items.filter((i) => i.state === "failed").length;
       const staleCount = coverage.items.filter((i) => i.state === "stale").length;
       if (gate.ok) {
         return deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
       }
+      const escalateAction =
+        state.tier === "standard"
+          ? [{ id: "escalate_sota" as const, label: "升级 SOTA 主程接管", labelKey: "core.action.escalateSota" }]
+          : [];
       if (failedCount > 0) {
         const overrideAction =
           approval.valid && coverage.requiredTotal > 0
@@ -567,6 +518,7 @@ export function deriveActionBanner(
             tone: "danger",
             primaryAction: { id: "dispatch_fix", label: "让 Agent 修复失败项", labelKey: "core.action.dispatchFix" },
             secondaryActions: [
+              ...escalateAction,
               ...(hasVerifyCommands
                 ? [{ id: "run_all_verifications" as const, label: "重新运行验证", labelKey: "core.action.rerun" }]
                 : []),
@@ -593,84 +545,34 @@ export function deriveActionBanner(
           },
         };
       }
+      const latestRun = state.agentRuns && state.agentRuns.length > 0 ? state.agentRuns[state.agentRuns.length - 1] : null;
+      const lastRunFailed = latestRun?.status === "failed";
       const prefix = state.track === "fast_track" ? "快速通道已开启" : "方案已批准";
-      const taskHint = state.tasks.length > 0 ? ` · 任务 ${doneTasks}/${state.tasks.length}` : "";
       const readyKey =
         state.track === "fast_track"
-          ? state.tasks.length > 0
-            ? "core.banner.implementing.readyFastTasks"
-            : "core.banner.implementing.readyFast"
-          : state.tasks.length > 0
-            ? "core.banner.implementing.readyApprovedTasks"
-            : "core.banner.implementing.readyApproved";
-      const blockedOverrideAction =
-        approval.valid && coverage.requiredTotal > 0 && state.tasks.some((t) => t.status === "blocked")
-          ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
-          : [];
+          ? "core.banner.implementing.readyFast"
+          : "core.banner.implementing.readyApproved";
       return {
         needsDecision: false,
         decisionReason: null,
         banner: {
-          headline: `${prefix}${taskHint} · 待完成开发并运行验证`,
+          headline: `${prefix} · 待完成开发并运行验证`,
           headlineKey: readyKey,
-          headlineParams: { done: doneTasks, total: state.tasks.length },
-          tone: "info",
+          tone: lastRunFailed ? "warning" : "info",
           primaryAction: {
             id: "dispatch_implement",
-            label: state.tasks.length > 0 ? "继续让 Agent 实施" : "开始实施",
-            labelKey: state.tasks.length > 0 ? "core.action.continueImplement" : "core.action.startImplement",
+            label: latestRun ? "继续让 Agent 实施" : "开始实施",
+            labelKey: latestRun ? "core.action.continueImplement" : "core.action.startImplement",
           },
           secondaryActions: [
+            ...(lastRunFailed ? escalateAction : []),
             ...(hasVerifyCommands
               ? [{ id: "run_all_verifications" as const, label: "运行全部验证", labelKey: "core.action.runAll" }]
               : []),
-            ...blockedOverrideAction,
           ],
         },
       };
     }
-
-    case "awaiting_acceptance":
-      if (gate.ok) {
-        return deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
-      }
-      return {
-        needsDecision: true,
-        decisionReason: "待最终验收",
-        decisionReasonKey: "core.decision.finalAcceptance",
-        banner: {
-          headline: `尚未满足验收条件：${gate.blockers[0] ?? "请先完成验证"}`,
-          headlineKey: "core.banner.awaitAcceptance.blocked",
-          headlineParams: {
-            reason: gate.blockerRefs?.[0] ?? gate.blockers[0] ?? { key: "core.action.rerunShort" },
-          },
-          tone: "warning",
-          primaryAction: hasVerifyCommands
-            ? { id: "run_all_verifications", label: "重新运行验证", labelKey: "core.action.rerun" }
-            : { id: "dispatch_fix", label: "让 Agent 补充验证", labelKey: "core.action.agentSupplement" },
-          secondaryActions: [
-            ...(approval.valid && coverage.requiredTotal > 0
-              ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
-              : []),
-            { id: "request_changes", label: "打回修改…", labelKey: "core.action.sendBack" },
-          ],
-        },
-      };
-
-    case "blocked":
-      return {
-        needsDecision: true,
-        decisionReason: "已阻塞",
-        decisionReasonKey: "core.decision.blocked",
-        banner: {
-          headline: `需求受阻：${state.blockedReason ?? "未记录原因"}`,
-          headlineKey: "core.banner.blocked",
-          headlineParams: { reason: state.blockedReason ?? { key: "core.reason.unrecorded" } },
-          tone: "warning",
-          primaryAction: { id: "unblock", label: "解除阻塞", labelKey: "core.action.unblock" },
-          secondaryActions: [],
-        },
-      };
 
     case "done":
       return {
@@ -695,9 +597,9 @@ export function deriveActionBanner(
         needsDecision: false,
         decisionReason: null,
         banner: {
-          headline: `需求已取消${state.blockedReason ? `：${state.blockedReason}` : ""}`,
-          headlineKey: state.blockedReason ? "core.banner.cancelledReason" : "core.banner.cancelled",
-          ...(state.blockedReason ? { headlineParams: { reason: state.blockedReason } } : {}),
+          headline: `需求已取消${state.cancelReason ? `：${state.cancelReason}` : ""}`,
+          headlineKey: state.cancelReason ? "core.banner.cancelledReason" : "core.banner.cancelled",
+          ...(state.cancelReason ? { headlineParams: { reason: state.cancelReason } } : {}),
           tone: "neutral",
           primaryAction: null,
           secondaryActions: [{ id: "reopen", label: "重新打开", labelKey: "core.action.reopen" }],

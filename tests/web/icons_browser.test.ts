@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { approveDesign, createRequirement, initProject, propose, updateTasks } from "../../src/core/engine.ts";
+import { approveDesign, createRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
@@ -100,14 +100,6 @@ async function seedRequirement(root: string): Promise<void> {
   });
   await propose(root, "REQ-001", { designMarkdown: DESIGN_MD, actor: "agent" });
   await approveDesign(root, "REQ-001");
-  await updateTasks(root, "REQ-001", {
-    tasks: [
-      { title: "待开始步骤", status: "pending" },
-      { title: "进行中步骤", status: "in_progress" },
-      { title: "已完成步骤", status: "done" },
-      { title: "受阻步骤", status: "blocked" },
-    ],
-  });
 
   // Create one of each coverage state: passed / failed / stale / unverified.
   await runVerification(root, "REQ-001", { command: "sleep 0.4; echo icon-ok", criterionIds: ["AC-1"] });
@@ -206,7 +198,7 @@ describe("REQ-001 real browser icon behavior", () => {
 
     try {
       expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toContain(
-        "实施中",
+        "研发中",
       );
 
       const svgReport = await page.evaluate(() => {
@@ -259,17 +251,17 @@ describe("REQ-001 real browser icon behavior", () => {
         expect(iconCount).toBe(1);
       }
 
-      // Task/coverage metadata keeps readable labels next to bitmap-free icons.
+      // Verify tab keeps readable evidence status labels next to bitmap-free icons.
       await page.click('[data-testid="tab-changes"]');
-      await page.waitForSelector(".task-row", { timeout: 5000 });
-      const taskLabels = await page.evaluate(() =>
-        Array.from(document.querySelectorAll(".task-row [data-slot=\"badge\"]")).map((el) => ({
+      await page.waitForSelector(".evidence-card", { timeout: 5000 });
+      const evidenceBadges = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.evidence-card [data-slot="badge"]')).map((el) => ({
           text: el.textContent ?? "",
           icons: el.querySelectorAll("svg.ui-icon").length,
         })),
       );
-      expect(taskLabels.map((t) => t.text.trim())).toEqual(["待开始", "进行中", "已完成", "受阻"]);
-      expect(taskLabels.every((t) => t.icons === 1)).toBe(true);
+      expect(evidenceBadges.length).toBeGreaterThan(0);
+      expect(evidenceBadges.every((b) => b.text.trim().length > 0 && b.icons === 1)).toBe(true);
 
       // Drawer discussion/terminal tabs and close control keep their original interaction.
       await page.click('[data-testid="toggle-drawer-btn"]');

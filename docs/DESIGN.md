@@ -1,7 +1,7 @@
-# Workbench 架构与产品设计规范（v5.0：Workbench Hub + 多 Harness 算力路由）
+# Workbench 架构与产品设计规范（v6.0：单主程闭环 + 项目级双档路由 + 盲审架构）
 
-> 状态：当前权威设计基线（Option B 演进版：常驻多项目 Hub 守护进程 + Headless Core + 多 Harness 分阶段模型路由 + 三栏式本地 Web 工作台）。  
-> 文档分工：本文定义产品定位、工作流、三层解耦与多 Harness 路由架构、三栏式界面信息架构及通用工具接口；数据与领域不变量见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)；实施与验收进度见 [TASKS.md](TASKS.md)；旧版 Tern-Luau 单体架构与 AF 系列文档已归档至 [archive/README.md](archive/README.md)。
+> 状态：当前权威设计基线（v6.0 收敛版：常驻多项目 Hub 守护进程 + Headless Core + 项目级 3 角色双档路由 + 三栏式本地 Web 工作台）。  
+> 文档分工：本文定义产品定位、工作流、三层解耦与多 Harness 路由架构、三栏式界面信息架构及通用工具接口；数据与领域不变量见 [DOMAIN_CONTRACT.md](DOMAIN_CONTRACT.md)；旧版架构与历史文档已归档至 [archive/README.md](archive/README.md)。
 
 ---
 
@@ -21,17 +21,18 @@
    - 不对 Agent 的每一次文件修改做繁琐审批。人类只守住真正决定工程质量的两道关口：
      1. **写代码前**：审阅并批准规范/方案（或显式授权走快速通道）。
      2. **交付完成前**：审阅真实的验证命令证据（`Verification Evidence`）、代码差异（`Git Diff`）与可选的跨模型审查报告（`Cross-Model Review`），点击验收通过。
-3. **双轨自适应工作流（Plan-First vs Fast-Track）**
-   - **标准模式（Plan-First）**：`draft` → `designing` → `awaiting_approval`（人审方案）→ `implementing` → `awaiting_acceptance`（人看证据与 Diff 验收）→ `done`。
-   - **快速通道（Fast-Track）**：针对明确小需求，人可从 `draft` 直接授权跳过方案审批进入 `implementing`；但编码完成后仍须经过同等严格的**真实验证证据 + 人工验收**闭环。
-   - **设计阶段执行边界**：`design` 阶段允许运行只读测试或检查命令复现问题与调研现状，直接编辑 `spec.md`、`design.md`（及可选 `criteria.json`）后结束本轮即可（无需手动调用状态流转或进入编码）；宿主执行器在退出后自动同步为提案并交由人类审阅。核心引擎在批准前仍拒绝记录验证证据与完成任务，Hub 对 `implement` / `fix` 强制校验阶段与有效审批。
+3. **极简 4 态生命周期与双轨流转（Plan-First vs Fast-Track）**
+   - **持久状态（仅 4 态）**：`planning` → `coding` → `done` / `cancelled`（"待批准"、"验证失败"、"待验收"均由 `designHash`、`approval`、`evidence` 实时派生）。
+   - **标准模式（Plan-First）**：`planning`（调研并编写 `spec.md` / `design.md` 及可选内联 ```` ```workbench-criteria ```` JSON 块）→ 人类批准 → `coding`（编码 + 自动验证 + 可选异构盲审）→ 人类验收 → `done`。
+   - **快速通道（Fast-Track）**：针对明确小需求，人可从 `planning` 直接授权跳过方案审批进入 `coding`；编码完成后仍须经过同等严格的**真实验证证据 + 人工验收**闭环。
+   - **设计阶段执行边界**：`design` 阶段允许运行只读测试或检查命令复现问题与调研现状，直接编辑 `spec.md`、`design.md` 后结束本轮即可；宿主执行器在退出后自动同步为提案并交由人类审阅。核心引擎在批准前仍拒绝记录验证证据，Hub 对 `implement` / `fix` 强制校验阶段与有效审批。
 4. **零废话 UI（Zero-Noise Interface）**
-   - 主界面只展示**业务事实**（需求目标、方案正文、任务进度、验证绿/红状态、代码 Diff、交叉审查结论）和**当前唯一核心行动建议 + 执行器选择**。
+   - 主界面只展示**业务事实**（需求目标、方案正文、档位标记 `Standard / SOTA`、验证绿/红状态、代码 Diff、防测试篡改告警与跨模型审查结论）和**当前唯一核心行动建议 + 执行器选择**。
    - 彻底清除免责说教、内部 UUID、SHA-256 指纹与协议术语；调试信息统一收纳于「更多 → 查看调试信息」。
-5. **多项目集中统筹与分阶段异构算力路由（Multi-Project Hub & Stage-Based Model Routing）**
-   - **单守护进程统筹多项目**：通过全局 `wb start` 启动常驻后台 Hub 服务（默认固定端口 `4318`，支持 `wb status` / `wb stop` / `wb restart` / `wb open`），在同一个 Web 工作台中切换、新增与初始化多个本地 Git 仓库，无需按项目逐一开终端起服务。
-   - **主动调度多种本地 CLI Harness**：工作台从被动“复制提示词/依赖单一会话”，升级为主动在目标项目根目录拉起本机已安装的 Coding Agent CLI（`codex`、`qodercn`、`opencode`、`agy`（Antigravity / Gemini CLI）、`omp`）并实时流式传输日志。
-   - **按阶段分配算力与保持能力连续性**：将研发拆分为 **`design`（规划设计）**、**`implement`（编码实施）**、**`fix`（诊断修复，默认与 `implement` 同级并继承原会话上下文）** 与 **`review`（交付前单轮独立盲审）**；不再在默认预设中强行降级推理强度或打断原生会话，让 `implement`/`fix` 连续闭环、由宿主机自动执行 `runAllVerifications()` 与最多 2 轮 `auto_heal` 修复，高杠杆独立模型负责 `review`。
+5. **项目级零兜底路由与「双档单主程 + 盲审」架构**
+   - **项目级彻底收口**：`hub.json` 不再保存全局路由或预设；项目初始化时根据本机已安装 CLI 自动生成显式 `routing` 写入 `.workbench/project.json`，运行时仅读取项目自身路由，彻底消除跨项目隐式回落。
+   - **3 角色极简路由**：每个项目仅配置 **`defaultLead`（常规主力主程）**、**`sotaLead`（SOTA 旗舰主程）**、**`reviewer`（独立异构盲审专家）** 以及 `autoReview` / `autoHeal` 开关，每个角色独立配置跨订阅 `fallbacks` 容灾链。
+   - **人工控制 SOTA 额度边界**：需求默认 `tier: "standard"`，由 `defaultLead` 同模型端到端执行 `ask/design/implement/fix` 并复用原生会话，自动自愈与 429 容灾严格限制在同档位 `fallbacks` 内，绝不自动消耗 `sotaLead` 额度；仅当人类显式切换 SOTA 档位或点击「升级 SOTA 主程接管」时才启用 `sotaLead`。
 
 ---
 

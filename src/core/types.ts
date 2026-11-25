@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 4 as const;
+export const SCHEMA_VERSION = 6 as const;
 export const WORKBENCH_DIR = ".workbench" as const;
 
 /** Schema of the immutable acceptance artifact written at human acceptance (REQ-003). */
@@ -14,11 +14,9 @@ export const MAX_HANDOFF_BYTES = 128 * 1024;
 export const MAX_STATE_BYTES = 512 * 1024;
 export const MAX_EVIDENCE_BYTES = 512 * 1024;
 export const MAX_CRITERIA = 32;
-export const MAX_TASKS = 64;
 export const MAX_TIMELINE = 500;
 export const MAX_DISCUSSIONS = 200;
 export const MAX_AGENT_RUNS = 100;
-export const MAX_REVIEW_HISTORY = 12;
 export const MAX_RUN_LOG_BYTES = 4 * 1024 * 1024;
 export const MAX_RUN_TRACE_BYTES = 8 * 1024 * 1024;
 export const MAX_TOOL_INPUT_BYTES = 16 * 1024;
@@ -58,13 +56,9 @@ export const REVIEW_VERDICTS = ["pass", "concern", "block"] as const;
 export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 
 export const STAGES = [
-  "draft",
-  "designing",
-  "awaiting_approval",
-  "implementing",
-  "awaiting_acceptance",
+  "planning",
+  "coding",
   "done",
-  "blocked",
   "cancelled",
 ] as const;
 
@@ -73,8 +67,8 @@ export type Stage = (typeof STAGES)[number];
 export const TRACKS = ["plan_first", "fast_track"] as const;
 export type Track = (typeof TRACKS)[number];
 
-export const TASK_STATUSES = ["pending", "in_progress", "done", "blocked"] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const REQUIREMENT_TIERS = ["standard", "sota"] as const;
+export type RequirementTier = (typeof REQUIREMENT_TIERS)[number];
 
 export type PrivacyMode = "local" | "tracked";
 
@@ -90,11 +84,8 @@ export type HarnessId = (typeof HARNESS_IDS)[number];
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
-export const ROUTING_PRESETS = ["balanced", "sota_first", "quota_saver"] as const;
-export type RoutingPreset = (typeof ROUTING_PRESETS)[number];
-
-export const ROUTING_STAGES = ["design", "implement", "fix", "review"] as const;
-export type RoutingStage = (typeof ROUTING_STAGES)[number];
+export const ROUTING_ROLES = ["defaultLead", "sotaLead", "reviewer"] as const;
+export type RoutingRole = (typeof ROUTING_ROLES)[number];
 
 export interface ModelTarget {
   harness: HarnessId;
@@ -102,21 +93,49 @@ export interface ModelTarget {
   reasoningEffort?: ReasoningEffort;
 }
 
-export interface StageRouteRule {
+export interface RoleRouteRule {
   primary: ModelTarget;
   fallbacks: ModelTarget[];
 }
 
 export interface RoutingConfig {
-  activePreset: RoutingPreset;
-  stages: Record<RoutingStage, StageRouteRule>;
-  /** Automatically dispatch cross-model review after agent submits readyForAcceptance (defaults to true). */
+  /** Standard workhorse lead running ask/design/implement/fix end-to-end. */
+  defaultLead: RoleRouteRule;
+  /** Flagship SOTA lead running complex/escalated tasks end-to-end (human-triggered only). */
+  sotaLead: RoleRouteRule;
+  /** Independent heterogeneous reviewer for blind review after verification passes. */
+  reviewer: RoleRouteRule;
+  /** Automatically dispatch cross-model blind review after coding verification passes (defaults to true). */
   autoReview?: boolean;
-  /** Maximum automatic review rounds per requirement before yielding directly to human acceptance (defaults to 1). */
-  maxAutoReviewRounds?: number;
   /** Automatically resume same session to fix failing verification commands after implement/fix exit 0 (defaults to true). */
   autoHeal?: boolean;
 }
+
+export const DEFAULT_PROJECT_ROUTING: RoutingConfig = {
+  defaultLead: {
+    primary: { harness: "qodercn", model: "Qwen4-Max" },
+    fallbacks: [
+      { harness: "codex", model: "gpt-6.1-terra" },
+      { harness: "opencode", model: "opencode/deepseek-v4.1-flash-free" },
+    ],
+  },
+  sotaLead: {
+    primary: { harness: "codex", model: "gpt-6.2-astra", reasoningEffort: "high" },
+    fallbacks: [
+      { harness: "agy", model: "claude-opus-5-5", reasoningEffort: "high" },
+      { harness: "agy", model: "gemini-4-hydrogen", reasoningEffort: "high" },
+    ],
+  },
+  reviewer: {
+    primary: { harness: "agy", model: "gemini-4-argon" },
+    fallbacks: [
+      { harness: "codex", model: "codex-auto-review" },
+      { harness: "qodercn", model: "Qwen4-Max" },
+    ],
+  },
+  autoReview: true,
+  autoHeal: true,
+};
 
 export interface ProjectGitHubConfig {
   repo?: string;
@@ -199,21 +218,6 @@ export interface AcceptanceRecord {
   reviewDisposition?: ReviewDisposition;
   /** Reference to the immutable evidence artifact captured at acceptance; absent on legacy records. */
   snapshot?: AcceptanceSnapshotReference | null;
-}
-
-export interface TaskItem {
-  id: string;
-  title: string;
-  status: TaskStatus;
-  note?: string;
-  updatedAt: number;
-}
-
-export interface TaskInput {
-  id?: string;
-  title: string;
-  status: TaskStatus;
-  note?: string;
 }
 
 export interface BaselineSnapshot {
@@ -464,15 +468,12 @@ export type TimelineEventKind =
   | "approved"
   | "fast_tracked"
   | "changes_requested"
-  | "tasks_updated"
+  | "tier_changed"
   | "verified"
   | "screenshots_captured"
-  | "submitted_for_acceptance"
   | "accepted"
   | "delivered"
   | "rejected"
-  | "blocked"
-  | "unblocked"
   | "cancelled"
   | "reopened"
   | "discussed"
@@ -520,13 +521,6 @@ export interface RequirementGitHubLink {
   pr?: RequirementGitHubPrLink | null;
 }
 
-export interface HandoffNote {
-  updatedAt: number;
-  keyDecisions: string[];
-  deadEnds: string[];
-  nextSteps: string[];
-}
-
 export interface DiscussionEntry {
   id: string;
   at: number;
@@ -550,6 +544,7 @@ export type RunDispatchReason =
   | "auto_fallback"
   | "auto_heal"
   | "auto_review"
+  | "sota_escalate"
   | "conflict_resolve"
   | "refine"
   | "ask";
@@ -614,7 +609,6 @@ export interface RunContextSnapshot {
   promptEstTokens: number;
   sections: HandoffSectionMetric[];
   truncatedSections: string[];
-  handoffNoteSnapshot?: HandoffNote | null;
   handoffMarkdown: string;
   promptText: string;
 }
@@ -840,9 +834,6 @@ export interface ReviewReport {
   reviewedSpecHash: string;
   reviewedCodeSnapshotHash: string;
   reviewedAt: number;
-  round?: number;
-  reviewMode?: "full" | "delta";
-  changedFiles?: string[];
 }
 
 export type ScreenshotTrigger = "auto_submit" | "manual";
@@ -911,6 +902,7 @@ export interface RequirementState {
   title: string;
   stage: Stage;
   track: Track;
+  tier: RequirementTier;
   revision: number;
   specHash: string;
   designVersion: number;
@@ -919,22 +911,18 @@ export interface RequirementState {
   approval: ApprovalRecord | null;
   acceptance: AcceptanceRecord | null;
   delivery?: DeliveryRecord | null;
-  tasks: TaskItem[];
   baseline: BaselineSnapshot | null;
   verifications: VerificationRecord[];
   timeline: TimelineEvent[];
   lastFeedback: string | null;
-  blockedFrom: Stage | null;
-  blockedReason: string | null;
-  /** Explicit marker for UI-facing requirements; also used by source-driven pain point promotion. */
+  cancelReason?: string | null;
+  /** Explicit marker for UI-facing requirements. */
   uiRelated?: boolean;
   /** Bounded screenshot evidence batches, newest last; at most MAX_SCREENSHOT_BATCHES. */
   screenshotBatches?: ScreenshotBatch[];
-  handoffNote?: HandoffNote | null;
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
   reviewReport?: ReviewReport | null;
-  reviewHistory?: ReviewReport[];
   github?: RequirementGitHubLink | null;
   /** 可选附件元数据；旧数据无该字段时行为不变。 */
   attachments?: AttachmentMeta[];
@@ -1050,12 +1038,12 @@ export type ActionId =
   | "dispatch_implement"
   | "run_all_verifications"
   | "dispatch_fix"
+  | "escalate_sota"
   | "dispatch_review"
   | "dispatch_fix_review"
   | "sync_base"
   | "accept"
   | "accept_override"
-  | "unblock"
   | "reopen";
 
 export interface BannerAction {
@@ -1102,18 +1090,16 @@ export interface RequirementSummary {
   title: string;
   stage: Stage;
   track: Track;
+  tier: RequirementTier;
   revision: number;
   designVersion: number;
   criteriaCount: number;
   requiredTotal: number;
   requiredPassed: number;
-  tasksTotal: number;
-  tasksDone: number;
   needsDecision: boolean;
   decisionReason: string | null;
   decisionReasonKey?: string;
   decisionReasonParams?: UiMessageParams;
-  blockedReason: string | null;
   progressText: string;
   progressKey?: string;
   progressParams?: UiMessageParams;

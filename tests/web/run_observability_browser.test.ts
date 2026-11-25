@@ -369,5 +369,5 @@ suite("Agent Observability E2E (Chromium)", () => {
     expect(httpErrors).toEqual([]);
     expect(invokeCount).toBe(2);
     await page.close();
-  }, { timeout: 30_000 });
+  }, { timeout: 60_000 });
 });

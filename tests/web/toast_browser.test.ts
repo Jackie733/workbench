@@ -151,6 +151,7 @@ suite("REQ-001 coss UI 消息提示真实浏览器回归", () => {
         { timeout: 5000 },
         TOAST_SEL,
       );
+      await Bun.sleep(100);
       const center = await page.evaluate((sel: string) => {
         const r = document.querySelector(sel)!.getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2 };

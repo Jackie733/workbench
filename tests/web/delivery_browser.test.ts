@@ -11,9 +11,8 @@ import {
   linkRequirementGitHubIssue,
   propose,
   recordRequirementGitHubSync,
-  updateTasks,
 } from "../../src/core/engine.ts";
-import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
@@ -532,10 +531,6 @@ describe("post-acceptance delivery wrap-up UI", () => {
     const base = await observeGitSnapshot(repo);
     await approveDesign(repo, "REQ-001", { baseline: base });
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    await updateTasks(repo, "REQ-001", {
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: (await observeGitSnapshot(repo))?.fingerprint ?? null,
-    });
 
     const githubDeps: GitHubCommandDeps = {
       getRemoteUrl: async () => "https://github.com/acme/workbench.git",
@@ -610,41 +605,40 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
 
-      // 2. Quick report auto-promote with GitHub issue creation failing -> localized English warning toast.
-      await page.waitForSelector('[data-testid="open-quick-report-btn"]', { timeout: 10_000 });
-      await page.click('[data-testid="open-quick-report-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-title"]', { timeout: 10_000 });
-      await page.type('[data-testid="quick-report-title"]', "Broken alignment");
-      const autoPromoteChecked = await page.evaluate(
-        () => Boolean((document.querySelector('[data-testid="quick-report-autopromote"]') as HTMLInputElement | null)?.checked),
-      );
-      if (!autoPromoteChecked) await page.click('[data-testid="quick-report-autopromote"]');
-      await page.waitForSelector('[data-testid="quick-report-create-issue"]', { timeout: 10_000 });
+      // 2. New requirement with GitHub issue creation failing -> localized English warning toast.
+      await page.click('[data-testid="back-home-btn"]');
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="new-req-btn"]');
+      await page.waitForSelector('[data-testid="new-req-goal"]', { timeout: 10_000 });
+      await page.type('[data-testid="new-req-goal"]', "Broken alignment");
+      await page.waitForSelector('[data-testid="new-req-create-issue"]', { timeout: 10_000 });
       await page.waitForFunction(
-        () => !(document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.disabled,
+        () => !(document.querySelector('[data-testid="new-req-create-issue"]') as HTMLButtonElement | null)?.hasAttribute("aria-disabled") &&
+          !(document.querySelector('[data-testid="new-req-create-issue"]') as HTMLInputElement | null)?.disabled,
         { timeout: 10_000 },
       );
-      const createIssueChecked = await page.evaluate(
-        () => Boolean((document.querySelector('[data-testid="quick-report-create-issue"]') as HTMLInputElement | null)?.checked),
-      );
-      if (!createIssueChecked) await page.click('[data-testid="quick-report-create-issue"]');
-      await page.click('[data-testid="submit-quick-report-btn"]');
+      const createIssueChecked = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="new-req-create-issue"]');
+        return Boolean((el as HTMLInputElement | null)?.checked || el?.getAttribute("aria-checked") === "true");
+      });
+      if (!createIssueChecked) await page.click('[data-testid="new-req-create-issue"]');
+      await page.click('[data-testid="save-draft-btn"]');
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes(
-              "Created requirement REQ-002 with a sandbox (issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
+              "Requirement REQ-002 created (GitHub issue sync warning: Failed to create GitHub Issue: API quota exceeded)",
             ),
           ),
         { timeout: 10_000 },
       );
-      const quickWarnToast = await page.evaluate(
+      const issueWarnToast = await page.evaluate(
         () =>
           Array.from(document.querySelectorAll('[data-slot="toast-root"]'))
             .map((el) => el.textContent ?? "")
-            .find((txt) => txt.includes("issue sync warning: Failed to create GitHub Issue")) ?? "",
+            .find((txt) => txt.includes("GitHub issue sync warning: Failed to create GitHub Issue")) ?? "",
       );
-      expect(/[\u4e00-\u9fff]/.test(quickWarnToast)).toBe(false);
+      expect(/[\u4e00-\u9fff]/.test(issueWarnToast)).toBe(false);
     } finally {
       await page.close();
     }

@@ -54,7 +54,7 @@ describe("WB-03 MCP Server and wb CLI", () => {
 
     const listToolsResp = await handleMcpMessage(root, { jsonrpc: "2.0", id: 2, method: "tools/list" });
     const tools = (listToolsResp?.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
-    expect(tools).toEqual(["wb_list", "wb_get", "wb_propose", "wb_update_tasks", "wb_screenshot", "wb_verify"]);
+    expect(tools).toEqual(["wb_list", "wb_get", "wb_propose", "wb_screenshot", "wb_verify"]);
 
     // Reject unknown/privileged tools
     for (const forbidden of ["wb_approve", "wb_accept", "approve", "accept"]) {
@@ -152,31 +152,20 @@ describe("WB-03 MCP Server and wb CLI", () => {
       const propJson = JSON.parse((propRes.result as { content: Array<{ text: string }> }).content[0]!.text) as {
         stage: string;
       };
-      expect(propJson.stage).toBe("awaiting_approval");
+      expect(propJson.stage).toBe("planning");
 
-      // 2. Agent cannot submit for acceptance before human approval
-      const prematureSubmit = await rpc("tools/call", {
-        name: "wb_update_tasks",
-        arguments: { id: "REQ-001", readyForAcceptance: true },
+      // 2. Agent cannot run verification before human approval
+      const prematureVerify = await rpc("tools/call", {
+        name: "wb_verify",
+        arguments: { id: "REQ-001", command: "bun -e 'console.log(1)'", criterionIds: ["AC-1"] },
       });
-      expect((prematureSubmit.result as { isError: boolean }).isError).toBe(true);
+      expect((prematureVerify.result as { isError: boolean }).isError).toBe(true);
 
       // 3. Human approves in core (simulating Web UI approval)
       await approveDesign(root, "REQ-001");
 
-      // 4. Agent writes code, updates tasks, tries readyForAcceptance BEFORE running verification -> rejected!
+      // 4. Agent writes code and runs real verification via wb_verify
       fs.writeFileSync(path.join(root, "index.ts"), "export const v = 2;\nexport const health = () => ({ ok: true });\n");
-      const unverifiedSubmit = await rpc("tools/call", {
-        name: "wb_update_tasks",
-        arguments: {
-          id: "REQ-001",
-          tasks: [{ title: "实现 health 函数", status: "done" }],
-          readyForAcceptance: true,
-        },
-      });
-      expect((unverifiedSubmit.result as { isError: boolean }).isError).toBe(true);
-
-      // 5. Agent runs real verification via wb_verify, then submits for acceptance
       const verifyRes = await rpc("tools/call", {
         name: "wb_verify",
         arguments: { id: "REQ-001", command: "bun -e 'console.log(\"health ok\")'", criterionIds: ["AC-1"] },
@@ -187,19 +176,6 @@ describe("WB-03 MCP Server and wb CLI", () => {
       };
       expect(verifyJson.verification.passed).toBe(true);
       expect(verifyJson.acceptanceGate.ok).toBe(true);
-
-      const submitRes = await rpc("tools/call", {
-        name: "wb_update_tasks",
-        arguments: {
-          id: "REQ-001",
-          tasks: [{ id: "T-1", title: "实现 health 函数", status: "done" }],
-          readyForAcceptance: true,
-        },
-      });
-      const submitJson = JSON.parse((submitRes.result as { content: Array<{ text: string }> }).content[0]!.text) as {
-        stage: string;
-      };
-      expect(submitJson.stage).toBe("awaiting_acceptance");
 
       const getDiffRes = await rpc("tools/call", {
         name: "wb_get",
@@ -238,7 +214,7 @@ describe("WB-03 MCP Server and wb CLI", () => {
     ]);
     fs.rmSync(criteriaFile);
     expect(proposed.status).toBe(0);
-    expect(JSON.parse(proposed.stdout).stage).toBe("awaiting_approval");
+    expect(JSON.parse(proposed.stdout).stage).toBe("planning");
 
     // CLI does not expose approve or accept
     expect(runCliSubprocess(root, ["approve", "REQ-001"]).status).toBe(1);
@@ -249,10 +225,6 @@ describe("WB-03 MCP Server and wb CLI", () => {
     const verified = runCliSubprocess(root, ["verify", "REQ-001", "--all"]);
     expect(verified.status).toBe(0);
     expect(JSON.parse(verified.stdout).coverage.requiredPassed).toBe(1);
-
-    const submitted = runCliSubprocess(root, ["tasks", "REQ-001", "--ready"]);
-    expect(submitted.status).toBe(0);
-    expect(JSON.parse(submitted.stdout).stage).toBe("awaiting_acceptance");
   });
 
   test("wb config verification flags and wb spawn CLI", async () => {

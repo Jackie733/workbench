@@ -13,27 +13,27 @@ import {
   propose,
   recordReviewReport,
   requestChanges,
-  updateTasks,
+  updateProjectConfig,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { buildRequirementPrBody } from "../../src/core/github.ts";
-import { distillRequirementToPlaybook, readPlaybook } from "../../src/core/playbook.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import {
   applySandboxToMain,
   createOrReuseWorktree,
-  inspectRsiSandboxDrift,
-  reconcileRsiSandboxBaseline,
+  inspectSandboxDrift,
+  reconcileSandboxBaseline,
   syncRequirementMirrorToSandbox,
-  syncRsiSandboxBase,
-} from "../../src/hub/evolution.ts";
+  syncSandboxBase,
+} from "../../src/core/worktree.ts";
 import { buildExecutionPrompt, HubExecutor } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
-import { buildPresetRouting } from "../../src/hub/routing.ts";
+import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 
 const tempDirs: string[] = [];
 const origHubDir = process.env.WORKBENCH_HUB_DIR;
 const origRsiDepth = process.env.WORKBENCH_RSI_DEPTH;
+const origChromePath = process.env.WORKBENCH_CHROME_PATH;
 
 function makeTempHub(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-rev-hub-"));
@@ -58,6 +58,7 @@ function makeGitRepo(name = "workbench"): string {
 
 beforeEach(() => {
   delete process.env.WORKBENCH_RSI_DEPTH;
+  process.env.WORKBENCH_CHROME_PATH = "/nonexistent-chrome-for-test";
 });
 
 afterEach(() => {
@@ -65,6 +66,8 @@ afterEach(() => {
   else process.env.WORKBENCH_HUB_DIR = origHubDir;
   if (origRsiDepth === undefined) delete process.env.WORKBENCH_RSI_DEPTH;
   else process.env.WORKBENCH_RSI_DEPTH = origRsiDepth;
+  if (origChromePath === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+  else process.env.WORKBENCH_CHROME_PATH = origChromePath;
   while (tempDirs.length > 0) fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 
@@ -80,9 +83,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     await propose(repo, "REQ-001", { designMarkdown: "# Design\nSimple.", actor: "agent" });
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    const ready = await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
+    const ready = getRequirement(repo, "REQ-001", {
       currentCodeSnapshotHash: (await observeGitSnapshot(repo))!.fingerprint,
     });
 
@@ -205,7 +206,6 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     await propose(repo, "REQ-001", {
       specMarkdown: hugeSpec,
       designMarkdown: hugeDesign,
-      handoffNote: { deadEnds: ["CRITICAL_DEAD_END_DO_NOT_REPEAT"] },
       actor: "agent",
     });
     await approveDesign(repo, "REQ-001");
@@ -239,7 +239,6 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(packet.markdown).toContain("CRITICAL_HUMAN_INSTRUCTION");
     expect(packet.markdown).toContain("CRITICAL_UNRESOLVED_NOTE");
     expect(packet.markdown).toContain("CRITICAL_FAILURE_TRACE");
-    expect(packet.markdown).toContain("CRITICAL_DEAD_END_DO_NOT_REPEAT");
     expect(packet.markdown).toContain(".workbench/items/REQ-001/spec.md");
     expect(packet.markdown).toContain(".workbench/items/REQ-001/design.md");
 
@@ -274,14 +273,6 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
       if (action === "implement") {
         console.log("src/hub/executor.ts:829: nativeSessionId: canResumeSameHarness");
         console.log("session id: 01a1e74e-98bb-7503-97dd-e8709f8e5022");
-        const { updateTasks } = await import(${JSON.stringify(path.resolve(import.meta.dir, "../../src/core/engine.ts"))});
-        const { observeGitSnapshot } = await import(${JSON.stringify(path.resolve(import.meta.dir, "../../src/core/git.ts"))});
-        const snap = await observeGitSnapshot(process.cwd());
-        await updateTasks(process.cwd(), "REQ-001", {
-          tasks: [{ title: "implemented", status: "done" }],
-          readyForAcceptance: true,
-          currentCodeSnapshotHash: snap.fingerprint,
-        });
       } else if (action === "review") {
         console.log('Review findings:\\n\`\`\`json\\n{"verdict":"concern","summary":"需补充边界检查","findings":[{"id":"F-1","severity":"medium","title":"缺少空值保护","criterionIds":["AC-1"],"files":["app.ts:1"],"suggestion":"增加判空"}]}\\n\`\`\`');
       }
@@ -291,23 +282,25 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     const scriptPath = path.join(helperDir, "mock_agent.ts");
     fs.writeFileSync(scriptPath, cliScript);
 
+    const harnesses = [
+      {
+        id: "codex" as const,
+        label: "Codex",
+        subscription: "Plus",
+        installed: true,
+        executable: "codex",
+        models: [
+          { id: "codex-auto-review", tier: "review" as const, source: "detected" as const },
+          { id: "gpt-6.2-sol", tier: "sota" as const, source: "detected" as const },
+        ],
+        defaultModel: "gpt-6.2-sol",
+        detectedAt: Date.now(),
+      },
+    ];
+    await updateProjectConfig(repo, { routing: { ...buildInitialProjectRouting(harnesses), autoReview: true } });
+
     const executor = new HubExecutor({
-      initialHarnesses: [
-        {
-          id: "codex",
-          label: "Codex",
-          subscription: "Plus",
-          installed: true,
-          executable: "codex",
-          models: [
-            { id: "codex-auto-review", tier: "review", source: "detected" },
-            { id: "gpt-6.2-sol", tier: "sota", source: "detected" },
-          ],
-          defaultModel: "gpt-6.2-sol",
-          detectedAt: Date.now(),
-        },
-      ],
-      getHubPreferences: () => ({ routing: { ...buildPresetRouting("balanced"), autoReview: true } }),
+      initialHarnesses: harnesses,
       commandBuilder: (_target, ctx) => {
         seenActions.push(ctx.action);
         return {
@@ -355,30 +348,16 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     });
   });
 
-  test("filters conversational noise from Playbook and safely syncs non-conflicting sandbox drift", async () => {
+  test("safely syncs non-conflicting sandbox drift and applies changes to main", async () => {
     makeTempHub();
     const repo = makeGitRepo("sandbox-sync");
     await initProject(repo, { name: "workbench", privacyMode: "local" });
     await createRequirement(repo, {
-      goal: "Test playbook filter and sandbox sync",
+      goal: "Test sandbox sync",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
     });
     await propose(repo, "REQ-001", { designMarkdown: "# Design\nOk.", actor: "agent" });
     await approveDesign(repo, "REQ-001");
-    await addDiscussion(repo, "REQ-001", { actor: "human", mode: "refine", message: "接纳，请你更新方案", resolved: true });
-    await addDiscussion(repo, "REQ-001", {
-      actor: "human",
-      mode: "refine",
-      message: "所有文件路径必须校验 canonicalRoot",
-      resolved: true,
-    });
-    await requestChanges(repo, "REQ-001", { feedback: "审查结论：阻止验收。请修复问题" });
-    const d1 = getRequirement(repo, "REQ-001");
-    await distillRequirementToPlaybook(repo, d1);
-    const pb = readPlaybook(repo);
-    expect(pb.markdown).toContain("canonicalRoot");
-    expect(pb.markdown).not.toContain("接纳，请你更新方案");
-    expect(pb.markdown).not.toContain("审查结论：阻止验收");
 
     // Create sandbox at C1
     const sb = await createOrReuseWorktree(repo, "REQ-001");
@@ -391,13 +370,13 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     execFileSync("git", ["add", "other.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main updates other.ts"], { cwd: repo, stdio: "ignore" });
 
-    const drift1 = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const drift1 = await inspectSandboxDrift(repo, "REQ-001");
     expect(drift1?.behindCount).toBe(1);
     expect(drift1?.conflictFiles).toEqual([]);
     expect(drift1?.canAutoSync).toBe(true);
 
     // Auto sync updates other.ts in sandbox while preserving WIP app.ts
-    const syncRes = await syncRsiSandboxBase(repo, "REQ-001");
+    const syncRes = await syncSandboxBase(repo, "REQ-001");
     expect(syncRes.synced).toBe(true);
     expect(syncRes.drift.behindCount).toBe(0);
     expect(fs.readFileSync(path.join(wt, "app.ts"), "utf8")).toBe("export const v = 99;\n");
@@ -408,12 +387,12 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     execFileSync("git", ["add", "app.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main conflicts app.ts"], { cwd: repo, stdio: "ignore" });
 
-    const drift2 = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const drift2 = await inspectSandboxDrift(repo, "REQ-001");
     expect(drift2?.behindCount).toBe(1);
     expect(drift2?.conflictFiles).toEqual(["app.ts"]);
     expect(drift2?.canAutoSync).toBe(false);
 
-    const blockedSync = await syncRsiSandboxBase(repo, "REQ-001");
+    const blockedSync = await syncSandboxBase(repo, "REQ-001");
     expect(blockedSync.synced).toBe(false);
     expect(blockedSync.conflictFiles).toEqual(["app.ts"]);
     // WIP preserved!
@@ -422,7 +401,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     // On clean non-conflicting case (revert conflict file in wt, keep new file), verify applySandboxToMain works after sync
     fs.writeFileSync(path.join(wt, "new_feature.ts"), "export const feat = true;\n");
     execFileSync("git", ["checkout", "--", "app.ts"], { cwd: wt, stdio: "ignore" });
-    const syncClean = await syncRsiSandboxBase(repo, "REQ-001");
+    const syncClean = await syncSandboxBase(repo, "REQ-001");
     expect(syncClean.synced).toBe(true);
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const wtSnap = (await observeGitSnapshot(wt))!;
@@ -433,7 +412,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(fs.readFileSync(path.join(repo, "app.ts"), "utf8")).toBe("export const v = 2;\n");
   });
 
-  test("reconcileRsiSandboxBaseline advances sandbox.baseHead and state.baseline.head only after merging main commits", async () => {
+  test("reconcileSandboxBaseline advances sandbox.baseHead and state.baseline.head only after merging main commits", async () => {
     makeTempHub();
     const repo = makeGitRepo("reconcile-base");
     await initProject(repo, { name: "workbench", privacyMode: "local" });
@@ -463,33 +442,27 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     execFileSync("git", ["commit", "-m", "main side commit"], { cwd: repo, stdio: "ignore" });
     const mainHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
-    const noMergeReconcile = await reconcileRsiSandboxBaseline(repo, "REQ-001");
+    const noMergeReconcile = await reconcileSandboxBaseline(repo, "REQ-001");
     expect(noMergeReconcile).toBeNull();
     expect(getRequirement(repo, "REQ-001").state.baseline?.head).toBe(initHead);
 
-    // 2. Agent merges main inside sandbox worktree, runs verify, and submits awaiting_acceptance
+    // 2. Agent merges main inside sandbox worktree and runs verify
     execFileSync("git", ["merge", "--no-edit", mainHead], { cwd: wt, stdio: "ignore" });
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    const wtSnapReady = (await observeGitSnapshot(wt))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "merged & verified", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: wtSnapReady.fingerprint,
-    });
 
-    const reconciled = await reconcileRsiSandboxBaseline(repo, "REQ-001");
+    const reconciled = await reconcileSandboxBaseline(repo, "REQ-001");
     expect(reconciled).not.toBeNull();
-    // Preserves awaiting_acceptance stage when verification already covers post-merge snapshot
-    expect(reconciled!.state.stage).toBe("awaiting_acceptance");
+    // Preserves coding stage when verification already covers post-merge snapshot
+    expect(reconciled!.state.stage).toBe("coding");
     expect(reconciled!.state.baseline?.head).toBe(mainHead);
 
-    const postDrift = await inspectRsiSandboxDrift(repo, "REQ-001");
+    const postDrift = await inspectSandboxDrift(repo, "REQ-001");
     expect(postDrift?.baseHead).toBe(mainHead);
     expect(postDrift?.behindCount).toBe(0);
     expect(postDrift?.conflictFiles).toEqual([]);
   });
 
-  test("syncRsiSandboxBase ignores worktree node_modules symlink when aheadCount > 0 and mirrors evidence files", async () => {
+  test("syncSandboxBase ignores worktree node_modules symlink when aheadCount > 0 and mirrors evidence files", async () => {
     makeTempHub();
     const repo = makeGitRepo("sync-node-modules");
     await initProject(repo, { name: "workbench", privacyMode: "local" });
@@ -517,7 +490,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     execFileSync("git", ["add", "other.ts"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main commit"], { cwd: repo, stdio: "ignore" });
 
-    const syncRes = await syncRsiSandboxBase(repo, "REQ-001");
+    const syncRes = await syncSandboxBase(repo, "REQ-001");
     expect(syncRes.synced).toBe(true);
     expect(syncRes.drift.behindCount).toBe(0);
     expect(fs.readFileSync(path.join(wt, "other.ts"), "utf8")).toBe("export const other = 2;\n");
@@ -530,25 +503,20 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(fs.existsSync(mirroredMeta)).toBe(true);
   });
 
-  test("Phase 2: tracks reviewHistory/round, enforces delta re-review convergence, downgrades low-only concern, and caps auto-review rounds", async () => {
+  test("Phase 2: blind review stays independent, downgrades low-only concern, and caps auto-review rounds", async () => {
     makeTempHub();
     const repo = makeGitRepo("review-converge");
     await initProject(repo, { name: "ReviewConverge", privacyMode: "local" });
     await createRequirement(repo, {
-      goal: "验证审查历史与增量收敛机制",
+      goal: "验证独立审查与低优先级降级机制",
       criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
     });
     await propose(repo, "REQ-001", { designMarkdown: "# Design\nConverge.", actor: "agent" });
     await approveDesign(repo, "REQ-001");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap1 = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap1.fingerprint,
-    });
 
-    // Round 1 review: full mode
+    // Round 1 review
     const r1 = await recordReviewReport(repo, "REQ-001", {
       reviewerHarness: "codex",
       reviewerModel: "gpt-6.2-sol",
@@ -558,14 +526,11 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
       findings: [{ id: "F-1", severity: "medium", title: "收缩规则缺失", files: ["app.ts:1"] }],
       reviewedSpecHash: getRequirement(repo, "REQ-001").state.specHash,
       reviewedCodeSnapshotHash: snap1.fingerprint,
-      changedFiles: ["app.ts"],
     });
-    expect(r1.state.reviewReport?.round).toBe(1);
-    expect(r1.state.reviewReport?.reviewMode).toBe("full");
-    expect(r1.state.reviewHistory).toHaveLength(1);
+    expect(r1.state.reviewReport?.verdict).toBe("concern");
     expect(r1.validity.banner.primaryAction?.id).toBe("dispatch_fix_review");
 
-    // Round 2 handoff & prompt enter delta convergence mode
+    // Round 2 handoff & prompt stay blind (no playbook or delta convergence mode)
     fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 2;\n");
     fs.writeFileSync(path.join(repo, "other.ts"), "export const other = 2;\n");
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
@@ -583,7 +548,7 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(reviewPrompt).not.toContain("增量收敛模式");
     expect(reviewPrompt).toContain("只读 Code Review");
 
-    // Round 2 non-blocking concern (no high finding) flips banner primaryAction to accept
+    // Round 2 non-blocking concern keeps accept available
     const r2 = await recordReviewReport(repo, "REQ-001", {
       reviewerHarness: "codex",
       reviewerModel: "gpt-6.2-sol",
@@ -594,33 +559,31 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
       reviewedSpecHash: r1.state.specHash,
       reviewedCodeSnapshotHash: snap2.fingerprint,
     });
-    expect(r2.state.reviewReport?.round).toBe(2);
-    expect(r2.state.reviewReport?.reviewMode).toBe("delta");
-    expect(r2.state.reviewHistory).toHaveLength(2);
-    expect(r2.validity.banner.primaryAction?.id).toBe("accept");
+    expect(r2.state.reviewReport?.verdict).toBe("concern");
+    expect(r2.validity.banner.secondaryActions.some((a) => a.id === "accept")).toBe(true);
 
-    // Executor: low-only concern downgrades to pass, and maxAutoReviewRounds: 1 prevents 2nd auto review
-    const routing = buildPresetRouting("balanced");
+    // Executor: low-only concern downgrades to pass, and auto-review runs at most once per requirement
+    const harnesses = [
+      {
+        id: "codex" as const,
+        label: "Codex",
+        subscription: "Plus",
+        installed: true,
+        executable: "codex",
+        models: [
+          { id: "codex-auto-review", tier: "review" as const, source: "detected" as const },
+          { id: "gpt-6.2-sol", tier: "sota" as const, source: "detected" as const },
+        ],
+        defaultModel: "gpt-6.2-sol",
+        detectedAt: Date.now(),
+      },
+    ];
+    const routing = buildInitialProjectRouting(harnesses);
     routing.autoReview = true;
-    routing.maxAutoReviewRounds = 1;
+    await updateProjectConfig(repo, { routing });
     const ranActions: string[] = [];
     const executor = new HubExecutor({
-      initialHarnesses: [
-        {
-          id: "codex",
-          label: "Codex",
-          subscription: "Plus",
-          installed: true,
-          executable: "codex",
-          models: [
-            { id: "codex-auto-review", tier: "review", source: "detected" },
-            { id: "gpt-6.2-sol", tier: "sota", source: "detected" },
-          ],
-          defaultModel: "gpt-6.2-sol",
-          detectedAt: Date.now(),
-        },
-      ],
-      getHubPreferences: () => ({ routing }),
+      initialHarnesses: harnesses,
       commandBuilder: (_target, ctx) => {
         ranActions.push(ctx.action);
         if (ctx.action === "review") {
@@ -645,11 +608,6 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     await approveDesign(repo, "REQ-002");
     await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
     const req2Snap = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-002", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: req2Snap.fingerprint,
-    });
 
     const waitReview = new Promise<void>((resolve) => {
       const unsub = executor.subscribe((ev) => {
@@ -667,15 +625,9 @@ describe("Review-aware workflow, priority handoff, session capture, and sandbox 
     expect(req2Detail.state.reviewReport?.verdict).toBe("pass");
     expect(req2Detail.state.reviewReport?.findings?.[0]?.severity).toBe("low");
 
-    // Subsequent fix submit with maxAutoReviewRounds=1 must NOT trigger a 2nd auto review
+    // Subsequent fix must NOT trigger a 2nd auto review
     fs.writeFileSync(path.join(repo, "app.ts"), "export const v = 3;\n");
     await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
-    const req2Snap2 = (await observeGitSnapshot(repo))!;
-    await updateTasks(repo, "REQ-002", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: req2Snap2.fingerprint,
-    });
     const waitFix = new Promise<void>((resolve) => {
       const unsub = executor.subscribe((ev) => {
         if (ev.type === "agent.run.finished" && ev.action === "fix") {

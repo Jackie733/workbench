@@ -5,10 +5,7 @@ import {
   CheckCircle2,
   Circle,
   CircleAlert,
-  CircleDot,
   CircleOff,
-  ClipboardCheck,
-  Clock,
   FileEdit,
   Hammer,
   Info,
@@ -19,7 +16,6 @@ import {
   Search,
   Sparkles,
   Undo2,
-  Unlock,
   Wrench,
   X,
   Zap,
@@ -30,7 +26,6 @@ import type {
   EffectiveVerificationState,
   ReviewVerdict,
   Stage,
-  TaskStatus,
 } from "../../core/types.ts";
 
 export function Icon({
@@ -55,13 +50,6 @@ export function Icon({
   );
 }
 
-export const TASK_ICONS = {
-  pending: Circle,
-  in_progress: CircleDot,
-  done: Check,
-  blocked: CircleAlert,
-} satisfies Record<TaskStatus, LucideIcon>;
-
 export const COVERAGE_ICONS = {
   passed: Check,
   failed: X,
@@ -71,13 +59,9 @@ export const COVERAGE_ICONS = {
 } satisfies Record<CriterionCoverageState, LucideIcon>;
 
 export const STAGE_ICONS = {
-  draft: FileEdit,
-  designing: Sparkles,
-  awaiting_approval: Clock,
-  implementing: Hammer,
-  awaiting_acceptance: ClipboardCheck,
+  planning: FileEdit,
+  coding: Hammer,
   done: CheckCircle2,
-  blocked: CircleAlert,
   cancelled: CircleOff,
 } satisfies Record<Stage, LucideIcon>;
 
@@ -103,12 +87,12 @@ export const BANNER_ACTION_ICONS = {
   dispatch_implement: Play,
   run_all_verifications: Play,
   dispatch_fix: Wrench,
+  escalate_sota: Zap,
   dispatch_review: Search,
   dispatch_fix_review: Wrench,
   sync_base: RefreshCw,
   accept: Check,
   accept_override: AlertTriangle,
-  unblock: Unlock,
   reopen: RotateCcw,
 } satisfies Record<ActionId, LucideIcon>;
 

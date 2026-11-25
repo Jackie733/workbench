@@ -19,7 +19,7 @@ import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { acceptanceSnapshotPath } from "../../src/core/store.ts";
 import { MAX_ACCEPTANCE_DIFF_BYTES, MAX_ACCEPTANCE_SNAPSHOT_BYTES, type RequirementState } from "../../src/core/types.ts";
-import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 
 const tempDirs: string[] = [];
 const origHubEnv = process.env.WORKBENCH_HUB_DIR;
@@ -350,7 +350,7 @@ describe("REQ-003 acceptance snapshot preservation and history fidelity", () => 
         expectedRevision: current.state.revision - 1,
       }),
     ).rejects.toMatchObject({ code: "revision_conflict" });
-    expect(getRequirement(repo, "REQ-001").state.stage).toBe("implementing");
+    expect(getRequirement(repo, "REQ-001").state.stage).toBe("coding");
 
     // 2. Snapshot artifact write/size failure cannot publish done: create many large criteria/files or exceed MAX_ACCEPTANCE_SNAPSHOT_BYTES
     // Force snapshot failure by making baseline unreachable (corrupt baseline ref in state.json)
@@ -363,7 +363,7 @@ describe("REQ-003 acceptance snapshot preservation and history fidelity", () => 
     await expect(
       acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: baseSnap!.fingerprint }),
     ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
-    expect(getRequirement(repo, "REQ-001").state.stage).toBe("implementing");
+    expect(getRequirement(repo, "REQ-001").state.stage).toBe("coding");
 
     // 3. Stale snapshotHash (concurrent edit between verify and accept) cannot publish done
     atomicWriteJson(statePath, rawState);
@@ -372,7 +372,7 @@ describe("REQ-003 acceptance snapshot preservation and history fidelity", () => 
     await expect(
       acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: editedSnap!.fingerprint }),
     ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
-    expect(getRequirement(repo, "REQ-001").state.stage).toBe("implementing");
+    expect(getRequirement(repo, "REQ-001").state.stage).toBe("coding");
 
     // List summary reflects frozen snapshot once validly accepted
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });

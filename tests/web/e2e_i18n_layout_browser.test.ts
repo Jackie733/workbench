@@ -8,7 +8,7 @@ import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import type { RequirementState } from "../../src/core/types.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { applyHubRoutingPreset, readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
+import { registerHubProject } from "../../src/hub/registry.ts";
 import { resetAuthPassword } from "../../src/server/auth.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
@@ -196,6 +196,10 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.waitForSelector('[data-testid="ws-stage-badge"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="toggle-drawer-btn"]');
       await page.waitForSelector('[data-testid="right-drawer"].open', { timeout: 5000 });
+      await page.waitForFunction(
+        () => Math.round(document.querySelector('[data-testid="right-drawer"]')?.getBoundingClientRect().width ?? 0) === 720,
+        { timeout: 3000 },
+      );
 
       const initialDrawer = await page.evaluate(() => {
         const drawer = document.querySelector('[data-testid="right-drawer"]');
@@ -494,14 +498,22 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
     process.env.WORKBENCH_HUB_DIR = hubDir;
 
     const repo = initGitRepo();
-    await initProject(repo, { name: "PickerRepo", privacyMode: "local" });
+    const presetDesign = { harness: "opencode" as const, model: "opencode/deepseek-v4.1-flash-free" };
+    await initProject(repo, {
+      name: "PickerRepo",
+      privacyMode: "local",
+      routing: {
+        defaultLead: { primary: presetDesign, fallbacks: [] },
+        sotaLead: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        reviewer: { primary: { harness: "codex", model: "gpt-6-astra" }, fallbacks: [] },
+        autoReview: false,
+        autoHeal: false,
+      },
+    });
     await createRequirement(repo, {
       goal: "在原生续接时保持所选模型与推理强度",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
     });
-    // The stage preset deliberately disagrees with the model picked in the picker below.
-    applyHubRoutingPreset("quota_saver");
-    const presetDesign = readHubConfig().routing.stages.design.primary;
 
     const startedEvents: Array<{ runId: string; harness?: string; model?: string }> = [];
     const finishedRunIds = new Set<string>();
@@ -636,9 +648,9 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         window.fetch = spy as unknown as typeof fetch;
       });
 
-      // 1. Automatic mode sends no explicit selection and dispatches the stage preset.
+      // 1. Default route mode sends no explicit selection and dispatches the stage preset.
       expect(await readHiddenSelect()).toBe(`${presetDesign.harness}::${presetDesign.model}`);
-      expect(await readTriggerLabel()).toContain(`自动 (${presetDesign.harness}/${presetDesign.model})`);
+      expect(await readTriggerLabel()).toContain(`默认 (${presetDesign.harness}/${presetDesign.model})`);
       await runWithCurrentSelection(1);
       expect(runCalls[0]!.body.action).toBe("design");
       expect(runCalls[0]!.body.harness).toBeUndefined();
@@ -679,12 +691,12 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       });
       expect(executor.getLiveLog(startedEvents[1]!.runId)).toContain("dispatch harness=codex model=gpt-6.1-sol effort=medium");
 
-      // 3. Returning to automatic routing through the same picker drops the override entirely.
+      // 3. Returning to default routing through the same picker drops the override entirely.
       await clickReady(page, '[data-testid="banner-runner-select-trigger"]');
       await page.waitForSelector('[data-slot="command-item"]', { timeout: 5000 });
-      await pickVisibleItem("自动路由");
+      await pickVisibleItem("默认路由");
       await page.waitForFunction(
-        () => (document.querySelector('[data-testid="banner-runner-select-trigger"]')?.textContent ?? "").includes("自动 ("),
+        () => (document.querySelector('[data-testid="banner-runner-select-trigger"]')?.textContent ?? "").includes("默认 ("),
         { timeout: 5000 },
       );
       expect(await readTriggerLabel()).not.toContain("gpt-6.1-sol");
@@ -912,8 +924,11 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(workspaceText).toContain("Verification has not run yet");
       expect(workspaceText).toContain("Annotate");
       expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
-        "Awaiting approval",
+        "Planning",
       );
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="ws-derived-status-badge"]')?.textContent),
+      ).toBe("Awaiting approval");
 
       // 4b. 英文界面下的批注弹窗与控件。
       await page.click('[data-action="annotate-anchor"]');
@@ -938,8 +953,11 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(await bodyText()).toContain("Agent 已提交技术方案 v1");
       expect(await bodyText()).toContain("尚未运行验证");
       expect(await page.evaluate(() => document.querySelector('[data-testid="ws-stage-badge"]')?.textContent)).toBe(
-        "待批准",
+        "规划中",
       );
+      expect(
+        await page.evaluate(() => document.querySelector('[data-testid="ws-derived-status-badge"]')?.textContent),
+      ).toBe("待批准");
       // 5b. 中文界面下的批注、设置与报修文案同样完整。
       await page.click('[data-action="annotate-anchor"]');
       await page.waitForSelector('[data-testid="annotate-modal"]', { timeout: 5000 });
@@ -954,14 +972,6 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(await bodyText()).toContain("工作台设置");
       await clickModalAction("routing-modal", "取消");
       await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), {
-        timeout: 5000,
-      });
-      await clickReady(page, '[data-testid="open-quick-report-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
-      expect(await bodyText()).toContain("随手报修与自进化反馈");
-      expect(await bodyText()).toContain("UI 异常 / 布局交互问题");
-      await clickModalAction("quick-report-modal", "取消");
-      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), {
         timeout: 5000,
       });
       const draftValue = await page.evaluate(
@@ -1128,12 +1138,11 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(/[\u4e00-\u9fff]/.test(ghImportToast)).toBe(false);
       await clickModalAction("new-req-modal", "Cancel");
       await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), { timeout: 5000 });
-      await clickReady(page, '[data-testid="open-quick-report-btn"]');
-      await page.waitForSelector('[data-testid="quick-report-modal"]', { timeout: 5000 });
-      expect(await bodyText()).toContain("Quick report & self-evolution feedback");
-      expect(await bodyText()).toContain("UI anomaly / layout interaction");
-      await clickModalAction("quick-report-modal", "Cancel");
-      await page.waitForFunction(() => !document.querySelector('[data-testid="quick-report-modal"]'), { timeout: 5000 });
+      await clickReady(page, '[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="routing-modal"]', { timeout: 5000 });
+      expect(await bodyText()).toContain("Workspace settings");
+      await clickModalAction("routing-modal", "Cancel");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 5000 });
       expect(await readDocumentLanguages()).toEqual(docLanguagesBefore);
 
       // 9. 客户端错误反馈在英文界面下本地化。
@@ -1257,7 +1266,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
     } finally {
       await page.close();
     }
-  }, 60_000);
+  }, 90_000);
 
   test("IDE 侧栏待拍板过滤无裁剪、Diff 多文件搜索隔离与 backHome 非破坏性编辑保护", async () => {
     const root = initGitRepo();

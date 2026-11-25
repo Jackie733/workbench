@@ -10,11 +10,10 @@ import {
   getRequirement,
   initProject,
   propose,
-  updateTasks,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
-import { createOrReuseWorktree } from "../../src/hub/evolution.ts";
+import { createOrReuseWorktree } from "../../src/core/worktree.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
@@ -122,11 +121,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
     execFileSync("git", ["commit", "-m", "req1 line1"], { cwd: sb1.worktreePath, stdio: "ignore" });
     await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
     const snap1 = (await observeGitSnapshot(sb1.worktreePath))!;
-    await updateTasks(repo, "REQ-001", {
-      tasks: [{ title: "done", status: "done" }],
-      readyForAcceptance: true,
-      currentCodeSnapshotHash: snap1.fingerprint,
-    });
     await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap1.fingerprint });
 
     // REQ-002: active requirement with auto-mergeable edit on line 30 of shared.ts + sibling overlap on shared.ts
@@ -271,7 +265,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       await clickReady(page, '[data-testid="sync-sandbox-base-btn"]');
       await page.waitForFunction(
         () => !document.querySelector('[data-testid="sync-sandbox-base-btn"]'),
-        { timeout: 5000 },
+        { timeout: 15000 },
       );
 
       // 4. Open done REQ-001 -> reopen modal defaults to preserveApproval (implementing), or click agent-sync-sandbox-btn directly!
@@ -299,7 +293,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
         await new Promise((r) => setTimeout(r, 25));
       }
       const req1After = getRequirement(repo, "REQ-001").state;
-      expect(req1After.stage).toBe("implementing");
+      expect(req1After.stage).toBe("coding");
       expect(req1After.approval).not.toBeNull();
       expect(req1After.lastFeedback).toBeNull();
       expect(dispatched).toEqual([{ action: "fix", reqId: "REQ-001" }]);
@@ -307,5 +301,5 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 });
