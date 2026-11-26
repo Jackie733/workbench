@@ -331,10 +331,10 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 5000 });
       const initial = await page.evaluate(() => ({
-        decisionPills: document.querySelectorAll(".stat-pill.warn").length,
+        decisionAlert: Boolean(document.querySelector('[data-testid="scope-decisions-alert"]')),
         sidebarBadge: Boolean(document.querySelector(".sb-item .sb-badge.warn")),
       }));
-      expect(initial.decisionPills).toBe(1);
+      expect(initial.decisionAlert).toBe(true);
       expect(initial.sidebarBadge).toBe(true);
 
       const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "review" });
@@ -344,7 +344,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         () =>
           !document.querySelector('[data-testid="req-decision-badge-REQ-001"]') &&
           !document.querySelector(".sb-item .sb-badge.warn") &&
-          document.querySelectorAll(".stat-pill.warn").length === 0 &&
+          !document.querySelector('[data-testid="scope-decisions-alert"]') &&
           (document.querySelector('[data-testid="req-row-REQ-001"] .req-sub')?.textContent ?? "").includes("执行中"),
         { timeout: 5000 },
       );
@@ -352,6 +352,12 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       expect(executor.cancelRun(runId)).toBe(true);
       runId = null;
       await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 5000 });
+      await page.waitForSelector('[data-testid="scope-decisions-alert"]', { timeout: 5000 });
+      expect(
+        await page.evaluate(
+          () => document.querySelector('[data-testid="scope-count-decisions"]')?.textContent?.trim() ?? null,
+        ),
+      ).toBe("1");
       expect(pageErrors).toEqual([]);
     } finally {
       if (runId) executor.cancelRun(runId);

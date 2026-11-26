@@ -188,9 +188,6 @@ const zhCN = {
   "effort.ultra": "Ultra (极致)",
   "effort.auto": "Auto (自动)",
 
-  "home.active": "活跃需求",
-  "home.decisions": "待拍板",
-  "home.done": "已完成",
   "home.searchPlaceholder": "搜索需求编号、标题或进度…",
   "home.scope.active": "活跃",
   "home.scope.decisions": "待拍板",
@@ -1687,9 +1684,6 @@ const en: Record<MessageKey, string> = {
   "effort.ultra": "Ultra",
   "effort.auto": "Auto",
 
-  "home.active": "Active",
-  "home.decisions": "Decisions",
-  "home.done": "Completed",
   "home.searchPlaceholder": "Search by ID, title, or progress…",
   "home.scope.active": "Active",
   "home.scope.decisions": "Decisions",

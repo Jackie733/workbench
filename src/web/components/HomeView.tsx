@@ -293,6 +293,12 @@ export function HomeView() {
   const activeCnt = activeBaseItems.length;
   const decisionCnt = pendingDecisions.length;
   const doneCnt = filterRequirementsByScope(allBaseItems, "done").length;
+  const scopeCounts = {
+    active: activeCnt,
+    decisions: decisionCnt,
+    done: doneCnt,
+    all: allBaseItems.length,
+  } as const;
 
   const mergeEntryMap = new Map<string, { entry: NonNullable<typeof mergeOrder>["ordered"][number]; rank: number }>();
   (mergeOrder?.ordered ?? []).forEach((entry, idx) => {
@@ -331,33 +337,6 @@ export function HomeView() {
           >
             <Icon icon={Plus} size={14} /> {t(language, "home.newRequirement")}
           </Button>
-        </div>
-
-        <div className="mission-stats">
-          <button
-            type="button"
-            className={`stat-pill ${scope === "active" ? "active" : ""}`}
-            onClick={() => setScope("active")}
-          >
-            <span className="muted xs">{t(language, "home.active")}</span>
-            <strong>{activeCnt}</strong>
-          </button>
-          <button
-            type="button"
-            className={`stat-pill ${decisionCnt > 0 ? "warn" : ""} ${scope === "decisions" ? "active" : ""}`}
-            onClick={() => setScope("decisions")}
-          >
-            <span className="muted xs">{t(language, "home.decisions")}</span>
-            <strong>{decisionCnt}</strong>
-          </button>
-          <button
-            type="button"
-            className={`stat-pill ${scope === "done" ? "active" : ""}`}
-            onClick={() => setScope("done")}
-          >
-            <span className="muted xs">{t(language, "home.done")}</span>
-            <strong>{doneCnt}</strong>
-          </button>
         </div>
 
         <InputGroup>
@@ -401,14 +380,22 @@ export function HomeView() {
                 />
               }
             >
-              <span className="truncate">
-                {sc === "active"
-                  ? t(language, "home.scope.active")
-                  : sc === "decisions"
-                    ? `${t(language, "home.scope.decisions")}${decisionCnt > 0 ? ` (${decisionCnt})` : ""}`
-                    : sc === "done"
-                      ? t(language, "home.scope.done")
-                      : t(language, "home.scope.all")}
+              <span className="sb-scope-tab">
+                <span className="truncate">
+                  {sc === "active"
+                    ? t(language, "home.scope.active")
+                    : sc === "decisions"
+                      ? t(language, "home.scope.decisions")
+                      : sc === "done"
+                        ? t(language, "home.scope.done")
+                        : t(language, "home.scope.all")}
+                </span>
+                <span className="sb-scope-count" data-testid={`scope-count-${sc}`}>
+                  {scopeCounts[sc]}
+                </span>
+                {sc === "decisions" && decisionCnt > 0 && (
+                  <span className="sb-scope-alert-dot" data-testid="scope-decisions-alert" aria-hidden="true" />
+                )}
               </span>
             </SegmentedControlItem>
           ))}

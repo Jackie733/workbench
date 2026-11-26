@@ -1297,7 +1297,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="scope-tabs"]', { timeout: 5000 });
 
-      // 1. All 4 scope tabs (including "待拍板 (1)") fit cleanly inside the 310px sidebar without overflow/clipping
+      // 1. 四段范围筛选（含计数与待拍板告警）在侧栏内不溢出、不裁剪
       const tabsFit = await page.evaluate(() => {
         const container = document.querySelector('[data-testid="scope-tabs"]') as HTMLElement | null;
         if (!container) return null;
@@ -1315,6 +1315,46 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       });
       expect(tabsFit?.containerOverflow).toBe(false);
       expect(tabsFit?.btns.every((b) => b.role === "tab" && !b.overflowX && !b.outside)).toBe(true);
+
+      // 1b. 单一筛选入口：旧统计栏已移除，四段各自展示计数与待拍板告警
+      const scopeSummary = await page.evaluate(() => ({
+        legacyStats: document.querySelectorAll(".mission-stats, .stat-pill").length,
+        setScopeCounts: ["active", "decisions", "done", "all"].map(
+          (sc) => document.querySelectorAll(`[data-action="set-scope"][data-value="${sc}"]`).length,
+        ),
+        counts: ["active", "decisions", "done", "all"].map(
+          (sc) => document.querySelector(`[data-testid="scope-count-${sc}"]`)?.textContent?.trim() ?? null,
+        ),
+        hasAlert: Boolean(document.querySelector('[data-testid="scope-decisions-alert"]')),
+      }));
+      expect(scopeSummary.legacyStats).toBe(0);
+      expect(scopeSummary.setScopeCounts).toEqual([1, 1, 1, 1]);
+      expect(scopeSummary.counts).toEqual(["2", "1", "0", "2"]);
+      expect(scopeSummary.hasAlert).toBe(true);
+
+      // 1c. 英文界面下四段筛选同样不溢出，计数保持不变
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
+      await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 5000 });
+      const enTabsFit = await page.evaluate(() => {
+        const container = document.querySelector('[data-testid="scope-tabs"]') as HTMLElement | null;
+        if (!container) return null;
+        const cr = container.getBoundingClientRect();
+        const btns = Array.from(container.querySelectorAll("button"));
+        return {
+          containerOverflow: container.scrollWidth > container.clientWidth + 1,
+          btnClipped: btns.some(
+            (b) => b.scrollWidth > b.clientWidth + 1 || b.getBoundingClientRect().right > cr.right + 1,
+          ),
+          counts: ["active", "decisions", "done", "all"].map(
+            (sc) => document.querySelector(`[data-testid="scope-count-${sc}"]`)?.textContent?.trim() ?? null,
+          ),
+        };
+      });
+      expect(enTabsFit?.containerOverflow).toBe(false);
+      expect(enTabsFit?.btnClipped).toBe(false);
+      expect(enTabsFit?.counts).toEqual(["2", "1", "0", "2"]);
+      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
+      await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 5000 });
 
       // 2. "decisions" scope tab filters to only pending-decision REQ-001, and REQ-001 appears only once in unified list
       expect(await page.evaluate(() => document.querySelectorAll('[data-testid="req-row-REQ-001"]').length)).toBe(1);
