@@ -1,21 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   ArrowLeft,
   BarChart3,
   Laptop,
+  LayoutDashboard,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
   Moon,
   Settings,
   Sun,
 } from "lucide-react";
 import { t } from "../i18n.ts";
 import { backHome, logoutSession, useAuthStatusQuery, useHubStateQuery, useProjectQuery } from "../queries.ts";
-import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
@@ -39,13 +37,11 @@ export function Topbar() {
   const mainView = useUiStore((s) => s.mainView);
   const setMainView = useUiStore((s) => s.setMainView);
   const selectedId = useUiStore((s) => s.selectedId);
-  const drawerOpen = useUiStore((s) => s.drawerOpen);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
   const desktopSidebarOpen = useUiStore((s) => s.desktopSidebarOpen);
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
   const setDesktopSidebarOpen = useUiStore((s) => s.setDesktopSidebarOpen);
-  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
   const setModal = useUiStore((s) => s.setModal);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
 
@@ -65,7 +61,21 @@ export function Topbar() {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  const activeRunCount = useStreamStore((s) => Object.keys(s.activeRuns).length);
+  const headerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const el = headerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    // 窄屏下顶栏会换行变高；抽屉/侧栏/遮罩都按 --header-h 固定偏移，必须跟随实际高度。
+    const ro = new ResizeObserver(() => {
+      document.documentElement.style.setProperty("--header-h", `${el.offsetHeight}px`);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--header-h");
+    };
+  }, []);
+
   const { data: auth } = useAuthStatusQuery();
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
@@ -85,7 +95,7 @@ export function Topbar() {
       : t(language, "topbar.expandSidebar");
 
   return (
-    <header className="topbar app-header" data-testid="app-header">
+    <header ref={headerRef} className="topbar app-header" data-testid="app-header">
       <div className="topbar-left">
         <button
           className="app-brand-btn"
@@ -172,26 +182,41 @@ export function Topbar() {
       </div>
 
       <div className="topbar-right">
-        <UiLanguageSelect className="topbar-language" />
+        <div className="topbar-view-switch" role="group" aria-label={t(language, "topbar.viewSwitchAria")}>
+          <button
+            className={`seg-btn ${mainView !== "insights" ? "active" : ""}`}
+            type="button"
+            data-testid="topbar-workspace-btn"
+            aria-pressed={mainView !== "insights"}
+            onClick={() => {
+              setSidebarOpen(false);
+              setMainView("workspace");
+            }}
+          >
+            <Icon icon={LayoutDashboard} size={14} />
+            <span className="header-btn-label">{t(language, "topbar.workspaceView")}</span>
+          </button>
+          <button
+            className={`seg-btn ${mainView === "insights" ? "active" : ""}`}
+            type="button"
+            data-testid="topbar-insights-btn"
+            aria-pressed={mainView === "insights"}
+            title={t(language, "insights.title")}
+            aria-label={t(language, "insights.navLabel")}
+            onClick={() => {
+              setSidebarOpen(false);
+              setMainView(mainView === "insights" ? "workspace" : "insights");
+            }}
+          >
+            <Icon icon={BarChart3} size={14} />
+            <span className="header-btn-label">{t(language, "insights.navLabel")}</span>
+          </button>
+        </div>
+
+        <span className="topbar-divider" aria-hidden="true" />
 
         <Button
-          size="xs"
-          type="button"
-          variant={mainView === "insights" ? "default" : "ghost"}
-          data-testid="topbar-insights-btn"
-          title={t(language, "insights.title")}
-          aria-label={t(language, "insights.navLabel")}
-          onClick={() => {
-            setSidebarOpen(false);
-            setMainView(mainView === "insights" ? "workspace" : "insights");
-          }}
-        >
-          <Icon icon={BarChart3} size={14} />
-          <span className="header-btn-label">{t(language, "insights.navLabel")}</span>
-        </Button>
-
-        <Button
-          size="xs"
+          size="icon-xs"
           type="button"
           variant="ghost"
           data-action="open-routing"
@@ -201,7 +226,6 @@ export function Topbar() {
           onClick={() => setModal({ kind: "routing", draft: null })}
         >
           <Icon icon={Settings} size={14} />
-          <span className="header-btn-label">{t(language, "topbar.settingsLabel")}</span>
         </Button>
 
         <Button
@@ -216,64 +240,42 @@ export function Topbar() {
           <Icon icon={theme === "dark" ? Sun : Moon} size={14} />
         </Button>
 
-        <Button
-          size="xs"
-          type="button"
-          variant={selectedId && drawerOpen ? "default" : "outline"}
-          data-action="toggle-drawer"
-          data-testid="toggle-drawer-btn"
-          disabled={!selectedId}
-          aria-expanded={Boolean(selectedId && drawerOpen)}
-          aria-label={drawerOpen ? t(language, "topbar.collapseDrawer") : t(language, "topbar.expandDrawer")}
-          title={
-            selectedId
-              ? drawerOpen
-                ? t(language, "topbar.drawerTitleOpen")
-                : t(language, "topbar.drawerTitleClosed")
-              : t(language, "topbar.drawerTitleDisabled")
-          }
-          onClick={() => {
-            if (selectedId) setDrawerOpen(!drawerOpen);
-          }}
-        >
-          {activeRunCount > 0 && <span className="pulse-dot" />}
-          <Icon icon={selectedId && drawerOpen ? PanelRightClose : PanelRightOpen} size={14} />
-          <span className="header-btn-label">
-            {selectedId && drawerOpen ? t(language, "topbar.drawerLabelOpen") : t(language, "topbar.drawerLabelClosed")}
-          </span>
-        </Button>
+        <UiLanguageSelect iconOnly />
 
         {auth?.required && auth?.authenticated && (
-          <AlertDialog
-            open={logoutOpen}
-            onOpenChange={(open, event) => {
-              if (logout.isPending) event.cancel();
-              else setLogoutOpen(open);
-            }}
-          >
-            <AlertDialogTrigger
-              render={<Button size="icon-xs" type="button" variant="ghost" />}
-              data-testid="logout-btn"
-              title={t(language, "topbar.logout")}
-              aria-label={t(language, "topbar.logout")}
+          <>
+            <span className="topbar-divider" aria-hidden="true" />
+            <AlertDialog
+              open={logoutOpen}
+              onOpenChange={(open, event) => {
+                if (logout.isPending) event.cancel();
+                else setLogoutOpen(open);
+              }}
             >
-              <Icon icon={LogOut} size={14} />
-            </AlertDialogTrigger>
-            <AlertDialogPopup data-testid="logout-dialog">
-              <AlertDialogHeader>
-                <AlertDialogTitle>{t(language, "topbar.logoutTitle")}</AlertDialogTitle>
-                <AlertDialogDescription>{t(language, "topbar.logoutDescription")}</AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogClose disabled={logout.isPending} render={<Button type="button" variant="ghost" />}>
-                  {t(language, "common.cancel")}
-                </AlertDialogClose>
-                <Button type="button" variant="destructive" loading={logout.isPending} onClick={() => logout.mutate()}>
-                  {t(language, "topbar.logout")}
-                </Button>
-              </AlertDialogFooter>
-            </AlertDialogPopup>
-          </AlertDialog>
+              <AlertDialogTrigger
+                render={<Button size="icon-xs" type="button" variant="ghost" />}
+                data-testid="logout-btn"
+                title={t(language, "topbar.logout")}
+                aria-label={t(language, "topbar.logout")}
+              >
+                <Icon icon={LogOut} size={14} />
+              </AlertDialogTrigger>
+              <AlertDialogPopup data-testid="logout-dialog">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{t(language, "topbar.logoutTitle")}</AlertDialogTitle>
+                  <AlertDialogDescription>{t(language, "topbar.logoutDescription")}</AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogClose disabled={logout.isPending} render={<Button type="button" variant="ghost" />}>
+                    {t(language, "common.cancel")}
+                  </AlertDialogClose>
+                  <Button type="button" variant="destructive" loading={logout.isPending} onClick={() => logout.mutate()}>
+                    {t(language, "topbar.logout")}
+                  </Button>
+                </AlertDialogFooter>
+              </AlertDialogPopup>
+            </AlertDialog>
+          </>
         )}
       </div>
     </header>

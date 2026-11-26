@@ -205,6 +205,7 @@
   position: sticky;
   top: 0;
   z-index: 32;
+  flex-shrink: 0;
   min-height: var(--header-h);
   width: 100%;
   background: var(--surface);
@@ -654,6 +655,7 @@
 }
 
 .drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); gap: 6px; }
+.drawer-head [data-slot="tabs"] { min-width: 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .drawer-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
 .drawer-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 10px 12px; gap: 10px; }
 .drawer-diff-body { overflow-y: auto; }
@@ -2212,4 +2214,24 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+}
+
+/* Unlayered so these states win over Tailwind utilities on coss buttons. */
+.topbar-right { gap: 6px; flex-wrap: nowrap; }
+.topbar-divider { width: 1px; height: 16px; background: var(--border); flex-shrink: 0; }
+.topbar-view-switch { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface-2); flex-shrink: 0; }
+.seg-btn { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border: none; border-radius: 6px; background: transparent; color: var(--muted); font-family: inherit; font-size: 12.5px; font-weight: 500; line-height: 1; cursor: pointer; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease; }
+.seg-btn:hover { color: var(--text); background: var(--surface); }
+.seg-btn.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ws-drawer-toggle { margin-left: auto; }
+.ws-drawer-toggle.open, .ws-drawer-toggle.open:hover { background: var(--accent-soft); color: var(--accent); }
+.drawer-toggle-icon { position: relative; display: inline-flex; }
+.drawer-toggle-icon .pulse-dot { position: absolute; top: -3px; right: -4px; width: 6px; height: 6px; box-shadow: none; }
+.drawer-close-btn { display: none; }
+@media (min-width: 640px) {
+  .seg-btn { height: 20px; padding: 0 8px; font-size: 12px; }
+}
+@media (max-width: 1120px) {
+  .drawer-close-btn { display: inline-flex; }
 }
