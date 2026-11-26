@@ -463,7 +463,7 @@ export function InsightsView() {
                   label: formatAgentActionLabel(language, a.action),
                   value: a.runs,
                   color: ACTION_COLORS[a.action] ?? "var(--accent)",
-                  hint: `${a.runs} · ${formatTokenCount(a.tokens)} · ${formatUsd(a.equivalentCostUsd)}`,
+                  hint: `${a.runs} runs · ${formatTokenCount(a.tokens)} · ${formatUsd(a.equivalentCostUsd)}`,
                 }))}
               />
             </Card>

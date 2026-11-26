@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { BarChart3, Check, ChevronDown, ChevronRight, Folder, Plus, Settings, Star, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Folder, Plus, Settings, Star, X } from "lucide-react";
 import { api, type HubProjectSummary } from "../api.ts";
 import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
@@ -56,8 +56,6 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
   const projectGroup = useUiStore((s) => s.projectGroup);
   const projectsCollapsed = useUiStore((s) => s.projectsCollapsed);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
-  const mainView = useUiStore((s) => s.mainView);
-  const setMainView = useUiStore((s) => s.setMainView);
   const setSidebarOpen = useUiStore((s) => s.setSidebarOpen);
   const setSidebarWidth = useUiStore((s) => s.setSidebarWidth);
   const setProjectSort = useUiStore((s) => s.setProjectSort);
@@ -698,19 +696,6 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
                   })}
                 </span>
               </div>
-              <Button
-                type="button"
-                size="xs"
-                variant={mainView === "insights" ? "default" : "ghost"}
-                className="sb-insights-btn justify-start"
-                data-testid="sidebar-insights-btn"
-                onClick={() => {
-                  setMainView(mainView === "insights" ? "workspace" : "insights");
-                  setSidebarOpen(false);
-                }}
-              >
-                <Icon icon={BarChart3} size={14} /> {t(language, "insights.navLabel")}
-              </Button>
             </div>
           )}
         </div>

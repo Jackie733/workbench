@@ -201,7 +201,7 @@ function WorkbenchShell() {
 
   return (
     <>
-      <div id="main-root" className={`app-shell isolate ${projectReady ? "detail-mode" : ""}`}>
+      <div id="main-root" className={`app-shell isolate ${projectReady ? "detail-mode" : ""} ${mainView === "insights" ? "insights-mode" : ""}`}>
         <Topbar />
         <div
           ref={layoutRef}
