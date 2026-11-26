@@ -419,6 +419,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
           const root = document.scrollingElement ?? document.documentElement;
           const tabsRect = tabs?.getBoundingClientRect();
           const scrollRect = scroll?.getBoundingClientRect();
+          const tabsStyle = tabs ? getComputedStyle(tabs) : null;
           const buttons = Array.from(tabs?.querySelectorAll("button") ?? []).map((button) => {
             const rect = button.getBoundingClientRect();
             const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
@@ -441,6 +442,9 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
             tabsHeight: tabsRect?.height ?? -1,
             tabsTop: tabsRect?.top ?? -1,
             tabsBottom: tabsRect?.bottom ?? -1,
+            tabsOverflowY: tabsStyle?.overflowY ?? "",
+            tabsScrollHeight: tabs?.scrollHeight ?? -1,
+            tabsClientHeight: tabs?.clientHeight ?? -1,
             scrollTop: scrollRect?.top ?? -1,
             scrollHeight: scroll?.scrollHeight ?? -1,
             scrollClientHeight: scroll?.clientHeight ?? -1,
@@ -453,6 +457,12 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(before.scrollHeight).toBeGreaterThan(before.scrollClientHeight + 100);
       expect(before.windowScrollY).toBe(0);
       expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
+
+      // Tabs 栏不应出现纵向滚动条：激活页签的下划线指示条会向下溢出 1px，
+      // 需要纵向溢出被隐藏（或指示条不再溢出），否则横向滚动容器会带出纵向滚动条。
+      expect(
+        before.tabsOverflowY === "hidden" || before.tabsScrollHeight <= before.tabsClientHeight,
+      ).toBe(true);
 
       // Tabs 栏不能被内容区挤压成细条，五个按钮必须完整位于栏内且仍可点击。
       expect(before.buttons.map((b) => b.text)).toEqual([
