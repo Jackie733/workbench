@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { ConsoleMarkdown } from "../../src/web/components/ConsoleMarkdown.tsx";
 import { ConsoleOutput } from "../../src/web/components/ConsoleOutput.tsx";
 import { parseConsoleLog, reconstructAgyTraceEvents, shortenDisplayPath, stripAnsi } from "../../src/web/lib/consoleFormat.ts";
 
@@ -325,5 +326,213 @@ describe("ConsoleOutput SSR rendering", () => {
     expect(html).toContain('class="console-file-ref"');
     expect(html).toContain("RESOURCE_EXHAUSTED (code 429): Individual quota reached.");
     expect(html).not.toContain('"error_code":429');
+  });
+
+  test("unwraps whole-message markdown fences in legacy structured blocks", () => {
+    const log = [
+      "$ exec-mock",
+      "assistant",
+      "```markdown",
+      "## 结构摘要",
+      "",
+      "1. 步骤一",
+      "2. 步骤二",
+      "",
+      "| 指标 | 结果 |",
+      "| :-- | --: |",
+      "| 类型检查 | 通过 |",
+      "```",
+    ].join("\n");
+
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, { runId: "RUN-MD-FENCE", rawLog: log, isRunning: false, language: "zh-CN" }),
+    );
+    expect(html).toContain('data-level="2"');
+    expect(html).toContain('class="console-msg-list is-ordered"');
+    expect(html).toContain('class="console-msg-table"');
+    expect(html).not.toContain("```");
+    expect(html).not.toContain("## 结构摘要");
+  });
+
+  test("keeps markdown tables and fenced thinking code intact in legacy logs and matches trace rendering", () => {
+    const tableText = ["| Name | Status |", "| --- | --- |", "| build | ok |"].join("\n");
+    const thinkingText = ["分析命令输出：", "```bash", "$ echo hi", "hi", "```", "然后继续。"].join("\n");
+    const legacyLog = ["assistant", tableText, "", "thinking", thinkingText].join("\n");
+
+    const blocks = parseConsoleLog(legacyLog);
+    expect(blocks.map((b) => b.kind)).toEqual(["message", "thinking"]);
+    const message = blocks.find((b) => b.kind === "message")!;
+    const thinking = blocks.find((b) => b.kind === "thinking")!;
+    expect(message.content).toBe(tableText);
+    expect(thinking.content).toBe(thinkingText);
+
+    const legacyHtml = renderToStaticMarkup(
+      createElement(ConsoleOutput, { runId: "RUN-MD-LEGACY", rawLog: legacyLog, isRunning: false, language: "zh-CN" }),
+    );
+    expect(legacyHtml).toContain('<table class="console-msg-table">');
+    expect(legacyHtml).toContain("build");
+    expect(legacyHtml).not.toContain('data-block-kind="tool_call"');
+
+    const traceHtml = renderToStaticMarkup(
+      createElement(ConsoleOutput, {
+        runId: "RUN-MD-TRACE",
+        rawLog: "",
+        traceEvents: [
+          { seq: 1, ts: 1, type: "assistant.message", turnIndex: 1, text: tableText },
+          { seq: 2, ts: 2, type: "thinking", turnIndex: 1, text: thinkingText },
+        ],
+        hasTrace: true,
+        isRunning: false,
+        language: "zh-CN",
+      }),
+    );
+    expect(traceHtml).toContain('<table class="console-msg-table">');
+    expect(traceHtml).toContain("build");
+    expect(traceHtml).not.toContain('data-block-kind="tool_call"');
+
+    const legacyMessageHtml = renderToStaticMarkup(
+      createElement(ConsoleMarkdown, { text: message.content, language: "zh-CN" }),
+    );
+    const traceMessageHtml = renderToStaticMarkup(
+      createElement(ConsoleMarkdown, { text: tableText, language: "zh-CN" }),
+    );
+    expect(legacyMessageHtml).toBe(traceMessageHtml);
+
+    const legacyThinkingHtml = renderToStaticMarkup(
+      createElement(ConsoleMarkdown, { text: thinking.content, language: "zh-CN", variant: "thinking" }),
+    );
+    const traceThinkingHtml = renderToStaticMarkup(
+      createElement(ConsoleMarkdown, { text: thinkingText, language: "zh-CN", variant: "thinking" }),
+    );
+    expect(legacyThinkingHtml).toBe(traceThinkingHtml);
+    expect(legacyThinkingHtml).toContain('<span class="console-msg-code-lang">bash</span>');
+    expect(legacyThinkingHtml).toContain("$ echo hi");
+  });
+
+  test("keeps nested fences inside longer legacy fences within message and thinking blocks", () => {
+    const fencedMessage = [
+      "````markdown",
+      "# 摘要",
+      "",
+      "```bash",
+      "$ echo hi",
+      "```",
+      "",
+      "继续正文。",
+      "````",
+    ].join("\n");
+    const messageBlocks = parseConsoleLog(["assistant", fencedMessage].join("\n"));
+    expect(messageBlocks.map((b) => b.kind)).toEqual(["message"]);
+    expect(messageBlocks[0]!.content).toBe(fencedMessage);
+
+    const messageHtml = renderToStaticMarkup(
+      createElement(ConsoleOutput, {
+        runId: "RUN-MD-NESTED-FENCE",
+        rawLog: ["assistant", fencedMessage].join("\n"),
+        isRunning: false,
+        language: "zh-CN",
+      }),
+    );
+    expect(messageHtml).toContain('data-level="1"');
+    expect(messageHtml).toContain('<span class="console-msg-code-lang">bash</span>');
+    expect(messageHtml).toContain("$ echo hi");
+    expect(messageHtml).toContain("继续正文。");
+    expect(messageHtml).not.toContain('data-block-kind="tool_call"');
+
+    const fencedThinking = [
+      "````markdown",
+      "# 思考",
+      "",
+      "```bash",
+      "$ echo hi",
+      "```",
+      "````",
+      "结束思考。",
+    ].join("\n");
+    const thinkingBlocks = parseConsoleLog(["thinking", fencedThinking].join("\n"));
+    expect(thinkingBlocks.map((b) => b.kind)).toEqual(["thinking"]);
+    expect(thinkingBlocks[0]!.content).toBe(fencedThinking);
+  });
+
+  test("keeps single-column tables without trailing pipes out of tool cards", () => {
+    const tableText = ["| Name", "| ---", "| Build"].join("\n");
+    const blocks = parseConsoleLog(["assistant", tableText].join("\n"));
+    expect(blocks.map((b) => b.kind)).toEqual(["message"]);
+    expect(blocks[0]!.content).toBe(tableText);
+
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, {
+        runId: "RUN-MD-SINGLE-COL-TABLE",
+        rawLog: ["assistant", tableText].join("\n"),
+        isRunning: false,
+        language: "zh-CN",
+      }),
+    );
+    expect(html).toContain('<table class="console-msg-table">');
+    expect(html).toContain("Build");
+    expect(html).not.toContain('data-block-kind="tool_call"');
+  });
+
+  test.each([":---", ":---:", "---:"])("renders a single-column table with bare delimiter %s in legacy logs and trace", (delimiter) => {
+    const tableText = ["| Status |", delimiter, "| Build |"].join("\n");
+    const rawLog = ["assistant", tableText].join("\n");
+    const props = { runId: "RUN-MD-ALIGNED-SINGLE-COL", isRunning: false, language: "en" as const };
+    const legacyHtml = renderToStaticMarkup(createElement(ConsoleOutput, { ...props, rawLog }));
+    const traceHtml = renderToStaticMarkup(createElement(ConsoleOutput, {
+      ...props,
+      rawLog: "",
+      hasTrace: true,
+      traceEvents: [{ seq: 1, ts: 1, type: "assistant.message", turnIndex: 1, text: tableText }],
+    }));
+
+    const traceTable = traceHtml.match(/<table\b.*?<\/table>/s)?.[0];
+    expect(traceTable).toContain("text-align:");
+    expect(legacyHtml.match(/<table\b.*?<\/table>/s)?.[0]).toBe(traceTable);
+    expect(legacyHtml).not.toContain('data-block-kind="tool_call"');
+  });
+
+  test.each(["→", "←", "✱", "$"])("keeps %s commands immediately after a table in raw tool blocks", (marker) => {
+    const tableText = ["| Name | Status |", "| --- | --- |", "| Build | OK |"].join("\n");
+    const command = marker === "$" ? "$ echo hi | cat" : `${marker} Bash echo hi | cat`;
+    const toolOutput = "**tool output**";
+    const rawLog = ["assistant", tableText, command, toolOutput].join("\n");
+    const blocks = parseConsoleLog(rawLog);
+
+    expect(blocks.map((block) => block.kind)).toEqual(["message", "tool_call"]);
+    expect(blocks[0]!.content).toBe(tableText);
+    expect(blocks[1]!.meta?.command).toBe("echo hi | cat");
+    expect(blocks[1]!.content).toBe(`${marker === "$" ? "echo hi | cat" : command}\n${toolOutput}`);
+
+    const html = renderToStaticMarkup(createElement(ConsoleOutput, {
+      runId: "RUN-MD-TABLE-TOOL", rawLog, isRunning: false, language: "en",
+    }));
+    expect(html).toContain('<table class="console-msg-table">');
+    expect(html).toContain('data-block-kind="tool_call"');
+    expect(html).not.toContain("<strong>tool output</strong>");
+  });
+
+  test("keeps piped OpenCode tool commands and raw output as tool cards", () => {
+    const log = ["$ exec-mock", "| Bash echo hi | cat", "**tool output**"].join("\n");
+    const blocks = parseConsoleLog(log);
+    expect(blocks.map((b) => b.kind)).toEqual(["command_env", "tool_call"]);
+    const tool = blocks[1]!;
+    expect(tool.title).toBe("Bash");
+    expect(tool.meta?.command).toBe("echo hi | cat");
+    expect(tool.content).toContain("| Bash echo hi | cat");
+    expect(tool.content).toContain("**tool output**");
+
+    const html = renderToStaticMarkup(
+      createElement(ConsoleOutput, { runId: "RUN-MD-PIPED-TOOL", rawLog: log, isRunning: false, language: "zh-CN" }),
+    );
+    expect(html).toContain('data-block-kind="tool_call"');
+    expect(html).not.toContain('data-block-kind="message"');
+    expect(html).not.toContain("<strong>tool output</strong>");
+  });
+
+  test.each(["---", ":---:"])("keeps a piped tool command before %s out of a false table", (delimiter) => {
+    const log = ["assistant", "| Bash echo hi | cat", delimiter, "**tool output**"].join("\n");
+    const blocks = parseConsoleLog(log);
+    expect(blocks[0]?.kind).toBe("tool_call");
+    expect(blocks[0]?.meta?.command).toBe("echo hi | cat");
   });
 });

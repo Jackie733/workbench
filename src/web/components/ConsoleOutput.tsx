@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -29,8 +29,10 @@ import {
   type ConsoleBlock,
   type ConsoleBlockKind,
 } from "../lib/consoleFormat.ts";
+import { copyTextToClipboard } from "../lib/clipboard.ts";
 import { formatDurationHuman, formatPercent, formatTokenCount, formatUsd } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
+import { ConsoleMarkdown } from "./ConsoleMarkdown.tsx";
 import { Icon } from "./Icon.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { Badge } from "./ui/badge.tsx";
@@ -304,223 +306,6 @@ function blockIcon(kind: ConsoleBlockKind, tone: ConsoleBlock["tone"]) {
       return AlertTriangle;
     case "message":
       return Terminal;
-  }
-}
-
-function isMarkdownTableStart(lines: string[], idx: number): boolean {
-  const line = lines[idx];
-  if (!line || !line.trim().startsWith("|") || idx + 1 >= lines.length) return false;
-  return /^\s*\|?\s*[-:]+(?:\s*\|\s*[-:]+)+\s*\|?\s*$/.test(lines[idx + 1]!);
-}
-
-function renderFormattedMessage(text: string) {
-  const lines = text.split("\n");
-  const out: Array<
-    | { kind: "heading"; key: string; text: string }
-    | { kind: "code"; key: string; lang: string; content: string }
-    | { kind: "quote"; key: string; lines: string[] }
-    | { kind: "table"; key: string; headers: string[]; rows: string[][] }
-    | { kind: "list"; key: string; items: string[] }
-    | { kind: "text"; key: string; text: string }
-  > = [];
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i]!;
-    if (line.trim().startsWith("```")) {
-      const lang = line.trim().slice(3).trim();
-      const codeLines: string[] = [];
-      i += 1;
-      while (i < lines.length && !lines[i]!.trim().startsWith("```")) {
-        codeLines.push(lines[i]!);
-        i += 1;
-      }
-      out.push({ kind: "code", key: `code-${i}`, lang, content: codeLines.join("\n") });
-      i += 1;
-      continue;
-    }
-
-    if (/^#{1,4}\s+/.test(line.trim())) {
-      out.push({ kind: "heading", key: `h-${i}`, text: line.trim().replace(/^#{1,4}\s+/, "") });
-      i += 1;
-      continue;
-    }
-
-    if (/^\s*>\s?/.test(line)) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && /^\s*>\s?/.test(lines[i]!)) {
-        quoteLines.push(lines[i]!.replace(/^\s*>\s?/, ""));
-        i += 1;
-      }
-      out.push({ kind: "quote", key: `quote-${i}`, lines: quoteLines });
-      continue;
-    }
-
-    if (isMarkdownTableStart(lines, i)) {
-      const splitRow = (rowLine: string) =>
-        rowLine
-          .trim()
-          .replace(/^\|/, "")
-          .replace(/\|$/, "")
-          .split("|")
-          .map((c) => c.trim());
-      const headers = splitRow(line);
-      i += 2;
-      const rows: string[][] = [];
-      while (i < lines.length && lines[i]!.trim().startsWith("|")) {
-        rows.push(splitRow(lines[i]!));
-        i += 1;
-      }
-      out.push({ kind: "table", key: `tbl-${i}`, headers, rows });
-      continue;
-    }
-
-    if (/^\s*(?:[-*]|\d+\.)\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*(?:[-*]|\d+\.)\s+/.test(lines[i]!)) {
-        items.push(lines[i]!.trim().replace(/^(?:[-*]|\d+\.)\s+/, ""));
-        i += 1;
-      }
-      out.push({ kind: "list", key: `list-${i}`, items });
-      continue;
-    }
-
-    const textLines: string[] = [];
-    while (
-      i < lines.length &&
-      !lines[i]!.trim().startsWith("```") &&
-      !/^#{1,4}\s+/.test(lines[i]!.trim()) &&
-      !/^\s*>\s?/.test(lines[i]!) &&
-      !isMarkdownTableStart(lines, i) &&
-      !/^\s*(?:[-*]|\d+\.)\s+/.test(lines[i]!)
-    ) {
-      textLines.push(lines[i]!);
-      i += 1;
-    }
-    const joined = textLines.join("\n").trim();
-    if (joined) out.push({ kind: "text", key: `txt-${i}`, text: joined });
-  }
-
-  return (
-    <div className="console-msg-rich">
-      {out.map((seg) => {
-        if (seg.kind === "heading") {
-          return (
-            <div key={seg.key} className="console-msg-heading">
-              {renderInlineCode(seg.text)}
-            </div>
-          );
-        }
-        if (seg.kind === "code") {
-          return (
-            <pre key={seg.key} className="console-msg-code">
-              {seg.lang && <span className="console-msg-code-lang">{seg.lang}</span>}
-              <code>{seg.content}</code>
-            </pre>
-          );
-        }
-        if (seg.kind === "quote") {
-          return (
-            <blockquote key={seg.key} className="console-msg-quote">
-              {seg.lines.map((ql, idx) => (
-                <div key={idx}>{renderInlineCode(ql)}</div>
-              ))}
-            </blockquote>
-          );
-        }
-        if (seg.kind === "table") {
-          return (
-            <div key={seg.key} className="console-msg-table-wrap">
-              <table className="console-msg-table">
-                <thead>
-                  <tr>
-                    {seg.headers.map((h, idx) => (
-                      <th key={idx}>{renderInlineCode(h)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {seg.rows.map((r, rIdx) => (
-                    <tr key={rIdx}>
-                      {r.map((cell, cIdx) => (
-                        <td key={cIdx}>{renderInlineCode(cell)}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        }
-        if (seg.kind === "list") {
-          return (
-            <ul key={seg.key} className="console-msg-list">
-              {seg.items.map((item, idx) => (
-                <li key={idx}>{renderInlineCode(item)}</li>
-              ))}
-            </ul>
-          );
-        }
-        return (
-          <div key={seg.key} className="console-msg-para">
-            {renderInlineCode(seg.text)}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function renderInlineCode(text: string, allowBold = true) {
-  const pattern = allowBold
-    ? /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\((?:file:\/\/\/[^)\s]+|https?:\/\/[^)\s]+)\))/g
-    : /(`[^`\n]+`|\[[^\]\n]+\]\((?:file:\/\/\/[^)\s]+|https?:\/\/[^)\s]+)\))/g;
-  const parts = text.split(pattern);
-  return (
-    <>
-      {parts.map((part, idx) => {
-        if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
-          return (
-            <code key={idx} className="console-inline-code">
-              {part.slice(1, -1)}
-            </code>
-          );
-        }
-        if (allowBold && part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
-          return <strong key={idx}>{renderInlineCode(part.slice(2, -2), false)}</strong>;
-        }
-        const linkMatch = /^\[([^\]\n]+)\]\(([^)\s]+)\)$/.exec(part);
-        if (linkMatch) {
-          const label = linkMatch[1]!;
-          const href = linkMatch[2]!;
-          if (href.startsWith("file://")) {
-            const fsPath = href.replace(/^file:\/\//, "");
-            return (
-              <span key={idx} className="console-file-ref" title={fsPath}>
-                <Icon icon={FileText} size={14} />
-                <span>{label}</span>
-              </span>
-            );
-          }
-          return (
-            <a key={idx} href={href} target="_blank" rel="noopener noreferrer" className="console-link">
-              {label}
-            </a>
-          );
-        }
-        return <Fragment key={idx}>{part}</Fragment>;
-      })}
-    </>
-  );
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (!text || typeof navigator === "undefined" || !navigator.clipboard?.writeText) return false;
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -986,7 +771,9 @@ export function ConsoleOutput({
                           </span>
                         </button>
                         {expanded && (
-                          <div className="console-block-body trace-thinking-body">{ev.text}</div>
+                          <div className="console-block-body trace-thinking-body">
+                            <ConsoleMarkdown text={ev.text} language={language} variant="thinking" />
+                          </div>
                         )}
                       </div>
                     );
@@ -995,7 +782,9 @@ export function ConsoleOutput({
                   if (ev.type === "assistant.message") {
                     return (
                       <div key={`msg-${ev.seq}`} className="console-block console-block-message">
-                        <div className="console-block-body">{renderFormattedMessage(ev.text)}</div>
+                        <div className="console-block-body">
+                          <ConsoleMarkdown text={ev.text} language={language} />
+                        </div>
                       </div>
                     );
                   }
@@ -1162,9 +951,11 @@ export function ConsoleOutput({
                         </div>
                       )}
                       <div className="console-block-body">
-                        {block.kind === "message"
-                          ? renderFormattedMessage(block.content)
-                          : block.content}
+                        {block.kind === "message" ? (
+                          <ConsoleMarkdown text={block.content} language={language} />
+                        ) : (
+                          block.content
+                        )}
                       </div>
                     </div>
                   );
@@ -1195,7 +986,11 @@ export function ConsoleOutput({
                     </button>
                     {expanded && (
                       <div className="console-block-body" data-testid="console-block-body">
-                        {block.content}
+                        {block.kind === "thinking" ? (
+                          <ConsoleMarkdown text={block.content} language={language} variant="thinking" />
+                        ) : (
+                          block.content
+                        )}
                       </div>
                     )}
                   </div>

@@ -69,6 +69,82 @@ const OPENCODE_STEP_RE = /^>\s+\S+\s+·\s+\S+\s*$/;
 const OPENCODE_THINK_RE = /^Thinking:\s*(.*)$/;
 const OPENCODE_TOOL_ARROW_RE = /^(?:\u2192|\u2190|\u2731|\|)\s+([A-Z][A-Za-z0-9_-]*)\b(.*)$/;
 const SHELL_CMD_LINE_RE = /^\$\s+(.+)$/;
+const TABLE_DELIMITER_RE = /^\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?$/;
+const FENCE_OPEN_RE = /^(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_RE = /^(`{3,}|~{3,})\s*$/;
+
+interface FenceMarker {
+  char: string;
+  length: number;
+}
+
+function isTableDelimiterLine(line: string): boolean {
+  const trimmed = line.trim();
+  // A line of dashes with no alignment or pipes can be a Setext heading underline.
+  return /[|:]/.test(trimmed) && TABLE_DELIMITER_RE.test(trimmed);
+}
+
+function countTableColumns(line: string): number {
+  const unescaped = line.trim().replace(/\\./g, "x");
+  return unescaped.replace(/^\||\|$/g, "").split("|").length;
+}
+
+const markdownTableLineCache = new WeakMap<string[], Set<number>>();
+
+function getMarkdownTableLines(lines: string[]): Set<number> {
+  const cached = markdownTableLineCache.get(lines);
+  if (cached) return cached;
+  const tableLines = new Set<number>();
+  for (let idx = 1; idx < lines.length; idx++) {
+    const delimiter = lines[idx]!;
+    if (!isTableDelimiterLine(delimiter)) continue;
+    const headerIdx = idx - 1;
+    const header = lines[headerIdx]!;
+    if (
+      !header.trim() ||
+      isTableDelimiterLine(header) ||
+      isExplicitStructuralBoundary(lines, headerIdx) ||
+      countTableColumns(header) !== countTableColumns(delimiter)
+    ) continue;
+    tableLines.add(headerIdx);
+    tableLines.add(idx);
+    for (let row = idx + 1; row < lines.length; row++) {
+      if (!lines[row]!.includes("|") || isExplicitStructuralBoundary(lines, row)) break;
+      tableLines.add(row);
+    }
+  }
+  markdownTableLineCache.set(lines, tableLines);
+  return tableLines;
+}
+
+/**
+ * A leading pipe can be an OpenCode marker or a table cell boundary. Keep it
+ * as Markdown inside a confirmed table and as a tool marker elsewhere.
+ */
+function isMarkdownTableLine(lines: string[], idx: number): boolean {
+  return getMarkdownTableLines(lines).has(idx);
+}
+
+function matchFenceOpen(line: string): FenceMarker | null {
+  const matched = FENCE_OPEN_RE.exec(line.trim());
+  if (!matched) return null;
+  const marker = matched[1]!;
+  if (marker[0] === "`" && matched[2]!.includes("`")) return null;
+  return { char: marker[0]!, length: marker.length };
+}
+
+function isFenceClose(line: string, fence: FenceMarker): boolean {
+  const matched = FENCE_CLOSE_RE.exec(line.trim());
+  return Boolean(matched && matched[1]![0] === fence.char && matched[1]!.length >= fence.length);
+}
+
+function isFenceBoundaryLine(fence: FenceMarker | null, line: string): boolean {
+  return fence ? isFenceClose(line, fence) : matchFenceOpen(line) !== null;
+}
+
+function advanceFence(fence: FenceMarker | null, line: string): FenceMarker | null {
+  return fence ? (isFenceClose(line, fence) ? null : fence) : matchFenceOpen(line);
+}
 
 /** Strips ANSI CSI/OSC/ESC control sequences and normalizes line endings. */
 export function stripAnsi(text: string): string {
@@ -123,9 +199,8 @@ function isAgyJsonLine(trimmed: string): boolean {
   return trimmed.startsWith("{") && /"event"\s*:\s*"(?:init|step_update|result)"/.test(trimmed);
 }
 
-function isStructuralBoundary(lines: string[], idx: number): boolean {
-  const line = lines[idx] ?? "";
-  const trimmed = line.trim();
+function isExplicitStructuralBoundary(lines: string[], idx: number): boolean {
+  const trimmed = (lines[idx] ?? "").trim();
   if (!trimmed) return false;
   if (isLauncherCmdLine(lines, idx)) return true;
   if (isAgyJsonLine(trimmed)) return true;
@@ -150,12 +225,19 @@ function isStructuralBoundary(lines: string[], idx: number): boolean {
     return true;
   }
   if (CODEX_BANNER_RE.test(trimmed) || STDIN_LINE_RE.test(trimmed)) return true;
-  if (OPENCODE_STEP_RE.test(trimmed) || OPENCODE_THINK_RE.test(trimmed) || OPENCODE_TOOL_ARROW_RE.test(trimmed)) return true;
+  if (OPENCODE_STEP_RE.test(trimmed) || OPENCODE_THINK_RE.test(trimmed)) return true;
+  if (!trimmed.startsWith("|") && OPENCODE_TOOL_ARROW_RE.test(trimmed)) return true;
   if (SHELL_CMD_LINE_RE.test(trimmed) && !isLauncherCmdLine(lines, idx)) return true;
   if (isNoiseLine(trimmed)) return true;
   if (/^\[(?:spawn error|timeout)\]/i.test(trimmed)) return true;
   if (PROMPT_START_PATTERNS.some((re) => re.test(trimmed))) return true;
   return false;
+}
+
+function isStructuralBoundary(lines: string[], idx: number): boolean {
+  if (isExplicitStructuralBoundary(lines, idx)) return true;
+  const trimmed = (lines[idx] ?? "").trim();
+  return trimmed.startsWith("|") && OPENCODE_TOOL_ARROW_RE.test(trimmed) && !isMarkdownTableLine(lines, idx);
 }
 
 function isBlockBoundary(lines: string[], idx: number): boolean {
@@ -433,17 +515,17 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
         buf.push(rawLine);
       }
       i++;
-      let inFence = false;
+      let fence: FenceMarker | null = null;
       while (i < lines.length) {
         const cur = lines[i]!;
         const t = cur.trim();
-        if (/^```/.test(t)) {
-          inFence = !inFence;
+        if (isFenceBoundaryLine(fence, cur)) {
+          fence = advanceFence(fence, cur);
           buf.push(cur);
           i++;
           continue;
         }
-        if (!inFence && isStructuralBoundary(lines, i) && !PROMPT_START_PATTERNS.some((re) => re.test(t))) {
+        if (!fence && isStructuralBoundary(lines, i) && !PROMPT_START_PATTERNS.some((re) => re.test(t))) {
           break;
         }
         buf.push(cur);
@@ -578,20 +660,34 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
       } else if (openCodeThink) {
         if (openCodeThink[1]?.trim()) buf.push(openCodeThink[1].trim());
         i++;
+        let fence: FenceMarker | null = null;
         while (i < lines.length) {
           const cur = lines[i]!;
           const t = cur.trim();
-          if (!t) break;
-          if (isStructuralBoundary(lines, i)) break;
+          if (isFenceBoundaryLine(fence, cur)) {
+            fence = advanceFence(fence, cur);
+            buf.push(cur);
+            i++;
+            continue;
+          }
+          if (!fence && !t) break;
+          if (!fence && isStructuralBoundary(lines, i)) break;
           buf.push(cur);
           i++;
         }
       } else {
         i++;
+        let fence: FenceMarker | null = null;
         while (i < lines.length) {
           const cur = lines[i]!;
           const t = cur.trim();
-          if (t && isStructuralBoundary(lines, i)) break;
+          if (isFenceBoundaryLine(fence, cur)) {
+            fence = advanceFence(fence, cur);
+            buf.push(cur);
+            i++;
+            continue;
+          }
+          if (!fence && t && isStructuralBoundary(lines, i)) break;
           buf.push(cur);
           i++;
         }
@@ -614,7 +710,7 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
     }
 
     // 6. Tool calls (Qoder 🔧, OpenCode →/←/✱/|, shell `$ cmd`, or Codex `exec`)
-    const openCodeTool = OPENCODE_TOOL_ARROW_RE.exec(trimmed);
+    const openCodeTool = trimmed.startsWith("|") && isMarkdownTableLine(lines, i) ? null : OPENCODE_TOOL_ARROW_RE.exec(trimmed);
     if (openCodeTool) {
       const toolName = openCodeTool[1]!;
       const toolArg = (openCodeTool[2] ?? "").trim();
@@ -803,22 +899,22 @@ export function parseConsoleLog(rawText: string, language: UiLanguage = "zh-CN")
       i++;
     }
     const buf: string[] = [];
-    let inFence = false;
+    let fence: FenceMarker | null = null;
     if (!isAgentMarker) {
-      if (/^```/.test(trimmed)) inFence = true;
+      fence = matchFenceOpen(trimmed);
       buf.push(rawLine);
       i++;
     }
     while (i < lines.length) {
       const cur = lines[i]!;
       const t = cur.trim();
-      if (/^```/.test(t)) {
-        inFence = !inFence;
+      if (isFenceBoundaryLine(fence, cur)) {
+        fence = advanceFence(fence, cur);
         buf.push(cur);
         i++;
         continue;
       }
-      if (!inFence && t && isBlockBoundary(lines, i)) {
+      if (!fence && t && isBlockBoundary(lines, i)) {
         // Keep merging consecutive plain message paragraphs, break on non-message markers
         if (t === "codex" || t === "assistant") {
           i++;
