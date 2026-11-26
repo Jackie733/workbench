@@ -92,25 +92,38 @@ function createMockGiteeDeps() {
         return new Response(JSON.stringify([]), { status: 200 });
       }
       if (method === "GET" && p === "/api/v5/enterprises/openstring/issues") {
-        if (u.searchParams.get("state") === "open") {
-          return new Response(
-            JSON.stringify([
-              {
-                number: "I8WEB1",
-                html_url: "https://e.gitee.com/openstring/issues/list?issue=I8WEB1",
-                title: "PC工作台筛选栏优化",
-                body: "无仓库工作项详情正文",
-                state: "open",
-                issue_state_detail: { title: "开启" },
-                issue_type_detail: { title: "需求" },
-                labels: [{ name: "ui" }],
-                repository: null,
-                program: { name: "DeepMDT 3.0" },
-                updated_at: "2026-11-18T15:00:00+08:00",
-              },
-            ]),
-            { status: 200 },
-          );
+        const webIssue1 = {
+          number: "I8WEB1",
+          html_url: "https://e.gitee.com/openstring/issues/list?issue=I8WEB1",
+          title: "PC工作台筛选栏优化",
+          body: "无仓库工作项详情正文",
+          state: "open",
+          issue_state_detail: { title: "开发中" },
+          issue_type_detail: { title: "需求" },
+          labels: [{ name: "ui" }],
+          repository: null,
+          program: { name: "DeepMDT 3.0" },
+          updated_at: "2026-11-18T15:00:00+08:00",
+        };
+        const webIssue2 = {
+          number: "I8WEB2",
+          html_url: "https://e.gitee.com/openstring/issues/list?issue=I8WEB2",
+          title: "剂量验证报告导出签章",
+          body: "",
+          state: "closed",
+          issue_state_detail: { title: "已验收" },
+          issue_type_detail: { title: "缺陷" },
+          labels: [],
+          repository: { full_name: "openstring/rt-cloud" },
+          program: { name: "放疗云" },
+          updated_at: "2026-11-17T10:00:00+08:00",
+        };
+        const stateParam = u.searchParams.get("state");
+        if (stateParam === "all") {
+          return new Response(JSON.stringify([webIssue1, webIssue2]), { status: 200 });
+        }
+        if (stateParam === "open") {
+          return new Response(JSON.stringify([webIssue1]), { status: 200 });
         }
         return new Response(JSON.stringify([]), { status: 200 });
       }
@@ -208,6 +221,42 @@ describe("Gitee Web UI workflow", () => {
       );
       expect(itemText).toContain("PC工作台筛选栏优化");
       expect(itemText).toContain("未绑定仓库");
+
+      // 2.1 Collaborator is the default ownership scope; both enterprise work items are listed.
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB2"]', { timeout: 10_000 });
+      const initialCount = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-result-count"]')?.textContent ?? "",
+      );
+      expect(initialCount).toContain("2");
+
+      // 2.2 Status multi-select narrows the list, and the chips row clears it.
+      await page.click('[data-testid="gitee-status-filter"]');
+      await page.waitForSelector('[data-testid="gitee-status-filter-option"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-status-filter-option"][data-value="已验收"]');
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB1"]'),
+        { timeout: 10_000 },
+      );
+      const statusFilteredCount = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-result-count"]')?.textContent ?? "",
+      );
+      expect(statusFilteredCount).toContain("1");
+      await page.click('[data-testid="gitee-status-filter"]');
+      await page.waitForSelector('[data-testid="gitee-clear-filters"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-clear-filters"]');
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 10_000 });
+
+      // 2.3 Project multi-select filters by associated program.
+      await page.click('[data-testid="gitee-project-filter"]');
+      await page.waitForSelector('[data-testid="gitee-project-filter-option"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-project-filter-option"][data-value="DeepMDT 3.0"]');
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB2"]'),
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="gitee-project-filter"]');
+      await page.click('[data-testid="gitee-clear-filters"]');
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB2"]', { timeout: 10_000 });
 
       await page.click('[data-testid="gitee-issue-item-I8WEB1"]');
       await page.click('[data-testid="import-issue-draft-btn"]');

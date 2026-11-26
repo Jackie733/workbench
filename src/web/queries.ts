@@ -142,15 +142,14 @@ export function useGiteeStatusQuery(activeProjectId: string | null, enabled: boo
 export function useGiteeIssuesQuery(
   activeProjectId: string | null,
   params: {
-    filter: "assigned" | "created" | "all";
-    state: "active" | "open" | "progressing" | "closed" | "all";
+    filter: "collaborator" | "assigned" | "created" | "all";
     q: string;
   },
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: queryKeys.giteeIssues(activeProjectId, params.filter, params.state, params.q),
-    queryFn: () => api.listGiteeIssues(params),
+    queryKey: queryKeys.giteeIssues(activeProjectId, params.filter, "all", params.q),
+    queryFn: () => api.listGiteeIssues({ filter: params.filter, state: "all", q: params.q }),
     enabled,
   });
 }

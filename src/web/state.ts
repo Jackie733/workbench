@@ -61,8 +61,9 @@ export type ModalState =
       tier?: RequirementTier;
       mode?: "create" | "import_issue";
       issueRef?: string;
-      giteeFilter?: "assigned" | "created" | "all";
-      giteeState?: "active" | "open" | "progressing" | "closed" | "all";
+      giteeFilter?: "collaborator" | "assigned" | "created" | "all";
+      giteeStatuses?: string[];
+      giteeProjects?: string[];
       giteeSearch?: string;
       selectedGiteeIssue?: GiteeIssueListItem | null;
       createGitHubIssue?: boolean;

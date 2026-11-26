@@ -323,7 +323,7 @@ export const api = {
   getGitHubStatus: () => requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status")),
   getGiteeStatus: () => requestJson<GiteeEnvironmentStatus>(withProjectParam("/api/gitee/status")),
   listGiteeIssues: (params?: {
-    filter?: "assigned" | "created" | "all";
+    filter?: "collaborator" | "assigned" | "created" | "all";
     state?: "active" | "open" | "progressing" | "closed" | "all";
     q?: string;
     enterprise?: string;

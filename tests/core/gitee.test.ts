@@ -154,6 +154,38 @@ function createMockGiteeFetch() {
           { status: 200 },
         );
       }
+      if (state === "all") {
+        return new Response(
+          JSON.stringify([
+            {
+              number: "I8ENT2",
+              html_url: "https://e.gitee.com/openstring/issues/list?issue=I8ENT2",
+              title: "表格导出 CSV 支持中文表头",
+              body: "企业工作项详细说明",
+              state: "open",
+              issue_state_detail: { title: "待办" },
+              issue_type_detail: { title: "任务" },
+              repository: null,
+              program: { name: "DeepMDT 3.0" },
+              updated_at: "2026-11-18T09:00:00+08:00",
+            },
+            {
+              number: "I8COL3",
+              html_url: "https://e.gitee.com/openstring/issues/list?issue=I8COL3",
+              title: "协作者视角的工作项",
+              body: "",
+              state: "progressing",
+              issue_state_detail: { title: "进行中" },
+              issue_type_detail: { title: "需求" },
+              labels: [],
+              repository: null,
+              program: { name: "放疗云" },
+              updated_at: "2026-11-19T10:00:00+08:00",
+            },
+          ]),
+          { status: 200 },
+        );
+      }
       return new Response(JSON.stringify([]), { status: 200 });
     }
 
@@ -446,6 +478,34 @@ describe("Gitee V5 integration", () => {
       (c) => (c.method === "POST" || c.method === "PATCH") && c.url.includes("/issues"),
     );
     expect(issueWriteCalls).toHaveLength(0);
+  });
+
+  test("listGiteeMyIssues collaborator scope queries the enterprise collaborator role only", async () => {
+    const { fetchMock, calls } = createMockGiteeFetch();
+    const deps: GiteeApiDeps = { fetch: fetchMock };
+
+    const listed = await listGiteeMyIssues(
+      { token: "valid-gitee-token", enterprise: "openstring", filter: "collaborator", state: "all" },
+      deps,
+    );
+    expect(listed.items.map((item) => item.ident).sort()).toEqual(["I8COL3", "I8ENT2"]);
+
+    const issueCalls = calls.filter((call) => call.url.includes("/issues"));
+    expect(issueCalls.length).toBeGreaterThan(0);
+    expect(issueCalls.every((call) => !call.url.includes("/user/issues"))).toBe(true);
+    expect(
+      issueCalls.some((call) => {
+        const u = new URL(call.url);
+        return u.pathname === "/api/v5/enterprises/openstring/issues" && u.searchParams.get("collaborator") === "jackie";
+      }),
+    ).toBe(true);
+
+    // Without an enterprise there is no collaborator scope to query; degrade to an empty list.
+    const noEnterprise = await listGiteeMyIssues(
+      { token: "valid-gitee-token", filter: "collaborator", state: "all" },
+      deps,
+    );
+    expect(noEnterprise.items).toEqual([]);
   });
 
   test("listGiteeMyIssues throws when all sub-requests fail and preserves partial results without polluting enterprise", async () => {
