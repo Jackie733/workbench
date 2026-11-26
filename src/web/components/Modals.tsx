@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Bug,
   Check,
+  ChevronDown,
   CircleHelp,
   ClipboardCheck,
   Download,
@@ -28,6 +29,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Send,
   Server,
   Settings,
@@ -73,7 +75,7 @@ import {
   resolveWarningParam,
   t,
 } from "../i18n.ts";
-import { formatBytes, formatReviewFixFeedback } from "../state.ts";
+import { formatBytes, formatReviewFixFeedback, relativeTime } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import { Icon } from "./Icon.tsx";
@@ -87,6 +89,7 @@ import { Checkbox } from "./ui/checkbox.tsx";
 import { DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogTitle } from "./ui/dialog.tsx";
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover.tsx";
 import { Radio, RadioGroup, RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
 import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
 import { SimpleSelect } from "./ui/select.tsx";
@@ -101,6 +104,162 @@ const STANDARD_QUOTA_POOLS = [
   "anthropic",
   "openai",
 ];
+
+const GITEE_NO_PROGRAM_KEY = "__none__";
+
+const GITEE_STATUS_COLORS: Record<string, string> = {
+  待办的: "#f59e0b",
+  待办: "#f59e0b",
+  开启: "#f59e0b",
+  开发中: "#3b82f6",
+  进行中: "#3b82f6",
+  开发完成: "#64748b",
+  已完成: "#64748b",
+  待测试: "#eab308",
+  测试中: "#eab308",
+  执行中: "#6366f1",
+  测试未通过: "#ef4444",
+  已拒绝: "#dc2626",
+  已验收: "#10b981",
+  已关闭: "#9ca3af",
+};
+
+const GITEE_PROJECT_DOT_COLORS = ["#2563eb", "#10b981", "#7c3aed", "#f59e0b", "#0ea5e9", "#ec4899"];
+
+function giteeStatusDotColor(statusKey: string, rawState?: string): string {
+  const known = GITEE_STATUS_COLORS[statusKey];
+  if (known) return known;
+  if (rawState === "progressing") return "#3b82f6";
+  if (rawState === "closed" || rawState === "rejected") return "#9ca3af";
+  return "#f59e0b";
+}
+
+function giteeProjectDotColor(name: string): string {
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return GITEE_PROJECT_DOT_COLORS[hash % GITEE_PROJECT_DOT_COLORS.length]!;
+}
+
+interface GiteeFilterOption {
+  value: string;
+  label: string;
+  count: number;
+  color?: string;
+}
+
+function GiteeFilterSelect(props: {
+  label: string;
+  options: GiteeFilterOption[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  searchPlaceholder: string;
+  clearLabel: string;
+  emptyLabel: string;
+  formatSelectedCount: (count: number) => string;
+  testId: string;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleOptions = normalizedQuery
+    ? props.options.filter((opt) => opt.label.toLowerCase().includes(normalizedQuery))
+    : props.options;
+  const selectedOptions = props.options.filter((opt) => props.selected.includes(opt.value));
+  const firstSelected = selectedOptions[0];
+  const restCount = selectedOptions.length - 1;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        className="inline-flex h-8 min-w-0 max-w-60 items-center gap-1.5 rounded-lg border border-input bg-background px-2.5 text-sm shadow-xs/5 outline-none transition-shadow hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/24"
+        aria-label={props.label}
+        data-testid={props.testId}
+      >
+        {firstSelected ? (
+          <>
+            {firstSelected.color && (
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{ backgroundColor: firstSelected.color }}
+              />
+            )}
+            <span className="truncate font-medium">{firstSelected.label}</span>
+            {restCount > 0 && <span className="shrink-0 text-xs font-semibold text-info">+{restCount}</span>}
+            <span className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold text-primary-foreground">
+              {selectedOptions.length}
+            </span>
+          </>
+        ) : (
+          <span className="truncate text-muted-foreground">{props.label}</span>
+        )}
+        <ChevronDown className="ms-auto size-3.5 shrink-0 opacity-60" />
+      </PopoverTrigger>
+      <PopoverPopup side="bottom" align="start" sideOffset={6} className="w-72 p-0" viewportClassName="p-0">
+        <div className="border-b p-2">
+          <Input
+            autoFocus
+            value={query}
+            className="h-8"
+            placeholder={props.searchPlaceholder}
+            aria-label={props.searchPlaceholder}
+            data-testid={`${props.testId}-search`}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <div className="max-h-64 overflow-y-auto p-1" role="listbox" aria-multiselectable="true">
+          {visibleOptions.map((opt) => {
+            const checked = props.selected.includes(opt.value);
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="option"
+                aria-selected={checked}
+                data-testid={`${props.testId}-option`}
+                data-value={opt.value}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
+                  checked ? "bg-accent/60" : ""
+                }`}
+                onClick={() =>
+                  props.onChange(
+                    checked ? props.selected.filter((value) => value !== opt.value) : [...props.selected, opt.value],
+                  )
+                }
+              >
+                <Checkbox checked={checked} tabIndex={-1} aria-hidden="true" className="pointer-events-none" />
+                {opt.color && (
+                  <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: opt.color }} />
+                )}
+                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">{opt.count}</span>
+              </button>
+            );
+          })}
+          {visibleOptions.length === 0 && (
+            <div className="p-4 text-center text-xs text-muted-foreground">{props.emptyLabel}</div>
+          )}
+        </div>
+        <div className="flex items-center justify-between border-t px-2 py-1">
+          <Button
+            variant="ghost"
+            size="xs"
+            type="button"
+            data-testid={`${props.testId}-clear`}
+            onClick={() => props.onChange([])}
+          >
+            {props.clearLabel}
+          </Button>
+          <span className="text-xs text-muted-foreground">{props.formatSelectedCount(props.selected.length)}</span>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
 
 function ObservabilityPricingModal({ onClose }: { onClose: () => void }) {
   const language = useUiStore((s) => s.language);
@@ -394,12 +553,13 @@ export function Modals() {
   );
   const isGiteeProject =
     project?.remoteProvider === "gitee" || Boolean(project?.project?.gitee);
-  const giteeFilter = m?.kind === "new_req" ? (m.giteeFilter ?? "assigned") : "assigned";
-  const giteeState = m?.kind === "new_req" ? (m.giteeState ?? "active") : "active";
+  const giteeFilter = m?.kind === "new_req" ? (m.giteeFilter ?? "collaborator") : "collaborator";
+  const giteeStatuses = m?.kind === "new_req" ? (m.giteeStatuses ?? []) : [];
+  const giteeProjects = m?.kind === "new_req" ? (m.giteeProjects ?? []) : [];
   const giteeSearch = m?.kind === "new_req" ? (m.giteeSearch ?? "") : "";
   const giteeIssuesQuery = useGiteeIssuesQuery(
     activeProjectId,
-    { filter: giteeFilter, state: giteeState, q: giteeSearch },
+    { filter: giteeFilter, q: giteeSearch },
     Boolean(
       m?.kind === "new_req" &&
         m.mode === "import_issue" &&
@@ -407,6 +567,56 @@ export function Modals() {
         giteeStatus?.authenticated,
     ),
   );
+
+  const giteeItems = giteeIssuesQuery.data?.items ?? [];
+  const giteeStatusOptions: GiteeFilterOption[] = (() => {
+    const counts = new Map<string, { count: number; rawState?: string }>();
+    for (const item of giteeItems) {
+      const key = item.stateName ?? item.state;
+      const prev = counts.get(key);
+      counts.set(key, { count: (prev?.count ?? 0) + 1, rawState: prev?.rawState ?? item.state });
+    }
+    return [...counts.entries()]
+      .map(([value, { count, rawState }]) => ({
+        value,
+        label: value,
+        count,
+        color: giteeStatusDotColor(value, rawState),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
+  })();
+  const giteeProjectOptions: GiteeFilterOption[] = (() => {
+    const counts = new Map<string, number>();
+    for (const item of giteeItems) {
+      const key = item.programName ?? GITEE_NO_PROGRAM_KEY;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([value, count]) => ({
+        value,
+        label: value === GITEE_NO_PROGRAM_KEY ? t(language, "gitee.noProgram") : value,
+        count,
+        color: value === GITEE_NO_PROGRAM_KEY ? undefined : giteeProjectDotColor(value),
+      }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
+  })();
+  const giteeVisibleItems = giteeItems.filter((item) => {
+    const statusKey = item.stateName ?? item.state;
+    if (giteeStatuses.length > 0 && !giteeStatuses.includes(statusKey)) return false;
+    const projectKey = item.programName ?? GITEE_NO_PROGRAM_KEY;
+    if (giteeProjects.length > 0 && !giteeProjects.includes(projectKey)) return false;
+    return true;
+  });
+  const hasGiteeFacetFilters = giteeStatuses.length > 0 || giteeProjects.length > 0;
+  const patchGiteeFilters = (patch: {
+    giteeFilter?: "collaborator" | "assigned" | "created" | "all";
+    giteeStatuses?: string[];
+    giteeProjects?: string[];
+    giteeSearch?: string;
+  }) =>
+    setModal((prev) =>
+      prev?.kind === "new_req" ? { ...prev, ...patch, selectedGiteeIssue: null } : prev,
+    );
 
   if (!m) return null;
 
@@ -654,13 +864,11 @@ export function Modals() {
                       aria-label={t(language, "gitee.filterAria")}
                       render={
                         <RadioGroupPrimitive
-                          className="flex items-center"
+                          className="flex flex-wrap items-center"
                           value={giteeFilter}
                           onValueChange={(next) => {
-                            if (next === "assigned" || next === "created" || next === "all") {
-                              setModal((prev) =>
-                                prev?.kind === "new_req" ? { ...prev, giteeFilter: next, selectedGiteeIssue: null } : prev,
-                              );
+                            if (next === "collaborator" || next === "assigned" || next === "created" || next === "all") {
+                              patchGiteeFilters({ giteeFilter: next, giteeStatuses: [], giteeProjects: [] });
                             }
                           }}
                         />
@@ -668,6 +876,7 @@ export function Modals() {
                     >
                       {(
                         [
+                          ["collaborator", t(language, "gitee.filterCollaborator")],
                           ["assigned", t(language, "gitee.filterAssigned")],
                           ["created", t(language, "gitee.filterCreated")],
                           ["all", t(language, "gitee.filterAll")],
@@ -681,30 +890,37 @@ export function Modals() {
                         </SegmentedControlItem>
                       ))}
                     </SegmentedControl>
-                    <SimpleSelect
-                      size="sm"
-                      aria-label={t(language, "gitee.stateAria")}
-                      data-testid="gitee-state-select"
-                      value={giteeState}
-                      onValueChange={(next) =>
-                        setModal((prev) =>
-                          prev?.kind === "new_req"
-                            ? {
-                                ...prev,
-                                giteeState: next as "active" | "open" | "progressing" | "closed" | "all",
-                                selectedGiteeIssue: null,
-                              }
-                            : prev,
-                        )
-                      }
-                      options={[
-                        { value: "active", label: t(language, "gitee.stateActive") },
-                        { value: "open", label: t(language, "gitee.stateOpen") },
-                        { value: "progressing", label: t(language, "gitee.stateProgressing") },
-                        { value: "closed", label: t(language, "gitee.stateClosed") },
-                        { value: "all", label: t(language, "gitee.stateAll") },
-                      ]}
+                  </div>
+                  {giteeFilter === "collaborator" && giteeStatus && !giteeStatus.enterprise && (
+                    <div className="text-xs text-muted-foreground">{t(language, "gitee.collaboratorHint")}</div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <GiteeFilterSelect
+                      testId="gitee-status-filter"
+                      label={t(language, "gitee.statusFilterLabel")}
+                      options={giteeStatusOptions}
+                      selected={giteeStatuses}
+                      onChange={(next) => patchGiteeFilters({ giteeStatuses: next })}
+                      searchPlaceholder={t(language, "gitee.filterSearchPlaceholder")}
+                      clearLabel={t(language, "gitee.clearOptions")}
+                      emptyLabel={t(language, "gitee.noMatchingOptions")}
+                      formatSelectedCount={(count) => t(language, "gitee.selectedCount", { count })}
                     />
+                    <GiteeFilterSelect
+                      testId="gitee-project-filter"
+                      label={t(language, "gitee.projectFilterLabel")}
+                      options={giteeProjectOptions}
+                      selected={giteeProjects}
+                      onChange={(next) => patchGiteeFilters({ giteeProjects: next })}
+                      searchPlaceholder={t(language, "gitee.filterSearchPlaceholder")}
+                      clearLabel={t(language, "gitee.clearOptions")}
+                      emptyLabel={t(language, "gitee.noMatchingOptions")}
+                      formatSelectedCount={(count) => t(language, "gitee.selectedCount", { count })}
+                    />
+                    <span className="ms-auto text-xs text-muted-foreground" data-testid="gitee-result-count">
+                      {t(language, "gitee.resultCount", { count: giteeVisibleItems.length })}
+                    </span>
                     <Button
                       variant="outline"
                       size="xs"
@@ -717,20 +933,76 @@ export function Modals() {
                     </Button>
                   </div>
 
+                  {hasGiteeFacetFilters && (
+                    <div className="flex flex-wrap items-center gap-1.5" data-testid="gitee-active-filters">
+                      {giteeStatusOptions
+                        .filter((opt) => giteeStatuses.includes(opt.value))
+                        .map((opt) => (
+                          <span
+                            key={`status:${opt.value}`}
+                            className="inline-flex items-center gap-1 rounded-md border bg-secondary/50 py-0.5 pe-0.5 ps-2 text-xs"
+                          >
+                            {opt.color && (
+                              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: opt.color }} />
+                            )}
+                            <span>{opt.label}</span>
+                            <button
+                              type="button"
+                              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                              aria-label={opt.label}
+                              onClick={() =>
+                                patchGiteeFilters({ giteeStatuses: giteeStatuses.filter((value) => value !== opt.value) })
+                              }
+                            >
+                              <X className="size-3" />
+                            </button>
+                          </span>
+                        ))}
+                      {giteeProjectOptions
+                        .filter((opt) => giteeProjects.includes(opt.value))
+                        .map((opt) => (
+                          <span
+                            key={`project:${opt.value}`}
+                            className="inline-flex items-center gap-1 rounded-md border bg-secondary/50 py-0.5 pe-0.5 ps-2 text-xs"
+                          >
+                            {opt.color && (
+                              <span className="size-2 shrink-0 rounded-[2px]" style={{ backgroundColor: opt.color }} />
+                            )}
+                            <span>{opt.label}</span>
+                            <button
+                              type="button"
+                              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                              aria-label={opt.label}
+                              onClick={() =>
+                                patchGiteeFilters({ giteeProjects: giteeProjects.filter((value) => value !== opt.value) })
+                              }
+                            >
+                              <X className="size-3" />
+                            </button>
+                          </span>
+                        ))}
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        type="button"
+                        data-testid="gitee-clear-filters"
+                        onClick={() => patchGiteeFilters({ giteeStatuses: [], giteeProjects: [] })}
+                      >
+                        {t(language, "gitee.clearFilters")}
+                      </Button>
+                    </div>
+                  )}
+
                   <Input
                     data-testid="gitee-issue-search"
                     value={giteeSearch}
                     placeholder={t(language, "gitee.searchPlaceholder")}
-                    onChange={(e) =>
-                      setModal((prev) =>
-                        prev?.kind === "new_req" ? { ...prev, giteeSearch: e.target.value } : prev,
-                      )
-                    }
+                    onChange={(e) => patchGiteeFilters({ giteeSearch: e.target.value })}
                   />
 
                   <div
                     data-testid="gitee-issue-list"
-                    className="flex max-h-60 flex-col gap-1.5 overflow-y-auto rounded-lg border p-1.5"
+                    className="flex max-h-72 flex-col gap-1.5 overflow-y-auto rounded-lg border p-1.5"
                   >
                     {giteeIssuesQuery.isLoading ? (
                       <div className="muted xs p-3 text-center">
@@ -744,22 +1016,32 @@ export function Modals() {
                           {describeClientError(language, giteeIssuesQuery.error)}
                         </AlertDescription>
                       </Alert>
-                    ) : (giteeIssuesQuery.data?.items.length ?? 0) === 0 ? (
-                      <div className="muted xs p-3 text-center">
-                        {t(language, "gitee.empty")}
-                        {giteeStatus?.enterprise
-                          ? t(language, "gitee.enterpriseSuffix", { enterprise: giteeStatus.enterprise })
-                          : ""}
+                    ) : giteeVisibleItems.length === 0 ? (
+                      <div className="muted xs flex flex-col items-center gap-2 p-4 text-center">
+                        <div>
+                          {t(language, "gitee.empty")}
+                          {giteeStatus?.enterprise
+                            ? t(language, "gitee.enterpriseSuffix", { enterprise: giteeStatus.enterprise })
+                            : ""}
+                        </div>
+                        {hasGiteeFacetFilters && (
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            type="button"
+                            data-testid="gitee-empty-clear-filters"
+                            onClick={() => patchGiteeFilters({ giteeStatuses: [], giteeProjects: [] })}
+                          >
+                            {t(language, "gitee.clearFilters")}
+                          </Button>
+                        )}
                       </div>
                     ) : (
-                      giteeIssuesQuery.data!.items.map((item) => {
+                      giteeVisibleItems.map((item) => {
                         const isSelected = m.selectedGiteeIssue?.ident === item.ident;
-                        const stateVariant =
-                          item.state === "closed" || item.state === "rejected"
-                            ? "secondary"
-                            : item.state === "progressing"
-                              ? "info"
-                              : "warning";
+                        const statusKey = item.stateName ?? item.state;
+                        const statusColor = giteeStatusDotColor(statusKey, item.state);
+                        const updatedMs = Date.parse(item.updatedAt);
                         return (
                           <div
                             key={item.ident}
@@ -780,13 +1062,44 @@ export function Modals() {
                               <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
                                 <code className="xs">#{item.ident}</code>
                                 {item.issueType && <Badge variant="outline" size="sm">{item.issueType}</Badge>}
-                                <Badge variant={stateVariant} size="sm">{item.stateName ?? item.state}</Badge>
-                                {item.programName && <span className="xs muted">{item.programName}</span>}
+                                <span
+                                  className="inline-flex h-5 items-center gap-1 rounded-[4px] border px-1.5 text-[11px] font-medium"
+                                  style={{
+                                    color: statusColor,
+                                    borderColor: `${statusColor}55`,
+                                    backgroundColor: `${statusColor}14`,
+                                  }}
+                                >
+                                  <span className="size-1.5 rounded-full" style={{ backgroundColor: statusColor }} />
+                                  {statusKey}
+                                </span>
+                                {item.programName ? (
+                                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                    <span
+                                      className="size-1.5 rounded-[2px]"
+                                      style={{ backgroundColor: giteeProjectDotColor(item.programName) }}
+                                    />
+                                    {item.programName}
+                                  </span>
+                                ) : (
+                                  <span className="xs muted">{t(language, "gitee.noProgram")}</span>
+                                )}
                                 <span className="xs muted">
                                   {item.repository ? item.repository : t(language, "gitee.unlinkedRepo")}
                                 </span>
                               </div>
                               <div className="text-[13px] font-medium">{item.title}</div>
+                              <div className="xs muted mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                {item.assignee && (
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="inline-flex size-4 items-center justify-center rounded-full bg-secondary text-[9px] font-semibold">
+                                      {item.assignee.slice(0, 1).toUpperCase()}
+                                    </span>
+                                    {item.assignee}
+                                  </span>
+                                )}
+                                {Number.isFinite(updatedMs) && <span>{relativeTime(updatedMs, language)}</span>}
+                              </div>
                             </div>
                             {item.importedRequirementId && (
                               <Button

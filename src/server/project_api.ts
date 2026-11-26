@@ -546,7 +546,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         extractGiteeOwner(remoteRepo);
       const rawFilter = url.searchParams.get("filter");
       const filter =
-        rawFilter === "created" || rawFilter === "all" ? rawFilter : "assigned";
+        rawFilter === "collaborator" || rawFilter === "created" || rawFilter === "all"
+          ? rawFilter
+          : "assigned";
       const rawState = url.searchParams.get("state");
       const state =
         rawState === "open" || rawState === "progressing" || rawState === "closed" || rawState === "all"
