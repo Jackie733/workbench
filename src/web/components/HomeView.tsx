@@ -465,7 +465,7 @@ export function HomeView() {
                         ? t(language, "home.emptyDone")
                         : t(language, "home.emptyActive")}
               </p>
-              {allBaseItems.length === 0 ? (
+              {allBaseItems.length === 0 && (
                 <Button
                   size="xs"
                   type="button"
@@ -474,18 +474,6 @@ export function HomeView() {
                 >
                   <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
                 </Button>
-              ) : (
-                scope !== "all" && (
-                  <Button
-                    size="xs"
-                    type="button"
-                    variant="outline"
-                    data-testid="empty-scope-all-btn"
-                    onClick={() => setScope("all")}
-                  >
-                    {t(language, "home.viewAll")}
-                  </Button>
-                )
               )}
             </Card>
           ) : visible.length === 0 ? (

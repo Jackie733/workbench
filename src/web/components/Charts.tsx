@@ -16,6 +16,7 @@ import {
   type Plugin,
 } from "chart.js";
 import { useEffect, useRef, type CSSProperties } from "react";
+import { t } from "../i18n.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 
 Chart.register(
@@ -803,7 +804,7 @@ export function DonutRingChart({
   segments,
   centerLabel,
   centerValue,
-  size = 144,
+  size = 150,
   emptyText = "—",
 }: {
   segments: DonutSegment[];
@@ -878,17 +879,27 @@ export function DonutRingChart({
         )}
       </div>
       <div className="donut-legend">
-        {nonZero.map((seg) => (
-          <div key={seg.key} className="donut-legend-row">
-            <span className="donut-legend-left">
-              <span className="chart-swatch" style={{ background: seg.color }} />
-              <span className="donut-legend-name">{seg.label}</span>
-            </span>
-            <span className="muted xs">
-              {seg.hint ?? `${Math.round((seg.value / total) * 100)}%`}
-            </span>
-          </div>
-        ))}
+        {nonZero.map((seg) => {
+          const pct = Math.round((seg.value / total) * 100);
+          return (
+            <div key={seg.key} className="donut-legend-row">
+              <div className="donut-legend-top">
+                <span className="donut-legend-left">
+                  <span className="chart-swatch" style={{ background: seg.color }} />
+                  <span className="donut-legend-name">{seg.label}</span>
+                </span>
+                <span className="donut-share-track" aria-hidden="true">
+                  <span
+                    className="donut-share-fill"
+                    style={{ width: `${Math.max(2, pct)}%`, background: seg.color }}
+                  />
+                </span>
+                <span className="donut-share-pct">{pct}%</span>
+              </div>
+              <div className="donut-legend-meta muted xs">{seg.hint ?? `${pct}%`}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -901,6 +912,7 @@ export function ActivityHeatmap({
   days: Array<{ date: string; runs: number; tokens: number; equivalentCostUsd: number }>;
   formatTooltip?: (d: { date: string; runs: number; tokens: number; equivalentCostUsd: number }) => string;
 }) {
+  const language = useUiStore((s) => s.language);
   const maxRuns = Math.max(1, ...days.map((d) => d.runs));
   const levelFor = (runs: number): number => {
     if (runs <= 0) return 0;
@@ -911,25 +923,101 @@ export function ActivityHeatmap({
     return 1;
   };
 
+  const locale = language === "zh-CN" ? "zh-CN" : "en-US";
+  const parseDay = (date: string) => new Date(`${date}T00:00:00`);
+  // 首列顶部补空位，使每行固定对应周一~周日，星期标注才真实。
+  const pad = days.length > 0 ? (parseDay(days[0]!.date).getDay() + 6) % 7 : 0;
+  const columns = Math.ceil((pad + days.length) / 7);
+  const monthLabels: Array<{ col: number; label: string }> = [];
+  let prevMonth = -1;
+  for (let c = 0; c < columns; c++) {
+    const d = days[Math.min(Math.max(0, c * 7 - pad), days.length - 1)];
+    if (!d) continue;
+    const dt = parseDay(d.date);
+    if (dt.getMonth() !== prevMonth) {
+      monthLabels.push({ col: c, label: dt.toLocaleDateString(locale, { month: "short" }) });
+      prevMonth = dt.getMonth();
+    }
+  }
+  const weekdayLabels = language === "zh-CN" ? ["一", "三", "五"] : ["Mon", "Wed", "Fri"];
+
+  const activeDays = days.filter((d) => d.runs > 0).length;
+  const totalRuns = days.reduce((acc, d) => acc + d.runs, 0);
+  const last7Runs = days.slice(-7).reduce((acc, d) => acc + d.runs, 0);
+  const peak = days.reduce(
+    (best, d) => (d.runs > best.runs ? d : best),
+    days[0] ?? { date: "", runs: 0, tokens: 0, equivalentCostUsd: 0 },
+  );
+
+  const cellStyle = (level: number): CSSProperties | undefined =>
+    level === 0 ? undefined : { opacity: 0.28 + level * 0.18 };
+
   return (
-    <div className="heatmap-grid" role="grid" aria-label="84-day activity heatmap">
-      {days.map((d) => {
-        const level = levelFor(d.runs);
-        const title = formatTooltip
-          ? formatTooltip(d)
-          : `${d.date}: ${d.runs} runs · ${d.tokens.toLocaleString()} tok`;
-        const style: CSSProperties | undefined =
-          level === 0 ? undefined : { opacity: 0.28 + level * 0.18 };
-        return (
-          <div
-            key={d.date}
-            className={`heatmap-cell level-${level}`}
-            style={style}
-            title={title}
-            data-date={d.date}
-          />
-        );
-      })}
+    <div className="heatmap-card-body">
+      <div className="heatmap-main">
+        <div className="heatmap-months" style={{ gridTemplateColumns: `repeat(${columns}, 18px)` }}>
+          {monthLabels.map((m) => (
+            <span key={m.col} style={{ gridColumn: m.col + 1 }}>{m.label}</span>
+          ))}
+        </div>
+        <div className="heatmap-body">
+          <div className="heatmap-weekdays" aria-hidden="true">
+            {weekdayLabels.map((w, i) => (
+              <span key={w} style={{ gridRow: i * 2 + 2 }}>{w}</span>
+            ))}
+          </div>
+          <div className="heatmap-grid" role="grid" aria-label="84-day activity heatmap">
+            {Array.from({ length: pad }, (_, i) => (
+              <div key={`pad-${i}`} className="heatmap-cell heatmap-pad" aria-hidden="true" />
+            ))}
+            {days.map((d) => {
+              const level = levelFor(d.runs);
+              const title = formatTooltip
+                ? formatTooltip(d)
+                : `${d.date}: ${d.runs} runs · ${d.tokens.toLocaleString()} tok`;
+              return (
+                <div
+                  key={d.date}
+                  className={`heatmap-cell level-${level}`}
+                  style={cellStyle(level)}
+                  title={title}
+                  data-date={d.date}
+                />
+              );
+            })}
+          </div>
+        </div>
+        <div className="heatmap-legend">
+          <span>{t(language, "insights.heatmap.less")}</span>
+          {[0, 1, 2, 3, 4].map((level) => (
+            <span
+              key={level}
+              className={`heatmap-cell heatmap-legend-cell level-${level}`}
+              style={cellStyle(level)}
+              aria-hidden="true"
+            />
+          ))}
+          <span>{t(language, "insights.heatmap.more")}</span>
+        </div>
+      </div>
+      <div className="heatmap-stats">
+        <div className="heatmap-stat">
+          <span className="muted xs">{t(language, "insights.heatmap.activeDays")}</span>
+          <strong>{activeDays}<span className="muted xs"> / {days.length}</span></strong>
+        </div>
+        <div className="heatmap-stat">
+          <span className="muted xs">{t(language, "insights.heatmap.totalRuns")}</span>
+          <strong>{totalRuns}</strong>
+        </div>
+        <div className="heatmap-stat">
+          <span className="muted xs">{t(language, "insights.heatmap.last7")}</span>
+          <strong>{last7Runs}<span className="muted xs"> runs</span></strong>
+        </div>
+        <div className="heatmap-stat">
+          <span className="muted xs">{t(language, "insights.heatmap.peakDay")}</span>
+          <strong>{peak.runs}<span className="muted xs"> · {peak.date ? peak.date.slice(5) : "—"}</span></strong>
+        </div>
+      </div>
     </div>
   );
 }
