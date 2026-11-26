@@ -86,6 +86,7 @@ const zhCN = {
   "topbar.drawerLabelOpen": "收起侧栏",
   "topbar.drawerLabelClosed": "研讨 / 终端",
   "topbar.logout": "退出登录",
+  "topbar.logoutTitle": "确定要退出登录吗？",
 
   "bridge.mcp": "MCP / CLI",
   "bridge.idle": "omp 在线",
@@ -1583,6 +1584,7 @@ const en: Record<MessageKey, string> = {
   "topbar.drawerLabelOpen": "Hide drawer",
   "topbar.drawerLabelClosed": "Discuss / terminal",
   "topbar.logout": "Sign out",
+  "topbar.logoutTitle": "Sign out of Workbench?",
 
   "bridge.mcp": "MCP / CLI",
   "bridge.idle": "omp online",

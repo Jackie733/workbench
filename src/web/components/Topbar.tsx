@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import {
   ArrowLeft,
   BarChart3,
@@ -19,6 +20,15 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { BrandMark } from "./BrandMark.tsx";
 import { Icon } from "./Icon.tsx";
 import { UiLanguageSelect } from "./Primitives.tsx";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "./ui/alert-dialog.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 
@@ -38,6 +48,12 @@ export function Topbar() {
   const setModal = useUiStore((s) => s.setModal);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
 
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const logout = useMutation({
+    mutationFn: logoutSession,
+    onSuccess: () => setLogoutOpen(false),
+    onError: (error) => useUiStore.getState().showToastError(error),
+  });
   const [isMobile, setIsMobile] = useState(
     () => typeof window !== "undefined" && window.matchMedia("(max-width: 820px)").matches,
   );
@@ -227,17 +243,35 @@ export function Topbar() {
         </Button>
 
         {auth?.required && auth?.authenticated && (
-          <Button
-            size="icon-xs"
-            type="button"
-            variant="ghost"
-            data-testid="logout-btn"
-            title={t(language, "topbar.logout")}
-            aria-label={t(language, "topbar.logout")}
-            onClick={() => void logoutSession()}
+          <AlertDialog
+            open={logoutOpen}
+            onOpenChange={(open, event) => {
+              if (logout.isPending) event.cancel();
+              else setLogoutOpen(open);
+            }}
           >
-            <Icon icon={LogOut} size={14} />
-          </Button>
+            <AlertDialogTrigger
+              render={<Button size="icon-xs" type="button" variant="ghost" />}
+              data-testid="logout-btn"
+              title={t(language, "topbar.logout")}
+              aria-label={t(language, "topbar.logout")}
+            >
+              <Icon icon={LogOut} size={14} />
+            </AlertDialogTrigger>
+            <AlertDialogPopup data-testid="logout-dialog">
+              <AlertDialogHeader>
+                <AlertDialogTitle>{t(language, "topbar.logoutTitle")}</AlertDialogTitle>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogClose disabled={logout.isPending} render={<Button type="button" variant="ghost" />}>
+                  {t(language, "common.cancel")}
+                </AlertDialogClose>
+                <Button type="button" variant="destructive" loading={logout.isPending} onClick={() => logout.mutate()}>
+                  {t(language, "topbar.logout")}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogPopup>
+          </AlertDialog>
         )}
       </div>
     </header>
