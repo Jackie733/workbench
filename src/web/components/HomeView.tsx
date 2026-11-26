@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CircleAlert,
@@ -276,20 +276,20 @@ export function HomeView() {
   const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", Boolean(project?.initialized));
   const { data: sandboxesData } = useProjectSandboxesQuery(activeProjectId, Boolean(project?.initialized));
 
-  const allBaseItems = allReqList?.items ?? [];
+  const allBaseItems = useMemo(() => allReqList?.items ?? [], [allReqList]);
   const activeBaseItems = filterRequirementsByScope(allBaseItems, "active");
   const mergeOrder = sandboxesData?.mergeOrder ?? null;
-  const activeSandboxes = sandboxesData?.sandboxes ?? [];
-  const activeRunList = Object.values(activeRuns);
+  const activeSandboxes = useMemo(() => sandboxesData?.sandboxes ?? [], [sandboxesData]);
+  const activeRunList = useMemo(() => Object.values(activeRuns), [activeRuns]);
 
-  const { items: listSource, pendingDecisions, pendingIdSet } = orderUnifiedRequirements({
+  const { items: listSource, pendingDecisions, pendingIdSet } = useMemo(() => orderUnifiedRequirements({
     allItems: allBaseItems,
     scope,
     runs: activeRunList,
     projectId: activeProjectId,
     mergeOrder,
     activeSandboxes,
-  });
+  }), [allBaseItems, scope, activeRunList, activeProjectId, mergeOrder, activeSandboxes]);
 
   const activeCnt = activeBaseItems.length;
   const decisionCnt = pendingDecisions.length;

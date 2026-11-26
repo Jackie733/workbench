@@ -561,6 +561,16 @@ export function useWorkbenchWsSync(enabled = true): void {
           return;
         }
 
+        if (type === "hub.updated" && ev.reason === "project.activated") {
+          const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
+          if (typeof ev.projectId === "string" && typeof ev.at === "number" && hub?.projects.some((p) => p.id === ev.projectId)) {
+            cacheProjectActivation(ev.projectId, ev.at);
+          } else {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+          }
+          return;
+        }
+
         if (type === "workbench.updated" || type === "hub.updated") {
           void queryClient.invalidateQueries();
         }
@@ -662,12 +672,21 @@ export function backHome(): void {
   });
 }
 
+function cacheProjectActivation(pid: string, lastOpenedAt: number): void {
+  queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (hub) => hub && ({
+    ...hub,
+    activeProjectId: pid,
+    projects: hub.projects.map((item) => item.id === pid ? { ...item, lastOpenedAt } : item),
+  }));
+}
+
 export async function switchProject(pid: string): Promise<void> {
   const ui = useUiStore.getState();
   ui.setSidebarOpen(false);
   ui.setMainView("workspace");
-  const ok = await runBusy(async () => {
-    await api.activateHubProject(pid);
+  if (pid === ui.activeProjectId) return;
+  await runBusy(async () => {
+    const { project } = await api.activateHubProject(pid);
     setApiProjectScope(pid);
     ui.setActiveProjectId(pid);
     useDraftStore.getState().setProjectScope(pid);
@@ -676,11 +695,8 @@ export async function switchProject(pid: string): Promise<void> {
     ui.setSelectedDiffFile(null);
     ui.setQuery("");
     ui.setHomeScrollY(0);
-    return true;
+    cacheProjectActivation(pid, project.lastOpenedAt);
   });
-  if (ok) {
-    await invalidateAllWorkbenchQueries();
-  }
 }
 
 export async function openAddProjectModal(preferredNodeId?: string): Promise<void> {

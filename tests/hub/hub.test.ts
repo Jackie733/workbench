@@ -1973,7 +1973,8 @@ printf 'done\\n'
     };
     expect(stateA.project.routing.defaultLead.primary.model).toBe("gpt-6-astra");
 
-    await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pB.id)}/activate`, { method: "POST" });
+    const activated = await fetch(`${server.url}/api/hub/projects/${encodeURIComponent(pB.id)}/activate?summary=0`, { method: "POST" });
+    expect(await activated.json()).toEqual({ activeProjectId: pB.id, project: expect.objectContaining({ id: pB.id }) });
     const stateB = (await (await fetch(`${server.url}/api/project`)).json()) as {
       project: { routing: { defaultLead: { primary: ModelTarget } } };
     };

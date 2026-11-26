@@ -226,8 +226,8 @@ export const api = {
       body: JSON.stringify(input),
     }),
   activateHubProject: (projectId: string) =>
-    requestJson<{ project: HubProjectEntry; activeProjectId: string | null; projects: HubProjectSummary[] }>(
-      `/api/hub/projects/${encodeURIComponent(projectId)}/activate`,
+    requestJson<{ project: HubProjectEntry; activeProjectId: string }>(
+      `/api/hub/projects/${encodeURIComponent(projectId)}/activate?summary=0`,
       { method: "POST" },
     ),
   updateHubProjectMeta: (body: { projectId: string; pinned?: boolean; category?: string | null }) =>

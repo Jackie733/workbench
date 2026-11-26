@@ -184,12 +184,23 @@ function StageStepper({ d, running }: { d: RequirementDetail; running: boolean }
   );
 }
 
+function latestOutputLine(log: string): string {
+  let end = log.length;
+  while (end > 0) {
+    const start = log.lastIndexOf("\n", end - 1) + 1;
+    const line = log.slice(start, end).trim();
+    if (line && !line.startsWith("$ ")) return line.slice(0, 140);
+    end = start - 1;
+  }
+  return "";
+}
+
 function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
   const language = useUiStore((s) => s.language);
   const setDrawerTab = useUiStore((s) => s.setDrawerTab);
   const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
   const selectedId = useUiStore((s) => s.selectedId);
-  const liveText = useStreamStore((s) => s.liveRunLogs[run.id] ?? "");
+  const latestOutput = useStreamStore((s) => latestOutputLine(s.liveRunLogs[run.id] ?? ""));
 
   const actionLabels: Record<string, string> = {
     design: t(language, "live.action.design"),
@@ -198,11 +209,7 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
     review: t(language, "live.action.review"),
     ask: t(language, "live.action.ask"),
   };
-  const lines = liveText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0 && !l.startsWith("$ "));
-  const latestLine = lines[lines.length - 1]?.slice(0, 140) ?? t(language, "live.waiting");
+  const latestLine = latestOutput || t(language, "live.waiting");
 
   return (
     <section className="live-agent-banner" data-testid="live-agent-banner">
@@ -1278,6 +1285,11 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
   );
 }
 
+function DiffCode({ lines, expanded }: { lines: string[]; expanded: boolean }) {
+  const html = useMemo(() => renderDiffLinesHtml(lines), [lines]);
+  return <div className={`diff-code ${expanded ? "expanded" : ""}`} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail; inDrawer?: boolean }) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -1324,7 +1336,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
 
   const rawDiffText = diffObs?.diff ?? "";
   const parsedFiles = useMemo(
-    () => (rawDiffText ? parseUnifiedDiff(rawDiffText).map((f) => ({ ...f, html: renderDiffLinesHtml(f.lines) })) : []),
+    () => (rawDiffText ? parseUnifiedDiff(rawDiffText) : []),
     [rawDiffText],
   );
   const rawDiffHtml = useMemo(
@@ -1574,10 +1586,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12.5, fontWeight: 600 }}>{f.path}</span>
                     <span className="muted xs">+{f.additions}/-{f.deletions}</span>
                   </div>
-                  <div
-                    className={`diff-code ${isExpanded ? "expanded" : ""}`}
-                    dangerouslySetInnerHTML={{ __html: f.html }}
-                  />
+                  <DiffCode lines={f.lines} expanded={isExpanded} />
                 </div>
               ))
             )}
@@ -1637,13 +1646,10 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                   </Button>
                 </AlertDescription>
               </Alert>
+            ) : activeDiffFile ? (
+              <DiffCode lines={activeDiffFile.lines} expanded={isExpanded} />
             ) : (
-              <div
-                className={`diff-code ${isExpanded ? "expanded" : ""}`}
-                dangerouslySetInnerHTML={{
-                  __html: activeDiffFile ? activeDiffFile.html : rawDiffHtml,
-                }}
-              />
+              <div className={`diff-code ${isExpanded ? "expanded" : ""}`} dangerouslySetInnerHTML={{ __html: rawDiffHtml }} />
             )}
           </div>
         )}

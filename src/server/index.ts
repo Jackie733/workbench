@@ -679,7 +679,10 @@ export async function startWorkbenchServer(options: {
       if (isLocalNodeId(project.nodeId)) {
         ensureWatcherFor(project.root);
       }
-      broadcastUi({ type: "hub.updated", reason: "project.activated", projectId: project.id, at: Date.now() });
+      broadcastUi({ type: "hub.updated", reason: "project.activated", projectId: project.id, at: project.lastOpenedAt });
+      if (url.searchParams.get("summary") === "0") {
+        return jsonResponse({ project, activeProjectId: project.id });
+      }
       const { cfg, projects } = await buildHubProjectsSnapshot();
       return jsonResponse({ project, activeProjectId: cfg.activeProjectId, projects });
     }
