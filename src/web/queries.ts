@@ -720,8 +720,9 @@ export async function openAddProjectModal(preferredNodeId?: string): Promise<voi
 }
 
 export async function logoutSession(): Promise<void> {
-  await api.logout();
-  await queryClient.invalidateQueries({ queryKey: queryKeys.authStatus });
+  const session = await api.logout();
+  await queryClient.cancelQueries({ queryKey: queryKeys.authStatus });
+  queryClient.setQueryData(queryKeys.authStatus, { required: true, ...session });
   queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== "auth" });
 }
 

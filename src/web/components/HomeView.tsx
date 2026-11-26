@@ -3,6 +3,7 @@ import {
   Check,
   CircleAlert,
   Clock,
+  Copy,
   FolderGit2,
   FolderPlus,
   GitBranch,
@@ -18,15 +19,16 @@ import {
 import type { OutputLanguage } from "../../core/types.ts";
 import { api, type HubProjectSummary, type ProjectSandboxesResponse } from "../api.ts";
 import { t, translateRef } from "../i18n.ts";
+import { copyTextToClipboard } from "../lib/clipboard.ts";
 import {
   initProjectSubmit,
-  invalidateAllWorkbenchQueries,
   openAddProjectModal,
   openRequirement,
   queryClient,
   queryKeys,
   runBusy,
   syncSandboxBaseAction,
+  useHubStateQuery,
   useProjectQuery,
   useProjectSandboxesQuery,
   useRequirementsQuery,
@@ -60,7 +62,10 @@ import { SimpleSelect } from "./ui/select.tsx";
 
 export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary }) {
   const language = useUiStore((s) => s.language);
+  const showToastKey = useUiStore((s) => s.showToastKey);
+  const { refetch } = useHubStateQuery();
   const nodeLabel = project.nodeName ?? project.nodeId ?? "remote";
+  const reconnectCommand = "wb node reconnect";
   return (
     <Card className="mx-auto my-6 max-w-2xl" data-testid="remote-node-offline-card">
       <CardHeader>
@@ -82,23 +87,38 @@ export function RemoteNodeOfflineCard({ project }: { project: HubProjectSummary 
         <Alert variant="info" className="text-xs">
           <Icon icon={Info} size={14} />
           <AlertDescription className="text-foreground">
-            <div>
-              {t(language, "remote.hintPrefix")}
-              <strong>{nodeLabel}</strong>
-              {t(language, "remote.hintMiddle")}
+            <div>{t(language, "remote.reconnect", { node: nodeLabel })}</div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              <code className="select-all">{reconnectCommand}</code>
+              <AsyncButton
+                type="button"
+                size="xs"
+                variant="ghost"
+                onAction={async () => {
+                  const copied = await copyTextToClipboard(reconnectCommand);
+                  showToastKey(copied ? "fallback.copied" : "remote.copyFailed", undefined, !copied);
+                }}
+              >
+                <Icon icon={Copy} size={14} /> {t(language, "common.copy")}
+              </AsyncButton>
             </div>
-            <pre className="mt-1.5 font-mono text-xs">wb node start</pre>
           </AlertDescription>
         </Alert>
       </CardPanel>
       <CardFooter>
-        <Button
+        <AsyncButton
           type="button"
+          variant="outline"
           data-testid="remote-node-refresh-btn"
-          onClick={() => void invalidateAllWorkbenchQueries()}
+          onAction={async () => {
+            const { data } = await refetch({ throwOnError: true });
+            if (data?.projects.find((item) => item.id === project.id)?.nodeOnline === false) {
+              showToastKey("remote.stillOffline");
+            }
+          }}
         >
           <Icon icon={RefreshCw} size={14} /> {t(language, "remote.refresh")}
-        </Button>
+        </AsyncButton>
       </CardFooter>
     </Card>
   );

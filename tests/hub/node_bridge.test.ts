@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { createNodeServiceManager, defaultNodeIdentity, readNodeConfig, writeNodeConfig } from "../../src/cli/node_service.ts";
+import { createNodeServiceManager, defaultNodeIdentity, nodeRuntimePath, readNodeConfig, writeNodeConfig } from "../../src/cli/node_service.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { startWorkbenchNodeClient, type NodeClientHandle } from "../../src/hub/node_bridge.ts";
 import { readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
@@ -473,6 +473,39 @@ describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
     expect(unitText).toContain('"node" "connect"');
     expect(unitText).not.toContain(secretToken);
     expect(fs.statSync(path.join(hubDir, "node.json")).mode & 0o777).toBe(0o600);
+
+    const newToken = "rotated-password";
+    const mockHub = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        if (new URL(req.url).pathname !== "/api/health") return new Response(null, { status: 404 });
+        if (req.headers.get("authorization") !== `Bearer ${newToken}`) return new Response(null, { status: 401 });
+        return Response.json({ ok: true, hubMode: true });
+      },
+    });
+    try {
+      const saved = writeNodeConfig({ ...readNodeConfig(hubDir)!, hubUrl: `ws://127.0.0.1:${mockHub.port}` }, hubDir);
+      const callsBeforeReconnect = calls.length;
+      await expect(mgr.reconnect(async () => "wrong-password")).rejects.toThrow("Hub 拒绝了访问密码");
+      expect(readNodeConfig(hubDir)).toEqual(saved);
+      expect(calls).toHaveLength(callsBeforeReconnect);
+
+      await mgr.reconnect(async () => newToken);
+      expect(readNodeConfig(hubDir)).toEqual({ ...saved, token: newToken });
+      expect(fs.readFileSync(installation.definitionPath, "utf8")).toBe(unitText);
+      expect(calls.slice(callsBeforeReconnect).map(({ args }) => args[1]).filter((arg) => arg !== "show"))
+        .toEqual(["show-environment", "restart"]);
+
+      fs.writeFileSync(nodeRuntimePath(hubDir), JSON.stringify({ nodeId: saved.nodeId, pid: process.pid, connected: true }));
+      const callsBeforeOnline = calls.length;
+      const online = await mgr.reconnect(async () => { throw new Error("already connected"); });
+      expect(online.connected).toBe(true);
+      expect(calls.slice(callsBeforeOnline).map(({ args }) => args[1])).toEqual(["show"]);
+    } finally {
+      fs.rmSync(nodeRuntimePath(hubDir), { force: true });
+      await mockHub.stop(true);
+    }
 
     // Uninstall removes unit and node-service.json cleanly
     const uninstalled = await mgr.controlService("uninstall");
