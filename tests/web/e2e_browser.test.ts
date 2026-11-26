@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { approveDesign, createRequirement, initProject, propose } from "../../src/core/engine.ts";
+import { approveDesign, cancelRequirement, createRequirement, initProject, propose } from "../../src/core/engine.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
-import { registerHubProject } from "../../src/hub/registry.ts";
+import { readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
@@ -395,6 +395,146 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
     }
   }, 90_000);
 
+  test("Hub project pin feedback and active requirement empty states", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-project-nav-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const activeRoot = initGitRepo();
+    const historyRoot = initGitRepo();
+    const emptyRoot = initGitRepo();
+    await initProject(activeRoot, { name: "Alpha", privacyMode: "local" });
+    await initProject(historyRoot, { name: "History", privacyMode: "local" });
+    await initProject(emptyRoot, { name: "Zulu", privacyMode: "local" });
+    const activeReq = await createRequirement(activeRoot, { goal: "Active goal" });
+    const historyReq = await createRequirement(historyRoot, { goal: "Historical goal" });
+    await cancelRequirement(historyRoot, historyReq.state.id, { reason: "Kept for reference" });
+    const active = registerHubProject(activeRoot).project;
+    const history = registerHubProject(historyRoot, { activate: false }).project;
+    const empty = registerHubProject(emptyRoot, { activate: false }).project;
+
+    const server = await startWorkbenchServer({ root: activeRoot, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+    const page = await browser!.newPage();
+    type ProjectNavTestWindow = Window & {
+      __wbReleasePin?: (ok: boolean) => void;
+      __wbReleaseRequirements?: () => void;
+    };
+    const pin = `[data-testid="pin-project-${history.id}"]`;
+    const project = (id: string) => `[data-testid="hub-project-${id}"]`;
+    const activeTab = '[data-action="set-scope"][data-value="active"]';
+    const allTab = '[data-action="set-scope"][data-value="all"]';
+    const emptyState = '[data-testid="empty-state"]';
+    const newButton = '[data-testid="empty-new-req-btn"]';
+    const viewAll = '[data-testid="empty-view-all-req-btn"]';
+    const workspace = '[data-testid="workspace-detail"]';
+    const order = () => page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="hub-project-list"] [data-action="switch-project"]'))
+        .map((el) => el.getAttribute("data-id")),
+    );
+    const star = () => page.evaluate((selector: string) => {
+      const style = getComputedStyle(document.querySelector(`${selector} svg`)!);
+      return { fill: style.fill, stroke: style.stroke };
+    }, pin);
+    const releasePin = async (ok: boolean) => {
+      await page.waitForFunction(() => Boolean((window as ProjectNavTestWindow).__wbReleasePin));
+      await page.evaluate((saved: boolean) => {
+        const w = window as ProjectNavTestWindow;
+        const release = w.__wbReleasePin!;
+        delete w.__wbReleasePin;
+        release(saved);
+      }, ok);
+    };
+
+    try {
+      await page.evaluateOnNewDocument((historyId: string) => {
+        const w = window as ProjectNavTestWindow;
+        const realFetch = w.fetch.bind(w);
+        w.fetch = async (input, init) => {
+          const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+          if (url.pathname === "/api/hub/projects/meta") {
+            const ok = await new Promise<boolean>((resolve) => { w.__wbReleasePin = resolve; });
+            if (!ok) return Response.json({ error: "Pin write failed" }, { status: 500 });
+          }
+          if (
+            url.pathname === "/api/requirements" &&
+            url.searchParams.get("project") === historyId &&
+            url.searchParams.get("scope") === "all" &&
+            !w.__wbReleaseRequirements
+          ) {
+            await new Promise<void>((resolve) => { w.__wbReleaseRequirements = resolve; });
+          }
+          return realFetch(input, init);
+        };
+      }, history.id);
+      await page.setViewport({ width: 1280, height: 800 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector(workspace);
+      await page.waitForSelector(`[data-testid="req-row-${activeReq.state.id}"]`);
+      await selectUiOption(page, '[data-testid="project-group-select"]', "none");
+      await selectUiOption(page, '[data-testid="project-sort-select"]', "name");
+      const initialOrder = [active.id, history.id, empty.id];
+      expect(await order()).toEqual(initialOrder);
+      const initialStar = await star();
+      expect(initialStar.fill).toBe("none");
+
+      await clickReady(page, pin);
+      await page.waitForSelector(`${pin}[aria-busy="true"][aria-pressed="true"]`);
+      const filledStar = await star();
+      expect(filledStar.fill).toBe(filledStar.stroke);
+      expect(filledStar.stroke).not.toBe(initialStar.stroke);
+      expect(await order()).toEqual(initialOrder);
+      await page.click(pin); // A second press while saving must not switch to the project row.
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.classList.contains("active"), project(active.id))).toBe(true);
+      await releasePin(false);
+      await page.waitForSelector(`${pin}:not([aria-busy])[aria-pressed="false"]`);
+      await page.waitForFunction(() => Boolean(document.querySelector('[data-slot="toast-title"]')?.textContent?.includes("置顶失败")));
+      expect(await star()).toEqual(initialStar);
+      expect(await order()).toEqual(initialOrder);
+
+      await clickReady(page, pin);
+      await page.waitForSelector(`${pin}[aria-busy="true"][aria-pressed="true"]`);
+      await releasePin(true);
+      await page.waitForSelector(`${pin}:not([aria-busy])[aria-pressed="true"]`);
+      expect(await order()).toEqual([history.id, active.id, empty.id]);
+      expect(readHubConfig().projects.find((item) => item.id === history.id)?.pinned).toBe(true);
+      await clickReady(page, pin);
+      await page.waitForSelector(`${pin}[aria-busy="true"][aria-pressed="false"]`);
+      expect(await star()).toEqual(initialStar);
+      expect(await order()).toEqual([history.id, active.id, empty.id]);
+      await releasePin(true);
+      await page.waitForSelector(`${pin}:not([aria-busy])[aria-pressed="false"]`);
+      expect(await order()).toEqual(initialOrder);
+
+      await clickReady(page, project(history.id));
+      await page.waitForFunction(() => Boolean((window as ProjectNavTestWindow).__wbReleaseRequirements));
+      await page.waitForSelector('.main-stage [role="status"]');
+      expect(await page.evaluate((selector: string) => document.querySelector(selector), emptyState)).toBeNull();
+      await page.evaluate(() => (window as ProjectNavTestWindow).__wbReleaseRequirements!());
+      await page.waitForSelector(`${activeTab}[aria-checked="true"]`);
+      await page.waitForSelector(viewAll);
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.textContent, emptyState)).toContain("暂无活跃需求");
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.textContent?.trim(), newButton)).toBe("新建需求");
+      expect(await page.evaluate((selector: string) => document.querySelector(selector), workspace)).toBeNull();
+      await clickReady(page, newButton);
+      await page.waitForSelector('[data-testid="new-req-goal"]');
+      await page.keyboard.press("Escape");
+
+      await clickReady(page, viewAll);
+      await page.waitForSelector(`${allTab}[aria-checked="true"]`);
+      await clickReady(page, `[data-testid="req-row-${historyReq.state.id}"]`);
+      await page.waitForSelector(workspace);
+      await clickReady(page, activeTab);
+      await clickReady(page, project(empty.id));
+      await page.waitForSelector(newButton);
+      await page.waitForSelector(`${activeTab}[aria-checked="true"]`);
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.textContent?.trim(), newButton)).toBe("新建第一条需求");
+      expect(await page.evaluate((selector: string) => document.querySelector(selector), viewAll)).toBeNull();
+    } finally {
+      await page.close();
+    }
+  }, 20_000);
+
   test("WB-11 & WB-12: three-column Hub UI, multi-project switching, routing center, co-design Ask/Refine, and live console review", async () => {
     const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-hub-"));
     tempDirs.push(hubDir);
@@ -519,7 +659,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       // 1b. Sidebar project sorting, grouping, pin, and custom category persistence
       await clickReady(page, `[data-testid="pin-project-${alphaId}"]`);
       await page.waitForFunction(
-        (id: unknown) => Boolean(document.querySelector(`[data-testid="pin-project-${String(id)}"]`)?.classList.contains("pinned")),
+        (id: unknown) => Boolean(document.querySelector(`[data-testid="pin-project-${String(id)}"][aria-pressed="true"]:not([aria-busy])`)),
         { timeout: 5000 },
         alphaId,
       );

@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, type ErrorInfo, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, type ErrorInfo, type ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { AnchoredToastProvider, ToastProvider } from "./components/ui/toast.tsx";
@@ -159,7 +159,7 @@ function WorkbenchShell() {
   const showSidebar = Boolean(hub?.hubMode || project?.initialized);
   const showDrawer = Boolean(selectedId) && drawerOpen && !remoteOffline;
 
-  const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", projectReady);
+  const { data: allReqList, isError: reqListError } = useRequirementsQuery(activeProjectId, "all", projectReady);
   const { isError: selectedReqIsError, error: selectedReqError } = useRequirementQuery(
     activeProjectId,
     projectReady ? selectedId : null,
@@ -171,33 +171,30 @@ function WorkbenchShell() {
     useUiStore.getState().setSelectedId(null);
   }, [projectReady, selectedId, selectedReqNotFound]);
 
-  useEffect(() => {
-    if (!projectReady || selectedId !== null || !allReqList) return;
+  const defaultId = useMemo(() => {
+    if (!projectReady || selectedId !== null || !allReqList) return null;
     const allItems = allReqList.items.filter(
       (item) =>
         !isRequirementNotFoundError(
           queryClient.getQueryState(queryKeys.requirement(activeProjectId, item.id))?.error,
         ),
     );
-    if (allItems.length === 0) return;
+    if (allItems.length === 0) return null;
     const runsList = Object.values(activeRuns);
-    const activeItems = filterRequirementsByScope(allItems, "active");
     const scopedItems =
       scope === "decisions"
-        ? partitionPendingDecisions(activeItems, runsList, activeProjectId).humanPending
-        : scope === "sandboxes"
-          ? activeItems
-          : filterRequirementsByScope(allItems, scope);
-    const candidates = scopedItems.length > 0 ? scopedItems : allItems;
-    const defaultId = pickDefaultRequirementId(candidates, runsList, activeProjectId);
-    if (defaultId) {
-      const ui = useUiStore.getState();
-      if (scopedItems.length === 0 && scope === "active") {
-        ui.setScope("all");
-      }
+        ? partitionPendingDecisions(filterRequirementsByScope(allItems, "active"), runsList, activeProjectId).humanPending
+        : filterRequirementsByScope(allItems, scope === "sandboxes" ? "active" : scope);
+    const candidates = scope === "active" || scopedItems.length > 0 ? scopedItems : allItems;
+    return pickDefaultRequirementId(candidates, runsList, activeProjectId);
+  }, [projectReady, selectedId, scope, allReqList, activeRuns, activeProjectId]);
+
+  useEffect(() => {
+    const ui = useUiStore.getState();
+    if (defaultId && ui.activeProjectId === activeProjectId && ui.scope === scope && ui.selectedId === null) {
       ui.setSelectedId(defaultId);
     }
-  }, [projectReady, selectedId, scope, allReqList, activeRuns, activeProjectId]);
+  }, [activeProjectId, defaultId, scope]);
 
   return (
     <>
@@ -223,8 +220,12 @@ function WorkbenchShell() {
                   <InitCard />
                 ) : selectedId ? (
                   <WorkspaceView />
+                ) : !allReqList || defaultId ? (
+                  <p className="muted" role={reqListError && !allReqList ? "alert" : "status"}>
+                    {t(language, reqListError && !allReqList ? "home.loadFailed" : "app.loading")}
+                  </p>
                 ) : (
-                  <EmptyRequirementsCard />
+                  <EmptyRequirementsCard hasHistory={allReqList.items.length > 0} />
                 )}
               </div>
             </div>

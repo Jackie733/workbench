@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Check, ChevronDown, ChevronRight, Folder, Plus, Settings, Star, X } from "lucide-react";
-import { api, type HubProjectSummary } from "../api.ts";
+import { api, type HubProjectSummary, type HubStateResponse } from "../api.ts";
 import { t } from "../i18n.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
@@ -65,6 +65,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
 
   const [editingCatId, setEditingCatId] = useState<string | null>(null);
   const [catDraft, setCatDraft] = useState("");
+  const [pendingPins, setPendingPins] = useState(() => new Map<string, boolean>());
   const [nodeUpdateTarget, setNodeUpdateTarget] = useState<NodeUpdateTarget | null>(null);
   const [nodeUpdateOpen, setNodeUpdateOpen] = useState(false);
   const resizerRef = useRef<HTMLDivElement | null>(null);
@@ -205,8 +206,29 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
 
   const updateProjectMeta = useMutation({
     mutationFn: api.updateHubProjectMeta,
-    onError: (error) => useUiStore.getState().showToastError(error),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.hubState }),
+    onSuccess: async (_, { projectId, pinned }) => {
+      if (pinned === undefined) return;
+      await queryClient.cancelQueries({ queryKey: queryKeys.hubState });
+      queryClient.setQueryData<HubStateResponse>(queryKeys.hubState, (hub) => hub && ({
+        ...hub,
+        projects: hub.projects.map((item) => item.id === projectId ? { ...item, pinned } : item),
+      }));
+    },
+    onError: (error, { pinned }) => {
+      const ui = useUiStore.getState();
+      if (pinned === undefined) ui.showToastError(error);
+      else ui.showToastKey(pinned ? "sidebar.pinFailed" : "sidebar.unpinFailed", undefined, true);
+    },
+    onSettled: (_, __, { projectId, pinned }) => {
+      if (pinned !== undefined) {
+        setPendingPins((previous) => {
+          const next = new Map(previous);
+          next.delete(projectId);
+          return next;
+        });
+      }
+      void queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+    },
   });
 
   const targetNode = nodeUpdateTarget ? nodes.find((node) => node.nodeId === nodeUpdateTarget.nodeId) : undefined;
@@ -313,6 +335,8 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
     const isRemote = Boolean(p.nodeId && p.nodeId !== "local");
     const offline = isRemote && p.nodeOnline === false;
     const editingCat = editingCatId === p.id;
+    const pendingPin = pendingPins.get(p.id);
+    const pinned = pendingPin ?? Boolean(p.pinned);
     return (
       <div key={p.id}>
         <div
@@ -358,13 +382,18 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
               type="button"
               size="icon-xs"
               variant="ghost"
-              className={`sb-meta-btn ${p.pinned ? "pinned" : ""}`}
+              className="sb-meta-btn sb-pin-btn aria-busy:cursor-progress"
               data-testid={`pin-project-${p.id}`}
-              title={p.pinned ? t(language, "sidebar.unpin") : t(language, "sidebar.pin")}
-              aria-label={p.pinned ? t(language, "sidebar.unpin") : t(language, "sidebar.pin")}
+              title={t(language, pinned ? "sidebar.unpin" : "sidebar.pin")}
+              aria-label={t(language, "sidebar.pin")}
+              aria-pressed={pinned}
+              aria-busy={pendingPin !== undefined || undefined}
+              aria-disabled={pendingPin !== undefined || undefined}
               onClick={(e) => {
                 e.stopPropagation();
-                updateProjectMeta.mutate({ projectId: p.id, pinned: !p.pinned });
+                if (pendingPin !== undefined) return;
+                setPendingPins((previous) => new Map(previous).set(p.id, !pinned));
+                updateProjectMeta.mutate({ projectId: p.id, pinned: !pinned });
               }}
             >
               <Icon icon={Star} size={14} />

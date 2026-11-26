@@ -21,6 +21,7 @@ import { api, type HubProjectSummary, type ProjectSandboxesResponse } from "../a
 import { t, translateRef } from "../i18n.ts";
 import { copyTextToClipboard } from "../lib/clipboard.ts";
 import {
+  backHome,
   initProjectSubmit,
   openAddProjectModal,
   openRequirement,
@@ -150,25 +151,39 @@ export function EmptyHubCard() {
   );
 }
 
-export function EmptyRequirementsCard() {
+export function EmptyRequirementsCard({ hasHistory }: { hasHistory: boolean }) {
   const language = useUiStore((s) => s.language);
   const setModal = useUiStore((s) => s.setModal);
+  const setScope = useUiStore((s) => s.setScope);
   return (
     <Card className="mx-auto my-6 max-w-2xl" data-testid="empty-state">
       <Empty className="py-10 md:py-12">
         <EmptyHeader>
-          <EmptyTitle>{t(language, "home.emptyTitle")}</EmptyTitle>
-          <EmptyDescription>{t(language, "home.emptyDesc")}</EmptyDescription>
+          <EmptyTitle>{t(language, hasHistory ? "home.emptyActive" : "home.emptyTitle")}</EmptyTitle>
+          <EmptyDescription>{t(language, hasHistory ? "home.emptyActiveDesc" : "home.emptyDesc")}</EmptyDescription>
         </EmptyHeader>
-        <EmptyContent>
+        <EmptyContent className="flex-row flex-wrap justify-center gap-2">
           <Button
             type="button"
             data-action="open-new-req"
             data-testid="empty-new-req-btn"
             onClick={() => setModal({ kind: "new_req", goal: "" })}
           >
-            <Icon icon={Plus} size={14} /> {t(language, "home.emptyNew")}
+            <Icon icon={Plus} size={14} /> {t(language, hasHistory ? "home.newRequirement" : "home.emptyNew")}
           </Button>
+          {hasHistory && (
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="empty-view-all-req-btn"
+              onClick={() => {
+                setScope("all");
+                backHome();
+              }}
+            >
+              {t(language, "home.viewAll")}
+            </Button>
+          )}
         </EmptyContent>
       </Empty>
     </Card>
@@ -293,7 +308,7 @@ export function HomeView() {
   const prevProjectRef = useRef(activeProjectId);
 
   const { data: project } = useProjectQuery(activeProjectId);
-  const { data: allReqList } = useRequirementsQuery(activeProjectId, "all", Boolean(project?.initialized));
+  const { data: allReqList, isError: reqListError } = useRequirementsQuery(activeProjectId, "all", Boolean(project?.initialized));
   const { data: sandboxesData } = useProjectSandboxesQuery(activeProjectId, Boolean(project?.initialized));
 
   const allBaseItems = useMemo(() => allReqList?.items ?? [], [allReqList]);
@@ -411,9 +426,11 @@ export function HomeView() {
                         ? t(language, "home.scope.done")
                         : t(language, "home.scope.all")}
                 </span>
-                <span className="sb-scope-count" data-testid={`scope-count-${sc}`}>
-                  {scopeCounts[sc]}
-                </span>
+                {allReqList && (
+                  <span className="sb-scope-count" data-testid={`scope-count-${sc}`}>
+                    {scopeCounts[sc]}
+                  </span>
+                )}
                 {sc === "decisions" && decisionCnt > 0 && (
                   <span className="sb-scope-alert-dot" data-testid="scope-decisions-alert" aria-hidden="true" />
                 )}
@@ -472,7 +489,11 @@ export function HomeView() {
         }}
       >
         <div id="home-body">
-          {listSource.length === 0 ? (
+          {!allReqList ? (
+            <p className="muted xs" role={reqListError ? "alert" : "status"}>
+              {t(language, reqListError ? "home.loadFailed" : "app.loading")}
+            </p>
+          ) : listSource.length === 0 ? (
             <Card className="sb-empty-box text-center p-3.5" data-testid="sb-empty-state">
               <p className="muted xs" style={{ margin: "0 0 10px" }}>
                 {allBaseItems.length === 0
