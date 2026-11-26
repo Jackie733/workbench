@@ -2701,7 +2701,7 @@ export function WorkspaceView() {
           variant="underline"
           size="lg"
           data-testid="workspace-tabs"
-          className="w-full justify-start overflow-x-auto max-sm:flex-wrap"
+          className="w-full justify-start overflow-x-auto overflow-y-hidden max-sm:flex-wrap"
         >
           <TabsTab className="grow-0" value="spec" data-testid="tab-spec">
             <Icon icon={FileText} size={14} /> {t(language, "ws.tab.spec")}
