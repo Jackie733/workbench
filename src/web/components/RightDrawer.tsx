@@ -31,6 +31,7 @@ import { ConsoleOutput } from "./ConsoleOutput.tsx";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card } from "./ui/card.tsx";
@@ -407,17 +408,17 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           <MarkdownView markdown={item.message} className="md-body xs" />
                           {item.actor === "agent" && item.mode === "ask" && !isReadonlyStage && (
                             <div style={{ marginTop: 6 }}>
-                              <Button
+                              <AsyncButton
                                 size="xs"
                                 type="button"
                                 variant="ghost"
                                 data-testid="adopt-discussion-btn"
                                 disabled={Boolean(activeRun)}
-                                onClick={() => void adoptDiscussion(d.state.id, item.id, item.message)}
+                                onAction={() => adoptDiscussion(d.state.id, item.id, item.message)}
                               >
                                 <Icon icon={Check} size={14} />{" "}
                                 {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
-                              </Button>
+                              </AsyncButton>
                             </div>
                           )}
                         </div>
@@ -480,7 +481,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       </div>
                     )}
                     <div className="drawer-composer-actions">
-                      <Button
+                      <AsyncButton
                         size="xs"
                         type="button"
                         variant="outline"
@@ -488,21 +489,21 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         data-action="run-ask"
                         data-testid="run-ask-btn"
                         disabled={busy || Boolean(activeRun)}
-                        onClick={() => void runAskFromDrawer(d.state.id)}
+                        onAction={() => runAskFromDrawer(d.state.id)}
                       >
                         <Icon icon={Lightbulb} size={14} /> {t(language, "drawer.ask")}
-                      </Button>
-                      <Button
+                      </AsyncButton>
+                      <AsyncButton
                         size="xs"
                         type="button"
                         className="flex-1"
                         data-action="run-refine"
                         data-testid="run-refine-btn"
                         disabled={busy || Boolean(activeRun) || isReadonlyStage}
-                        onClick={() => void runRefineFromDrawer(d.state.id)}
+                        onAction={() => runRefineFromDrawer(d.state.id)}
                       >
                         <Icon icon={Pencil} size={14} /> {t(language, isImplOrAccept ? "drawer.refineCode" : "drawer.refine")}
-                      </Button>
+                      </AsyncButton>
                     </div>
                   </div>
                 </div>
@@ -589,25 +590,27 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         </div>
                         <div className="console-status-actions">
                           {currentRun.status === "running" ? (
-                            <Button
+                            <AsyncButton
+                              key={`cancel-run:${currentRun.id}`}
                               size="xs"
                               type="button"
                               variant="destructive"
                               data-action="cancel-run"
                               data-testid="cancel-run-btn"
-                              onClick={() => void cancelRun(d.state.id, currentRun.id)}
+                              onAction={() => cancelRun(d.state.id, currentRun.id)}
                             >
                               <Icon icon={Square} size={14} /> {t(language, "drawer.stop")}
-                            </Button>
+                            </AsyncButton>
                           ) : currentRun.status === "failed" || currentRun.rateLimited ? (
-                            <Button
+                            <AsyncButton
+                              key={`retry-fallback:${currentRun.id}`}
                               size="xs"
                               type="button"
                               data-testid="retry-fallback-btn"
-                              onClick={() => void triggerActiveRun(d.state.id, currentRun.action, { useFallback: true })}
+                              onAction={() => triggerActiveRun(d.state.id, currentRun.action, { useFallback: true })}
                             >
                               <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.retryFallback")}
-                            </Button>
+                            </AsyncButton>
                           ) : null}
                         </div>
                       </div>

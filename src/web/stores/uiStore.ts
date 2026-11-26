@@ -114,6 +114,11 @@ export interface UiStoreState {
   drawerTab: DrawerTab;
   moreMenuOpen: boolean;
   modal: ModalState;
+  /**
+   * 弹窗实例序号：每次从关闭态重新打开弹窗或切换弹窗类型时递增。
+   * 异步动作在发起时记录序号，只有弹窗实例未被替换时才允许关闭，避免旧请求关掉新弹窗。
+   */
+  modalInstanceId: number;
 
   toggleTheme: () => void;
   setLanguage: (language: UiLanguage) => void;
@@ -150,6 +155,8 @@ export interface UiStoreState {
   setDrawerTab: (tab: DrawerTab) => void;
   setMoreMenuOpen: (open: boolean) => void;
   setModal: (modal: ModalState | ((prev: ModalState) => ModalState)) => void;
+  /** 关闭弹窗；传入实例序号时仅在弹窗未被替换的情况下关闭。 */
+  closeModal: (instanceId?: number) => void;
   showToast: (message: string, isError?: boolean) => void;
   showToastKey: (key: MessageKey, params?: MessageParams, isError?: boolean) => void;
   showToastError: (err: unknown) => void;
@@ -195,6 +202,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   drawerTab: "discuss",
   moreMenuOpen: false,
   modal: null,
+  modalInstanceId: 0,
 
   toggleTheme: () =>
     set((s) => {
@@ -269,9 +277,20 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setDrawerTab: (drawerTab) => set({ drawerTab }),
   setMoreMenuOpen: (moreMenuOpen) => set({ moreMenuOpen }),
   setModal: (modalOrUpdater) =>
-    set((s) => ({
-      modal: typeof modalOrUpdater === "function" ? modalOrUpdater(s.modal) : modalOrUpdater,
-    })),
+    set((s) => {
+      const modal = typeof modalOrUpdater === "function" ? modalOrUpdater(s.modal) : modalOrUpdater;
+      // 同一弹窗内的字段编辑保持实例不变；重新打开或切换类型才视为新实例。
+      const opensNewInstance = modal !== null && (s.modal === null || s.modal.kind !== modal.kind);
+      return {
+        modal,
+        ...(opensNewInstance ? { modalInstanceId: s.modalInstanceId + 1 } : {}),
+      };
+    }),
+  closeModal: (instanceId) =>
+    set((s) => {
+      if (instanceId !== undefined && instanceId !== s.modalInstanceId) return {};
+      return { modal: null, modalInstanceId: s.modalInstanceId + 1 };
+    }),
   showToast: (message, isError = false) => {
     toastManager.add({
       title: message,

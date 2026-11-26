@@ -114,6 +114,7 @@ import {
 } from "./Icon.tsx";
 import { LiveTimer, MarkdownView, ModalShell, RunnerSelect } from "./Primitives.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert.tsx";
+import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card } from "./ui/card.tsx";
@@ -466,14 +467,14 @@ function SpecDesignTab({
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {s.stage !== "done" && s.stage !== "cancelled" && review.verdict !== "pass" && (
                 <>
-                  <Button
+                  <AsyncButton
                     size="xs"
                     variant={isReviewCurrent ? "default" : "outline"}
                     type="button"
                     data-testid="review-fix-btn"
                     disabled={busy || runLocked}
-                    onClick={() =>
-                      void dispatchFixFromReview(d, {
+                    onAction={() =>
+                      dispatchFixFromReview(d, {
                         selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
                       })
                     }
@@ -484,44 +485,44 @@ function SpecDesignTab({
                         ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
                         : t(language, "core.action.fixPerReview")
                       : t(language, "review.fixStale")}
-                  </Button>
-                  <Button
+                  </AsyncButton>
+                  <AsyncButton
                     size="xs"
                     variant="outline"
                     type="button"
                     data-testid="review-reject-btn"
                     disabled={busy || runLocked}
-                    onClick={() => void handleBannerAction(d, "request_changes")}
+                    onAction={() => handleBannerAction(d, "request_changes")}
                   >
                     <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
-                  </Button>
+                  </AsyncButton>
                   {isReviewCurrent && validity.acceptanceGate.ok && (
-                    <Button
+                    <AsyncButton
                       size="xs"
                       variant="outline"
                       type="button"
                       data-testid="review-override-accept-btn"
                       disabled={busy || runLocked}
-                      onClick={() => void handleBannerAction(d, "accept")}
+                      onAction={() => handleBannerAction(d, "accept")}
                     >
                       <Icon icon={Check} size={14} />{" "}
                       {review.verdict === "block"
                         ? t(language, "core.action.ignoreBlockAccept")
                         : t(language, "core.action.acceptRisk")}
-                    </Button>
+                    </AsyncButton>
                   )}
                 </>
               )}
-              <Button
+              <AsyncButton
                 size="xs"
                 variant={!isReviewCurrent ? "default" : "outline"}
                 type="button"
                 data-testid="review-rerun-btn"
                 disabled={busy || runLocked}
-                onClick={() => void triggerActiveRun(s.id, "review")}
+                onAction={() => triggerActiveRun(s.id, "review")}
               >
                 <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
-              </Button>
+              </AsyncButton>
               <Button
                 size="xs"
                 variant="outline"
@@ -609,15 +610,15 @@ function SpecDesignTab({
               >
                 <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </Button>
-              <Button
+              <AsyncButton
                 size="xs"
                 type="button"
                 data-testid="save-spec-btn"
                 disabled={busy || runLocked}
-                onClick={() => void saveSpec()}
+                onAction={saveSpec}
               >
                 <Icon icon={Save} size={14} /> {t(language, "spec.save")}
-              </Button>
+              </AsyncButton>
             </div>
           ) : (
             s.stage !== "done" &&
@@ -863,13 +864,14 @@ function SpecDesignTab({
                     <Icon icon={MessageSquare} size={14} />
                   </Button>
                   {item.criterion.command && s.stage !== "done" && s.stage !== "cancelled" && (
-                    <Button
+                    <AsyncButton
                       size="xs"
                       variant="outline"
                       type="button"
+                      data-testid={`run-criterion-btn-${item.criterion.id}`}
                       disabled={busy || runLocked}
-                      onClick={() =>
-                        void executeVerify(s.id, {
+                      onAction={() =>
+                        executeVerify(s.id, {
                           command: item.criterion.command!,
                           criterionIds: [item.criterion.id],
                         }).then((res) => {
@@ -884,7 +886,7 @@ function SpecDesignTab({
                       }
                     >
                       <Icon icon={Play} size={14} /> {t(language, "spec.run")}
-                    </Button>
+                    </AsyncButton>
                   )}
                 </div>
               </div>
@@ -944,15 +946,15 @@ function SpecDesignTab({
                 >
                   <Icon icon={X} size={14} /> {t(language, "common.cancel")}
                 </Button>
-                <Button
+                <AsyncButton
                   size="xs"
                   type="button"
                   data-testid="save-design-btn"
                   disabled={busy || runLocked}
-                  onClick={() => void saveDesign()}
+                  onAction={saveDesign}
                 >
                   <Icon icon={Save} size={14} /> {t(language, "spec.saveDesign")}
-                </Button>
+                </AsyncButton>
               </>
             ) : (
               s.stage !== "done" &&
@@ -1127,17 +1129,17 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
           )}
         </div>
         {canCapture && (
-          <Button
+          <AsyncButton
             size="xs"
             variant="outline"
             type="button"
             data-testid="screenshot-recapture"
             disabled={capturing || runLocked}
-            onClick={() => void recapture()}
+            onAction={recapture}
           >
             <Icon icon={RefreshCw} size={14} />{" "}
             {capturing ? t(language, "shot.capturing") : t(language, "shot.captureAgain")}
-          </Button>
+          </AsyncButton>
         )}
       </div>
 
@@ -1784,14 +1786,14 @@ function ChangesVerifyTab({
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {revValid.effectiveState === "current" && review.verdict !== "pass" && (
-                <Button
+                <AsyncButton
                   size="xs"
                   type="button"
                   disabled={busy || runLocked}
-                  onClick={() => void dispatchFixFromReview(d)}
+                  onAction={() => dispatchFixFromReview(d)}
                 >
                   <Icon icon={Wrench} size={14} /> {t(language, "core.action.fixPerReview")}
-                </Button>
+                </AsyncButton>
               )}
               <Button
                 size="xs"
@@ -1811,14 +1813,15 @@ function ChangesVerifyTab({
         <div className="card-head">
           <h3>{t(language, "changes.evidenceTitle")}</h3>
           {s.criteria.some((c) => c.command) && s.stage !== "done" && s.stage !== "cancelled" && (
-            <Button
+            <AsyncButton
               size="xs"
               type="button"
+              data-testid="run-all-verifications-btn"
               disabled={busy || runLocked}
-              onClick={() => void handleBannerAction(d, "run_all_verifications")}
+              onAction={() => handleBannerAction(d, "run_all_verifications")}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runAll")}
-            </Button>
+            </AsyncButton>
           )}
         </div>
 
@@ -1861,13 +1864,14 @@ function ChangesVerifyTab({
                       )}
                     </Button>
                     {!isTerminal && (
-                      <Button
+                      <AsyncButton
                         size="xs"
                         variant="outline"
                         type="button"
+                        data-testid={`evidence-rerun-btn-${latest.record.id}`}
                         disabled={busy || runLocked}
-                        onClick={() =>
-                          void executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
+                        onAction={() =>
+                          executeVerify(s.id, { command, criterionIds: latest.record.criterionIds }).then((res) => {
                             if (res) {
                               showToastKey(
                                 res.runs[0]?.passed ? "changes.verifyPassed" : "changes.verifyFailedShort",
@@ -1879,7 +1883,7 @@ function ChangesVerifyTab({
                         }
                       >
                         <Icon icon={RefreshCw} size={14} /> {t(language, "changes.rerun")}
-                      </Button>
+                      </AsyncButton>
                     )}
                   </div>
                 </div>
@@ -1910,15 +1914,15 @@ function ChangesVerifyTab({
               value={manualCriteria}
               onChange={(e) => setManualCriteria(e.target.value)}
             />
-            <Button
+            <AsyncButton
               variant="outline"
               type="button"
               data-testid="manual-verify-btn"
               disabled={busy || runLocked}
-              onClick={() => void runManualVerify()}
+              onAction={runManualVerify}
             >
               <Icon icon={Play} size={14} /> {t(language, "changes.runVerify")}
-            </Button>
+            </AsyncButton>
           </div>
         )}
       </Card>
@@ -2478,24 +2482,24 @@ export function WorkspaceView() {
                 </div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {drift.canAutoSync && (
-                    <Button
+                    <AsyncButton
                       size="xs"
                       type="button"
                       data-testid="sync-sandbox-base-btn"
                       disabled={busy || runningThis}
-                      onClick={() => void syncSandboxBaseAction(s.id)}
+                      onAction={() => syncSandboxBaseAction(s.id)}
                     >
                       <Icon icon={RefreshCw} size={14} />{" "}
                       {t(language, isAutoMergeable ? "ws.sandboxDrift.syncAutoMerge" : "ws.sandboxDrift.sync")}
-                    </Button>
+                    </AsyncButton>
                   )}
                   {hasTrueConflict && canAgentResolveNow && (
-                    <Button
+                    <AsyncButton
                       size="xs"
                       type="button"
                       data-testid="agent-sync-sandbox-btn"
                       disabled={busy || runningThis}
-                      onClick={() => void dispatchSyncBaseWithAgent(d, drift)}
+                      onAction={() => dispatchSyncBaseWithAgent(d, drift)}
                     >
                       <Icon icon={Wrench} size={14} />{" "}
                       {t(
@@ -2504,7 +2508,7 @@ export function WorkspaceView() {
                           ? "ws.sandboxDrift.approveAndSyncWithAgent"
                           : "ws.sandboxDrift.syncWithAgent",
                       )}
-                    </Button>
+                    </AsyncButton>
                   )}
                 </div>
               </AlertDescription>
@@ -2554,13 +2558,13 @@ export function WorkspaceView() {
             <div className="banner-runner-row">
               <span className="xs muted">{t(language, "ws.modelDispatch")}</span>
               <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" tier={s.tier} />
-              <Button
+              <AsyncButton
                 size="sm"
                 variant="outline"
                 type="button"
                 data-testid="run-selected-model-btn"
                 disabled={busy || runningThis}
-                onClick={() => void triggerActiveRun(s.id, defaultAct)}
+                onAction={() => triggerActiveRun(s.id, defaultAct)}
               >
                 {runningThis ? (
                   <><Icon icon={Loader2} size={14} className="spin" /> {t(language, "ws.running")}</>
@@ -2569,29 +2573,30 @@ export function WorkspaceView() {
                     <Icon icon={Zap} size={14} /> {t(language, "ws.runBackground")}
                   </>
                 )}
-              </Button>
+              </AsyncButton>
               {canReview && (
-                <Button
+                <AsyncButton
                   size="sm"
                   variant="outline"
                   type="button"
                   data-testid="run-review-btn"
                   disabled={busy || runningThis}
-                  onClick={() => void triggerActiveRun(s.id, "review")}
+                  onAction={() => triggerActiveRun(s.id, "review")}
                 >
                   <Icon icon={Search} size={14} /> {t(language, "ws.crossReview")}
-                </Button>
+                </AsyncButton>
               )}
             </div>
           )}
         </div>
         <div className="banner-actions">
           {banner.primaryAction && (
-            <Button
+            <AsyncButton
+              key={`${s.id}:${banner.primaryAction.id}`}
               type="button"
               data-testid={`action-${banner.primaryAction.id}`}
               disabled={busy || runningThis}
-              onClick={() => void handleBannerAction(d, banner.primaryAction!.id)}
+              onAction={() => handleBannerAction(d, banner.primaryAction!.id)}
             >
               <Icon icon={BANNER_ACTION_ICONS[banner.primaryAction.id]} size={14} />{" "}
               {translateRef(
@@ -2600,20 +2605,20 @@ export function WorkspaceView() {
                 banner.primaryAction.label,
                 banner.primaryAction.labelParams,
               )}
-            </Button>
+            </AsyncButton>
           )}
           {banner.secondaryActions.map((sec) => (
-            <Button
-              key={sec.id}
+            <AsyncButton
+              key={`${s.id}:${sec.id}`}
               variant="outline"
               type="button"
               data-testid={`action-${sec.id}`}
               disabled={busy || runningThis}
-              onClick={() => void handleBannerAction(d, sec.id)}
+              onAction={() => handleBannerAction(d, sec.id)}
             >
               <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
               {translateRef(language, sec.labelKey, sec.label, sec.labelParams)}
-            </Button>
+            </AsyncButton>
           ))}
           {s.stage === "done" && (deliveryPreview?.canCommit || deliveryPreview?.canCreatePr) && (
             <Button
@@ -2637,24 +2642,24 @@ export function WorkspaceView() {
             </Button>
           )}
           {s.stage === "done" && s.github?.pr && (
-            <Button
+            <AsyncButton
               variant="outline"
               type="button"
               data-testid="sync-pr-btn"
               disabled={busy || runningThis}
-              onClick={() => void syncPrStatus()}
+              onAction={syncPrStatus}
             >
               <Icon icon={RefreshCw} size={14} />{" "}
               {reqData?.sandbox ? t(language, "ws.syncPrCleanup") : t(language, "ws.syncPr")}
-            </Button>
+            </AsyncButton>
           )}
           {reqData?.sandbox && s.stage === "done" && (
-            <Button
+            <AsyncButton
               variant="outline"
               type="button"
               data-testid="apply-sandbox-btn"
               disabled={busy || runningThis}
-              onClick={async () => {
+              onAction={async () => {
                 if (guardRequirementRunLock(s.id)) return;
                 const res = await runBusy(() => api.applySandbox(s.id));
                 if (res) {
@@ -2673,7 +2678,7 @@ export function WorkspaceView() {
             >
               <Icon icon={GitMerge} size={14} />{" "}
               {deliveryPreview?.canCreatePr ? t(language, "ws.applySandboxLocal") : t(language, "ws.applySandbox")}
-            </Button>
+            </AsyncButton>
           )}
         </div>
       </section>

@@ -783,7 +783,9 @@ export async function triggerActiveRun(
       action,
     });
     await queryClient.invalidateQueries({ queryKey: ["requirement"] });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.hubState });
+    // Hub 快照刷新属于请求完成后的后台同步，不应继续占用按钮的局部 loading，
+    // 否则网络或远端状态挂起时，已启动运行的操作按钮会长时间保持不可用。
+    void queryClient.invalidateQueries({ queryKey: queryKeys.hubState }).catch(() => undefined);
   }
 }
 
@@ -1204,6 +1206,7 @@ export async function submitNewRequirement(
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   if (!goal) {
     ui.showToastKey("toast.needGoal", undefined, true);
     return;
@@ -1219,7 +1222,7 @@ export async function submitNewRequirement(
     }),
   );
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
     if (res.githubWarning) {
@@ -1251,6 +1254,7 @@ export async function submitNewRequirement(
 export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent: boolean): Promise<void> {
   const issueRef = issueRefRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   if (!issueRef) {
     ui.showToastKey("toast.needIssueRef", undefined, true);
     return;
@@ -1262,7 +1266,7 @@ export async function submitImportGitHubIssue(issueRefRaw: string, dispatchAgent
     }),
   );
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
@@ -1292,6 +1296,7 @@ export async function submitImportGiteeIssue(opts: {
   dispatchAgent: boolean;
 }): Promise<void> {
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   const issueRef = opts.issueRef?.trim() ?? "";
   if (!opts.issue && !issueRef) {
     ui.showToastKey("gitee.toastNeedRef", undefined, true);
@@ -1304,7 +1309,7 @@ export async function submitImportGiteeIssue(opts: {
     }),
   );
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     ui.setSelectedId(res.detail.state.id);
     ui.setWorkspaceTab("spec");
     await invalidateAllWorkbenchQueries();
@@ -1324,6 +1329,7 @@ export async function submitImportGiteeIssue(opts: {
 export async function submitFeedback(detail: RequirementDetail, feedbackRaw: string, dispatchAgent: boolean): Promise<void> {
   const feedback = feedbackRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   if (!feedback) {
     ui.showToastKey("toast.needFeedback", undefined, true);
     return;
@@ -1337,7 +1343,7 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     }),
   );
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     await invalidateAllWorkbenchQueries();
     if (dispatchAgent) {
       await triggerActiveRun(detail.state.id, targetAction, { message: feedback });
@@ -1355,6 +1361,7 @@ export async function submitAcceptOverride(
 ): Promise<void> {
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   if (verdict === "block" && !reason) {
     ui.showToastKey("toast.acceptOverrideReasonRequired", undefined, true);
     return;
@@ -1368,7 +1375,7 @@ export async function submitAcceptOverride(
     }),
   );
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     await invalidateAllWorkbenchQueries();
     ui.showToastKey("toast.acceptOverrideDone", { id: detail.state.id });
   }
@@ -1382,6 +1389,7 @@ export async function submitLifecycle(
 ): Promise<void> {
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   if (!reason) {
     ui.showToastKey("toast.needReason", undefined, true);
     return;
@@ -1396,7 +1404,7 @@ export async function submitLifecycle(
     });
   });
   if (res) {
-    ui.setModal(null);
+    ui.closeModal(modalInstanceId);
     await invalidateAllWorkbenchQueries();
     ui.showToastKey("toast.lifecycleUpdated");
   }
@@ -1410,6 +1418,7 @@ export async function submitAnnotation(
 ): Promise<void> {
   const msg = messageRaw.trim();
   const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
   const draft = useDraftStore.getState();
   if (!msg) {
     ui.showToastKey("toast.needAnnotation", undefined, true);
@@ -1418,15 +1427,16 @@ export async function submitAnnotation(
   if (mode === "ask") {
     // 触发现有执行器的同需求调度名额，运行期间暂停并保留弹窗输入。
     if (guardRequirementRunLock(reqId)) return;
-    ui.setModal(null);
+    // 先等待调度请求结束再关闭弹窗，确保当前按钮在缓慢响应期间仍可见并展示 loading。
+    await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
+    ui.closeModal(modalInstanceId);
     ui.setDrawerOpen(true);
     ui.setDrawerTab("discuss");
-    await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
   } else {
     const out = await runBusy(() => api.addDiscussion(reqId, { mode: "refine", anchor, message: msg }));
     if (out) {
       draft.addPendingAnnotation({ id: out.entry.id, anchor, message: msg });
-      ui.setModal(null);
+      ui.closeModal(modalInstanceId);
       ui.setDrawerOpen(true);
       ui.setDrawerTab("discuss");
       ui.showToastKey("toast.annotationQueued");

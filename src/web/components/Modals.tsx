@@ -80,6 +80,7 @@ import { Icon } from "./Icon.tsx";
 import { MarkdownView, ModalShell, RunLockNotice } from "./Primitives.tsx";
 import { RoutingSettingsModal } from "./RoutingSettingsModal.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert.tsx";
+import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Checkbox } from "./ui/checkbox.tsx";
@@ -127,37 +128,46 @@ function ObservabilityPricingModal({ onClose }: { onClose: () => void }) {
 
   const pools = Array.from(new Set([...STANDARD_QUOTA_POOLS, ...Object.keys(billingMap)]));
 
-  const handleSave = async () => {
+  const handleSave = () => {
     const pricingOverrides: Record<string, ModelPriceOverride> = {};
     for (const row of priceRows) {
       const k = row.key.trim();
       if (!k) continue;
       pricingOverrides[k] = row.spec;
     }
-    const ok = await runBusy(() =>
+    // 局部 loading 只跟随受 runBusy 互斥保护的请求；后续刷新与提示继续按原顺序异步执行。
+    const request = runBusy(() =>
       api.updateHubPricing({
         traceRetentionDays: Math.max(1, Math.floor(retentionDays || 30)),
         billingOverrides: billingMap,
         pricingOverrides,
       }),
     );
-    if (ok) {
-      await invalidateAllWorkbenchQueries();
-      showToastKey("pricing.saved");
-      onClose();
-    }
+    void request
+      .then(async (ok) => {
+        if (!ok) return;
+        await invalidateAllWorkbenchQueries();
+        showToastKey("pricing.saved");
+        onClose();
+      })
+      .catch((err) => useUiStore.getState().showToastError(err));
+    return request;
   };
 
-  const handlePrune = async () => {
-    const out = await runBusy(() => api.pruneHubRunTraces(Math.max(0, Math.floor(retentionDays || 30))));
-    if (out) {
-      await invalidateAllWorkbenchQueries();
-      showToastKey("pricing.prunedSummary", {
-        deleted: out.deletedFiles,
-        freed: formatBytes(out.freedBytes),
-        projects: out.projectsPruned ?? 1,
-      });
-    }
+  const handlePrune = () => {
+    const request = runBusy(() => api.pruneHubRunTraces(Math.max(0, Math.floor(retentionDays || 30))));
+    void request
+      .then(async (out) => {
+        if (!out) return;
+        await invalidateAllWorkbenchQueries();
+        showToastKey("pricing.prunedSummary", {
+          deleted: out.deletedFiles,
+          freed: formatBytes(out.freedBytes),
+          projects: out.projectsPruned ?? 1,
+        });
+      })
+      .catch((err) => useUiStore.getState().showToastError(err));
+    return request;
   };
 
   return (
@@ -186,16 +196,16 @@ function ObservabilityPricingModal({ onClose }: { onClose: () => void }) {
               value={retentionDays}
               onChange={(e) => setRetentionDays(Number(e.target.value) || 30)}
             />
-            <Button
+            <AsyncButton
               type="button"
               variant="outline"
               size="xs"
               data-testid="prune-traces-now-btn"
               disabled={busy}
-              onClick={() => void handlePrune()}
+              onAction={handlePrune}
             >
               <Icon icon={Trash2} size={14} /> {t(language, "pricing.pruneNow")}
-            </Button>
+            </AsyncButton>
           </div>
         </div>
 
@@ -320,15 +330,15 @@ function ObservabilityPricingModal({ onClose }: { onClose: () => void }) {
         <Button variant="ghost" type="button" onClick={onClose}>
           <Icon icon={X} size={14} /> {t(language, "common.cancel")}
         </Button>
-        <Button
+        <AsyncButton
           variant="default"
           type="button"
           data-testid="save-pricing-btn"
           disabled={busy}
-          onClick={() => void handleSave()}
+          onAction={handleSave}
         >
           <Icon icon={Save} size={14} /> {t(language, "pricing.save")}
-        </Button>
+        </AsyncButton>
       </DialogFooter>
     </ModalShell>
   );
@@ -341,6 +351,8 @@ export function Modals() {
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const selectedId = useUiStore((s) => s.selectedId);
   const setModal = useUiStore((s) => s.setModal);
+  const closeModal = useUiStore((s) => s.closeModal);
+  const modalInstanceId = useUiStore((s) => s.modalInstanceId);
   const showToastKey = useUiStore((s) => s.showToastKey);
   const setActiveProjectId = useUiStore((s) => s.setActiveProjectId);
   const setSelectedId = useUiStore((s) => s.setSelectedId);
@@ -399,6 +411,8 @@ export function Modals() {
   if (!m) return null;
 
   const close = () => setModal(null);
+  // 异步提交完成时只关闭发起请求时的同一弹窗实例，避免旧请求误关用户后来打开的新弹窗。
+  const closeSubmitted = () => closeModal(modalInstanceId);
   const runLocked = runLock !== null;
   const detail = reqData?.detail ?? null;
 
@@ -571,13 +585,13 @@ export function Modals() {
               <Button variant="ghost" type="button" onClick={close}>
                 <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </Button>
-              <Button
+              <AsyncButton
                 variant="outline"
                 type="button"
                 data-testid="save-draft-btn"
                 disabled={busy}
-                onClick={() =>
-                  void submitNewRequirement(
+                onAction={() =>
+                  submitNewRequirement(
                     m.goal,
                     false,
                     isGiteeProject ? false : createIssueChecked,
@@ -587,14 +601,14 @@ export function Modals() {
                 }
               >
                 <Icon icon={Save} size={14} /> {t(language, "newReq.saveDraft")}
-              </Button>
-              <Button
+              </AsyncButton>
+              <AsyncButton
                 variant="default"
                 type="button"
                 data-testid="create-and-dispatch-btn"
                 disabled={busy}
-                onClick={() =>
-                  void submitNewRequirement(
+                onAction={() =>
+                  submitNewRequirement(
                     m.goal,
                     true,
                     isGiteeProject ? false : createIssueChecked,
@@ -604,7 +618,7 @@ export function Modals() {
                 }
               >
                 <Icon icon={Zap} size={14} /> {t(language, "newReq.createDispatch")}
-              </Button>
+              </AsyncButton>
             </DialogFooter>
           </>
         ) : isGiteeProject ? (
@@ -820,13 +834,13 @@ export function Modals() {
               <Button variant="ghost" type="button" onClick={close}>
                 <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </Button>
-              <Button
+              <AsyncButton
                 variant="outline"
                 type="button"
                 data-testid="import-issue-draft-btn"
                 disabled={busy || (!m.selectedGiteeIssue && !(m.issueRef ?? "").trim())}
-                onClick={() =>
-                  void submitImportGiteeIssue({
+                onAction={() =>
+                  submitImportGiteeIssue({
                     issue: m.selectedGiteeIssue,
                     issueRef: m.issueRef,
                     dispatchAgent: false,
@@ -834,14 +848,14 @@ export function Modals() {
                 }
               >
                 <Icon icon={Download} size={14} /> {t(language, "gitee.importDraft")}
-              </Button>
-              <Button
+              </AsyncButton>
+              <AsyncButton
                 variant="default"
                 type="button"
                 data-testid="import-issue-dispatch-btn"
                 disabled={busy || (!m.selectedGiteeIssue && !(m.issueRef ?? "").trim())}
-                onClick={() =>
-                  void submitImportGiteeIssue({
+                onAction={() =>
+                  submitImportGiteeIssue({
                     issue: m.selectedGiteeIssue,
                     issueRef: m.issueRef,
                     dispatchAgent: true,
@@ -849,7 +863,7 @@ export function Modals() {
                 }
               >
                 <Icon icon={Zap} size={14} /> {t(language, "gitee.importDispatch")}
-              </Button>
+              </AsyncButton>
             </DialogFooter>
           </div>
         ) : (
@@ -883,24 +897,24 @@ export function Modals() {
               <Button variant="ghost" type="button" onClick={close}>
                 <Icon icon={X} size={14} /> {t(language, "common.cancel")}
               </Button>
-              <Button
+              <AsyncButton
                 variant="outline"
                 type="button"
                 data-testid="import-issue-draft-btn"
                 disabled={busy}
-                onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", false)}
+                onAction={() => submitImportGitHubIssue(m.issueRef ?? "", false)}
               >
                 <Icon icon={Download} size={14} /> {t(language, "newReq.importDraft")}
-              </Button>
-              <Button
+              </AsyncButton>
+              <AsyncButton
                 variant="default"
                 type="button"
                 data-testid="import-issue-dispatch-btn"
                 disabled={busy}
-                onClick={() => void submitImportGitHubIssue(m.issueRef ?? "", true)}
+                onAction={() => submitImportGitHubIssue(m.issueRef ?? "", true)}
               >
                 <Icon icon={Zap} size={14} /> {t(language, "newReq.importDispatch")}
-              </Button>
+              </AsyncButton>
             </DialogFooter>
           </>
         )}
@@ -948,7 +962,7 @@ export function Modals() {
           ...(selectedNodeId !== "local" ? { nodeId: selectedNodeId } : {}),
         });
         setApiProjectScope(out.project.id);
-        setModal(null);
+        closeSubmitted();
         setActiveProjectId(out.project.id);
         setSelectedId(null);
         setSelectedDiffFile(null);
@@ -1158,15 +1172,15 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="submit-add-project-btn"
             disabled={busy}
-            onClick={() => void submitAddProject()}
+            onAction={submitAddProject}
           >
             <Icon icon={Plus} size={14} /> {t(language, "addProject.submit")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1202,26 +1216,26 @@ export function Modals() {
           />
         </DialogPanel>
         <DialogFooter>
-          <Button variant="ghost" type="button" onClick={close}>
+          <Button variant="ghost" type="button" data-testid="annotate-cancel-btn" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="outline"
             type="button"
             data-testid="annotate-ask-btn"
             disabled={runLocked}
-            onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "ask")}
+            onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "ask") : undefined)}
           >
             <Icon icon={Lightbulb} size={14} /> {t(language, "annotate.ask")}
-          </Button>
-          <Button
+          </AsyncButton>
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="annotate-queue-btn"
-            onClick={() => detail && void submitAnnotation(detail.state.id, m.anchor, m.message, "refine")}
+            onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "refine") : undefined)}
           >
             <Icon icon={Pencil} size={14} /> {t(language, "annotate.queue")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1313,16 +1327,16 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="feedback-submit-btn"
             disabled={busy || runLocked}
-            onClick={() => detail && void submitFeedback(detail, m.feedback, m.dispatchAgent)}
+            onAction={() => (detail ? submitFeedback(detail, m.feedback, m.dispatchAgent) : undefined)}
           >
             <Icon icon={Send} size={14} />{" "}
             {isDesignStage ? t(language, "feedback.submitDesign") : t(language, "feedback.submitFix")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1384,15 +1398,17 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={ArrowLeft} size={14} /> {t(language, "acceptOverride.back")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="confirm-accept-override-btn"
             disabled={busy || runLocked || (isBlock && !m.reason.trim())}
-            onClick={() => detail && void submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks)}
+            onAction={() =>
+              detail ? submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks) : undefined
+            }
           >
             <Icon icon={Check} size={14} /> {t(language, "acceptOverride.confirm")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1468,15 +1484,17 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="lifecycle-confirm-btn"
             disabled={busy || runLocked}
-            onClick={() => detail && void submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval })}
+            onAction={() =>
+              detail ? submitLifecycle(detail, m.action, m.reason, { preserveApproval: keepApproval }) : undefined
+            }
           >
             <Icon icon={Check} size={14} /> {t(language, "common.confirm")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1511,7 +1529,7 @@ export function Modals() {
         ),
       );
       if (res) {
-        setModal(null);
+        closeSubmitted();
         await invalidateAllWorkbenchQueries();
         const num = res.detail.state.github?.issue?.number;
         if (isGiteeLink) {
@@ -1597,12 +1615,12 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="submit-link-issue-btn"
             disabled={busy || runLocked || remoteReady === false}
-            onClick={() => void submitLinkIssue()}
+            onAction={submitLinkIssue}
           >
             <Icon icon={Link2} size={14} />{" "}
             {isGiteeLink
@@ -1610,7 +1628,7 @@ export function Modals() {
               : m.mode === "create"
                 ? t(language, "linkIssue.submitCreate")
                 : t(language, "linkIssue.submitLink")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -1677,7 +1695,7 @@ export function Modals() {
         }),
       );
       if (res) {
-        setModal(null);
+        closeSubmitted();
         await invalidateAllWorkbenchQueries();
         if (res.pr) {
           if (res.githubSyncWarning) {
@@ -1783,30 +1801,30 @@ export function Modals() {
                     })}
                   </span>
                   {deliveryPreview.sandboxDrift.canAutoSync ? (
-                    <Button
+                    <AsyncButton
                       variant="default"
                       size="xs"
                       type="button"
                       data-testid="deliver-sync-base-btn"
                       disabled={busy}
-                      onClick={() => void syncSandboxBaseAction(detail.state.id)}
+                      onAction={() => syncSandboxBaseAction(detail.state.id)}
                     >
                       <Icon icon={RefreshCw} size={14} /> {t(language, "deliver.driftSyncBtn")}
-                    </Button>
+                    </AsyncButton>
                   ) : (
-                    <Button
+                    <AsyncButton
                       variant="default"
                       size="xs"
                       type="button"
                       data-testid="deliver-resolve-conflict-btn"
                       disabled={busy}
-                      onClick={async () => {
-                        close();
+                      onAction={async () => {
                         await dispatchSyncBaseWithAgent(detail, deliveryPreview.sandboxDrift!);
+                        closeSubmitted();
                       }}
                     >
                       <Icon icon={Wrench} size={14} /> {t(language, "deliver.driftResolveBtn")}
-                    </Button>
+                    </AsyncButton>
                   )}
                 </AlertDescription>
               </Alert>
@@ -2000,18 +2018,18 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="submit-deliver-btn"
             disabled={busy || runLocked || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
-            onClick={() => void submitDeliver()}
+            onAction={submitDeliver}
           >
             <Icon icon={createPr ? GitPullRequest : GitCommit} size={14} />{" "}
             {createPr
               ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
               : t(language, "deliver.submitLocal")}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
@@ -2033,7 +2051,7 @@ export function Modals() {
       );
       if (res) {
         await invalidateAllWorkbenchQueries();
-        setModal(null);
+        closeSubmitted();
         showToastKey("spawn.createdToast", { count: res.created.length });
       }
     };
@@ -2140,22 +2158,22 @@ export function Modals() {
           <Button variant="ghost" type="button" onClick={close}>
             <Icon icon={X} size={14} /> {t(language, "common.cancel")}
           </Button>
-          <Button
+          <AsyncButton
             variant="default"
             type="button"
             data-testid="spawn-submit-btn"
             disabled={busy || runLocked || validItems.length === 0}
-            onClick={() => void submitSpawn()}
+            onAction={submitSpawn}
           >
             <Icon icon={GitFork} size={14} /> {t(language, "spawn.submit", { count: validItems.length })}
-          </Button>
+          </AsyncButton>
         </DialogFooter>
       </ModalShell>
     );
   }
 
   if (m.kind === "observability_pricing") {
-    return <ObservabilityPricingModal onClose={close} />;
+    return <ObservabilityPricingModal onClose={closeSubmitted} />;
   }
 
   return (

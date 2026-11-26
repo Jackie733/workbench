@@ -46,6 +46,7 @@ import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon, STAGE_ICONS } from "./Icon.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card, CardDescription, CardFooter, CardHeader, CardPanel, CardTitle } from "./ui/card.tsx";
@@ -417,7 +418,7 @@ export function HomeView() {
               <span className="truncate">{t(language, "home.scope.sandboxes", { count: mergeOrder.ordered.length })}</span>
               {hasSandboxConflict && <span className="sb-sandbox-alert-dot" aria-hidden="true" />}
             </Button>
-            <Button
+            <AsyncButton
               size="icon-xs"
               type="button"
               variant="ghost"
@@ -425,7 +426,7 @@ export function HomeView() {
               disabled={busy}
               title={t(language, "home.sandboxesRefresh")}
               aria-label={t(language, "home.sandboxesRefresh")}
-              onClick={async () => {
+              onAction={async () => {
                 const fresh = await runBusy(() => api.getProjectSandboxes(true));
                 if (fresh) {
                   queryClient.setQueryData<ProjectSandboxesResponse>(
@@ -437,7 +438,7 @@ export function HomeView() {
               }}
             >
               <Icon icon={RefreshCw} size={14} />
-            </Button>
+            </AsyncButton>
           </div>
         )}
       </div>
@@ -614,19 +615,19 @@ export function HomeView() {
                             )}
                           </div>
                           {canAutoSync && (
-                            <Button
+                            <AsyncButton
                               size="xs"
                               type="button"
                               variant="outline"
                               data-testid={`req-sync-sandbox-btn-${item.id}`}
                               disabled={busy}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void syncSandboxBaseAction(item.id);
+                              onAction={(event) => {
+                                event.stopPropagation();
+                                return syncSandboxBaseAction(item.id);
                               }}
                             >
                               <Icon icon={RefreshCw} size={14} /> {t(language, "ws.sandboxDrift.sync")}
-                            </Button>
+                            </AsyncButton>
                           )}
                         </div>
                       )}

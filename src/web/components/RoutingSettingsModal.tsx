@@ -37,6 +37,7 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { Icon } from "./Icon.tsx";
 import { ModalShell } from "./Primitives.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Checkbox } from "./ui/checkbox.tsx";
@@ -76,6 +77,7 @@ export function RoutingSettingsModal({
   const busy = useUiStore((s) => s.busy);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const setModal = useUiStore((s) => s.setModal);
+  const closeModal = useUiStore((s) => s.closeModal);
   const showToastKey = useUiStore((s) => s.showToastKey);
 
   const { data: hub } = useHubStateQuery();
@@ -167,6 +169,7 @@ export function RoutingSettingsModal({
   };
 
   const saveRouting = async () => {
+    const modalInstanceId = useUiStore.getState().modalInstanceId;
     const snapModal = useUiStore.getState().modal;
     const lm = snapModal?.kind === "routing" ? snapModal : m;
     const latestCfg = lm.draft ?? routing;
@@ -175,13 +178,14 @@ export function RoutingSettingsModal({
     if (res) {
       useDraftStore.getState().clearRunnerOverrides();
       await syncProjectRoutingCache(res.routing);
-      setModal(null);
+      closeModal(modalInstanceId);
       showToastKey("routing.savedProject");
       void invalidateAllWorkbenchQueries();
     }
   };
 
   const saveSettings = async () => {
+    const modalInstanceId = useUiStore.getState().modalInstanceId;
     const snapModal = useUiStore.getState().modal;
     const lm = snapModal?.kind === "routing" ? snapModal : m;
     const tokenPatch = lm.clearGiteeToken
@@ -256,7 +260,7 @@ export function RoutingSettingsModal({
     });
 
     if (ok) {
-      setModal(null);
+      closeModal(modalInstanceId);
       showToastKey("routing.savedProject");
       void invalidateAllWorkbenchQueries();
     }
@@ -313,16 +317,16 @@ export function RoutingSettingsModal({
               </SegmentedControlItem>
             </SegmentedControl>
             {tab === "routing" && (
-              <Button
+              <AsyncButton
                 variant="outline"
                 size="xs"
                 type="button"
                 data-testid="refresh-harnesses-btn"
                 disabled={busy}
-                onClick={() => void refreshHarnesses()}
+                onAction={refreshHarnesses}
               >
                 <Icon icon={RefreshCw} size={14} /> {t(language, "routing.refreshHarnesses")}
-              </Button>
+              </AsyncButton>
             )}
           </div>
         </div>
@@ -558,15 +562,15 @@ export function RoutingSettingsModal({
                 <Button variant="ghost" type="button" onClick={onClose}>
                   <Icon icon={X} size={14} /> {t(language, "common.cancel")}
                 </Button>
-                <Button
+                <AsyncButton
                   variant="default"
                   type="button"
                   data-testid="save-routing-btn"
                   disabled={busy}
-                  onClick={() => void saveRouting()}
+                  onAction={saveRouting}
                 >
                   <Icon icon={Save} size={14} /> {t(language, "routing.saveProject")}
-                </Button>
+                </AsyncButton>
               </DialogFooter>
             </>
           )}
@@ -942,15 +946,15 @@ export function RoutingSettingsModal({
             <Button variant="ghost" type="button" onClick={onClose}>
               <Icon icon={X} size={14} /> {t(language, "common.cancel")}
             </Button>
-            <Button
+            <AsyncButton
               variant="default"
               type="button"
               data-testid="save-project-btn"
               disabled={busy}
-              onClick={() => void saveSettings()}
+              onAction={saveSettings}
             >
               <Icon icon={Save} size={14} /> {t(language, "routing.saveProject")}
-            </Button>
+            </AsyncButton>
           </DialogFooter>
         </div>
       )}
