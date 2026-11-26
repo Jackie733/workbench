@@ -292,7 +292,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
             <>
               <div className="drawer-head">
                 <Tabs
-                  className="w-full gap-0"
+                  className="w-full min-w-0 gap-0"
                   value={drawerTab}
                   onValueChange={(next) => setDrawerTab(next as "discuss" | "console" | "diff")}
                 >
@@ -330,6 +330,18 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     </TabsTab>
                   </TabsList>
                 </Tabs>
+                <Button
+                  size="icon-xs"
+                  type="button"
+                  variant="ghost"
+                  className="drawer-close-btn"
+                  data-testid="drawer-close-btn"
+                  aria-label={t(language, "drawer.closeAria")}
+                  title={t(language, "drawer.closeAria")}
+                  onClick={() => setDrawerOpen(false)}
+                >
+                  <Icon icon={X} size={14} />
+                </Button>
               </div>
 
               {drawerTab === "diff" ? (

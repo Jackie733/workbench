@@ -27,6 +27,7 @@ import {
   Maximize2,
   MessageSquare,
   Minimize2,
+  PanelRightClose,
   PanelRightOpen,
   Pencil,
   Play,
@@ -1986,6 +1987,8 @@ export function WorkspaceView() {
   const selectedId = useUiStore((s) => s.selectedId);
   const workspaceTab = useUiStore((s) => s.workspaceTab);
   const busy = useUiStore((s) => s.busy);
+  const drawerOpen = useUiStore((s) => s.drawerOpen);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
   const moreMenuOpen = useUiStore((s) => s.moreMenuOpen);
   const moreMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreMenuAnchorRef = useRef<HTMLSpanElement | null>(null);
@@ -2365,6 +2368,24 @@ export function WorkspaceView() {
             </MenuPopup>
           </Menu>
         </div>
+        <Button
+          size="xs"
+          type="button"
+          variant="ghost"
+          className={`ws-drawer-toggle ${drawerOpen ? "open" : ""}`}
+          data-action="toggle-drawer"
+          data-testid="toggle-drawer-btn"
+          aria-expanded={drawerOpen}
+          aria-label={drawerOpen ? t(language, "topbar.collapseDrawer") : t(language, "topbar.expandDrawer")}
+          title={drawerOpen ? t(language, "topbar.drawerTitleOpen") : t(language, "topbar.drawerTitleClosed")}
+          onClick={() => setDrawerOpen(!drawerOpen)}
+        >
+          <span className="drawer-toggle-icon">
+            <Icon icon={drawerOpen ? PanelRightClose : PanelRightOpen} size={14} />
+            {runningThis && <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />}
+          </span>
+          <span className="header-btn-label">{t(language, "topbar.drawerLabelClosed")}</span>
+        </Button>
       </div>
 
       {s.lastFeedback && (

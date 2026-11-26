@@ -1,5 +1,5 @@
 import React from "react";
-import { Lock, MessageSquare } from "lucide-react";
+import { Languages, Lock, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { AgentAction, RequirementTier } from "../../core/types.ts";
@@ -11,20 +11,54 @@ import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogPopup, DialogTitle } from "./ui/dialog.tsx";
 import { ModelRunnerBar } from "./ui/ModelRunnerBar.tsx";
-import { SimpleSelect } from "./ui/select.tsx";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SimpleSelect } from "./ui/select.tsx";
 
-export function UiLanguageSelect({ className = "" }: { className?: string }) {
+export function UiLanguageSelect({ className = "", iconOnly = false }: { className?: string; iconOnly?: boolean }) {
   const language = useUiStore((s) => s.language);
   const setLanguage = useUiStore((s) => s.setLanguage);
+  const options = [
+    { value: "zh-CN", label: "简体中文" },
+    { value: "en", label: "English" },
+  ];
+  if (iconOnly) {
+    return (
+      <Select
+        items={options}
+        value={language}
+        onValueChange={(next) => {
+          if (next === null || next === undefined) return;
+          setLanguage(String(next) as UiLanguage);
+        }}
+      >
+        <SelectTrigger
+          aria-label={t(language, "app.languageSwitch")}
+          className={cn(
+            "h-7 min-h-7 w-7 min-w-7 justify-center gap-0 rounded-md border-transparent bg-transparent px-0 shadow-none before:hidden hover:bg-accent data-pressed:bg-accent data-popup-open:bg-accent dark:bg-transparent sm:h-6 sm:min-h-6 sm:w-6 sm:min-w-6 [&_[data-slot=select-icon]]:hidden",
+            className,
+          )}
+          data-testid="ui-language-select"
+          data-value={language}
+          size="sm"
+          title={t(language, "app.languageSwitch")}
+        >
+          <Icon icon={Languages} size={14} />
+        </SelectTrigger>
+        <SelectPopup align="end" alignItemWithTrigger={false}>
+          {options.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+    );
+  }
   return (
     <SimpleSelect
       aria-label={t(language, "app.languageSwitch")}
       className={cn("ui-language-select w-auto min-w-[96px]", className)}
       data-testid="ui-language-select"
-      options={[
-        { value: "zh-CN", label: "简体中文" },
-        { value: "en", label: "English" },
-      ]}
+      options={options}
       size="sm"
       title={t(language, "app.languageSwitch")}
       value={language}
