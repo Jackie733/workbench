@@ -54,9 +54,7 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
               <CardTitle>{t(language, "login.title")}</CardTitle>
             </div>
             <CardDescription className="text-xs">
-              {t(language, "login.descPrefix")}
-              <code>{t(language, "login.descCommand")}</code>
-              {t(language, "login.descSuffix")}
+              {t(language, "login.description")}
             </CardDescription>
           </CardHeader>
 
@@ -73,6 +71,8 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
                   id="login-password"
                   data-testid="login-password-input"
                   type="password"
+                  name="password"
+                  autoComplete="current-password"
                   autoFocus
                   placeholder={t(language, "login.passwordPlaceholder")}
                   value={password}
@@ -89,6 +89,22 @@ export function LoginView({ onAuthenticated }: { onAuthenticated: () => void }) 
                 </AlertDescription>
               </Alert>
             )}
+
+            <details className="text-xs text-muted-foreground">
+              <summary className="w-fit cursor-pointer text-foreground underline-offset-4 hover:underline">
+                {t(language, "login.forgotPassword")}
+              </summary>
+              <p className="mt-2">
+                {t(language, "login.resetPrefix")}
+                <code>wb service password</code>
+                {t(language, "login.resetSuffix")}
+              </p>
+              <p className="mt-1">
+                {t(language, "login.reconnectPrefix")}
+                <code>wb node reconnect</code>
+                {t(language, "login.reconnectSuffix")}
+              </p>
+            </details>
           </CardPanel>
 
           <CardFooter>

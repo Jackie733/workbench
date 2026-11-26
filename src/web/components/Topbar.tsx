@@ -23,6 +23,7 @@ import { UiLanguageSelect } from "./Primitives.tsx";
 import {
   AlertDialog,
   AlertDialogClose,
+  AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogPopup,
@@ -261,6 +262,7 @@ export function Topbar() {
             <AlertDialogPopup data-testid="logout-dialog">
               <AlertDialogHeader>
                 <AlertDialogTitle>{t(language, "topbar.logoutTitle")}</AlertDialogTitle>
+                <AlertDialogDescription>{t(language, "topbar.logoutDescription")}</AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogClose disabled={logout.isPending} render={<Button type="button" variant="ghost" />}>

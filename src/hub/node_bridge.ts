@@ -454,6 +454,7 @@ export interface NodeClientOptions {
   reconnectBaseMs?: number;
   onConnected?: () => void;
   onDisconnected?: (reason?: string) => void;
+  onConnectionFailed?: (reason: string) => void;
   updates?: {
     read(): NodeUpdateReport | undefined;
     blocksWork(revision: string | undefined): boolean;
@@ -883,6 +884,8 @@ export function startWorkbenchNodeClient(options: NodeClientOptions): NodeClient
       ws = null;
       if (wasConnected) {
         options.onDisconnected?.(ev.reason || `code ${ev.code}`);
+      } else if (!stopped) {
+        options.onConnectionFailed?.(`WebSocket 握手失败（${ev.reason || `code ${ev.code}`}）`);
       }
       if (!stopped) {
         const base = options.reconnectBaseMs ?? 1000;

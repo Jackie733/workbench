@@ -76,11 +76,10 @@ wb open
 
 ```sh
 wb service install --port 4318 --host 0.0.0.0
-wb service password
 wb service status
 ```
 
-- 首次以非 loopback 地址安装会自动生成访问密码并在终端提示一次；之后用 `wb service password` 查看方式重置（终端或 `--json` 输出）。重置会沿用同一 session secret，已有浏览器登录不失效，但旧密码立即作废。
+- 首次以非 loopback 地址安装会生成访问密码并在终端显示。忘记密码时，在主控机运行 `wb service password` 生成新密码。旧密码立即失效，已登录的浏览器可以继续使用。远程节点下次连接时，在各自终端运行 `wb node reconnect` 并输入新密码。
 - 凭据保存在 `<hubDir>/auth.json`（文件 `0600`，目录 `0700`），只存 scrypt 哈希与 session secret，绝不写入服务定义、日志或项目数据。
 - 浏览器访问 `http://<Hub 地址>:4318`，在登录页输入密码；会话 Cookie 有效期 30 天。脚本与远程节点使用 `Authorization: Bearer <密码>`。非 loopback 请求缺少凭据返回未授权，连续 5 次登录失败锁定 60 秒。
 - 同一密码复用于 `wb node install --token`。修改 host/port 会停止并重写托管配置再启动，可能中断正在执行的任务。
@@ -96,6 +95,7 @@ wb node status
 wb node stop
 wb node start
 wb node restart
+wb node reconnect
 wb node uninstall
 # 不安装服务，前台运行桥接
 wb node connect --hub http://192.168.1.10:4318 --token <访问密码>
@@ -103,6 +103,7 @@ wb node connect --hub http://192.168.1.10:4318 --token <访问密码>
 
 - `install` 写入节点配置 `node.json` 与安装记录 `node-service.json`（均为 `0600`），并按当前平台安装 LaunchAgent / systemd 用户服务；`--id` / `--name` 指定节点标识与显示名，省略时沿用已有配置或默认值。
 - `--token` 必须与主控 Hub 的访问密码一致（由 `wb service password` 生成或重置）；`--hub` 需为节点可达的主控安装地址，不能依赖节点自身的 loopback。
+- 已配置节点离线时，在节点终端运行 `wb node reconnect`。命令先检查现有凭据，收到 Hub 拒绝后才会提示输入密码。新密码验证成功后写入节点配置，再通过原有服务重连。Hub 地址、节点 ID 和服务安装记录继续沿用。输出「已连接到 Hub」即恢复。
 - 节点数据保留在节点自己的 `<hubDir>`：`node.json`、`node-runtime.json`、`node.log`。`wb node status` 的 installed、active、connected 是不同事实。
 - 所有权独立：主控 `wb service stop/uninstall` 不停止也不卸载节点，反之 `wb node uninstall` 不影响主控 Hub；卸载保留项目与 Hub 数据。
 - 连接失败时依次检查主控服务状态、地址可达性、密码与防火墙，不要以绑定 `0.0.0.0` 作为排障手段。

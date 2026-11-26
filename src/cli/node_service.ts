@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkbenchError } from "../core/errors.ts";
 import { atomicWriteFile, atomicWriteJson, readJsonStrict } from "../core/fs.ts";
@@ -154,6 +156,50 @@ export function nodeRuntimePath(hubDir: string = resolveHubDir()): string {
 
 export function nodeLogPath(hubDir: string = resolveHubDir()): string {
   return path.join(hubDir, "node.log");
+}
+
+async function checkNodeCredentials(cfg: NodeConfig): Promise<boolean> {
+  const hub = new URL(buildNodeWebSocketUrl(cfg.hubUrl, {
+    nodeId: cfg.nodeId, nodeName: cfg.nodeName, hostname: os.hostname(), platform: process.platform, version: "",
+  }));
+  hub.protocol = hub.protocol === "wss:" ? "https:" : "http:";
+  // The protected health endpoint exposes HTTP 401 even when the WebSocket client only reports an abnormal close.
+  const healthUrl = new URL("/api/health", hub);
+  const response = await fetch(healthUrl, {
+    headers: cfg.token ? { Authorization: `Bearer ${cfg.token.trim()}` } : undefined,
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => fail(`无法访问 Hub（${healthUrl.origin}），请检查主控服务和网络后重试。`));
+  if (response.status === 401) return false;
+  const health = response.ok ? await response.json().catch(() => null) : null;
+  if (health?.ok !== true || health.hubMode !== true) {
+    fail(`地址未返回正常的 Workbench Hub 响应（${healthUrl.origin}，HTTP ${response.status}）。`);
+  }
+  return true;
+}
+
+export function promptNodePassword(): Promise<string> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+    throw new WorkbenchError("invalid_input", "请在远程节点的交互终端运行 wb node reconnect，并输入当前 Hub 访问密码。");
+  }
+  return new Promise((resolve, reject) => {
+    const input = createInterface({
+      input: process.stdin,
+      output: new Writable({ write(_chunk, _encoding, done) { done(); } }),
+      terminal: true,
+      historySize: 0,
+    });
+    input.once("close", () => {
+      process.stderr.write("\n");
+      reject(new WorkbenchError("invalid_input", "已取消重连。"));
+    });
+    input.once("SIGINT", () => input.close());
+    process.stderr.write("请输入当前 Hub 访问密码（输入隐藏）：");
+    input.once("line", (password) => {
+      resolve(password.trim());
+      input.close();
+    });
+  });
 }
 
 export function readNodeConfig(hubDir: string = resolveHubDir()): NodeConfig | null {
@@ -520,7 +566,30 @@ export function createNodeServiceManager(options: NodeServiceOptions = {}) {
     return getStatus();
   }
 
-  return { readInstallation, getStatus, installService, controlService };
+  async function reconnect(getPassword: () => Promise<string>): Promise<NodeStatusResult> {
+    const cfg = readNodeConfig(hubDir);
+    if (!cfg) fail("尚未配置远程节点，请先运行 wb node install --hub <Hub 地址> --token <访问密码>。");
+    const accepted = await checkNodeCredentials(cfg);
+    if (accepted) {
+      const status = await getStatus();
+      if (status.connected) return status;
+    } else {
+      const token = await getPassword();
+      if (!token) throw new WorkbenchError("invalid_input", "请输入 Hub 访问密码。");
+      const updated = { ...cfg, token };
+      if (!(await checkNodeCredentials(updated))) {
+        throw new WorkbenchError("invalid_input", "Hub 拒绝了访问密码。请核对网页登录密码后重试。");
+      }
+      const current = readNodeConfig(hubDir);
+      if (current?.hubUrl !== cfg.hubUrl || current.nodeId !== cfg.nodeId || current.nodeName !== cfg.nodeName || current.token !== cfg.token) {
+        fail("节点配置已更新，请重新运行 wb node reconnect。");
+      }
+      writeNodeConfig(updated, hubDir);
+    }
+    return controlService("restart");
+  }
+
+  return { readInstallation, getStatus, installService, controlService, reconnect };
 }
 
 export async function startDetachedNode(
@@ -650,6 +719,11 @@ export async function runNodeForeground(cfg: NodeConfig, hubDir: string = resolv
     },
     onDisconnected: (reason) => {
       lastError = reason ?? "连接已断开";
+      updateRuntime(false);
+    },
+    onConnectionFailed: (reason) => {
+      if (lastError === reason) return;
+      lastError = reason;
       updateRuntime(false);
     },
   });

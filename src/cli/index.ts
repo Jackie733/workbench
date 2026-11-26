@@ -45,6 +45,7 @@ import { getDaemonStatus, lanUrlFor, openUrlInBrowser, startDaemon, stopDaemon }
 import {
   createNodeServiceManager,
   defaultNodeIdentity,
+  promptNodePassword,
   readNodeConfig,
   runNodeForeground,
   startDetachedNode,
@@ -190,6 +191,7 @@ function helpText(): string {
     "  node install --hub <url> [--token <pwd>] [--id <id>] [--name <name>]",
     "                                             安装远程节点自启后台服务（供 WSL2 接入主控 Hub）",
     "  node start|stop|restart|status|uninstall|connect 管理远程节点轻量桥接服务",
+    "  node reconnect                             重连已配置的节点，按需输入当前 Hub 访问密码",
     "  init [--name <name>] [--local|--tracked]   初始化项目 .workbench/ 存储",
     "       [--lang <zh-CN|en|auto>]",
     "  config [--global] [--output-language <zh-CN|en|auto|inherit>]",
@@ -289,17 +291,32 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
 
       case "node": {
         const action = parsed.positionals[0];
-        if (!action || !["install", "start", "stop", "restart", "status", "uninstall", "connect"].includes(action) || parsed.positionals.length !== 1) {
+        if (!action || !["install", "start", "stop", "restart", "reconnect", "status", "uninstall", "connect"].includes(action) || parsed.positionals.length !== 1) {
           throw new WorkbenchError(
             "invalid_input",
-            "用法: wb node install --hub <url> [--token <pwd>] [--id <id>] [--name <name>] | start | stop | restart | status | uninstall | connect",
+            "用法: wb node install --hub <url> [--token <pwd>] [--id <id>] [--name <name>] | start | stop | restart | reconnect | status | uninstall | connect",
           );
         }
-        const allowedFlags = new Set(["json", "root", "hub", "token", "id", "name"]);
+        const allowedFlags = new Set(action === "reconnect" ? ["json", "root"] : ["json", "root", "hub", "token", "id", "name"]);
         for (const flag of parsed.flags.keys()) {
           if (!allowedFlags.has(flag)) throw new WorkbenchError("invalid_input", `未知 node 参数: --${flag}`);
         }
         const nodeMgr = createNodeServiceManager();
+        if (action === "reconnect") {
+          const result = await nodeMgr.reconnect(() => {
+            if (asJson) throw new WorkbenchError("invalid_input", "请在交互终端运行 wb node reconnect 更新 Hub 访问密码。");
+            return promptNodePassword();
+          });
+          if (asJson) {
+            printResult(result, true);
+          } else if (result.connected) {
+            printResult(`节点 ${result.nodeName} 已连接到 Hub。`, false);
+          } else {
+            const detail = result.lastError ? `（${result.lastError}）` : "";
+            throw new WorkbenchError("execution_failed", `凭据验证成功，节点尚未建立 WebSocket 连接${detail}。`);
+          }
+          return result.connected ? 0 : 1;
+        }
         if (action === "status" || action === "stop" || action === "uninstall" || action === "restart") {
           const result = await nodeMgr.controlService(action);
           printResult(result, asJson);
