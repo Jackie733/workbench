@@ -257,10 +257,12 @@ export function buildHarnessCommand(
         (!modelInfo?.supportedEfforts || modelInfo.supportedEfforts.length > 0) &&
         !modelInfo?.effortLocked;
       const permissionFlags = isReadOnly ? ["--permission-mode", "auto"] : ["--dangerously-skip-permissions"];
+      const partialFlags = structuredJson && ctx.action === "ask" ? ["--include-partial-messages"] : [];
       const args = [
         "-w",
         ctx.root,
         ...(structuredJson ? ["-o", "stream-json"] : []),
+        ...partialFlags,
         ...permissionFlags,
         ...isolationFlags,
         "--append-system-prompt",
@@ -274,7 +276,7 @@ export function buildHarnessCommand(
       return {
         command: bin,
         args,
-        displayCommand: `${bin} -p${structuredJson ? " -o stream-json" : ""} ${permissionFlags.join(" ")} -m ${model}${effectiveSessionId ? ` -r ${effectiveSessionId}` : ""}`,
+        displayCommand: `${bin} -p${structuredJson ? " -o stream-json" : ""}${partialFlags.length > 0 ? " --include-partial-messages" : ""} ${permissionFlags.join(" ")} -m ${model}${effectiveSessionId ? ` -r ${effectiveSessionId}` : ""}`,
       };
     }
 

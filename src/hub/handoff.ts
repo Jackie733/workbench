@@ -344,7 +344,11 @@ export async function synthesizeHandoffPacket(
   const unresolvedRefineNotes = allDiscussions.filter(
     (d) => d.actor === "human" && d.mode === "refine" && (!d.kind || d.kind === "annotation") && !d.resolved,
   );
-  const recentAskNotes = allDiscussions.filter((d) => d.mode === "ask").slice(-4);
+  const instructionTrimmed = options.humanInstruction?.trim() ?? "";
+  const recentAskNotes = allDiscussions
+    .filter((d) => d.mode === "ask")
+    .filter((d) => !(options.action === "ask" && instructionTrimmed && d.actor === "human" && d.message.trim() === instructionTrimmed))
+    .slice(-4);
   const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
   const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));
   const review = state.reviewReport;
@@ -476,6 +480,7 @@ export async function synthesizeHandoffPacket(
         Boolean(feedbackText) &&
         !(includeReviewDetail && review && isDuplicateText(feedbackText, review.summary));
       const showInstruction =
+        options.action !== "ask" &&
         Boolean(instructionText) &&
         !isDuplicateText(instructionText, showFeedback ? feedbackText : null) &&
         !(includeReviewDetail && review && isDuplicateText(instructionText, review.summary));
@@ -594,11 +599,16 @@ export async function synthesizeHandoffPacket(
   }
 
   // Authoritative file pointers + adopted human decisions + criteria coverage
+  const isAskAction = options.action === "ask";
   const contractLines: string[] = [
     "## 权威文件指引与验收条件",
-    `- **需求规范**：\`${itemDirHint}/spec.md\`（请用原生工具直接读取全文）`,
+    isAskAction
+      ? `- **需求规范**：\`${itemDirHint}/spec.md\`（按需只读查阅）`
+      : `- **需求规范**：\`${itemDirHint}/spec.md\`（请用原生工具直接读取全文）`,
     designMarkdown.trim()
-      ? `- **技术方案**：\`${itemDirHint}/design.md\`（已存在，请直接读取全文）`
+      ? isAskAction
+        ? `- **技术方案**：\`${itemDirHint}/design.md\`（已存在，按需查阅）`
+        : `- **技术方案**：\`${itemDirHint}/design.md\`（已存在，请直接读取全文）`
       : `- **技术方案**：\`${itemDirHint}/design.md\`（尚未起草）`,
   ];
   if (validity.verifications.length > 0) {
@@ -646,7 +656,7 @@ export async function synthesizeHandoffPacket(
     }
     contractLines.push("");
   }
-  if (options.action !== "review") {
+  if (options.action !== "review" && options.action !== "ask") {
     const playbook = readProjectPlaybook(root);
     if (playbook.lessons.length > 0) {
       contractLines.push("### 项目经验法则（`.workbench/playbook.md`）");

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   AlertTriangle,
-  ArrowDown,
+  ArrowUp,
   BookmarkPlus,
   Check,
   ChevronDown,
@@ -9,7 +9,6 @@ import {
   Copy,
   FileDiff,
   FileText,
-  Lightbulb,
   Loader2,
   MapPin,
   MessageSquare,
@@ -53,6 +52,12 @@ import {
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/uiStore.ts";
+import {
+  ChatConversation,
+  ChatEmptyState,
+  ChatMessage,
+  useChatScroll,
+} from "./chat/index.ts";
 import { ConsoleMarkdown } from "./ConsoleMarkdown.tsx";
 import { ConsoleOutput } from "./ConsoleOutput.tsx";
 import { DiscussStreamCard } from "./DiscussStreamCard.tsx";
@@ -63,9 +68,16 @@ import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card } from "./ui/card.tsx";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsible.tsx";
+import {
+  Composer,
+  ComposerActionGroup,
+  ComposerActions,
+  ComposerHeader,
+  ComposerInput,
+} from "./ui/composer.tsx";
 import { SimpleSelect } from "./ui/select.tsx";
 import { Tabs, TabsList, TabsTab } from "./ui/tabs.tsx";
-import { Textarea } from "./ui/textarea.tsx";
 import { DiffViewerPanel } from "./WorkspaceView.tsx";
 
 type DiscussFilter = "all" | "ask" | "refine";
@@ -130,13 +142,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
             ? "collapsed closing"
             : "collapsed settled";
 
-  const threadRef = useRef<HTMLDivElement | null>(null);
-  const isThreadAtBottomRef = useRef(true);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const [maxWidth, setMaxWidth] = useState<number>(DEFAULT_DRAWER_WIDTH);
-  const [showJumpBottom, setShowJumpBottom] = useState(false);
   const [discussFilter, setDiscussFilter] = useState<DiscussFilter>("all");
-  const [queueCollapsed, setQueueCollapsed] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [expandedSummaries, setExpandedSummaries] = useState<Record<string, boolean>>({});
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -146,12 +155,6 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    isThreadAtBottomRef.current = true;
-    setShowJumpBottom(false);
-    setDiscussFilter("all");
-  }, [reqId]);
 
   const syncDrawerCssWidth = useCallback(
     (preferredWidth: number) => {
@@ -316,46 +319,17 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
     return hasAsk && hasRefine;
   }, [discussions, pendingAnnotationIdSet]);
 
-  // 智能贴底滚动：仅当用户已在底部时跟随流式输出，上滑回看时暂停并展示「回到底部」。
-  useLayoutEffect(() => {
-    if (!drawerOpen || drawerTab !== "discuss") return;
-    const el = threadRef.current;
-    if (!el) return;
-    if (isThreadAtBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-      setShowJumpBottom(false);
-    } else {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShowJumpBottom(dist > 28 && el.scrollHeight > el.clientHeight + 28);
-    }
-  }, [
-    drawerOpen,
-    drawerTab,
-    discussions.length,
-    activeAskRun?.id,
-    askTraceEvents?.length,
-    askLiveDelta?.text.length,
-    askLiveDelta?.thinking.length,
-    askStreamLog.length,
-    lastAskError?.runId,
-  ]);
+  const chatScroll = useChatScroll({
+    active: Boolean(d) && drawerOpen && drawerTab === "discuss",
+    itemCount: threadItems.length + (activeAskRun ? 1 : 0) + (lastAskError ? 1 : 0),
+    layoutKey: `${reqId}:${activeAskRun?.id ?? ""}:${askTraceEvents?.length ?? 0}:${askLiveDelta?.text.length ?? 0}:${askLiveDelta?.thinking.length ?? 0}:${askStreamLog.length}:${lastAskError?.runId ?? ""}`,
+  });
 
-  const handleThreadScroll = () => {
-    const el = threadRef.current;
-    if (!el) return;
-    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = dist <= 28;
-    isThreadAtBottomRef.current = atBottom;
-    setShowJumpBottom(!atBottom && el.scrollHeight > el.clientHeight + 28);
-  };
-
-  const jumpThreadToBottom = () => {
-    const el = threadRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    isThreadAtBottomRef.current = true;
-    setShowJumpBottom(false);
-  };
+  useEffect(() => {
+    setDiscussFilter("all");
+    chatScroll.resetScroll(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reqId]);
 
   useEffect(() => {
     if (!drawerOpen || drawerTab !== "console" || !reqId || !currentRun) return;
@@ -379,6 +353,8 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const stage = d?.state.stage;
   const isImplOrAccept = stage === "coding";
   const isReadonlyStage = stage === "done" || stage === "cancelled";
+
+  const showComposerHeader = Boolean(discussAnchor || activeTaskRun || activeAskRun || isReadonlyStage);
 
   return (
     <>
@@ -479,17 +455,17 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
               ) : drawerTab === "discuss" ? (
                 <div className="drawer-body discuss-pane-layout" data-testid="discuss-pane">
                   {pendingAnnotations.length > 0 && (
-                    <div className="annot-queue" data-testid="pending-annotations">
+                    <Collapsible
+                      open={queueOpen}
+                      onOpenChange={setQueueOpen}
+                      className="annot-queue"
+                      data-testid="pending-annotations"
+                    >
                       <div className="annot-queue-head">
-                        <button
-                          type="button"
-                          className="annot-queue-toggle"
-                          aria-expanded={!queueCollapsed}
-                          onClick={() => setQueueCollapsed((v) => !v)}
-                        >
-                          <Icon icon={queueCollapsed ? ChevronRight : ChevronDown} size={14} />
+                        <CollapsibleTrigger className="annot-queue-toggle">
+                          <Icon icon={queueOpen ? ChevronDown : ChevronRight} size={14} />
                           <strong>{t(language, "drawer.pending", { count: pendingAnnotations.length })}</strong>
-                        </button>
+                        </CollapsibleTrigger>
                         <div className="annot-queue-actions">
                           {!isReadonlyStage && (
                             <AsyncButton
@@ -508,7 +484,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                           )}
                         </div>
                       </div>
-                      {!queueCollapsed && (
+                      <CollapsiblePanel>
                         <div className="annot-queue-list">
                           {pendingAnnotations.map((a) => (
                             <div key={a.id} className="annot-chip" data-testid={`pending-annotation-${a.id}`}>
@@ -556,77 +532,104 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             </div>
                           ))}
                         </div>
-                      )}
-                    </div>
+                      </CollapsiblePanel>
+                    </Collapsible>
                   )}
 
                   {hasMixedDiscussionTypes && (
-                    <div className="discuss-filter-bar" data-testid="discuss-filter-bar">
+                    <div className="flex shrink-0 flex-wrap items-center gap-1" data-testid="discuss-filter-bar">
                       {(["all", "ask", "refine"] as const).map((f) => (
-                        <button
+                        <Button
                           key={f}
                           type="button"
-                          className={`discuss-filter-pill ${discussFilter === f ? "active" : ""}`}
+                          size="xs"
+                          variant={discussFilter === f ? "secondary" : "ghost"}
+                          className="h-6 rounded-full px-2.5 text-[11.5px]"
                           data-testid={`discuss-filter-${f}`}
                           onClick={() => setDiscussFilter(f)}
                         >
                           {t(language, `drawer.filter.${f}`)}
-                        </button>
+                        </Button>
                       ))}
                     </div>
                   )}
 
-                  <div className="discuss-thread-shell">
-                    <div
-                      className="discuss-thread"
-                      data-testid="discuss-thread"
-                      ref={threadRef}
-                      onScroll={handleThreadScroll}
-                    >
-                      {threadItems.length === 0 && !activeAskRun && !lastAskError ? (
-                        <Card className="p-4 text-center text-xs text-muted-foreground">
-                          {discussions.length > 0 && discussFilter !== "all"
+                  <ChatConversation
+                    scroll={chatScroll}
+                    label={t(language, "drawer.tab.discuss")}
+                    jumpLabel={t(language, "drawer.jumpBottom")}
+                    viewportTestId="discuss-thread"
+                    jumpTestId="discuss-jump-bottom-btn"
+                  >
+                    {threadItems.length === 0 && !activeAskRun && !lastAskError ? (
+                      <ChatEmptyState
+                        icon={<Icon icon={MessageSquare} size={16} />}
+                        title={t(language, "drawer.tab.discuss")}
+                        description={
+                          discussions.length > 0 && discussFilter !== "all"
                             ? t(language, "drawer.filterEmpty")
-                            : t(language, "drawer.discussEmpty")}
-                        </Card>
-                      ) : (
-                        threadItems.map((item) => {
-                          if (item.kind === "refine_summary") {
-                            const expanded = Boolean(expandedSummaries[item.id]);
-                            const firstLine = item.message.split(/\r?\n/)[0] ?? item.message;
-                            return (
-                              <div key={item.id} className="discuss-system-divider" data-testid="discuss-refine-summary">
-                                <button
-                                  type="button"
-                                  className="discuss-system-toggle"
-                                  aria-expanded={expanded}
-                                  onClick={() =>
-                                    setExpandedSummaries((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
-                                  }
-                                >
-                                  <Icon icon={expanded ? ChevronDown : ChevronRight} size={14} />
-                                  <Icon icon={Pencil} size={14} />
-                                  <span className="discuss-system-title">
-                                    {t(language, "drawer.refineSummaryTitle")}
-                                  </span>
-                                  <span className="discuss-system-preview">{firstLine.slice(0, 72)}</span>
-                                  <span className="muted xs">{formatDateTime(item.at, language)}</span>
-                                </button>
-                                {expanded && (
-                                  <div className="discuss-system-body">
-                                    <ConsoleMarkdown text={item.message} language={language} />
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          }
+                            : t(language, "drawer.discussEmpty")
+                        }
+                      />
+                    ) : (
+                      threadItems.map((item, idx) => {
+                        if (item.kind === "refine_summary") {
+                          const expanded = Boolean(expandedSummaries[item.id]);
+                          const firstLine = item.message.split(/\r?\n/)[0] ?? item.message;
+                          return (
+                            <Collapsible
+                              key={item.id}
+                              open={expanded}
+                              onOpenChange={(open) =>
+                                setExpandedSummaries((prev) => ({ ...prev, [item.id]: open }))
+                              }
+                              className="rounded-xl border border-dashed border-border bg-muted/40 overflow-hidden"
+                              data-testid="discuss-refine-summary"
+                            >
+                              <CollapsibleTrigger className="flex w-full flex-wrap items-center gap-1.5 px-2.5 py-1.5 text-left text-[11.5px] text-muted-foreground transition-colors hover:text-foreground">
+                                <Icon icon={expanded ? ChevronDown : ChevronRight} size={14} />
+                                <Icon icon={Pencil} size={14} />
+                                <span className="font-semibold text-foreground">
+                                  {t(language, "drawer.refineSummaryTitle")}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate">{firstLine.slice(0, 72)}</span>
+                                <span className="text-[11px]">{formatDateTime(item.at, language)}</span>
+                              </CollapsibleTrigger>
+                              <CollapsiblePanel>
+                                <div className="border-t border-dashed border-border px-3 py-2">
+                                  <ConsoleMarkdown text={item.message} language={language} />
+                                </div>
+                              </CollapsiblePanel>
+                            </Collapsible>
+                          );
+                        }
 
-                          if (item.actor === "human") {
-                            return (
-                              <div key={item.id} className="discuss-msg human">
-                                <div className="discuss-human-bubble">
-                                  <div className="discuss-meta">
-                                    <span className="discuss-author-label">{t(language, "drawer.me")}</span>
+                        const prevItem = idx > 0 ? threadItems[idx - 1] : undefined;
+                        const grouped = Boolean(
+                          prevItem &&
+                            prevItem.kind !== "refine_summary" &&
+                            prevItem.actor === item.actor &&
+                            item.actor === "human",
+                        );
+
+                        if (item.actor === "human") {
+                          return (
+                            <ChatMessage
+                              key={item.id}
+                              side="outgoing"
+                              grouped={grouped}
+                              bubbleProps={{ variant: "default" }}
+                              footer={
+                                <span className="flex items-center gap-1.5">
+                                  <span>{t(language, "drawer.me")}</span>
+                                  <span>·</span>
+                                  <span>{formatDateTime(item.at, language)}</span>
+                                </span>
+                              }
+                            >
+                              <div className="flex flex-col gap-1.5">
+                                {(item.mode === "refine" || item.anchor) && (
+                                  <div className="flex flex-wrap items-center gap-1.5">
                                     {item.mode === "refine" && (
                                       <Badge variant={item.resolved ? "success" : "warning"} size="sm">
                                         <Icon icon={item.resolved ? Check : MessageSquare} size={14} />{" "}
@@ -635,37 +638,46 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                           : t(language, "drawer.mode.annotate")}
                                       </Badge>
                                     )}
-                                    <span className="muted xs">{formatDateTime(item.at, language)}</span>
+                                    {item.anchor && (
+                                      <button
+                                        type="button"
+                                        className="discuss-anchor-pill"
+                                        data-testid="anchor-jump-btn"
+                                        title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
+                                        onClick={() => triggerAnchorHighlight(item.anchor!)}
+                                      >
+                                        <Icon icon={MapPin} size={14} />
+                                        <span>{item.anchor}</span>
+                                      </button>
+                                    )}
                                   </div>
-                                  {item.anchor && (
-                                    <button
-                                      type="button"
-                                      className="discuss-anchor-pill"
-                                      data-testid="anchor-jump-btn"
-                                      title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
-                                      onClick={() => triggerAnchorHighlight(item.anchor!)}
-                                    >
-                                      <Icon icon={MapPin} size={14} />
-                                      <span>{item.anchor}</span>
-                                    </button>
-                                  )}
-                                  <div className="discuss-human-text">
-                                    <ConsoleMarkdown text={item.message} language={language} />
-                                  </div>
+                                )}
+                                <div className="discuss-human-text">
+                                  <ConsoleMarkdown text={item.message} language={language} />
                                 </div>
                               </div>
-                            );
-                          }
+                            </ChatMessage>
+                          );
+                        }
 
-                          const isCopied = copiedId === item.id;
-                          return (
-                            <div key={item.id} className="discuss-msg agent" data-testid="discuss-agent-msg">
-                              <div className="discuss-ai-head">
-                                <div className="discuss-ai-identity">
-                                  <span className="discuss-ai-avatar" aria-hidden="true">
-                                    <Icon icon={Sparkles} size={14} />
-                                  </span>
-                                  <span className="discuss-ai-name">
+                        const isCopied = copiedId === item.id;
+                        return (
+                          <ChatMessage
+                            key={item.id}
+                            side="incoming"
+                            data-testid="discuss-agent-msg"
+                            avatar={
+                              <span
+                                className="inline-flex size-7 items-center justify-center rounded-full border border-border bg-muted/60 text-primary"
+                                aria-hidden="true"
+                              >
+                                <Icon icon={Sparkles} size={14} />
+                              </span>
+                            }
+                            author={
+                              <div className="flex w-full items-center justify-between gap-2">
+                                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                  <span className="font-semibold text-foreground">
                                     {item.harness ?? "Agent"}
                                     {item.model ? ` · ${item.model}` : ""}
                                   </span>
@@ -675,32 +687,20 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                     </Badge>
                                   )}
                                 </div>
-                                <span className="muted xs">{formatDateTime(item.at, language)}</span>
+                                <span className="shrink-0 text-[11px] font-normal text-muted-foreground">
+                                  {formatDateTime(item.at, language)}
+                                </span>
                               </div>
-
-                              {item.anchor && (
-                                <button
-                                  type="button"
-                                  className="discuss-anchor-pill"
-                                  data-testid="anchor-jump-btn"
-                                  title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
-                                  onClick={() => triggerAnchorHighlight(item.anchor!)}
-                                >
-                                  <Icon icon={MapPin} size={14} />
-                                  <span>{item.anchor}</span>
-                                </button>
-                              )}
-
-                              <div className="discuss-ai-body">
-                                <ConsoleMarkdown text={item.message} language={language} />
-                              </div>
-
-                              <div className="discuss-ai-footer">
-                                <div className="discuss-ai-actions">
+                            }
+                            bubbleProps={{ variant: "card", className: "w-full" }}
+                            footer={
+                              <div className="flex w-full flex-col gap-1.5 pt-1">
+                                <div className="flex flex-wrap items-center gap-1">
                                   <Button
                                     size="xs"
                                     type="button"
                                     variant="ghost"
+                                    className="h-6 px-2 text-[11.5px] text-muted-foreground hover:text-foreground"
                                     data-testid="copy-discussion-btn"
                                     onClick={() => void handleCopyReply(item.id, item.message)}
                                   >
@@ -713,6 +713,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                         size="xs"
                                         type="button"
                                         variant="ghost"
+                                        className="h-6 px-2 text-[11.5px] text-muted-foreground hover:text-foreground"
                                         data-testid="discussion-to-annotation-btn"
                                         onClick={() =>
                                           setModal({
@@ -729,6 +730,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                         size="xs"
                                         type="button"
                                         variant="ghost"
+                                        className="h-6 px-2 text-[11.5px] text-muted-foreground hover:text-foreground"
                                         data-testid="adopt-discussion-btn"
                                         disabled={Boolean(activeTaskRun)}
                                         onAction={() => adoptDiscussion(d.state.id, item.id, item.message)}
@@ -739,12 +741,11 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                     </>
                                   )}
                                 </div>
-
                                 {(item.durationMs !== undefined ||
                                   (item.toolCallsCount !== undefined && item.toolCallsCount > 0) ||
                                   item.handoffMode ||
                                   item.runId) && (
-                                  <div className="discuss-ai-meta-strip">
+                                  <div className="flex flex-wrap items-center gap-2 px-1 text-[11px] text-muted-foreground">
                                     {item.durationMs !== undefined && (
                                       <span>
                                         {t(language, "drawer.replyMeta", {
@@ -775,27 +776,45 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                                   </div>
                                 )}
                               </div>
+                            }
+                          >
+                            {item.anchor && (
+                              <button
+                                type="button"
+                                className="discuss-anchor-pill"
+                                data-testid="anchor-jump-btn"
+                                title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
+                                onClick={() => triggerAnchorHighlight(item.anchor!)}
+                              >
+                                <Icon icon={MapPin} size={14} />
+                                <span>{item.anchor}</span>
+                              </button>
+                            )}
+                            <div className="discuss-ai-body">
+                              <ConsoleMarkdown text={item.message} language={language} />
                             </div>
-                          );
-                        })
-                      )}
+                          </ChatMessage>
+                        );
+                      })
+                    )}
 
-                      {activeAskRun && activeAskRun.status === "running" && (
-                        <DiscussStreamCard
-                          run={activeAskRun}
-                          traceEvents={askTraceEvents}
-                          liveDelta={askLiveDelta}
-                          rawLog={askStreamLog}
-                          language={language}
-                          onStop={() => cancelRun(d.state.id, activeAskRun.id)}
-                        />
-                      )}
+                    {activeAskRun && activeAskRun.status === "running" && (
+                      <DiscussStreamCard
+                        run={activeAskRun}
+                        traceEvents={askTraceEvents}
+                        liveDelta={askLiveDelta}
+                        rawLog={askStreamLog}
+                        language={language}
+                        onStop={() => cancelRun(d.state.id, activeAskRun.id)}
+                      />
+                    )}
 
-                      {!activeAskRun && lastAskError && (
-                        <div className="discuss-error-card" data-testid="discuss-ask-error-card">
-                          <div className="discuss-error-head">
-                            <span className="discuss-error-title">
-                              <Icon icon={AlertTriangle} size={14} />
+                    {!activeAskRun && lastAskError && (
+                      <Alert variant="error" className="text-xs" data-testid="discuss-ask-error-card">
+                        <Icon icon={AlertTriangle} size={14} />
+                        <AlertDescription className="flex w-full flex-col gap-1.5 text-foreground">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-semibold text-destructive-foreground">
                               {t(
                                 language,
                                 lastAskError.status === "cancelled"
@@ -819,10 +838,10 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             </Button>
                           </div>
                           {lastAskError.errorSummary && (
-                            <div className="discuss-error-detail">{lastAskError.errorSummary}</div>
+                            <div className="text-muted-foreground break-words">{lastAskError.errorSummary}</div>
                           )}
                           {lastAskError.message && (
-                            <div className="discuss-error-actions">
+                            <div>
                               <AsyncButton
                                 size="xs"
                                 type="button"
@@ -840,119 +859,126 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               </AsyncButton>
                             </div>
                           )}
-                        </div>
-                      )}
-                    </div>
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                  </ChatConversation>
 
-                    {showJumpBottom && (
-                      <Button
-                        size="xs"
-                        type="button"
-                        variant="outline"
-                        className="discuss-jump-bottom"
-                        data-testid="discuss-jump-bottom-btn"
-                        onClick={jumpThreadToBottom}
-                      >
-                        <Icon icon={ArrowDown} size={14} /> {t(language, "drawer.jumpBottom")}
-                      </Button>
-                    )}
-                  </div>
-
-                  <div className="drawer-composer">
-                    {activeTaskRun && (
-                      <div className="xs muted discuss-lock-hint" data-testid="drawer-run-lock-hint">
-                        {t(language, "drawer.refineLockHint")}
-                      </div>
-                    )}
-                    {activeAskRun && (
-                      <div className="xs muted discuss-lock-hint" data-testid="drawer-ask-lock-hint">
-                        {t(language, "drawer.askLockHint")}
-                      </div>
-                    )}
-                    {discussAnchor && (
-                      <div className="discuss-composer-anchor">
-                        <button
-                          type="button"
-                          className="discuss-anchor-pill"
-                          title={t(language, "drawer.jumpToAnchor", { anchor: discussAnchor })}
-                          onClick={() => triggerAnchorHighlight(discussAnchor)}
-                        >
-                          <Icon icon={MapPin} size={14} />
-                          <span>{discussAnchor}</span>
-                        </button>
-                        <Button
-                          size="icon-xs"
-                          type="button"
-                          variant="ghost"
-                          aria-label={t(language, "drawer.clearAnchor")}
-                          onClick={() => setDiscussAnchor(d.state.id, null)}
-                        >
-                          <Icon icon={X} size={14} />
-                        </Button>
-                      </div>
-                    )}
-                    <div className="discuss-composer-top">
-                      <RunnerSelect stageAction="ask" testId="drawer-runner-select" tier={d.state.tier} />
-                      <Button
-                        size="xs"
-                        type="button"
-                        variant={discussFreshSession ? "secondary" : "ghost"}
-                        data-testid="discuss-fresh-topic-btn"
-                        aria-pressed={discussFreshSession}
-                        title={t(language, "drawer.freshTopicTitle")}
-                        onClick={() => setDiscussFreshSession(d.state.id, !discussFreshSession)}
-                      >
-                        <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.freshTopic")}
-                      </Button>
-                    </div>
-                    <Textarea
-                      size="sm"
-                      id="discuss-input"
-                      data-testid="discuss-input"
-                      rows={3}
+                  <div className="shrink-0 pt-1">
+                    <Composer
+                      allowEmpty
                       value={discussDraft}
-                      placeholder={t(language, isImplOrAccept ? "drawer.placeholderFix" : "drawer.placeholder")}
-                      onChange={(e) => setDiscussDraft(d.state.id, e.target.value)}
-                      onKeyDown={(e) => {
-                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing) {
-                          e.preventDefault();
-                          if (!busy && !activeAskRun && discussDraft.trim()) {
-                            void runAskFromDrawer(d.state.id);
-                          }
+                      onValueChange={(val) => setDiscussDraft(d.state.id, val)}
+                      onSubmit={() => {
+                        if (!busy && !activeAskRun && discussDraft.trim()) {
+                          void runAskFromDrawer(d.state.id);
                         }
                       }}
-                    />
-                    {isReadonlyStage && (
-                      <div className="xs muted" style={{ marginTop: 4 }}>
-                        {t(language, "drawer.readonlyHint")}
-                      </div>
-                    )}
-                    <div className="drawer-composer-actions">
-                      <AsyncButton
-                        size="xs"
-                        type="button"
-                        variant="outline"
-                        className="flex-1"
-                        data-action="run-ask"
-                        data-testid="run-ask-btn"
-                        disabled={busy || Boolean(activeAskRun)}
-                        onAction={() => runAskFromDrawer(d.state.id)}
-                      >
-                        <Icon icon={Lightbulb} size={14} /> {t(language, "drawer.ask")}
-                      </AsyncButton>
-                      <AsyncButton
-                        size="xs"
-                        type="button"
-                        className="flex-1"
-                        data-action="run-refine"
-                        data-testid="run-refine-btn"
-                        disabled={busy || Boolean(activeTaskRun) || isReadonlyStage}
-                        onAction={() => runRefineFromDrawer(d.state.id)}
-                      >
-                        <Icon icon={Pencil} size={14} /> {t(language, isImplOrAccept ? "drawer.refineCode" : "drawer.refine")}
-                      </AsyncButton>
-                    </div>
-                    <div className="discuss-composer-shortcut muted xs">{t(language, "drawer.shortcutHint")}</div>
+                    >
+                      {showComposerHeader && (
+                        <ComposerHeader>
+                          {discussAnchor && (
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                type="button"
+                                className="discuss-anchor-pill"
+                                title={t(language, "drawer.jumpToAnchor", { anchor: discussAnchor })}
+                                onClick={() => triggerAnchorHighlight(discussAnchor)}
+                              >
+                                <Icon icon={MapPin} size={14} />
+                                <span>{discussAnchor}</span>
+                              </button>
+                              <Button
+                                size="icon-xs"
+                                type="button"
+                                variant="ghost"
+                                aria-label={t(language, "drawer.clearAnchor")}
+                                onClick={() => setDiscussAnchor(d.state.id, null)}
+                              >
+                                <Icon icon={X} size={14} />
+                              </Button>
+                            </div>
+                          )}
+                          {activeTaskRun && (
+                            <div className="text-[11px] leading-snug text-muted-foreground" data-testid="drawer-run-lock-hint">
+                              {t(language, "drawer.refineLockHint")}
+                            </div>
+                          )}
+                          {activeAskRun && (
+                            <div className="text-[11px] leading-snug text-muted-foreground" data-testid="drawer-ask-lock-hint">
+                              {t(language, "drawer.askLockHint")}
+                            </div>
+                          )}
+                          {isReadonlyStage && (
+                            <div className="text-[11px] leading-snug text-muted-foreground">
+                              {t(language, "drawer.readonlyHint")}
+                            </div>
+                          )}
+                        </ComposerHeader>
+                      )}
+
+                      <ComposerInput
+                        id="discuss-input"
+                        data-testid="discuss-input"
+                        placeholder={t(language, isImplOrAccept ? "drawer.placeholderFix" : "drawer.placeholder")}
+                      />
+
+                      <ComposerActions>
+                        <ComposerActionGroup>
+                          <RunnerSelect
+                            stageAction="ask"
+                            testId="drawer-runner-select"
+                            tier={d.state.tier}
+                            compact
+                            popoverSide="top"
+                            popoverAlign="start"
+                          />
+                          <Button
+                            size="xs"
+                            type="button"
+                            variant={discussFreshSession ? "secondary" : "ghost"}
+                            className="h-7 shrink-0 rounded-lg px-2 text-[11px]"
+                            data-testid="discuss-fresh-topic-btn"
+                            aria-pressed={discussFreshSession}
+                            title={t(language, "drawer.freshTopicTitle")}
+                            onClick={() => setDiscussFreshSession(d.state.id, !discussFreshSession)}
+                          >
+                            <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.freshTopic")}
+                          </Button>
+                        </ComposerActionGroup>
+
+                        <ComposerActionGroup align="end">
+                          <AsyncButton
+                            size="xs"
+                            type="button"
+                            variant="outline"
+                            className="h-7 shrink-0 rounded-lg px-2.5 text-[11.5px]"
+                            data-action="run-refine"
+                            data-testid="run-refine-btn"
+                            disabled={busy || Boolean(activeTaskRun) || isReadonlyStage}
+                            title={t(language, isImplOrAccept ? "drawer.refineCodeBtnTitle" : "drawer.refineBtnTitle")}
+                            onAction={() => runRefineFromDrawer(d.state.id)}
+                          >
+                            <Icon icon={Pencil} size={14} />{" "}
+                            {t(language, isImplOrAccept ? "drawer.refineCodeShort" : "drawer.refineShort")}
+                          </AsyncButton>
+                          <AsyncButton
+                            size="icon-sm"
+                            type="button"
+                            variant="default"
+                            className="size-7 shrink-0 rounded-lg"
+                            data-action="run-ask"
+                            data-testid="run-ask-btn"
+                            aria-label={t(language, "drawer.sendAskAria")}
+                            title={t(language, "drawer.sendAskAria")}
+                            disabled={busy || Boolean(activeAskRun)}
+                            onAction={() => runAskFromDrawer(d.state.id)}
+                          >
+                            <Icon icon={ArrowUp} size={14} />
+                          </AsyncButton>
+                        </ComposerActionGroup>
+                      </ComposerActions>
+                    </Composer>
                   </div>
                 </div>
               ) : (

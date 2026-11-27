@@ -126,7 +126,7 @@ const EXPECTED_LUCIDE = {
   ],
   "RightDrawer.tsx": [
     "AlertTriangle",
-    "ArrowDown",
+    "ArrowUp",
     "BookmarkPlus",
     "Check",
     "ChevronDown",
@@ -134,7 +134,6 @@ const EXPECTED_LUCIDE = {
     "Copy",
     "FileDiff",
     "FileText",
-    "Lightbulb",
     "Loader2",
     "MapPin",
     "MessageSquare",

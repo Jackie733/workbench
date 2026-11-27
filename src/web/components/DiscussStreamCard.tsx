@@ -13,10 +13,20 @@ import type { AgentRunRecord, RunTraceEvent } from "../../core/types.ts";
 import { t, type UiLanguage } from "../i18n.ts";
 import { shortenDisplayPath } from "../lib/consoleFormat.ts";
 import type { LiveStreamDelta } from "../stores/streamStore.ts";
+import {
+  ChatBubble,
+  ChatMessageAvatar,
+  ChatMessageContent,
+  ChatMessageHeader,
+  ChatMessageLayout,
+  ChatTypingIndicator,
+} from "./chat/index.ts";
 import { ConsoleMarkdown } from "./ConsoleMarkdown.tsx";
 import { Icon } from "./Icon.tsx";
 import { LiveTimer } from "./Primitives.tsx";
 import { AsyncButton } from "./ui/async-button.tsx";
+import { Badge } from "./ui/badge.tsx";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsible.tsx";
 
 interface LiveToolStep {
   callId: string;
@@ -130,99 +140,115 @@ export function DiscussStreamCard({
         : t(language, "drawer.thinkingLive");
 
   return (
-    <div className="discuss-msg agent discuss-streaming" data-testid="discuss-stream-card">
-      <div className="discuss-ai-head">
-        <div className="discuss-ai-identity">
-          <span className="discuss-ai-avatar is-live" aria-hidden="true">
-            <Icon icon={Sparkles} size={14} />
-          </span>
-          <span className="discuss-ai-name">
+    <ChatMessageLayout
+      align="start"
+      className="discuss-streaming"
+      data-testid="discuss-stream-card"
+    >
+      <ChatMessageHeader className="w-full">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="font-semibold text-foreground">
             {run.harness} · {run.model}
           </span>
-          <span className="discuss-live-pill">
+          <Badge variant="info" size="sm" className="gap-1">
             <Icon icon={Loader2} size={14} className="spin" />
             <span>{t(language, "drawer.askRunning")}</span>
-            <span className="discuss-live-sep">·</span>
+            <span className="opacity-55">·</span>
             <LiveTimer startedAt={run.startedAt} />
-          </span>
+          </Badge>
         </div>
         <AsyncButton
           size="xs"
           type="button"
           variant="ghost"
-          className="discuss-stop-btn"
+          className="h-6 shrink-0 px-2 text-destructive-foreground hover:bg-destructive/10 hover:text-destructive-foreground"
           data-testid="stop-ask-btn"
           onAction={onStop}
         >
           <Icon icon={Square} size={14} /> {t(language, "drawer.stopAsk")}
         </AsyncButton>
-      </div>
+      </ChatMessageHeader>
 
-      {hasSteps && (
-        <div className="discuss-steps-box" data-testid="discuss-stream-steps">
-          <button
-            type="button"
-            className="discuss-steps-toggle"
-            aria-expanded={stepsExpanded}
-            onClick={() => setStepsExpanded((v) => !v)}
-          >
-            <Icon icon={stepsExpanded ? ChevronDown : ChevronRight} size={14} />
-            {derived.runningTool || derived.isStreamingThinking ? (
-              <Icon icon={Loader2} size={14} className="spin" />
-            ) : (
-              <Icon icon={Search} size={14} />
-            )}
-            <span className="discuss-steps-label">{stepLabel}</span>
-          </button>
+      <ChatMessageAvatar>
+        <span
+          className="inline-flex size-7 items-center justify-center rounded-full border border-primary/40 bg-primary/10 text-primary"
+          aria-hidden="true"
+        >
+          <Icon icon={Sparkles} size={14} />
+        </span>
+      </ChatMessageAvatar>
 
-          {stepsExpanded && (
-            <div className="discuss-steps-detail">
-              {derived.tools.map((tool) => (
-                <div key={tool.callId} className={`discuss-step-row ${tool.isError ? "is-error" : ""}`}>
-                  {!tool.ended ? (
-                    <Icon icon={Loader2} size={14} className="spin" />
-                  ) : (
-                    <Icon icon={tool.isError ? AlertTriangle : Check} size={14} />
-                  )}
-                  <span className="discuss-step-tool">{tool.toolName}</span>
-                  {tool.summary && (
-                    <span className="discuss-step-summary" title={tool.summary}>
-                      {shortenDisplayPath(tool.summary)}
-                    </span>
+      <ChatMessageContent>
+        <div className="flex w-full min-w-0 flex-col gap-2">
+          {hasSteps && (
+            <Collapsible
+              open={stepsExpanded}
+              onOpenChange={setStepsExpanded}
+              className="rounded-xl border border-border/80 bg-muted/50 overflow-hidden"
+              data-testid="discuss-stream-steps"
+            >
+              <CollapsibleTrigger className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11.5px] text-muted-foreground transition-colors hover:text-foreground">
+                <Icon icon={stepsExpanded ? ChevronDown : ChevronRight} size={14} />
+                {derived.runningTool || derived.isStreamingThinking ? (
+                  <Icon icon={Loader2} size={14} className="spin shrink-0" />
+                ) : (
+                  <Icon icon={Search} size={14} className="shrink-0" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{stepLabel}</span>
+              </CollapsibleTrigger>
+
+              <CollapsiblePanel>
+                <div className="flex max-h-[180px] flex-col gap-1 overflow-y-auto border-t border-border/70 px-2.5 py-2">
+                  {derived.tools.map((tool) => (
+                    <div
+                      key={tool.callId}
+                      className={`flex items-center gap-1.5 text-[11.5px] ${
+                        tool.isError ? "text-destructive-foreground" : "text-muted-foreground"
+                      }`}
+                    >
+                      {!tool.ended ? (
+                        <Icon icon={Loader2} size={14} className="spin shrink-0" />
+                      ) : (
+                        <Icon icon={tool.isError ? AlertTriangle : Check} size={14} className="shrink-0" />
+                      )}
+                      <span className="shrink-0 font-mono font-medium text-foreground">{tool.toolName}</span>
+                      {tool.summary && (
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={tool.summary}>
+                          {shortenDisplayPath(tool.summary)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  {derived.allThinking.length > 0 && (
+                    <div className="mt-1 border-t border-dashed border-border pt-1.5">
+                      <ConsoleMarkdown
+                        text={derived.allThinking[derived.allThinking.length - 1]!}
+                        language={language}
+                        variant="thinking"
+                      />
+                    </div>
                   )}
                 </div>
-              ))}
-              {derived.allThinking.length > 0 && (
-                <div className="discuss-thinking-preview">
-                  <ConsoleMarkdown
-                    text={derived.allThinking[derived.allThinking.length - 1]!}
-                    language={language}
-                    variant="thinking"
-                  />
-                </div>
-              )}
-            </div>
+              </CollapsiblePanel>
+            </Collapsible>
           )}
-        </div>
-      )}
 
-      <div className="discuss-stream-body" data-testid="discuss-stream-output">
-        {derived.answerMarkdown ? (
-          <div className="discuss-stream-md">
-            <ConsoleMarkdown text={derived.answerMarkdown} language={language} />
-            <span className="discuss-stream-cursor" aria-hidden="true" />
+          <div className="w-full min-w-0" data-testid="discuss-stream-output">
+            {derived.answerMarkdown ? (
+              <ChatBubble align="start" variant="card" className="w-full border-primary/35">
+                <div className="discuss-ai-body">
+                  <ConsoleMarkdown text={derived.answerMarkdown} language={language} />
+                  <span className="discuss-stream-cursor" aria-hidden="true" />
+                </div>
+              </ChatBubble>
+            ) : (
+              <ChatTypingIndicator
+                label={hasSteps ? t(language, "drawer.generatingLive") : t(language, "drawer.connecting")}
+              />
+            )}
           </div>
-        ) : (
-          <div className="discuss-connecting-row">
-            <span className="discuss-typing-dots" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-            <span>{t(language, "drawer.connecting")}</span>
-          </div>
-        )}
-      </div>
-    </div>
+        </div>
+      </ChatMessageContent>
+    </ChatMessageLayout>
   );
 }

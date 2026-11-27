@@ -298,7 +298,7 @@ echo "PLAIN_RETRY_OK"
     await executor.startRun({
       root: repo,
       requirementId: "REQ-001",
-      action: "ask",
+      action: "design",
       harness: "codex",
       model: "gpt-5.4",
       message: "ping",

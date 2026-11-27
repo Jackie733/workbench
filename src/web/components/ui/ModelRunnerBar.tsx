@@ -12,6 +12,7 @@ import {
 } from "../../state.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { cn } from "../../lib/utils.ts";
 import { Icon } from "../Icon.tsx";
 import { Badge } from "./badge.tsx";
 import { Button } from "./button.tsx";
@@ -23,10 +24,16 @@ export function ModelRunnerBar({
   stageAction,
   testId,
   tier = "standard",
+  compact = false,
+  popoverSide,
+  popoverAlign,
 }: {
   stageAction: AgentAction;
   testId: string;
   tier?: RequirementTier;
+  compact?: boolean;
+  popoverSide?: "top" | "bottom";
+  popoverAlign?: "start" | "center" | "end";
 }) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -86,8 +93,17 @@ export function ModelRunnerBar({
       ? `${t(language, "runner.default")} (${choice.harness}/${choice.model ?? ""})`
       : t(language, "runner.defaultRoute");
 
+  const compactDisplay = selectedRunnerKey
+    ? (choice.model ?? choice.harness)
+    : choice.model
+      ? `${t(language, "runner.default")} · ${choice.model}`
+      : t(language, "runner.defaultRoute");
+
+  const resolvedSide = popoverSide ?? (compact ? "top" : "bottom");
+  const resolvedAlign = popoverAlign ?? (compact ? "start" : "end");
+
   return (
-    <div className="inline-flex items-center gap-1.5 flex-wrap">
+    <div className={cn("inline-flex items-center flex-wrap", compact ? "gap-1 min-w-0" : "gap-1.5")}>
       {/* Keep native select synced & accessible for E2E test selectors */}
       <select
         className="sr-only"
@@ -125,25 +141,33 @@ export function ModelRunnerBar({
               <Button
                 ref={triggerRef}
                 type="button"
-                variant="outline"
-                size="sm"
-                className="model-runner-trigger max-w-[235px] min-w-0 shrink justify-start"
+                variant={compact ? "ghost" : "outline"}
+                size={compact ? "xs" : "sm"}
+                className={cn(
+                  "model-runner-trigger min-w-0 shrink justify-start",
+                  compact
+                    ? "h-7 max-w-[180px] rounded-lg px-2 text-muted-foreground hover:text-foreground"
+                    : "max-w-[235px]",
+                )}
                 data-testid={`${testId}-trigger`}
                 title={t(language, "runner.current", { model: currentDisplay })}
               >
                 <Icon icon={Cpu} size={14} className="shrink-0 opacity-70" />
-                <span className="truncate min-w-0 font-mono text-[11.5px]">{currentDisplay}</span>
+                <span className={cn("truncate min-w-0 font-mono", compact ? "text-[11px]" : "text-[11.5px]")}>
+                  {compact ? compactDisplay : currentDisplay}
+                </span>
                 <Icon icon={ChevronsUpDown} size={14} className="shrink-0 opacity-60" />
               </Button>
             }
           />
         </span>
         <PopoverPopup
-          align="end"
+          align={resolvedAlign}
           anchor={anchorRef}
           className="w-[340px] rounded-xl p-0 overflow-hidden"
           finalFocus={triggerRef}
           positionerClassName="z-[80]"
+          side={resolvedSide}
           sideOffset={6}
           viewportClassName="p-0"
         >
@@ -165,11 +189,18 @@ export function ModelRunnerBar({
       {/* Reasoning Effort selector: 3-state adaptive (configurable / locked / unsupported) */}
       {effortCap.mode === "configurable" && (
         <div className="inline-flex items-center gap-1" title={t(language, "runner.effortTitle")}>
-          <span className="hidden sm:inline-flex items-center text-muted-foreground">
-            <Icon icon={Gauge} size={14} />
-          </span>
+          {!compact && (
+            <span className="hidden sm:inline-flex items-center text-muted-foreground">
+              <Icon icon={Gauge} size={14} />
+            </span>
+          )}
           <SimpleSelect
-            className="w-auto min-w-[96px] font-mono text-xs"
+            className={cn(
+              "w-auto font-mono",
+              compact
+                ? "h-7 min-h-7 min-w-[74px] rounded-lg border-transparent bg-transparent px-2 text-[11px] text-muted-foreground shadow-none before:hidden hover:bg-accent hover:text-foreground dark:bg-transparent"
+                : "min-w-[96px] text-xs",
+            )}
             data-field="effort-select"
             data-testid={`${testId}-effort`}
             options={[
@@ -191,7 +222,10 @@ export function ModelRunnerBar({
       {effortCap.mode === "locked" && (
         <Badge
           variant="outline"
-          className="h-7 gap-1 px-2 font-mono text-xs text-muted-foreground"
+          className={cn(
+            "gap-1 font-mono text-muted-foreground",
+            compact ? "h-6 px-1.5 text-[11px]" : "h-7 px-2 text-xs",
+          )}
           data-testid={`${testId}-effort-locked`}
           title={t(language, "runner.effortLockedTitle")}
         >

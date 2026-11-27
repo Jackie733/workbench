@@ -13,7 +13,7 @@ const CLI_NOISE_RE =
   /^Model ".*" is not available right now; using ".*" instead\.?(?: Use \/model to choose another model\.?)?$/i;
 
 const UNSUPPORTED_JSON_FLAG_RE =
-  /(?:unknown|unexpected|unrecognized|invalid)\s+(?:option|argument|flag)[^\n]*(?:--json|--format|--output-format|--mode)/i;
+  /(?:unknown|unexpected|unrecognized|invalid)\s+(?:option|argument|flag)[^\n]*(?:--json|--format|--output-format|--mode|--include-partial-messages)/i;
 
 export function stripCliNoise(text: string): string {
   return text
@@ -59,7 +59,7 @@ export interface HarnessStreamAdapter {
   flush(): AdapterLineResult | null;
 }
 
-function summarizeToolInput(inp: unknown): string {
+export function summarizeToolInput(inp: unknown): string {
   if (typeof inp === "string") return inp.replace(/\s+/g, " ").trim().slice(0, 90);
   if (!inp || typeof inp !== "object") return "";
   const rec = inp as Record<string, unknown>;
@@ -100,7 +100,7 @@ function summarizeToolInput(inp: unknown): string {
   return raw.replace(/\s+/g, " ").trim().slice(0, 90);
 }
 
-function formatToolInputBounded(inp: unknown): { text?: string; truncated?: boolean } {
+export function formatToolInputBounded(inp: unknown): { text?: string; truncated?: boolean } {
   if (inp === undefined || inp === null) return {};
   let raw: string;
   if (typeof inp === "string") {
@@ -120,7 +120,7 @@ function formatToolInputBounded(inp: unknown): { text?: string; truncated?: bool
   };
 }
 
-function formatToolOutputBounded(rawOut: unknown): {
+export function formatToolOutputBounded(rawOut: unknown): {
   output?: string;
   outputBytes?: number;
   outputTruncated?: boolean;
@@ -157,7 +157,7 @@ function formatToolOutputBounded(rawOut: unknown): {
   };
 }
 
-function formatTraceTextBounded(raw: string): { text: string; truncated: boolean } {
+export function formatTraceTextBounded(raw: string): { text: string; truncated: boolean } {
   const head = 40 * 1024;
   const tail = MAX_TRACE_TEXT_BYTES - head;
   const clipped = clipHeadTailUtf8(raw, head, tail);
@@ -240,7 +240,7 @@ export function extractTouchedFiles(toolName: string, input: unknown): {
   return { all: uniq, read: [], written: [] };
 }
 
-function toSafeCount(v: unknown): number {
+export function toSafeCount(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
 }
 
@@ -904,6 +904,24 @@ class CodexStreamAdapter implements HarnessStreamAdapter {
       }
     }
 
+    if (
+      (type === "item.updated" ||
+        type === "agent_message.delta" ||
+        type === "response.output_text.delta" ||
+        type === "reasoning.delta") &&
+      typeof (evt.delta ?? (evt.item as Record<string, unknown> | undefined)?.delta) === "string"
+    ) {
+      const itemObj = evt.item && typeof evt.item === "object" ? (evt.item as Record<string, unknown>) : undefined;
+      const delta = String(evt.delta ?? itemObj?.delta ?? "");
+      if (delta) {
+        const isReasoning = type === "reasoning.delta" || itemObj?.type === "reasoning";
+        if (isReasoning) {
+          return { events: [], displayText: "", replyText: null, thinkingDelta: delta };
+        }
+        return { events: [], displayText: "", replyText: null, textDelta: delta };
+      }
+    }
+
     if (type === "turn.completed") {
       const turn = Math.max(1, this.turnIndex);
       const usage =
@@ -1079,6 +1097,33 @@ class OpencodeStreamAdapter implements HarnessStreamAdapter {
         ],
         displayText: `🔧 调用工具: ${toolName}${summary ? ` (${summary})` : ""}\n`,
         replyText: null,
+        sessionId,
+      };
+    }
+
+    if (type === "text_delta" || type === "reasoning_delta") {
+      const delta = typeof evt.delta === "string" ? evt.delta : typeof part.delta === "string" ? part.delta : typeof part.text === "string" ? part.text : "";
+      if (!delta) return { events: [], displayText: "", replyText: null, sessionId };
+      return {
+        events: [],
+        displayText: "",
+        replyText: null,
+        ...(type === "reasoning_delta" ? { thinkingDelta: delta } : { textDelta: delta }),
+        sessionId,
+      };
+    }
+
+    if (type === "message.part.delta") {
+      const props = (evt.properties && typeof evt.properties === "object" ? evt.properties : evt) as Record<string, unknown>;
+      const delta = typeof props.delta === "string" ? props.delta : "";
+      const field = typeof props.field === "string" ? props.field : "";
+      if (!delta) return { events: [], displayText: "", replyText: null, sessionId };
+      const isThinking = field === "reasoning" || field === "thinking";
+      return {
+        events: [],
+        displayText: "",
+        replyText: null,
+        ...(isThinking ? { thinkingDelta: delta } : { textDelta: delta }),
         sessionId,
       };
     }

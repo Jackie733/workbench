@@ -204,13 +204,23 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       const initialDrawer = await page.evaluate(() => {
         const drawer = document.querySelector('[data-testid="right-drawer"]');
         const headX = drawer?.querySelector('.drawer-head [aria-label="收起右侧栏"]');
+        const tabs = drawer!.querySelector('[data-slot="tabs"]') as HTMLElement;
+        const indicator = tabs.querySelector('[data-slot="tab-indicator"]')!;
         return {
           width: Math.round(drawer?.getBoundingClientRect().width ?? 0),
           hasHeadCloseX: Boolean(headX),
+          tabsHeight: tabs.clientHeight,
+          tabsScrollHeight: tabs.scrollHeight,
+          verticalOverflow: getComputedStyle(tabs).overflowY,
+          indicatorBottom: indicator.getBoundingClientRect().bottom,
+          tabsBottom: tabs.getBoundingClientRect().bottom,
         };
       });
       expect(initialDrawer.width).toBe(720);
       expect(initialDrawer.hasHeadCloseX).toBe(false);
+      expect(initialDrawer.verticalOverflow).toBe("hidden");
+      expect(initialDrawer.tabsScrollHeight).toBeLessThanOrEqual(initialDrawer.tabsHeight);
+      expect(initialDrawer.indicatorBottom).toBeLessThanOrEqual(initialDrawer.tabsBottom);
 
       // 4. Drag resizer left to reach 50% equal width (780px on 1920px viewport with 360px sidebar)
       const resizerRect = await page.evaluate(() => {

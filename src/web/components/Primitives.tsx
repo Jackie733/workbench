@@ -198,12 +198,27 @@ export function RunnerSelect({
   stageAction,
   testId,
   tier = "standard",
+  compact = false,
+  popoverSide,
+  popoverAlign,
 }: {
   stageAction: AgentAction;
   testId: string;
   tier?: RequirementTier;
+  compact?: boolean;
+  popoverSide?: "top" | "bottom";
+  popoverAlign?: "start" | "center" | "end";
 }) {
-  return <ModelRunnerBar stageAction={stageAction} testId={testId} tier={tier} />;
+  return (
+    <ModelRunnerBar
+      stageAction={stageAction}
+      testId={testId}
+      tier={tier}
+      compact={compact}
+      popoverSide={popoverSide}
+      popoverAlign={popoverAlign}
+    />
+  );
 }
 
 export function ModalShell({

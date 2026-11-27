@@ -40,6 +40,7 @@ import {
   type RunContextSnapshot,
   type RunDispatchReason,
   type RunHandoffMode,
+  type RunTokenUsage,
   type RunTraceEvent,
 } from "../core/types.ts";
 import { clipHeadTailUtf8, sanitizeOutput } from "../core/validate.ts";
@@ -83,6 +84,8 @@ import {
   normalizeRoutingConfig,
   resolveRouteCandidates,
 } from "./routing.ts";
+import { driveCodexAppServerProcess } from "./codex_app_server.ts";
+import { driveOpencodeAcpProcess } from "./opencode_acp.ts";
 import { createHarnessStreamAdapter, isUnsupportedJsonFlagError, stripCliNoise } from "./stream_adapters.ts";
 import { isModelCoolingDown, recordModelRunOutcome } from "./telemetry.ts";
 import { RunTraceCollector } from "./trace_collector.ts";
@@ -161,6 +164,7 @@ export interface StartRunInput {
   /** Tracks the bounded 1-round automatic `block -> fix -> verify -> re-review` cycle (0 or 1). */
   reviewFixCycle?: number;
   forcePlainText?: boolean;
+  disableRpcStdio?: boolean;
   forceFreshSession?: boolean;
   isInternalRetry?: boolean;
   reviewFormatRescue?: { sessionId: string; harness: HarnessId; model: string; reasoningEffort?: ModelTarget["reasoningEffort"] };
@@ -195,6 +199,7 @@ interface ActiveJob {
   timeoutReason: TimeoutReason | null;
   killTimer?: ReturnType<typeof setTimeout>;
   lockLease?: CodeRootLockLease;
+  onCancel?: () => void;
 }
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
@@ -274,6 +279,7 @@ export class HubExecutor {
   private readonly runLogs = new Map<string, string>();
   private readonly traceCollectors = new Map<string, RunTraceCollector>();
   private readonly plainTextFallbackHarnesses = new Set<HarnessId>();
+  private readonly rpcFallbackHarnesses = new Set<HarnessId>();
   private readonly listeners = new Set<(ev: RunExecutorEvent) => void>();
   private readonly cliEntryPath: string;
   private readonly commandBuilder?: CustomCommandBuilder;
@@ -1123,13 +1129,45 @@ export class HubExecutor {
       }
     };
 
-    const initialCmdLine = `$ ${built.displayCommand}\n`;
+    const rpcStdioAllowed =
+      structuredJsonEnabled &&
+      !input.disableRpcStdio &&
+      !this.rpcFallbackHarnesses.has(target.harness) &&
+      !this.commandBuilder;
+    const useOpencodeAcp =
+      target.harness === "opencode" &&
+      input.action === "ask" &&
+      rpcStdioAllowed;
+    const useCodexAppServer =
+      target.harness === "codex" &&
+      input.action === "ask" &&
+      rpcStdioAllowed;
+    const useRpcStdio = useOpencodeAcp || useCodexAppServer;
+    const opencodeBin = targetHarnessInfo?.executable || "opencode";
+    const codexBin = targetHarnessInfo?.executable || "codex";
+    const spawnCommand = useOpencodeAcp
+      ? opencodeBin
+      : useCodexAppServer
+        ? codexBin
+        : built.command;
+    const spawnArgs = useOpencodeAcp
+      ? ["acp"]
+      : useCodexAppServer
+        ? ["app-server", "--stdio"]
+        : built.args;
+    const displayCommand = useOpencodeAcp
+      ? `${opencodeBin} acp --model ${target.model}${resumedSessionId ? ` --resume ${resumedSessionId}` : ""}`
+      : useCodexAppServer
+        ? `${codexBin} app-server --stdio --model ${target.model}${resumedSessionId ? ` --resume ${resumedSessionId}` : ""}`
+        : built.displayCommand;
+
+    const initialCmdLine = `$ ${displayCommand}\n`;
     this.runLogs.set(runId, initialCmdLine);
     appendDiskLog(initialCmdLine);
-    const child = spawn(built.command, built.args, {
+    const child = spawn(spawnCommand, spawnArgs, {
       cwd: codeRoot,
       detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [useRpcStdio ? "pipe" : "ignore", "pipe", "pipe"],
       env: childEnv,
     });
 
@@ -1170,6 +1208,7 @@ export class HubExecutor {
       if (finalized || job.cancelled || job.timedOut) return;
       job.timedOut = true;
       job.timeoutReason = reason;
+      job.onCancel?.();
       this.killProcessGroup(job);
     };
 
@@ -1298,15 +1337,59 @@ export class HubExecutor {
       }
     };
 
-    child.stdout?.on("data", (buf: Buffer) => {
-      if (buf.length > 0) resetIdleTimer();
-      stdoutLineBuf += buf.toString("utf8");
-      const lines = stdoutLineBuf.split(/\r?\n/);
-      stdoutLineBuf = lines.pop() ?? "";
-      for (const line of lines) {
-        handleAdapterResult(streamAdapter.feedLine(line), true);
-      }
-    });
+    const rpcCallbacks = {
+      cwd: codeRoot,
+      prompt,
+      model: target.model,
+      reasoningEffort: target.reasoningEffort,
+      resumedSessionId,
+      readOnly: isReadOnly,
+      onActivity: resetIdleTimer,
+      onSessionId: (sid: string) => {
+        capturedSessionId = sid;
+      },
+      onDelta: (channel: "text" | "thinking", delta: string) => {
+        this.emit({
+          type: "agent.run.delta",
+          root: base,
+          requirementId: id,
+          runId,
+          action: input.action,
+          channel,
+          delta,
+          at: Date.now(),
+        });
+      },
+      onTraceEvent: (ev: Parameters<typeof collector.append>[0]) => collector.append(ev),
+      onUsage: (usage: RunTokenUsage, turnsCount?: number) => {
+        collector.setAuthoritativeTotals({ usage, turnsCount });
+      },
+      onReplyText: (text: string) => {
+        cleanReplyParts.push(text);
+      },
+      onDisplayText: (text: string) => emitCleanChunk(text),
+      onWarning: (line: string) => emitCleanChunk(line),
+    };
+
+    const acpHandle = useOpencodeAcp
+      ? driveOpencodeAcpProcess(child, rpcCallbacks)
+      : useCodexAppServer
+        ? driveCodexAppServerProcess(child, rpcCallbacks)
+        : null;
+
+    if (acpHandle) {
+      job.onCancel = acpHandle.cancel;
+    } else {
+      child.stdout?.on("data", (buf: Buffer) => {
+        if (buf.length > 0) resetIdleTimer();
+        stdoutLineBuf += buf.toString("utf8");
+        const lines = stdoutLineBuf.split(/\r?\n/);
+        stdoutLineBuf = lines.pop() ?? "";
+        for (const line of lines) {
+          handleAdapterResult(streamAdapter.feedLine(line), true);
+        }
+      });
+    }
 
     child.stderr?.on("data", (buf: Buffer) => {
       if (buf.length > 0) resetIdleTimer();
@@ -1321,7 +1404,11 @@ export class HubExecutor {
       }
     });
 
-    const finalize = async (exitCode: number | null, spawnErr?: string) => {
+    const finalize = async (
+      exitCode: number | null,
+      spawnErr?: string,
+      rpcOpts?: { errorMessage?: string; handshakeFailed?: boolean },
+    ) => {
       if (finalized) return;
       finalized = true;
       if (idleTimer) clearTimeout(idleTimer);
@@ -1334,6 +1421,7 @@ export class HubExecutor {
       let modelUnavailable = false;
       let sessionExpired = false;
       let shouldRetryPlainText = false;
+      let shouldFallbackFromRpc = false;
       let snap: Awaited<ReturnType<typeof observeGitSnapshot>> = null;
       let latestReq: RequirementDetail | null = null;
       let parsedReview: ReturnType<typeof parseReviewOutput> = null;
@@ -1378,7 +1466,20 @@ export class HubExecutor {
           !job.timedOut &&
           !spawnErr &&
           isSessionExpiredError(rawLog, exitCode);
+        shouldFallbackFromRpc =
+          useRpcStdio &&
+          !input.disableRpcStdio &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          exitCode !== 0 &&
+          durationMs < 5000 &&
+          Boolean(rpcOpts?.handshakeFailed);
+        if (shouldFallbackFromRpc) {
+          this.rpcFallbackHarnesses.add(target.harness);
+        }
         shouldRetryPlainText =
+          !shouldFallbackFromRpc &&
           structuredJsonEnabled &&
           !input.forcePlainText &&
           !job.cancelled &&
@@ -1478,23 +1579,28 @@ export class HubExecutor {
 
         errorSummary =
           status === "failed"
-            ? shouldRetryPlainText
-              ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
-              : sessionExpired
-                ? "原生会话已过期或不存在，已自动降级为全新交接重试"
-                : reviewParseFailed
-                  ? canRescueReviewFormat
-                    ? "审查输出缺少结构化 JSON 结论块，正在自动补全格式化输出"
-                    : "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
-                  : job.timedOut
-                    ? job.timeoutReason === "max_duration"
-                      ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
-                      : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-                    : modelUnavailable
-                      ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
-                      : rateLimited
-                        ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-                        : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+            ? shouldFallbackFromRpc
+              ? "CLI 不支持流式 RPC 协议，已自动降级为标准命令行模式重试"
+              : shouldRetryPlainText
+                ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
+                : sessionExpired
+                  ? "原生会话已过期或不存在，已自动降级为全新交接重试"
+                  : reviewParseFailed
+                    ? canRescueReviewFormat
+                      ? "审查输出缺少结构化 JSON 结论块，正在自动补全格式化输出"
+                      : "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
+                    : job.timedOut
+                      ? job.timeoutReason === "max_duration"
+                        ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+                        : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
+                      : modelUnavailable
+                        ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
+                        : rateLimited
+                          ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                          : (spawnErr ||
+                              rpcOpts?.errorMessage ||
+                              rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) ||
+                              `退出码 ${exitCode}`)
             : undefined;
         codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
 
@@ -1745,7 +1851,7 @@ export class HubExecutor {
       }
 
       // Decoupled fire-and-forget telemetry & ledger sidecars
-      if (!shouldRetryPlainText && !sessionExpired) {
+      if (!shouldFallbackFromRpc && !shouldRetryPlainText && !sessionExpired) {
         queueMicrotask(() => {
           try {
             const outcome: TelemetryOutcomeInput = {
@@ -1863,6 +1969,18 @@ export class HubExecutor {
 
       const alreadyRunning = () =>
         this.getActiveRuns(base).some((r) => r.requirementId === id && (r.action === "ask") === isAskTrack);
+
+      if (shouldFallbackFromRpc && !alreadyRunning()) {
+        void this.startRun({
+          ...input,
+          harness: target.harness,
+          model: target.model,
+          reasoningEffort: target.reasoningEffort,
+          disableRpcStdio: true,
+          isInternalRetry: true,
+        }).catch(() => {});
+        return;
+      }
 
       if (shouldRetryPlainText && !alreadyRunning()) {
         void this.startRun({
@@ -2243,10 +2361,29 @@ export class HubExecutor {
       }
     };
 
+    if (acpHandle) {
+      void acpHandle.done.then((res) => {
+        if (res.sessionId) capturedSessionId = res.sessionId;
+        void finalize(res.exitCode, undefined, {
+          errorMessage: res.errorMessage,
+          handshakeFailed: res.handshakeFailed,
+        }).finally(() => {
+          this.killProcessGroup(job);
+        });
+      });
+    }
+
     child.on("error", (err) => {
       void finalize(1, err.message);
     });
     child.on("close", (code) => {
+      if (acpHandle && !finalized) {
+        // Wait for acpHandle.done if stdout/protocol is finishing; fallback if it crashed early.
+        setTimeout(() => {
+          if (!finalized) void finalize(code);
+        }, 50);
+        return;
+      }
       void finalize(code);
     });
 
@@ -2291,6 +2428,7 @@ export class HubExecutor {
     const job = this.activeJobs.get(runId);
     if (!job) return false;
     job.cancelled = true;
+    job.onCancel?.();
     this.killProcessGroup(job);
     return true;
   }

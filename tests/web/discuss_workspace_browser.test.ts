@@ -141,6 +141,17 @@ suite("Discussion & Annotation Workspace Browser E2E (P0/P1/P2)", () => {
         hasStopAskBtn: Boolean(document.querySelector('[data-testid="stop-ask-btn"]')),
         hasRawPre: Boolean(document.querySelector('.discuss-stream-pre')),
         hasRichMarkdown: Boolean(document.querySelector('[data-testid="discuss-stream-output"] .console-msg-rich')),
+        hasChatConversation: Boolean(document.querySelector('[data-slot="chat-conversation"]')),
+        hasComposer: Boolean(document.querySelector('[data-slot="composer"]')),
+        runnerInComposerActions: Boolean(
+          document.querySelector('[data-slot="composer-actions"] [data-testid="drawer-runner-select-trigger"]'),
+        ),
+        refineInComposerActions: Boolean(
+          document.querySelector('[data-slot="composer-actions"] [data-testid="run-refine-btn"]'),
+        ),
+        askInComposerActions: Boolean(
+          document.querySelector('[data-slot="composer-actions"] [data-testid="run-ask-btn"]'),
+        ),
         editDesignDisabled: Boolean(
           (document.querySelector('[data-testid="start-edit-design-btn"]') as HTMLButtonElement | null)?.disabled,
         ),
@@ -157,6 +168,11 @@ suite("Discussion & Annotation Workspace Browser E2E (P0/P1/P2)", () => {
         hasStopAskBtn: true,
         hasRawPre: false,
         hasRichMarkdown: true,
+        hasChatConversation: true,
+        hasComposer: true,
+        runnerInComposerActions: true,
+        refineInComposerActions: true,
+        askInComposerActions: true,
         editDesignDisabled: false,
         approveDisabled: false,
         refineDisabled: false,
@@ -224,6 +240,24 @@ suite("Discussion & Annotation Workspace Browser E2E (P0/P1/P2)", () => {
       fs.writeFileSync(implCodeFile, "0", "utf8");
       fs.writeFileSync(implDoneFile, "go", "utf8");
       await page.waitForFunction(() => !document.querySelector('[data-testid="live-agent-banner"]'), { timeout: 8000 });
+
+      // Narrow drawer (360px) + dark theme layout check: ComposerActions must not overflow horizontally
+      await page.evaluate(() => {
+        document.documentElement.setAttribute("data-theme", "dark");
+        const ws = document.querySelector(".workspace-shell") as HTMLElement | null;
+        if (ws) ws.style.setProperty("--drawer-w", "360px");
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      const narrowOverflow = await page.evaluate(() => {
+        const actions = document.querySelector('[data-slot="composer-actions"]') as HTMLElement | null;
+        const drawer = document.querySelector('[data-testid="discuss-pane"]') as HTMLElement | null;
+        if (!actions || !drawer) return { missing: true, overflows: true };
+        return {
+          missing: false,
+          overflows: actions.scrollWidth > drawer.clientWidth + 2,
+        };
+      });
+      expect(narrowOverflow).toEqual({ missing: false, overflows: false });
 
       expect(pageErrors).toEqual([]);
     } finally {

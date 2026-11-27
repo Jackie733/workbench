@@ -179,28 +179,46 @@ export function buildExecutionPrompt(
       : "轻量类型/语法检查";
 
   if (input.action === "ask") {
+    const hasDesign = Boolean(detail.designMarkdown.trim());
+    const unresolvedCount = (detail.state.discussions ?? []).filter(
+      (d) => d.actor === "human" && d.mode === "refine" && (!d.kind || d.kind === "annotation") && !d.resolved,
+    ).length;
+    const compactAskContext = isEn
+      ? [
+          `- **Requirement**: ${reqId} (${detail.state.title}) | **Stage**: \`${detail.state.stage}\` | **Track**: \`${detail.state.track}\``,
+          `- **On-demand references (read ONLY if needed)**: \`${itemDirHint}/spec.md\`, \`${itemDirHint}/design.md\` (${hasDesign ? "drafted" : "not drafted yet"}), \`${itemDirHint}/handoff.md\`${unresolvedCount > 0 ? ` (${unresolvedCount} pending annotation(s))` : ""}`,
+        ].join("\n")
+      : [
+          `- **需求**：${reqId}（${detail.state.title}）| **阶段**：\`${detail.state.stage}\` | **轨道**：\`${detail.state.track}\``,
+          `- **按需参考位置（仅在需要时查阅）**：\`${itemDirHint}/spec.md\`、\`${itemDirHint}/design.md\`（${hasDesign ? "已起草" : "尚未起草"}）、\`${itemDirHint}/handoff.md\`${unresolvedCount > 0 ? `（含待处理批注 ${unresolvedCount} 条）` : ""}`,
+        ].join("\n");
+
     return (
       isEn
         ? [
-            `You are in read-only Q&A mode for requirement ${reqId} (${detail.state.title}).`,
-            "- Perform read-only research only; do NOT modify repository files or requirement state.",
+            `You are in read-only Q&A discussion mode for requirement ${reqId} (${detail.state.title}).`,
+            "- Perform read-only exploration at most; NEVER modify repository files or requirement state.",
+            "- Match your response depth and tool usage to the user's message: for greetings (e.g. 'hi', 'hello'), small talk, status checks, or general conceptual questions that do not require inspecting files, reply concisely and naturally WITHOUT reading files, running commands, or summarizing the requirement unprompted.",
+            "- Only read the minimal necessary files on demand when the user's specific question requires verifying requirement docs or source code, and stay tightly focused on what was asked.",
             buildOutputLanguageDirective(lang, "ask"),
             "",
             ...(options.resumedSession
-              ? [`(Native session resume; latest brief at \`${itemDirHint}/handoff.md\`)`]
-              : [handoffMarkdown ? `Context Brief:\n${handoffMarkdown}` : `Read \`${itemDirHint}/spec.md\` and \`${itemDirHint}/design.md\`.`]),
+              ? [`(Native session resume; on-demand context brief at \`${itemDirHint}/handoff.md\`)`]
+              : [compactAskContext]),
             "",
             input.anchor ? `Anchor: ${input.anchor}` : "",
             `Question: ${input.message?.trim() || "Explain the core design approach and main risks."}`,
           ]
         : [
-            `你当前处于「只读问答探讨」模式，请针对工作台需求 ${reqId}（${detail.state.title}）回答用户问题。`,
-            "- 仅做只读调研与解答，不要修改仓库文件或需求状态。",
+            `你当前处于「只读问答探讨」模式，关联工作台需求 ${reqId}（${detail.state.title}）。`,
+            "- 严格保持只读：严禁修改任何仓库文件或需求状态。",
+            "- 按问题意图自适应回答深度与工具调用：若用户只是打招呼（如 hi / 你好）、寒暄或提问无需查代码的常规问题，请直接简明自然地回复，不要主动读取文件、运行命令或长篇大论分析需求内容。",
+            "- 仅当用户问题确实需要核对需求文档或源码细节时，再按需只读查阅最相关的文件，并紧扣问题本身作答。",
             buildOutputLanguageDirective(lang, "ask"),
             "",
             ...(options.resumedSession
-              ? [`（同会话原生续接；完整指引见 \`${itemDirHint}/handoff.md\`）`]
-              : [handoffMarkdown ? `上下文指引：\n${handoffMarkdown}` : `请先读取 \`${itemDirHint}/spec.md\` 与 \`${itemDirHint}/design.md\`。`]),
+              ? [`（同会话原生续接；按需上下文简报位于 \`${itemDirHint}/handoff.md\`）`]
+              : [compactAskContext]),
             "",
             input.anchor ? `提问锚点：${input.anchor}` : "",
             `用户问题：${input.message?.trim() || "请解释当前技术方案的核心思路与风险点。"}`,
