@@ -139,7 +139,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       const idleTabsTop = await tabsTop();
 
       // 启动受控运行：命令持续输出直到测试写入结束标记。
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
       await page.waitForSelector('[data-testid="run-lock-hint"]', { timeout: 5000 });
       await page.waitForFunction(
@@ -153,7 +153,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       const requestsAtLock = writeRequests.length;
 
       expect(await tabsTop()).toBe(idleTabsTop);
-      expect(await page.evaluate(() => ["action-run_all_verifications", "action-dispatch_implement", "run-selected-model-btn"]
+      expect(await page.evaluate(() => ["action-run_all_verifications", "action-dispatch_implement", "banner-runner-select", "run-review-btn"]
         .every((id) => !document.querySelector(`[data-testid="${id}"]`)))).toBe(true);
 
       // 「更多」可打开：写入项禁用，只读项可用。
@@ -236,8 +236,9 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
         },
         { timeout: 8000 },
       );
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
       expect(await disabled('[data-testid="action-dispatch_implement"]')).toBe(false);
-      expect(await disabled('[data-testid="run-selected-model-btn"]')).toBe(false);
+      await page.waitForSelector('[data-testid="banner-runner-select"]', { timeout: 8000 });
       expect(await tabsTop()).toBe(idleTabsTop);
       expect(finished.length).toBe(1);
 
@@ -301,12 +302,13 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
     const pageErrors: string[] = [];
     page.on("pageerror", (err: Error) => pageErrors.push(err.message));
 
-    const waitUnlocked = () =>
+    const waitUnlocked = (action: "dispatch_implement" | "dispatch_review" = "dispatch_implement") =>
       page.waitForFunction(
-        () =>
+        (actionId: unknown) =>
           !document.querySelector('[data-testid="live-agent-banner"]') &&
-          Boolean((document.querySelector('[data-testid="run-selected-model-btn"]') as HTMLButtonElement | null)?.disabled === false),
+          Boolean((document.querySelector(`[data-testid="action-${String(actionId)}"]`) as HTMLButtonElement | null)?.disabled === false),
         { timeout: 8000 },
+        action,
       );
     const finishRun = (code: number) => {
       fs.writeFileSync(codeFile, `${code}\n`);
@@ -319,7 +321,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
     };
     const startRun = async (expectedRuns: number) => {
       fs.rmSync(doneFile, { force: true });
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
       await waitStarted(expectedRuns);
     };
@@ -329,7 +331,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 8000 });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 8000 });
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
 
       // 1. 刷新后由 Hub 快照恢复运行期限制。
       await startRun(1);
@@ -339,7 +341,14 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="run-lock-hint"]')))).toBe(true);
       finishRun(0);
-      await waitUnlocked();
+      await waitUnlocked("dispatch_review");
+
+      // 成功实施会自动重新验证并进入待审查；制造新的代码变更后才能再次从实施入口启动。
+      fs.appendFileSync(path.join(repo, "calc.ts"), "// stale after successful run\n");
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 8000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
 
       // 2. 失败结束同样按真实状态解除限制。
       await startRun(2);
@@ -361,14 +370,9 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       // 4. 快速结束（HTTP 调度响应可能晚于结束事件）不会留下陈旧锁。
       finishRun(0);
       const expectedFastRun = started.length + 1;
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await waitStarted(expectedFastRun);
-      await page.waitForFunction(
-        () =>
-          !document.querySelector('[data-testid="live-agent-banner"]') &&
-          Boolean((document.querySelector('[data-testid="run-selected-model-btn"]') as HTMLButtonElement | null)?.disabled === false),
-        { timeout: 8000 },
-      );
+      await waitUnlocked("dispatch_review");
       expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="run-lock-hint"]')))).toBe(false);
 
       expect(pageErrors).toEqual([]);
@@ -501,10 +505,10 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 8000 });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 8000 });
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
 
       // 1. 单项目模式：运行中触发一次全量查询失效，快照附带 projectId 仍应维持限制。
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
       await waitStarted(1);
       const beforeSync = hubStateResponses;
@@ -531,7 +535,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await reconnect();
       await page.waitForFunction(() => !document.querySelector('[data-testid="live-agent-banner"]'), { timeout: 12000 });
       await page.waitForFunction(
-        () => !(document.querySelector('[data-testid="run-selected-model-btn"]') as HTMLButtonElement | null)?.disabled,
+        () => (document.querySelector('[data-testid="action-dispatch_implement"]') as HTMLButtonElement | null)?.disabled === false,
         { timeout: 8000 },
       );
       expect(await disabled('[data-testid="action-run_all_verifications"]')).toBe(false);
@@ -631,7 +635,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await pageA.goto(server.url, { waitUntil: "networkidle0" });
       await pageA.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10000 });
       await clickReady(pageA, '[data-testid="req-row-REQ-001"]');
-      await pageA.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 8000 });
+      await pageA.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
 
       const runDuringGap = await executor.startRun({
         root: repo,
@@ -649,7 +653,8 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await pageA.waitForSelector('[data-testid="run-lock-hint"]', { timeout: 5000 });
       expect(
         await pageA.evaluate(
-          () => Boolean((document.querySelector('[data-testid="action-run_all_verifications"]') as HTMLButtonElement | null)?.disabled),
+          () => ["action-run_all_verifications", "action-dispatch_implement"]
+            .every((id) => !document.querySelector(`[data-testid="${id}"]`)),
         ),
       ).toBe(true);
 
@@ -682,7 +687,7 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await unblockSockets(pageB);
       await pageB.waitForFunction(() => !document.querySelector('[data-testid="live-agent-banner"]'), { timeout: 12000 });
       await pageB.waitForFunction(
-        () => !(document.querySelector('[data-testid="run-selected-model-btn"]') as HTMLButtonElement | null)?.disabled,
+        () => (document.querySelector('[data-testid="action-dispatch_implement"]') as HTMLButtonElement | null)?.disabled === false,
         { timeout: 8000 },
       );
 
@@ -748,8 +753,6 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       p.evaluate(() => (window as unknown as { __wbReleaseHubState: () => void }).__wbReleaseHubState());
     const hubStateRequests = (p: BrowserPage) =>
       p.evaluate(() => (window as unknown as { __wbHubStateRequests: number }).__wbHubStateRequests);
-    const disabled = (p: BrowserPage, selector: string) =>
-      p.evaluate((sel: string) => Boolean((document.querySelector(sel) as HTMLButtonElement | null)?.disabled), selector);
 
     const pageA = await browser!.newPage();
     const pageB = await browser!.newPage();
@@ -789,7 +792,8 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       await pageA.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await clickReady(pageA, '[data-testid="req-row-REQ-001"]');
       await pageA.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
-      expect(await disabled(pageA, '[data-testid="action-run_all_verifications"]')).toBe(true);
+      expect(await pageA.evaluate(() => ["action-run_all_verifications", "action-dispatch_implement"]
+        .every((id) => !document.querySelector(`[data-testid="${id}"]`)))).toBe(true);
 
       executor.cancelRun(runDuringGap.run.id);
       await waitFinished(1);
@@ -827,11 +831,16 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
 
       await pageB.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await clickReady(pageB, '[data-testid="req-row-REQ-001"]');
-      await pageB.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 8000 });
+      await pageB.waitForFunction(
+        () => (document.querySelector('[data-testid="action-dispatch_implement"]') as HTMLButtonElement | null)?.disabled === false,
+        { timeout: 8000 },
+      );
       // 释放的旧快照包含已结束的运行，不得回滚连接后补拉的新状态。
       await Bun.sleep(300);
       expect(await pageB.evaluate(() => Boolean(document.querySelector('[data-testid="live-agent-banner"]')))).toBe(false);
-      expect(await disabled(pageB, '[data-testid="run-selected-model-btn"]')).toBe(false);
+      expect(await pageB.evaluate(() =>
+        (document.querySelector('[data-testid="action-dispatch_implement"]') as HTMLButtonElement | null)?.disabled === false,
+      )).toBe(true);
 
       expect(pageErrors).toEqual([]);
       // 断言初始请求在途期间连接后确实发出了新快照请求，而非直接复用。
@@ -908,9 +917,9 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       );
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 8000 });
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 8000 });
 
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await waitStarted(1);
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 8000 });
       expect(await page.evaluate(() => Boolean((window as unknown as { __wbRunStartPending: boolean }).__wbRunStartPending))).toBe(
@@ -948,9 +957,9 @@ suite("REQ-012 Web E2E run lock & reconnect recovery flows", () => {
       expect(await bannerVisible(page)).toBe(false);
       expect(
         await page.evaluate(
-          () => Boolean((document.querySelector('[data-testid="run-selected-model-btn"]') as HTMLButtonElement | null)?.disabled),
+          () => (document.querySelector('[data-testid="action-dispatch_implement"]') as HTMLButtonElement | null)?.disabled === false,
         ),
-      ).toBe(false);
+      ).toBe(true);
 
       expect(pageErrors).toEqual([]);
     } finally {

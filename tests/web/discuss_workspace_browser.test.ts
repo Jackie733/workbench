@@ -204,12 +204,12 @@ suite("Discussion & Annotation Workspace Browser E2E (P0/P1/P2)", () => {
         { timeout: 3000 },
       );
 
-      // 3. Approve -> start background implement -> verify Ask still works concurrently!
+      // 3. Approve -> start implement -> verify Ask still works concurrently!
       await approveDesign(repo, "REQ-001");
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="run-selected-model-btn"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await page.waitForSelector('[data-testid="action-dispatch_implement"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await page.waitForSelector('[data-testid="live-agent-banner"]', { timeout: 5000 });
 
       await clickReady(page, '[data-testid="drawer-tab-discuss"]');

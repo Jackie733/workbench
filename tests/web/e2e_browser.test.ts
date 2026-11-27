@@ -866,19 +866,18 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(bannerRunnerMetrics.flexShrink).toBe("1");
       expect(bannerRunnerMetrics.minWidth).toBe("0px");
       expect(Math.abs(bannerRunnerMetrics.height - 28)).toBeLessThanOrEqual(1);
-      // REQ-015: 阶段横幅内模型触发器、推理强度下拉与运行/审查按钮严格等高 28px 且单行。
+      // REQ-015: 阶段横幅内模型触发器、推理强度下拉与审查按钮严格等高 28px 且单行。
       await expectControlsAligned(
         page,
         [
           '[data-testid="banner-runner-select-trigger"]',
           '[data-testid="banner-runner-select-effort"]',
-          '[data-testid="run-selected-model-btn"]',
           '[data-testid="run-review-btn"]',
         ],
         28,
       );
       await selectUiOption(page, '[data-testid="banner-runner-select-effort"]', "high");
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       // Auto-review may chain immediately after `implement`, switching the drawer to the review run's stream.
       await page.waitForFunction(
         () => {
@@ -1329,11 +1328,11 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForFunction(
         () =>
           Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")) &&
-          Boolean(document.querySelector('[data-testid="run-selected-model-btn"]:not([disabled])')),
+          Boolean(document.querySelector('[data-testid="action-dispatch_implement"]:not([disabled])')),
         { timeout: 5000 },
       );
 
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_implement"]');
       await page.waitForFunction(
         () =>
           Boolean(document.querySelector('[data-testid="console-log-output"]')?.textContent?.includes("核心回复：终端渲染已完成")) &&

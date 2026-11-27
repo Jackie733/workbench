@@ -636,7 +636,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       }
     };
     const runWithCurrentSelection = async (expectedRuns: number) => {
-      await clickReady(page, '[data-testid="run-selected-model-btn"]');
+      await clickReady(page, '[data-testid="action-dispatch_design"]');
       await page.waitForFunction(
         (count: unknown) => {
           const calls = (window as unknown as { __wbRunCalls?: RunCall[] }).__wbRunCalls;

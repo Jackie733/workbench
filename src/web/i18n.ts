@@ -319,7 +319,6 @@ const zhCN = {
   "ws.runLockShort": "写入暂停",
   "ws.runLockHint": "Agent 正在执行，验证、调度、编辑与交付等写入操作已暂停；可等待运行结束或主动终止运行。",
   "ws.runLockMenuHint": "Agent 正在执行，写入操作已暂停；查看交接简报与调试信息仍可用。",
-  "ws.runBackground": "后台执行",
   "ws.crossReview": "跨模型审查",
   "ws.deliverPrAppend": "追加提交 / 更新 PR…",
   "ws.deliverPrCreate": "提交并创建 GitHub PR…",
@@ -705,7 +704,7 @@ const zhCN = {
   "drawer.stop": "终止任务",
   "drawer.retryFallback": "切换备援模型重试",
   "drawer.waiting": "等待终端输出…",
-  "drawer.consoleEmpty": "尚未通过调度器触发 Agent 执行。可在主横幅选择模型后点击「后台执行」。",
+  "drawer.consoleEmpty": "尚未启动 Agent 任务。可在主横幅选择模型，再点击当前阶段的操作按钮。",
 
   "md.empty": "（暂无内容）",
   "md.annotateTitle": "对此段提问或批注",
@@ -2004,7 +2003,6 @@ const en: Record<MessageKey, string> = {
   "ws.runLockShort": "Writes paused",
   "ws.runLockHint": "An agent run is active. Verification, dispatch, editing, and delivery actions are paused until it ends; you can wait or stop the run.",
   "ws.runLockMenuHint": "An agent run is active. Write actions are paused; handoff and debug info remain available.",
-  "ws.runBackground": "Run in background",
   "ws.crossReview": "Cross-model review",
   "ws.deliverPrAppend": "Add commits / update PR…",
   "ws.deliverPrCreate": "Commit & create GitHub PR…",
@@ -2390,7 +2388,7 @@ const en: Record<MessageKey, string> = {
   "drawer.stop": "Stop task",
   "drawer.retryFallback": "Retry with fallback model",
   "drawer.waiting": "Waiting for terminal output…",
-  "drawer.consoleEmpty": "No agent run has been dispatched yet. Pick a model in the main banner and click “Run in background”.",
+  "drawer.consoleEmpty": "No agent task has started yet. Pick a model in the main banner, then use the action for the current stage.",
 
   "md.empty": "(No content)",
   "md.annotateTitle": "Ask or annotate this section",

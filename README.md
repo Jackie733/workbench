@@ -14,11 +14,11 @@ Repository: [Jackie733/workbench](https://github.com/Jackie733/workbench).
 
 1. **Resident multi-project control center (`wb start` / `wb open`)**
    - The global `wb` CLI installs onto `$PATH` via `bun link`; a user-level service is the recommended way to host the hub (default port `4318`, data in `~/.workbench-hub/`).
-   - The three-column web command center gives you **live project switching**, a **local directory browser with guided initialization**, pending-approval counters, and background-run breathing indicators in the left rail.
+   - The three-column web command center gives you **live project switching**, a **local directory browser with guided initialization**, pending-approval counters, and agent-run breathing indicators in the left rail.
 2. **Multi-harness auto-discovery and stage-based routing**
    - Automatically discovers local `codex`, `qodercn`, `opencode`, `agy` (Antigravity / Gemini CLI), and `omp` installations plus their model catalogs, and lets you append paid models such as OpenCode Go.
    - Ships with `balanced` (recommended default), `sota_first`, and `quota_saver` presets: scarce SOTA quota goes to the low-token, high-leverage `design` and `review` stages, while high-frequency `implement` / `fix` work routes to high-throughput or free models.
-   - **Active background execution with a live terminal**: switch the executing model inline from the action banner, stream child-process logs into the console, terminate runs at any time, or retry on a fallback model after a rate limit or failure.
+   - **Stage actions with a live terminal**: select a model in the action banner, start the agent through an explicit stage action such as generating a design or starting implementation, stream child-process logs into the console, terminate runs at any time, or retry on a fallback model after a rate limit or failure.
 3. **Two-tier cross-harness handoff and PR-style co-design**
    - **Two-tier handoff**: same-harness continuation reuses each CLI's native session mechanism; after a harness switch or an abnormal interruption, the hub synthesizes a bounded `handoff.md` (contract facts, agent notes and dead ends, the `git diff` scene, and the tail of the failing log).
    - **Non-linear co-design**: hover any section of `spec.md`, `design.md`, or an acceptance criterion to add an inline **`[💬 annotate / ask]`** note; the discussion rail separates **Ask** (read-only) from **Refine** (which re-proposes the design and opens a `vN-1 → vN` diff). Humans can also edit `design.md` directly.

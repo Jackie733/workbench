@@ -3475,18 +3475,6 @@ export function WorkspaceView() {
               {canRunModel ? (
                 <div className="banner-runner-row" role="group" aria-label={t(language, "ws.modelDispatch")}>
                   <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" tier={s.tier} />
-                  <AsyncButton
-                    size="sm"
-                    variant="outline"
-                    type="button"
-                    data-testid="run-selected-model-btn"
-                    disabled={busy}
-                    title={t(language, "ws.runBackground")}
-                    aria-label={t(language, "ws.runBackground")}
-                    onAction={() => triggerActiveRun(s.id, defaultAct)}
-                  >
-                    <Icon icon={Zap} size={14} /> <span className="ws-compact-label">{t(language, "ws.runBackground")}</span>
-                  </AsyncButton>
                   {canReview && (
                     <AsyncButton
                       size="sm"

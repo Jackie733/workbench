@@ -140,7 +140,6 @@ describe("REQ-019 P0 关键按钮接入范围", () => {
       "evidence-rerun-btn-",
       "manual-verify-btn",
       "screenshot-recapture",
-      "run-selected-model-btn",
       "run-review-btn",
       "action-${",
       "sync-pr-btn",
