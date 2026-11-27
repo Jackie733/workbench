@@ -54,6 +54,7 @@ import type {
 import { canDirectApproveWithDecisions } from "../state.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
 import {
+  describeClientError,
   formatAgentStatusLabel,
   formatPrStateLabel,
   prStateRef,
@@ -71,6 +72,7 @@ import {
   guardRequirementRunLock,
   handleBannerAction,
   invalidateAllWorkbenchQueries,
+  isRequirementNotFoundError,
   notifyCascadeSyncResults,
   openHandoff,
   openRequirement,
@@ -108,6 +110,7 @@ import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
+import { WorkspaceLoadingState } from "./WorkspaceLoadingState.tsx";
 import { WorkspaceSandbox } from "./WorkspaceSandbox.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import {
@@ -2871,7 +2874,12 @@ export function WorkspaceView() {
 
   const { data: hub } = useHubStateQuery();
   const { data: project } = useProjectQuery(activeProjectId);
-  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const {
+    data: reqData,
+    isError: reqIsError,
+    error: reqError,
+    refetch: refetchReq,
+  } = useRequirementQuery(activeProjectId, selectedId);
   const isDoneStage = reqData?.detail?.state.stage === "done";
   const { data: deliveryPreview } = useDeliveryQuery(activeProjectId, selectedId, Boolean(isDoneStage));
   const [approval, setApproval] = useState<{
@@ -2886,7 +2894,18 @@ export function WorkspaceView() {
   }, [activeProjectId, selectedId, reqData?.detail?.state.stage]);
 
   const d = reqData?.detail ?? null;
-  if (!d) return <p className="muted">{t(language, "ws.loading")}</p>;
+  if (!d) {
+    const showLoadError = Boolean(reqIsError && !isRequirementNotFoundError(reqError));
+    return (
+      <WorkspaceLoadingState
+        selectedId={selectedId}
+        language={language}
+        isError={showLoadError}
+        errorMessage={showLoadError ? describeClientError(language, reqError) : undefined}
+        onRetry={showLoadError ? () => refetchReq() : undefined}
+      />
+    );
+  }
 
   const { state: s, validity } = d;
   const stageMeta = STAGE_META[s.stage];

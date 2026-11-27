@@ -277,6 +277,9 @@ const zhCN = {
   "remote.copyFailed": "无法自动复制。请选择命令文本并复制。",
 
   "ws.loading": "正在加载需求详情…",
+  "ws.loadingHint": "正在同步规范、方案与验证状态",
+  "ws.loadFailedTitle": "加载需求详情失败",
+  "ws.loadRetry": "重新加载",
   "ws.step.draft": "1. 需求草稿",
   "ws.step.design": "2. 方案设计",
   "ws.step.review": "3. 人工审阅",
@@ -1953,6 +1956,9 @@ const en: Record<MessageKey, string> = {
   "remote.copyFailed": "Copying failed. Select the command text and copy it manually.",
 
   "ws.loading": "Loading requirement details…",
+  "ws.loadingHint": "Syncing spec, design, and verification state",
+  "ws.loadFailedTitle": "Failed to load requirement details",
+  "ws.loadRetry": "Retry",
   "ws.step.draft": "1. Requirement draft",
   "ws.step.design": "2. Design",
   "ws.step.review": "3. Human review",
