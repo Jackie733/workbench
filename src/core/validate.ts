@@ -90,8 +90,10 @@ import {
   type RunTokenUsage,
   type ScreenshotBatch,
   type ScreenshotBatchStatus,
+  type ScreenshotPhase,
   type ScreenshotShot,
   type ScreenshotSkipReasonCode,
+  type ScreenshotSource,
   type ScreenshotTrigger,
   type Stage,
   type TimelineEvent,
@@ -108,7 +110,7 @@ const SNAPSHOT_PATH_RE = /^snapshots\/acceptance-[A-Za-z0-9][A-Za-z0-9._-]{0,63}
 const SCREENSHOT_SHOT_ID_RE = /^S-[A-Za-z0-9-]{1,64}$/;
 const SCREENSHOT_BATCH_ID_RE = /^SB-[A-Za-z0-9-]{1,64}$/;
 const SCREENSHOT_PATH_RE = /^screenshots\/shot-S-[A-Za-z0-9-]{1,64}\.png$/;
-const SCREENSHOT_VIEWPORT_RE = /^\d{2,5}x\d{2,5}$/;
+const SCREENSHOT_VIEWPORT_RE = /^\d{1,5}x\d{1,5}$/;
 const GIT_REF_RE = /^[0-9a-f]{7,64}$/i;
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const GITEE_ENTERPRISE_RE = /^[A-Za-z0-9_.-]{1,100}$/;
@@ -118,8 +120,10 @@ const DIFF_STATUSES: DiffEvidenceStatus[] = ["captured", "empty", "unavailable"]
 const FILES_SCOPES: DiffFilesScope[] = ["baseline-relative", "worktree", "none"];
 const EFFECTIVE_STATES: EffectiveVerificationState[] = ["passed", "failed", "stale", "unknown"];
 const COVERAGE_STATES: CriterionCoverageState[] = ["passed", "failed", "stale", "unverified", "unavailable"];
-const SCREENSHOT_TRIGGERS: ScreenshotTrigger[] = ["auto_submit", "manual"];
+const SCREENSHOT_TRIGGERS: ScreenshotTrigger[] = ["auto_submit", "manual", "agent_attach", "auto_collect"];
 const SCREENSHOT_STATUSES: ScreenshotBatchStatus[] = ["captured", "partial", "skipped"];
+const SCREENSHOT_SOURCES: ScreenshotSource[] = ["scenario", "matrix"];
+const SCREENSHOT_PHASES: ScreenshotPhase[] = ["before", "after", "state"];
 const SCREENSHOT_SKIP_REASON_CODES: ScreenshotSkipReasonCode[] = [
   "browser_missing",
   "chrome_path_missing",
@@ -952,6 +956,27 @@ export function validateScreenshotShot(raw: unknown): ScreenshotShot {
   ) {
     throw new WorkbenchError("corrupt_record", "截图记录字段损坏");
   }
+  if (raw.description !== undefined) {
+    if (
+      typeof raw.description !== "string" ||
+      !isSafeText(raw.description, 2000, true) ||
+      Array.from(raw.description).length > 500
+    ) {
+      throw new WorkbenchError("corrupt_record", "截图场景说明无效或超过 500 字符");
+    }
+  }
+  if (raw.phase !== undefined && !SCREENSHOT_PHASES.includes(raw.phase as ScreenshotPhase)) {
+    throw new WorkbenchError("corrupt_record", "截图阶段标记无效");
+  }
+  if (raw.criterionIds !== undefined) {
+    if (
+      !Array.isArray(raw.criterionIds) ||
+      raw.criterionIds.length > MAX_CRITERIA ||
+      raw.criterionIds.some((item) => typeof item !== "string" || !TOKEN_ID_RE.test(item))
+    ) {
+      throw new WorkbenchError("corrupt_record", "截图关联验收条件无效");
+    }
+  }
   return raw as unknown as ScreenshotShot;
 }
 
@@ -964,6 +989,9 @@ export function validateScreenshotBatch(raw: unknown): ScreenshotBatch {
     !SCREENSHOT_SKIP_REASON_CODES.includes(raw.reasonCode as ScreenshotSkipReasonCode)
   ) {
     throw new WorkbenchError("corrupt_record", "截图跳过原因码无效");
+  }
+  if (raw.source !== undefined && !SCREENSHOT_SOURCES.includes(raw.source as ScreenshotSource)) {
+    throw new WorkbenchError("corrupt_record", "截图批次来源无效");
   }
   if (
     typeof raw.id !== "string" ||

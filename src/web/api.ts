@@ -27,6 +27,7 @@ import type {
   RunTraceEvent,
   SandboxDriftInfo,
   ScreenshotCaptureResult,
+  ScreenshotPhase,
   Stage,
   Track,
   VerificationRecord,
@@ -488,6 +489,23 @@ export const api = {
     requestJson<{ detail: RequirementDetail; screenshotCapture: ScreenshotCaptureResult }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/screenshots/capture`),
       { method: "POST", body: JSON.stringify({ ...(label?.trim() ? { label: label.trim() } : {}) }) },
+    ),
+  attachScenarioScreenshots: (
+    id: string,
+    shots: Array<{
+      dataBase64: string;
+      label: string;
+      description?: string;
+      phase?: ScreenshotPhase;
+      viewport?: string;
+      theme?: "light" | "dark";
+      urlPath?: string;
+      criterionIds?: string[];
+    }>,
+  ) =>
+    requestJson<{ detail: RequirementDetail; screenshotCapture: ScreenshotCaptureResult }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/screenshots/attach`),
+      { method: "POST", body: JSON.stringify({ shots }) },
     ),
   getHandoff: (id: string) =>
     requestJson<{ markdown: string; detail: RequirementDetail }>(

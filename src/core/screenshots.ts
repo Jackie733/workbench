@@ -12,13 +12,17 @@ import {
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_NAV_MS,
   MAX_SCREENSHOT_TOTAL_MS,
+  MAX_SCREENSHOTS_PER_BATCH,
+  WORKBENCH_DIR,
   type ScreenshotBatch,
   type ScreenshotBatchStatus,
   type ScreenshotCaptureResult,
+  type ScreenshotPhase,
   type ScreenshotShot,
   type ScreenshotSkipReasonCode,
   type ScreenshotTrigger,
 } from "./types.ts";
+import { assertRequirementId, isSafeText } from "./validate.ts";
 import { ensureServerForProject } from "../server/runtime.ts";
 
 export interface ScreenshotMatrixEntry {
@@ -242,7 +246,10 @@ function batchId(): string {
   return `SB-${Date.now()}-${randomUUID().slice(0, 6)}`;
 }
 
-function isExternalNonWorkbenchRepo(codeRoot: string): boolean {
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** Returns true for repositories that are not Workbench itself (e.g. external business frontends). */
+export function isExternalNonWorkbenchRepo(codeRoot: string): boolean {
   const pkgPath = path.join(codeRoot, "package.json");
   try {
     const stat = fs.lstatSync(pkgPath);
@@ -252,6 +259,419 @@ function isExternalNonWorkbenchRepo(codeRoot: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The generic 8-shot matrix only makes sense for Workbench's own UI. */
+export function isWorkbenchOwnRepo(codeRoot: string): boolean {
+  return !isExternalNonWorkbenchRepo(codeRoot);
+}
+
+/** Gitignored staging directory where browser tests may drop scenario screenshots. */
+export function screenshotStagingDir(root: string, id: string): string {
+  const base = canonicalRoot(root);
+  assertRequirementId(id);
+  return path.join(base, WORKBENCH_DIR, "tmp", "screenshots", id);
+}
+
+export interface ScreenshotAttachShotInput {
+  /** PNG file path; resolved against the current working directory, then the code root. */
+  file?: string;
+  bytes?: Buffer | Uint8Array;
+  /** Base64 payload for HTTP/Web uploads; data URLs are accepted. */
+  dataBase64?: string;
+  /** Alias for dataBase64 accepted by HTTP/MCP clients. */
+  base64?: string;
+  label: string;
+  description?: string;
+  phase?: ScreenshotPhase;
+  viewport?: string;
+  theme?: "light" | "dark";
+  urlPath?: string;
+  /** Alias for urlPath. */
+  url?: string;
+  criterionIds?: string[];
+  /** Alias for criterionIds. */
+  criteria?: string[];
+}
+
+export interface AttachRequirementScreenshotsInput {
+  shots: ScreenshotAttachShotInput[];
+  trigger?: ScreenshotTrigger;
+  actor?: "agent" | "human" | "system";
+  currentCodeSnapshotHash?: string | null;
+}
+
+function parsePngDimensions(bytes: Buffer): { width: number; height: number } {
+  if (bytes.length < 33 || !bytes.subarray(0, 8).equals(PNG_MAGIC) || bytes.toString("ascii", 12, 16) !== "IHDR") {
+    throw new WorkbenchError("invalid_input", "截图必须是合法的 PNG 文件（缺少 PNG 文件头或 IHDR 块）");
+  }
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (width < 1 || height < 1 || width > 99999 || height > 99999) {
+    throw new WorkbenchError("invalid_input", `截图尺寸无效: ${width}x${height}`);
+  }
+  return { width, height };
+}
+
+function decodeBase64Screenshot(raw: string): Buffer {
+  const payload = raw.includes(",") ? raw.slice(raw.indexOf(",") + 1) : raw;
+  if (!payload.trim() || !/^[A-Za-z0-9+/=\s]+$/.test(payload)) {
+    throw new WorkbenchError("invalid_input", "截图 base64 内容无效");
+  }
+  return Buffer.from(payload, "base64");
+}
+
+function resolveScreenshotFilePath(raw: string, codeRoot: string): string {
+  const candidates = path.isAbsolute(raw)
+    ? [raw]
+    : [path.resolve(process.cwd(), raw), path.resolve(codeRoot, raw)];
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    const stat = fs.lstatSync(candidate);
+    if (stat.isSymbolicLink()) {
+      throw new WorkbenchError("invalid_input", `截图文件不允许使用符号链接: ${raw}`);
+    }
+    if (!stat.isFile()) {
+      throw new WorkbenchError("invalid_input", `截图路径必须是普通文件: ${raw}`);
+    }
+    if (stat.size > MAX_SCREENSHOT_BYTES) {
+      throw new WorkbenchError("invalid_input", `截图文件超过单张 2MB 上限: ${raw}`);
+    }
+    return candidate;
+  }
+  throw new WorkbenchError("invalid_input", `截图文件不存在: ${raw}`);
+}
+
+function readAttachShotBytes(input: ScreenshotAttachShotInput, codeRoot: string): Buffer {
+  let bytes: Buffer;
+  if (input.bytes !== undefined) {
+    bytes = Buffer.from(input.bytes);
+  } else if (typeof input.dataBase64 === "string") {
+    bytes = decodeBase64Screenshot(input.dataBase64);
+  } else if (typeof input.base64 === "string") {
+    bytes = decodeBase64Screenshot(input.base64);
+  } else if (typeof input.file === "string" && input.file.trim()) {
+    bytes = fs.readFileSync(resolveScreenshotFilePath(input.file.trim(), codeRoot));
+  } else {
+    throw new WorkbenchError("invalid_input", "每张截图必须提供 file、bytes 或 dataBase64 之一");
+  }
+  if (bytes.length === 0) {
+    throw new WorkbenchError("invalid_input", "截图文件不能为空");
+  }
+  if (bytes.length > MAX_SCREENSHOT_BYTES) {
+    throw new WorkbenchError("invalid_input", "截图超出单张 2MB 上限");
+  }
+  parsePngDimensions(bytes);
+  return bytes;
+}
+
+function normalizeAttachShot(
+  input: ScreenshotAttachShotInput,
+  bytes: Buffer,
+): Omit<ScreenshotShot, "id" | "path" | "sha256" | "sizeBytes"> {
+  const label = typeof input.label === "string" ? input.label.trim() : "";
+  if (!label || !isSafeText(label, 300)) {
+    throw new WorkbenchError("invalid_input", "每张截图都必须提供合法的场景标题 label（≤300 字节）");
+  }
+  if (input.description !== undefined && typeof input.description !== "string") {
+    throw new WorkbenchError("invalid_input", "截图场景说明必须是字符串");
+  }
+  const description = typeof input.description === "string" ? input.description.trim() : "";
+  if (description && (!isSafeText(description, 2000, true) || Array.from(description).length > 500)) {
+    throw new WorkbenchError("invalid_input", "截图场景说明不能超过 500 字符或包含非法控制字符");
+  }
+  if (input.phase !== undefined && !["before", "after", "state"].includes(input.phase)) {
+    throw new WorkbenchError("invalid_input", `无效的截图阶段: ${String(input.phase)}`);
+  }
+  if (input.theme !== undefined && input.theme !== "light" && input.theme !== "dark") {
+    throw new WorkbenchError("invalid_input", `无效的截图主题: ${String(input.theme)}`);
+  }
+  if (input.viewport !== undefined && typeof input.viewport !== "string") {
+    throw new WorkbenchError("invalid_input", "截图视口必须是 WxH 格式字符串");
+  }
+  if (input.urlPath !== undefined && typeof input.urlPath !== "string") {
+    throw new WorkbenchError("invalid_input", "截图来源路径必须是字符串");
+  }
+  if (input.url !== undefined && typeof input.url !== "string") {
+    throw new WorkbenchError("invalid_input", "截图来源路径别名 url 必须是字符串");
+  }
+  const dimensions = parsePngDimensions(bytes);
+  const derivedViewport = `${dimensions.width}x${dimensions.height}`;
+  const viewport = typeof input.viewport === "string" && input.viewport.trim()
+    ? input.viewport.trim()
+    : derivedViewport;
+  if (!/^\d{1,5}x\d{1,5}$/.test(viewport)) {
+    throw new WorkbenchError("invalid_input", `无效的截图视口: ${viewport}（应为 WxH）`);
+  }
+  const urlPath =
+    typeof input.urlPath === "string" && input.urlPath.trim()
+      ? input.urlPath.trim()
+      : typeof input.url === "string" && input.url.trim()
+        ? input.url.trim()
+        : "/";
+  if (!isSafeText(urlPath, 4096)) {
+    throw new WorkbenchError("invalid_input", "截图来源路径无效或超过 4096 字节");
+  }
+  const normalizeCriterionIds = (value: unknown, field: string): string[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+      throw new WorkbenchError("invalid_input", `截图关联的验收条件 ID 必须是字符串数组（${field}）`);
+    }
+    return value.map((item) => item.trim()).filter(Boolean);
+  };
+  const criterionIds = Array.from(
+    new Set([
+      ...normalizeCriterionIds(input.criterionIds, "criterionIds"),
+      ...normalizeCriterionIds(input.criteria, "criteria"),
+    ]),
+  );
+  if (criterionIds.some((value) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value))) {
+    throw new WorkbenchError("invalid_input", "截图关联的验收条件 ID 无效");
+  }
+  return {
+    label,
+    urlPath,
+    viewport,
+    theme: input.theme ?? "light",
+    ...(description ? { description } : {}),
+    ...(input.phase ? { phase: input.phase } : {}),
+    ...(criterionIds.length > 0 ? { criterionIds } : {}),
+  };
+}
+
+/**
+ * Registers requirement-specific scenario screenshots (CLI / MCP / HTTP / staged test output).
+ * Unlike the generic matrix this works for any repository and never fills evidence with unrelated pages.
+ */
+export async function attachRequirementScreenshots(
+  root: string,
+  id: string,
+  input: AttachRequirementScreenshotsInput,
+): Promise<ScreenshotCaptureResult> {
+  const base = canonicalRoot(root);
+  const bundle = readRequirementBundle(base, id);
+  const state = bundle.state;
+  if (state.stage === "done" || state.stage === "cancelled") {
+    throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能提交截图证据`);
+  }
+  if (state.stage !== "coding") {
+    throw new WorkbenchError(
+      "approval_required",
+      `当前阶段（${state.stage}）不能提交截图证据；仅编码阶段允许提交场景截图`,
+    );
+  }
+  if (!Array.isArray(input.shots) || input.shots.length === 0) {
+    throw new WorkbenchError("invalid_input", "请至少提供一张场景截图");
+  }
+  if (input.shots.length > MAX_SCREENSHOTS_PER_BATCH) {
+    throw new WorkbenchError("invalid_input", `单批截图不能超过 ${MAX_SCREENSHOTS_PER_BATCH} 张`);
+  }
+
+  const startedAt = Date.now();
+  const codeRoot = resolveCodeRoot(base, id);
+  const snapshot = await observeGitSnapshot(codeRoot);
+  const codeSnapshotHash = snapshot?.fingerprint ?? state.specHash;
+  const currentCodeSnapshotHash = input.currentCodeSnapshotHash ?? snapshot?.fingerprint ?? null;
+
+  const shots: ScreenshotShot[] = [];
+  const files: Array<{ shotId: string; bytes: Buffer }> = [];
+  for (const item of input.shots) {
+    const bytes = readAttachShotBytes(item, codeRoot);
+    const meta = normalizeAttachShot(item, bytes);
+    const sid = shotId();
+    shots.push({
+      id: sid,
+      ...meta,
+      path: `screenshots/shot-${sid}.png`,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sizeBytes: bytes.length,
+    });
+    files.push({ shotId: sid, bytes });
+  }
+
+  const batch: ScreenshotBatch = {
+    id: batchId(),
+    createdAt: Date.now(),
+    trigger: input.trigger ?? "agent_attach",
+    actor: input.actor ?? "agent",
+    specHash: state.specHash,
+    codeSnapshotHash,
+    status: "captured",
+    skipReason: null,
+    source: "scenario",
+    shots,
+    durationMs: Math.max(0, Date.now() - startedAt),
+  };
+  await recordScreenshotBatch(base, id, { batch, files, currentCodeSnapshotHash });
+  return { status: "captured", batchId: batch.id, reason: null, batch };
+}
+
+export interface StagedScreenshotCollection {
+  attached: boolean;
+  count: number;
+  batch: ScreenshotBatch | null;
+  result: ScreenshotCaptureResult | null;
+  reason: string | null;
+}
+
+type StagedManifestEntry = Record<string, unknown>;
+
+function resolveStagedFile(stagingDir: string, rawFile: string): string {
+  const resolved = path.resolve(stagingDir, rawFile);
+  const relative = path.relative(stagingDir, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new WorkbenchError("invalid_input", `截图清单引用了 staging 目录之外的文件: ${rawFile}`);
+  }
+  const stat = fs.lstatSync(resolved);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new WorkbenchError("invalid_input", `截图清单文件必须是普通文件: ${rawFile}`);
+  }
+  // Lexical containment is not enough: a symlinked subdirectory can point outside the staging root.
+  // Resolve both sides before reading/deleting so the collected file always lives inside staging.
+  let realStaging: string;
+  let realResolved: string;
+  try {
+    realStaging = fs.realpathSync(stagingDir);
+    realResolved = fs.realpathSync(resolved);
+  } catch {
+    throw new WorkbenchError("invalid_input", `截图清单文件不存在或无法访问: ${rawFile}`);
+  }
+  const realRelative = path.relative(realStaging, realResolved);
+  if (!realRelative || realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+    throw new WorkbenchError("invalid_input", `截图清单引用了 staging 目录之外的文件: ${rawFile}`);
+  }
+  return resolved;
+}
+
+function stagedShotFromEntry(stagingDir: string, entry: StagedManifestEntry): ScreenshotAttachShotInput {
+  const file = typeof entry.file === "string" ? entry.file : "";
+  if (!file.trim()) {
+    throw new WorkbenchError("invalid_input", "截图清单每项必须包含 file 路径");
+  }
+  if (entry.label !== undefined && typeof entry.label !== "string") {
+    throw new WorkbenchError("invalid_input", "截图清单每项的 label 必须是字符串");
+  }
+  const label =
+    typeof entry.label === "string" && entry.label.trim()
+      ? entry.label.trim()
+      : path.basename(file).replace(/\.png$/i, "");
+  return {
+    file: resolveStagedFile(stagingDir, file),
+    label,
+    // Pass explicitly supplied metadata through unchanged so the shared validator rejects invalid
+    // values instead of silently dropping them and falling back to defaults.
+    ...(entry.description !== undefined ? { description: entry.description as string } : {}),
+    ...(entry.phase !== undefined ? { phase: entry.phase as ScreenshotPhase } : {}),
+    ...(entry.viewport !== undefined ? { viewport: entry.viewport as string } : {}),
+    ...(entry.theme !== undefined ? { theme: entry.theme as "light" | "dark" } : {}),
+    ...(entry.urlPath !== undefined
+      ? { urlPath: entry.urlPath as string }
+      : entry.url !== undefined
+        ? { url: entry.url as string }
+        : {}),
+    ...(entry.criterionIds !== undefined
+      ? { criterionIds: entry.criterionIds as string[] }
+      : entry.criteria !== undefined
+        ? { criteria: entry.criteria as string[] }
+        : {}),
+  };
+}
+
+/**
+ * Collects scenario screenshots staged by browser tests. A `manifest.json` may describe labels and
+ * phases; otherwise every top-level PNG becomes one shot. Staging lives under gitignored .workbench/.
+ */
+export async function collectStagedScreenshots(
+  root: string,
+  id: string,
+  options: { stagingDir?: string; currentCodeSnapshotHash?: string | null } = {},
+): Promise<StagedScreenshotCollection> {
+  const base = canonicalRoot(root);
+  const stagingDir = options.stagingDir ?? screenshotStagingDir(base, id);
+  let entries: fs.Dirent[];
+  try {
+    const stagingStat = fs.lstatSync(stagingDir);
+    if (stagingStat.isSymbolicLink() || !stagingStat.isDirectory()) {
+      throw new WorkbenchError("invalid_input", "截图 staging 路径必须是普通目录");
+    }
+    entries = fs.readdirSync(stagingDir, { withFileTypes: true });
+  } catch (error) {
+    if (error instanceof WorkbenchError) throw error;
+    return { attached: false, count: 0, batch: null, result: null, reason: null };
+  }
+  const consumed: string[] = [];
+  const manifestEntry = entries.find((entry) => entry.isFile() && entry.name === "manifest.json");
+  let shots: ScreenshotAttachShotInput[] = [];
+  if (manifestEntry) {
+    const manifestPath = path.join(stagingDir, manifestEntry.name);
+    const stat = fs.lstatSync(manifestPath);
+    if (stat.isSymbolicLink() || stat.size > 512 * 1024) {
+      throw new WorkbenchError("invalid_input", "截图清单无效或超过 512KB");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch {
+      throw new WorkbenchError("invalid_input", "截图清单不是合法的 JSON");
+    }
+    const rawEntries = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { shots?: unknown }).shots)
+        ? (parsed as { shots: unknown[] }).shots
+        : null;
+    if (!rawEntries) {
+      throw new WorkbenchError("invalid_input", "截图清单必须是数组或包含 shots 数组的对象");
+    }
+    shots = rawEntries.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new WorkbenchError("invalid_input", "截图清单每项必须是对象");
+      }
+      return stagedShotFromEntry(stagingDir, entry as StagedManifestEntry);
+    });
+    consumed.push(manifestPath);
+  } else {
+    const pngs = entries
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".png"))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b));
+    shots = pngs.map((name) => ({
+      file: path.join(stagingDir, name),
+      label: name.replace(/\.png$/i, ""),
+    }));
+  }
+  if (shots.length === 0) {
+    return { attached: false, count: 0, batch: null, result: null, reason: null };
+  }
+  for (const shot of shots) {
+    if (shot.file) consumed.push(path.resolve(shot.file));
+  }
+  const result = await attachRequirementScreenshots(base, id, {
+    shots,
+    trigger: "auto_collect",
+    actor: "system",
+    ...(options.currentCodeSnapshotHash !== undefined
+      ? { currentCodeSnapshotHash: options.currentCodeSnapshotHash }
+      : {}),
+  });
+  for (const file of new Set(consumed)) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      // Cleanup is best-effort; metadata is already authoritative.
+    }
+  }
+  try {
+    if (fs.readdirSync(stagingDir).length === 0) fs.rmdirSync(stagingDir);
+  } catch {
+    // Leave a non-empty or concurrently reused staging directory untouched.
+  }
+  return {
+    attached: true,
+    count: result.batch?.shots.length ?? 0,
+    batch: result.batch,
+    result,
+    reason: null,
+  };
 }
 
 async function persistSkippedBatch(
@@ -279,6 +699,7 @@ async function persistSkippedBatch(
     status: "skipped",
     skipReason: input.reason,
     reasonCode: input.reasonCode ?? null,
+    source: "matrix",
     shots: [],
     durationMs: Math.max(0, Date.now() - input.startedAt),
   };
@@ -547,6 +968,7 @@ export async function captureRequirementScreenshots(
     codeSnapshotHash,
     status,
     skipReason: reason,
+    source: "matrix",
     shots,
     durationMs: Math.max(0, Date.now() - startedAt),
   };

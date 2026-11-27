@@ -12,7 +12,7 @@ import {
 import { readBoundedText, resolveSafePath } from "../core/fs.ts";
 import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
 import { isHeavyVerificationCommand, runAllVerifications } from "../core/runner.ts";
-import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { captureRequirementScreenshots, collectStagedScreenshots, isWorkbenchOwnRepo } from "../core/screenshots.ts";
 import {
   MAX_DESIGN_BYTES,
   MAX_SPEC_BYTES,
@@ -473,26 +473,72 @@ export async function runCodingPostGate(input: {
     const hasFailedCommandVerification = updatedRequiredCmdItems.some((item) => item.state === "failed");
     const allCommandCriteriaPassed =
       updatedRequiredCmdItems.length > 0 && updatedRequiredCmdItems.every((item) => item.state === "passed");
+    const hasRequiredCriteria = latestReq.state.criteria.some((criterion) => criterion.required);
+    const commandsSatisfied =
+      !hasFailedCommandVerification &&
+      (allCommandCriteriaPassed ||
+        latestReq.validity.acceptanceGate.ok ||
+        (updatedRequiredCmdItems.length === 0 && hasRequiredCriteria));
+
+    // Scenario evidence is first-class: collect staged browser-test screenshots as soon as automated
+    // commands pass, without waiting for manual visual checkboxes.
+    if (commandsSatisfied) {
+      try {
+        const collected = await collectStagedScreenshots(input.base, input.id, {
+          currentCodeSnapshotHash: snap?.fingerprint ?? null,
+        });
+        if (collected.attached) {
+          input.appendNote(
+            `[workbench] 已自动收录 ${collected.count} 张需求场景截图（来源：WORKBENCH_SCREENSHOT_OUT_DIR）。\n`,
+          );
+          latestReq = getRequirement(input.base, input.id, {
+            currentCodeSnapshotHash: snap?.fingerprint ?? null,
+          });
+        }
+      } catch (error) {
+        input.appendNote(
+          `[workbench] 自动收录场景截图失败（不影响验收）：${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+    }
+
+    if (commandsSatisfied) {
+      const currentHash = snap?.fingerprint ?? null;
+      const hasFreshScenario = (latestReq.state.screenshotBatches ?? []).some(
+        (batch) =>
+          batch.source === "scenario" &&
+          batch.shots.length > 0 &&
+          (!currentHash || batch.codeSnapshotHash === currentHash),
+      );
+      const uiRelated = await isUiRelatedRequirement(latestReq.state, input.codeRoot);
+      if (uiRelated && !hasFreshScenario) {
+        const projStatus = getProjectStatus(input.base);
+        const wantsAutoScreenshots = projStatus.project?.verification?.autoScreenshots === true;
+        if (wantsAutoScreenshots && isWorkbenchOwnRepo(input.codeRoot)) {
+          // Explicit legacy fallback: generic fixed-route matrix is clearly a smoke inspection,
+          // never a substitute for requirement-specific evidence.
+          try {
+            const shotResult = await captureRequirementScreenshots(input.base, input.id, {
+              trigger: "auto_submit",
+              actor: "system",
+            });
+            if (shotResult.status === "captured" && shotResult.batch) {
+              input.appendNote(`[workbench] 未发现场景截图，已兜底采集 ${shotResult.batch.shots.length} 张通用页面巡检截图。\n`);
+              latestReq = getRequirement(input.base, input.id, { currentCodeSnapshotHash: currentHash });
+            }
+          } catch {
+            // Screenshot capture is strictly best-effort and must never block verification or review.
+          }
+        } else {
+          input.appendNote(
+            "[workbench] 尚未发现当前代码快照的需求场景截图；可运行 `wb screenshot add <REQ-ID> --manifest <json>`，或在浏览器测试中写入 WORKBENCH_SCREENSHOT_OUT_DIR 后重跑验证。通用固定矩阵不再冒充本次改动截图。\n",
+          );
+        }
+      }
+    }
 
     if (latestReq.validity.acceptanceGate.ok) {
       readyForReview = true;
-      // Opt-in best-effort auto-screenshot capture for UI-related requirements when verification passes.
-      const projStatus = getProjectStatus(input.base);
-      const wantsAutoScreenshots = projStatus.project?.verification?.autoScreenshots === true;
-      if (wantsAutoScreenshots && (await isUiRelatedRequirement(latestReq.state, input.codeRoot))) {
-        try {
-          const shotResult = await captureRequirementScreenshots(input.base, input.id, {
-            trigger: "auto_submit",
-            actor: "system",
-          });
-          if (shotResult.status === "captured" && shotResult.batch) {
-            input.appendNote(`[workbench] 已自动采集 ${shotResult.batch.shots.length} 张 UI 验收截图。\n`);
-            latestReq = getRequirement(input.base, input.id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-          }
-        } catch {
-          // Screenshot capture is strictly best-effort and must never block verification or review.
-        }
-      }
       input.appendNote("[workbench] 全部必需验收条件已通过，已就绪待审查与人工验收。\n");
     } else if (allCommandCriteriaPassed && !hasFailedCommandVerification) {
       // FLOW §3.2 / WB-14: trigger heterogeneous review as soon as all automated command criteria pass,

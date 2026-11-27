@@ -302,6 +302,36 @@ describe("status and error messages", () => {
     }
   });
 
+  test("REQ-018: scenario screenshot sources, phases and upload guidance stay bilingual", () => {
+    expect(t("zh-CN", "shot.source.scenario")).toBe("需求场景截图");
+    expect(t("zh-CN", "shot.source.matrix")).toBe("通用页面巡检");
+    expect(t("en", "shot.source.scenario")).toContain("scenario");
+    expect(t("en", "shot.source.matrix")).toContain("Generic");
+    expect(t("zh-CN", "shot.phase.before")).toBe("改动前");
+    expect(t("zh-CN", "shot.phase.after")).toBe("改动后");
+    expect(t("zh-CN", "shot.phase.state")).toBe("运行态");
+    expect(t("en", "shot.phase.before")).toBe("Before");
+    expect(t("en", "shot.phase.after")).toBe("After");
+    expect(t("en", "shot.phase.state")).toBe("Runtime state");
+    expect(t("zh-CN", "shot.descriptionLabelWithColon")).toBe("场景说明：");
+    expect(t("zh-CN", "shot.criteriaLabelWithColon")).toBe("关联验收条件：");
+    expect(t("en", "shot.descriptionLabelWithColon")).toBe("Scene description: ");
+    expect(t("en", "shot.criteriaLabelWithColon")).toBe("Linked acceptance criteria: ");
+    for (const key of [
+      "shot.upload",
+      "shot.uploadHint",
+      "shot.matrixCapture",
+      "shot.matrixHint",
+      "shot.scenarioEmpty",
+      "shot.trigger.agentAttach",
+      "shot.trigger.autoCollect",
+      "shot.descriptionLabel",
+      "shot.criteriaLabel",
+    ] as const) {
+      expect(t("en", key)).not.toBe(t("zh-CN", key));
+    }
+  });
+
   test("review-gated banners keep stable message refs in both languages", () => {
     const state = {
       id: "REQ-001",

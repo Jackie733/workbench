@@ -965,8 +965,11 @@ export interface DesignReviewReport {
   reviewedAt: number;
 }
 
-export type ScreenshotTrigger = "auto_submit" | "manual";
+export type ScreenshotTrigger = "auto_submit" | "manual" | "agent_attach" | "auto_collect";
 export type ScreenshotBatchStatus = "captured" | "partial" | "skipped";
+/** Scenario screenshots prove this requirement's change; matrix batches are generic route smoke checks. */
+export type ScreenshotSource = "scenario" | "matrix";
+export type ScreenshotPhase = "before" | "after" | "state";
 
 /** Stable reason codes for workbench-generated screenshot skips; UI localizes them. */
 export type ScreenshotSkipReasonCode =
@@ -988,6 +991,12 @@ export interface ScreenshotShot {
   path: string;
   sha256: string;
   sizeBytes: number;
+  /** Optional scene note explaining what state this shot verifies (≤ 500 characters). */
+  description?: string;
+  /** Optional change phase marker: baseline, result, or a specific runtime state. */
+  phase?: ScreenshotPhase;
+  /** Optional acceptance criterion IDs this shot supports, e.g. ["AC-4", "AC-5"]. */
+  criterionIds?: string[];
 }
 
 export interface ScreenshotBatch {
@@ -1001,6 +1010,8 @@ export interface ScreenshotBatch {
   skipReason: string | null;
   /** Present for skips produced by the workbench itself; historical raw reason stays readable. */
   reasonCode?: ScreenshotSkipReasonCode | null;
+  /** Missing on legacy batches; those are displayed as generic matrix inspections. */
+  source?: ScreenshotSource;
   shots: ScreenshotShot[];
   durationMs: number;
 }

@@ -134,4 +134,71 @@ describe("REQ-011 screenshot HTTP API", () => {
     expect(captureBody.screenshotCapture.reason).toContain("WORKBENCH_CHROME_PATH");
     expect(captureBody.detail.state.screenshotBatches.length).toBe(2);
   });
+
+  test("REQ-018: attaches JSON base64 and multipart scenario screenshots with metadata", async () => {
+    const root = initGitRepo();
+    await initProject(root);
+    const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
+    servers.push(server);
+
+    const snapshot = await observeGitSnapshot(root);
+    if (!snapshot) throw new Error("missing snapshot");
+    const created = await createRequirement(root, {
+      goal: "场景截图上传 API 测试",
+      criteria: [{ id: "AC-1", description: "命令通过", required: true, command: "echo ok" }],
+      track: "fast_track",
+      uiRelated: true,
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+    const id = created.state.id;
+    await authorizeFastTrack(root, id, { baseline: snapshot, currentCodeSnapshotHash: snapshot.fingerprint });
+
+    const jsonResp = await fetch(`${server.url}/api/requirements/${id}/screenshots/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shots: [
+          {
+            dataBase64: PNG_BYTES.toString("base64"),
+            label: "目标弹窗",
+            phase: "after",
+            description: "点击保存后打开",
+            criterionIds: ["AC-1"],
+          },
+        ],
+      }),
+    });
+    expect(jsonResp.status).toBe(201);
+    const jsonBody = (await jsonResp.json()) as {
+      detail: { state: { screenshotBatches: Array<{ source?: string; shots: Array<{ viewport: string }> }> } };
+      screenshotCapture: { status: string; batch: { source: string } };
+    };
+    expect(jsonBody.screenshotCapture.status).toBe("captured");
+    expect(jsonBody.screenshotCapture.batch.source).toBe("scenario");
+    expect(jsonBody.detail.state.screenshotBatches[0]?.shots[0]?.viewport).toBe("1x1");
+
+    const form = new FormData();
+    form.append(
+      "shots",
+      JSON.stringify([{ label: "改动前布局", phase: "before", theme: "light" }]),
+    );
+    form.append("files", new Blob([PNG_BYTES], { type: "image/png" }), "before.png");
+    const multipartResp = await fetch(`${server.url}/api/requirements/${id}/screenshots/attach`, {
+      method: "POST",
+      body: form,
+    });
+    expect(multipartResp.status).toBe(201);
+    const multipartBody = (await multipartResp.json()) as {
+      screenshotCapture: { batch: { shots: Array<{ label: string; phase?: string }> } };
+    };
+    expect(multipartBody.screenshotCapture.batch.shots[0]?.label).toBe("改动前布局");
+    expect(multipartBody.screenshotCapture.batch.shots[0]?.phase).toBe("before");
+
+    const invalidResp = await fetch(`${server.url}/api/requirements/${id}/screenshots/attach`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shots: [{ dataBase64: Buffer.from("no").toString("base64"), label: "非法" }] }),
+    });
+    expect(invalidResp.status).toBe(400);
+  });
 });
