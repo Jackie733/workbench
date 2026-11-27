@@ -12,7 +12,7 @@ import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/
 import { checkLanguageMismatchWarning, normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
-import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { attachRequirementScreenshots, captureRequirementScreenshots } from "../core/screenshots.ts";
 import { STAGES, type CriterionInput, type DecisionItem, type Stage } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "../hub/registry.ts";
@@ -108,7 +108,7 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
   {
     name: "wb_screenshot",
     description:
-      "Capture the default UI screenshot evidence matrix (home + requirement tabs, light/dark themes, desktop/narrow viewports) for a requirement. Best-effort: missing browser records a skipped batch without blocking acceptance.",
+      "Capture the generic UI screenshot matrix (home + requirement tabs, light/dark themes, desktop/narrow viewports) for a requirement. This is a fixed-route smoke inspection, not requirement-specific evidence; prefer wb_screenshot_add for scene screenshots. Best-effort: missing browser records a skipped batch without blocking acceptance.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -116,6 +116,44 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
       properties: {
         id: { type: "string", pattern: "^REQ-\\d{3,}$", description: "Requirement ID." },
         label: { type: "string", description: "Optional label prefix for captured shots." },
+      },
+    },
+  },
+  {
+    name: "wb_screenshot_add",
+    description:
+      "Attach requirement-specific scenario screenshots (PNG) as first-class acceptance evidence. Use this after browser/E2E verification to prove the actual UI change. Example: {id:\"REQ-001\",shots:[{file:\"/tmp/focus-state.png\",label:\"Focus ring on save\",description:\"Keyboard focus\",phase:\"after\",theme:\"dark\",criterionIds:[\"AC-2\"]}]}. Relative files resolve from the project/agent working directory. Max 12 shots per batch, 2MB each.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "shots"],
+      properties: {
+        id: { type: "string", pattern: "^REQ-\\d{3,}$", description: "Requirement ID." },
+        shots: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          description: "Scenario screenshots persisted as one batch.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["label"],
+            properties: {
+              file: { type: "string", description: "Absolute or working-directory-relative PNG path." },
+              dataBase64: { type: "string", description: "Inline base64 PNG instead of file." },
+              base64: { type: "string", description: "Alias for dataBase64." },
+              label: { type: "string", description: "Scene title, e.g. target modal open." },
+              description: { type: "string", description: "Optional scene note (≤500 chars)." },
+              phase: { type: "string", enum: ["before", "after", "state"] },
+              viewport: { type: "string", description: "Optional WxH; derived from PNG IHDR when omitted." },
+              theme: { type: "string", enum: ["light", "dark"] },
+              urlPath: { type: "string", description: "Optional route or scene identifier." },
+              url: { type: "string", description: "Alias for urlPath." },
+              criterionIds: { type: "array", items: { type: "string" } },
+              criteria: { type: "array", items: { type: "string" }, description: "Alias for criterionIds." },
+            },
+          },
+        },
       },
     },
   },
@@ -380,6 +418,96 @@ export async function executeWorkbenchTool(
         status: capture.status,
         batchId: capture.batchId,
         reason: capture.reason,
+        screenshotCapture: capture,
+      };
+    }
+
+    case "wb_screenshot_add": {
+      assertAllowedKeys(args, ["id", "shots"], name);
+      if (typeof args.id !== "string") {
+        throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
+      }
+      if (!Array.isArray(args.shots) || args.shots.length === 0) {
+        throw new WorkbenchError("invalid_input", "shots 必须是非空数组");
+      }
+      const shots = args.shots.map((raw, index) => {
+        if (!isRecord(raw)) {
+          throw new WorkbenchError("invalid_input", `shots[${index}] 必须是对象`);
+        }
+        assertAllowedKeys(
+          raw,
+          ["file", "dataBase64", "base64", "label", "description", "phase", "viewport", "theme", "urlPath", "url", "criterionIds", "criteria"],
+          `${name}.shots[${index}]`,
+        );
+        if (typeof raw.label !== "string" || !raw.label.trim()) {
+          throw new WorkbenchError("invalid_input", `shots[${index}] 缺少 label`);
+        }
+        if (
+          (typeof raw.file !== "string" || !raw.file.trim()) &&
+          (typeof raw.dataBase64 !== "string" || !raw.dataBase64.trim()) &&
+          (typeof raw.base64 !== "string" || !raw.base64.trim())
+        ) {
+          throw new WorkbenchError("invalid_input", `shots[${index}] 必须提供 file、dataBase64 或 base64`);
+        }
+        if (raw.criterionIds !== undefined) {
+          if (!Array.isArray(raw.criterionIds) || raw.criterionIds.some((item) => typeof item !== "string")) {
+            throw new WorkbenchError("invalid_input", `shots[${index}].criterionIds 必须是字符串数组`);
+          }
+        }
+        if (raw.criteria !== undefined) {
+          if (!Array.isArray(raw.criteria) || raw.criteria.some((item) => typeof item !== "string")) {
+            throw new WorkbenchError("invalid_input", `shots[${index}].criteria 必须是字符串数组`);
+          }
+        }
+        if (raw.description !== undefined && typeof raw.description !== "string") {
+          throw new WorkbenchError("invalid_input", `shots[${index}].description 必须是字符串`);
+        }
+        if (
+          raw.phase !== undefined &&
+          (typeof raw.phase !== "string" || !["before", "after", "state"].includes(raw.phase))
+        ) {
+          throw new WorkbenchError("invalid_input", `shots[${index}].phase 必须是 before、after 或 state`);
+        }
+        if (raw.theme !== undefined && raw.theme !== "light" && raw.theme !== "dark") {
+          throw new WorkbenchError("invalid_input", `shots[${index}].theme 必须是 light 或 dark`);
+        }
+        if (raw.viewport !== undefined && typeof raw.viewport !== "string") {
+          throw new WorkbenchError("invalid_input", `shots[${index}].viewport 必须是 WxH 字符串`);
+        }
+        if (raw.urlPath !== undefined && typeof raw.urlPath !== "string") {
+          throw new WorkbenchError("invalid_input", `shots[${index}].urlPath 必须是字符串`);
+        }
+        if (raw.url !== undefined && typeof raw.url !== "string") {
+          throw new WorkbenchError("invalid_input", `shots[${index}].url 必须是字符串`);
+        }
+        return {
+          label: raw.label,
+          ...(typeof raw.file === "string" ? { file: raw.file } : {}),
+          ...(typeof raw.dataBase64 === "string" ? { dataBase64: raw.dataBase64 } : {}),
+          ...(typeof raw.base64 === "string" ? { base64: raw.base64 } : {}),
+          ...(raw.description !== undefined ? { description: raw.description as string } : {}),
+          ...(raw.phase !== undefined ? { phase: raw.phase as "before" | "after" | "state" } : {}),
+          ...(raw.viewport !== undefined ? { viewport: raw.viewport as string } : {}),
+          ...(raw.theme !== undefined ? { theme: raw.theme as "light" | "dark" } : {}),
+          ...(raw.urlPath !== undefined ? { urlPath: raw.urlPath as string } : {}),
+          ...(raw.url !== undefined ? { url: raw.url as string } : {}),
+          ...(raw.criterionIds !== undefined ? { criterionIds: raw.criterionIds as string[] } : {}),
+          ...(raw.criteria !== undefined ? { criteria: raw.criteria as string[] } : {}),
+        };
+      });
+      const snapshot = await observeGitSnapshot(resolveCodeRoot(base, args.id));
+      const capture = await attachRequirementScreenshots(base, args.id, {
+        shots,
+        trigger: "agent_attach",
+        actor: "agent",
+        currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+      });
+      return {
+        id: args.id,
+        status: capture.status,
+        batchId: capture.batchId,
+        source: "scenario",
+        count: capture.batch?.shots.length ?? 0,
         screenshotCapture: capture,
       };
     }

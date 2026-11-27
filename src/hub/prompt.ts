@@ -472,8 +472,8 @@ export function buildExecutionPrompt(
   const screenshotHint =
     detail.state.uiRelated === true
       ? isEn
-        ? `${isBug ? "5" : "4"}. This requirement is UI-related; Workbench will auto-capture screenshots once verification passes (or run \`wb screenshot ${reqId}\`).`
-        : `${isBug ? "5" : "4"}. 本需求涉及 UI，验收命令通过后工作台会自动采集界面截图；如有需要也可运行 \`wb screenshot ${reqId}\`。`
+        ? `${isBug ? "5" : "4"}. This requirement is UI-related. While running browser tests or a targeted render script, capture 2–4 PNG screenshots that best prove this change (target interaction state, loading/error state, light/dark or narrow viewport, or before/after pairs). Either write them to \`$WORKBENCH_SCREENSHOT_OUT_DIR\` (an optional \`manifest.json\` can declare label/phase/description) or run \`wb screenshot add ${reqId} --file <png> --label "<scene>" [--phase before|after|state]\` / \`--manifest <json>\`. Workbench archives them after automated commands pass; it no longer substitutes unrelated fixed pages for requirement evidence.`
+        : `${isBug ? "5" : "4"}. 本需求涉及 UI。请在浏览器测试或定向渲染脚本中，截取 2–4 张最能证明本次改动的 PNG 场景图（如目标交互态、加载/错误态、亮/暗色或窄屏、改动前后对照）。可直接写入 \`$WORKBENCH_SCREENSHOT_OUT_DIR\`（可选 \`manifest.json\` 声明 label/phase/description），或运行 \`wb screenshot add ${reqId} --file <png> --label "<场景>" [--phase before|after|state]\` / \`--manifest <json>\`。工作台会在自动化验收命令通过后归档为需求场景截图，不再用无关固定页面冒充改动证据。`
       : "";
 
   const hasDesign = Boolean(detail.designMarkdown.trim());
@@ -523,7 +523,7 @@ export function buildExecutionPrompt(
           "Workflow:",
           step1En,
           step2En,
-          "3. End the turn once done — Workbench will automatically run required verification commands, capture screenshots if UI-related, and dispatch blind review on pass (or hand failures back to you for auto-heal).",
+          "3. End the turn once done — Workbench will automatically run required verification commands, collect scenario screenshots if you staged UI evidence, and dispatch blind review on pass (or hand failures back to you for auto-heal).",
           bugRuleEn,
           screenshotHint,
           "",

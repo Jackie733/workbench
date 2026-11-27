@@ -9,7 +9,7 @@ import { WorkbenchError } from "./errors.ts";
 import { atomicWriteJson, canonicalRoot, readJsonStrict, withNamedAdvisoryLock } from "./fs.ts";
 import { observeGitSnapshot } from "./git.ts";
 import { resolveCodeRoot } from "./sandbox.ts";
-import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
+import { MAX_EVIDENCE_BYTES, WORKBENCH_DIR, type RequirementDetail, type VerificationRecord } from "./types.ts";
 import { clipHeadTailUtf8, isSafeText, sanitizeOutput } from "./validate.ts";
 import { isManualCriterion } from "./validity.ts";
 
@@ -46,14 +46,19 @@ interface CommandExecutionOutput {
   truncatedByBuffer: boolean;
 }
 
-function executeShellCommand(cwd: string, command: string, timeoutMs: number): Promise<CommandExecutionOutput> {
+function executeShellCommand(
+  cwd: string,
+  command: string,
+  timeoutMs: number,
+  extraEnv?: NodeJS.ProcessEnv,
+): Promise<CommandExecutionOutput> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const isWin = process.platform === "win32";
     const shell = isWin ? "cmd.exe" : "bash";
     const shellArgs = isWin ? ["/d", "/s", "/c", command] : ["-lc", command];
 
-    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...extraEnv };
     // Never leak a parent agent's WORKBENCH_ROOT/WORKBENCH_REQ_ID/RUN_ACTION/RSI depth into verification test children.
     delete childEnv.WORKBENCH_ROOT;
     delete childEnv.WORKBENCH_REQ_ID;
@@ -270,6 +275,13 @@ export async function runVerification(
       `超时时间必须在 ${MIN_TIMEOUT_MS}ms 与 ${MAX_TIMEOUT_MS}ms 之间`,
     );
   }
+  const screenshotOutDir = path.join(base, WORKBENCH_DIR, "tmp", "screenshots", id);
+  try {
+    fs.mkdirSync(screenshotOutDir, { recursive: true });
+  } catch {
+    // Screenshot staging is best-effort; verification must still run.
+  }
+  const verificationEnv: NodeJS.ProcessEnv = { WORKBENCH_SCREENSHOT_OUT_DIR: screenshotOutDir };
 
   return withCodeRootLock(
     codeRoot,
@@ -288,7 +300,7 @@ export async function runVerification(
       const execResult = useHeavyLock
         ? await withNamedAdvisoryLock(
             resolveHeavyVerifyLockPath(),
-            () => executeShellCommand(codeRoot, command, Math.floor(rawTimeout)),
+            () => executeShellCommand(codeRoot, command, Math.floor(rawTimeout), verificationEnv),
             {
               waitTimeoutMs: MAX_TIMEOUT_MS,
               staleMs: MAX_TIMEOUT_MS + 60_000,
@@ -306,7 +318,7 @@ export async function runVerification(
               },
             },
           )
-        : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
+        : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout), verificationEnv);
       const postSnapshot = await observeGitSnapshot(codeRoot);
       if (!postSnapshot) {
         throw new WorkbenchError("execution_failed", "命令执行后无法读取 Git 代码快照");

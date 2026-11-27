@@ -3,17 +3,23 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import {
   authorizeFastTrack,
   createRequirement,
   initProject,
+  recordScreenshotBatch,
   recordVerification,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
-import { captureRequirementScreenshots, SCREENSHOT_MATRIX } from "../../src/core/screenshots.ts";
+import {
+  attachRequirementScreenshots,
+  captureRequirementScreenshots,
+  SCREENSHOT_MATRIX,
+} from "../../src/core/screenshots.ts";
 import { readRequirementBundle } from "../../src/core/store.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
-import type { VerificationRecord } from "../../src/core/types.ts";
+import type { ScreenshotShot, VerificationRecord } from "../../src/core/types.ts";
 import { resolveTestBrowser } from "./browser_env.ts";
 
 const browserEnv = resolveTestBrowser();
@@ -23,6 +29,7 @@ interface BrowserPage {
   setViewport(vp: { width: number; height: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string }): Promise<unknown>;
   waitForSelector(sel: string, opts?: { timeout?: number }): Promise<unknown>;
+  waitForFunction(fn: (...args: any[]) => unknown, opts?: { timeout?: number }, ...args: any[]): Promise<unknown>;
   click(sel: string): Promise<void>;
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   keyboard: { press(key: string): Promise<void> };
@@ -38,6 +45,10 @@ const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 const origHubDir = process.env.WORKBENCH_HUB_DIR;
 const origRsiDepth = process.env.WORKBENCH_RSI_DEPTH;
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lw7sNwAAAABJRU5ErkJggg==",
+  "base64",
+);
 let browser: BrowserInstance | null = null;
 
 function initGitRepo(): string {
@@ -179,6 +190,168 @@ suite("REQ-011 real browser screenshot evidence", () => {
       await page.keyboard.press("ArrowRight");
       await page.waitForSelector('[data-testid="screenshot-lightbox-next"]', { timeout: 5000 });
       await page.keyboard.press("Escape");
+    } finally {
+      await page.close();
+    }
+  }, 120_000);
+
+  test("REQ-018: shows scenario evidence separately from generic inspection, phase badges, lightbox notes and upload flow", async () => {
+    process.env.WORKBENCH_CHROME_PATH = browserEnv!.chromePath;
+    process.env.WORKBENCH_PUPPETEER_PATH = browserEnv!.puppeteerPath;
+    delete process.env.WORKBENCH_RSI_DEPTH;
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-shot-scenario-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+
+    const root = initGitRepo();
+    await initProject(root);
+    const server = await startWorkbenchServer({ root, port: 0 });
+    servers.push(server);
+
+    const snapshot = await observeGitSnapshot(root);
+    if (!snapshot) throw new Error("missing snapshot");
+    const created = await createRequirement(root, {
+      goal: "场景截图与通用巡检区分展示",
+      criteria: [{ id: "AC-1", description: "命令通过", required: true, command: "echo ok" }],
+      track: "fast_track",
+      uiRelated: true,
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+    const id = created.state.id;
+    await authorizeFastTrack(root, id, { baseline: snapshot, currentCodeSnapshotHash: snapshot.fingerprint });
+
+    const filesDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-shot-scenario-files-"));
+    tempDirs.push(filesDir);
+    const beforePath = path.join(filesDir, "before.png");
+    const afterPath = path.join(filesDir, "after.png");
+    fs.writeFileSync(beforePath, PNG_BYTES);
+    fs.writeFileSync(afterPath, PNG_BYTES);
+    const scenario = await attachRequirementScreenshots(root, id, {
+      shots: [
+        {
+          file: beforePath,
+          label: "改动前布局",
+          description: "旧的固定导航布局",
+          phase: "before",
+          criterionIds: ["AC-1"],
+        },
+        { file: afterPath, label: "改动后结果", description: "新的场景证据展示", phase: "after" },
+      ],
+    });
+    expect(scenario.status).toBe("captured");
+
+    const matrixShot: ScreenshotShot = {
+      id: `S-${Date.now()}-matrix1`,
+      label: "首页固定巡检",
+      urlPath: "/",
+      viewport: "1440x900",
+      theme: "light",
+      path: `screenshots/shot-S-${Date.now()}-matrix1.png`,
+      sha256: createHash("sha256").update(PNG_BYTES).digest("hex"),
+      sizeBytes: PNG_BYTES.length,
+    };
+    matrixShot.path = `screenshots/shot-${matrixShot.id}.png`;
+    await recordScreenshotBatch(root, id, {
+      batch: {
+        id: `SB-${Date.now()}-matrix`,
+        createdAt: Date.now(),
+        trigger: "manual",
+        actor: "human",
+        specHash: readRequirementBundle(root, id).state.specHash,
+        codeSnapshotHash: snapshot.fingerprint,
+        status: "captured",
+        skipReason: null,
+        source: "matrix",
+        shots: [matrixShot],
+        durationMs: 5,
+      },
+      files: [{ shotId: matrixShot.id, bytes: PNG_BYTES }],
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1440, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector(`[data-testid="req-card-${id}"]`, { timeout: 5000 });
+      await page.click(`[data-testid="req-card-${id}"]`);
+      await page.waitForSelector('[data-testid="workspace-detail"]', { timeout: 5000 });
+      await page.click('[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="screenshot-section"]', { timeout: 5000 });
+      await page.waitForSelector(`[data-testid="screenshot-source-badge-${scenario.batch!.id}"]`, {
+        timeout: 5000,
+      });
+
+      const sourceBadges = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="screenshot-source-badge-"]')).map((el) =>
+          el.textContent?.trim() ?? "",
+        ),
+      );
+      expect(sourceBadges[0]).toContain("需求场景截图");
+      expect(sourceBadges.some((text) => text.includes("通用页面巡检"))).toBe(true);
+      const matrixNote = await page.evaluate(
+        () =>
+          document.querySelector('[data-testid^="screenshot-matrix-note-"]')?.textContent?.trim() ?? "",
+      );
+      expect(matrixNote).toContain("不代表本次需求改动");
+
+      const phaseBadges = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-testid^="screenshot-phase-"]')).map((el) =>
+          el.textContent?.trim() ?? "",
+        ),
+      );
+      expect(phaseBadges).toContain("改动前");
+      expect(phaseBadges).toContain("改动后");
+
+      const firstScenarioShot = scenario.batch!.shots[0]!;
+      await page.click(`[data-testid="shot-${firstScenarioShot.id}"]`);
+      await page.waitForSelector('[data-testid="screenshot-lightbox"]', { timeout: 5000 });
+      const lightboxMeta = await page.evaluate(() => ({
+        description:
+          document.querySelector('[data-testid="screenshot-lightbox-description"]')?.textContent?.trim() ?? "",
+        criteria:
+          document.querySelector('[data-testid="screenshot-lightbox-criteria"]')?.textContent?.trim() ?? "",
+        source:
+          document.querySelector('[data-testid="screenshot-lightbox-source"]')?.textContent?.trim() ?? "",
+      }));
+      expect(lightboxMeta.description).toContain("旧的固定导航布局");
+      expect(lightboxMeta.criteria).toContain("AC-1");
+      expect(lightboxMeta.source).toContain("需求场景截图");
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="screenshot-lightbox"]'), {
+        timeout: 5000,
+      });
+
+      // Local PNG补录 flows through the hidden file input and the attach API.
+      const base64 = PNG_BYTES.toString("base64");
+      await page.evaluate(
+        (encoded: string, name: string) => {
+          const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0));
+          const file = new File([bytes], name, { type: "image/png" });
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          const input = document.querySelector('[data-testid="screenshot-upload-input"]') as HTMLInputElement | null;
+          if (!input) throw new Error("missing screenshot upload input");
+          input.files = transfer.files;
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        base64,
+        "uploaded-after.png",
+      );
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll(".screenshot-thumb-label")).some((el) =>
+            (el.textContent ?? "").includes("uploaded-after"),
+          ),
+        { timeout: 8000 },
+      );
+      await page.waitForSelector('[data-slot="toast-root"]', { timeout: 5000 });
+      const uploadedBatch = readRequirementBundle(root, id).state.screenshotBatches?.find((batch) =>
+        batch.shots.some((shot) => shot.label === "uploaded-after"),
+      );
+      expect(uploadedBatch?.source).toBe("scenario");
+      const uploadedShot = uploadedBatch!.shots.find((shot) => shot.label === "uploaded-after")!;
+      expect(fs.readFileSync(path.join(root, ".workbench", "items", id, uploadedShot.path))).toEqual(PNG_BYTES);
     } finally {
       await page.close();
     }

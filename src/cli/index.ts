@@ -157,6 +157,42 @@ function parseJsonValue<T>(raw: string, label: string): T {
   }
 }
 
+/** Reads a scenario screenshot manifest and resolves relative file paths against the manifest location. */
+function readScreenshotManifest(raw: string): Array<Record<string, unknown>> {
+  const trimmed = raw.trim();
+  let text = trimmed;
+  let baseDir = process.cwd();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) {
+    const target = path.resolve(process.cwd(), trimmed.startsWith("@") ? trimmed.slice(1) : trimmed);
+    text = readBoundedText(target, 512 * 1024);
+    baseDir = path.dirname(target);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new WorkbenchError("invalid_input", "截图清单不是合法的 JSON");
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && Array.isArray((parsed as { shots?: unknown }).shots)
+      ? (parsed as { shots: unknown[] }).shots
+      : null;
+  if (!list) {
+    throw new WorkbenchError("invalid_input", "截图清单必须是数组或包含 shots 数组的对象");
+  }
+  return list.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new WorkbenchError("invalid_input", "截图清单每项必须是对象");
+    }
+    const item = { ...(entry as Record<string, unknown>) };
+    if (typeof item.file === "string" && item.file.trim() && !path.isAbsolute(item.file)) {
+      item.file = path.resolve(baseDir, item.file);
+    }
+    return item;
+  });
+}
+
 function stageCliAttachments(paths: string[]): string[] {
   if (paths.length === 0) return [];
   const inputs = paths.map((raw) => {
@@ -220,7 +256,11 @@ function helpText(): string {
     "  spawn <REQ-ID> [--fast-track]              从父需求的方案章节一键派生子需求",
     "  propose <REQ-ID> [--title] [--spec]        提交或更新规范、验收条件与技术方案",
     "                   [--design] [--criteria] [--summary] [--revision <n>]",
-    "  screenshot <REQ-ID> [--label <text>]       采集 UI 截图验收证据（浏览器缺失时记录跳过批次）",
+    "  screenshot <REQ-ID> [--label <text>]       采集 Workbench 通用页面巡检截图（8 张固定路由）",
+    "  screenshot add <REQ-ID> --file <png> --label <text> [--phase before|after|state]",
+    "               [--description <text>] [--viewport WxH] [--theme light|dark] [--url <path>]",
+    "               [--criteria AC-1,AC-2]         提交需求场景截图（单图）",
+    "  screenshot add <REQ-ID> --manifest <json|@file> 批量提交同一批次的多张场景截图",
     "  verify <REQ-ID> (--cmd <cmd> [--criteria AC-1,AC-2] | --all [--force]) [--timeout <ms>]",
     "                                             运行真实验证命令并记录不可变证据",
     "  review <REQ-ID> --verdict <pass|concern|block> --summary <text> [--body <md|@file>]",
@@ -873,8 +913,63 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
       }
 
       case "screenshot": {
-        const id = parsed.positionals[0];
-        if (!id) throw new WorkbenchError("invalid_input", "请提供需求编号，例如: wb screenshot REQ-001 --label \"验收截图\"");
+        const isAdd = parsed.positionals[0] === "add";
+        const id = isAdd ? parsed.positionals[1] : parsed.positionals[0];
+        if (!id) {
+          throw new WorkbenchError(
+            "invalid_input",
+            isAdd
+              ? "请提供需求编号，例如: wb screenshot add REQ-001 --file shot.png --label \"目标状态\""
+              : "请提供需求编号，例如: wb screenshot REQ-001 --label \"通用页面巡检\"",
+          );
+        }
+        if (isAdd) {
+          const file = parsed.flags.get("file");
+          const manifest = parsed.flags.get("manifest");
+          if (typeof file === "string" && typeof manifest === "string") {
+            throw new WorkbenchError("invalid_input", "--file 与 --manifest 不能同时使用");
+          }
+          if (typeof file !== "string" && typeof manifest !== "string") {
+            throw new WorkbenchError("invalid_input", "请通过 --file 提交单张截图，或通过 --manifest 批量提交截图清单");
+          }
+          let shots: Array<Record<string, unknown>>;
+          if (typeof manifest === "string") {
+            shots = readScreenshotManifest(manifest);
+          } else {
+            if (typeof file !== "string") {
+              throw new WorkbenchError("invalid_input", "请通过 --file 提供 PNG 截图路径");
+            }
+            const label = parsed.flags.get("label");
+            if (typeof label !== "string" || !label.trim()) {
+              throw new WorkbenchError("invalid_input", "单张截图必须通过 --label 提供场景标题");
+            }
+            const criteria = parsed.flags.get("criteria");
+            shots = [
+              {
+                file: path.resolve(process.cwd(), file),
+                label: label.trim(),
+                ...(typeof parsed.flags.get("description") === "string"
+                  ? { description: parsed.flags.get("description") }
+                  : {}),
+                ...(typeof parsed.flags.get("phase") === "string" ? { phase: parsed.flags.get("phase") } : {}),
+                ...(typeof parsed.flags.get("viewport") === "string" ? { viewport: parsed.flags.get("viewport") } : {}),
+                ...(typeof parsed.flags.get("theme") === "string" ? { theme: parsed.flags.get("theme") } : {}),
+                ...(typeof parsed.flags.get("url") === "string" ? { urlPath: parsed.flags.get("url") } : {}),
+                ...(typeof criteria === "string" && criteria.trim()
+                  ? {
+                      criterionIds: criteria
+                        .split(",")
+                        .map((value) => value.trim())
+                        .filter(Boolean),
+                    }
+                  : {}),
+              },
+            ];
+          }
+          const res = await executeWorkbenchTool(root, "wb_screenshot_add", { id, shots });
+          printResult(res, asJson);
+          return 0;
+        }
         const label = parsed.flags.get("label");
         const res = await executeWorkbenchTool(root, "wb_screenshot", {
           id,

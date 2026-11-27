@@ -13,6 +13,10 @@ import type { VerificationRecord } from "../../src/core/types.ts";
 const tempDirs: string[] = [];
 const origChrome = process.env.WORKBENCH_CHROME_PATH;
 const origPuppeteer = process.env.WORKBENCH_PUPPETEER_PATH;
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lw7sNwAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 function initGitRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-shot-mcp-"));
@@ -93,6 +97,10 @@ describe("REQ-011 MCP screenshot tool and automatic trigger", () => {
       (screenshotTool!.inputSchema.required as string[]).includes("id"),
     ).toBe(true);
 
+    const scenarioTool = tools.find((tool) => tool.name === "wb_screenshot_add");
+    expect(scenarioTool).toBeTruthy();
+    expect((scenarioTool!.inputSchema.required as string[]).sort()).toEqual(["id", "shots"]);
+
     const unknownArg = await handleMcpMessage(root, {
       jsonrpc: "2.0",
       id: 2,
@@ -147,5 +155,58 @@ describe("REQ-011 MCP screenshot tool and automatic trigger", () => {
     expect(res.status).toBe("skipped");
     expect(res.reason).toContain("WORKBENCH_CHROME_PATH");
     expect(res.screenshotCapture.reason).toContain("WORKBENCH_CHROME_PATH");
+  });
+
+  test("REQ-018: wb_screenshot_add registers scenario shots from files and base64", async () => {
+    const { root, id } = await prepareReadyRequirement();
+    const pngPath = path.join(root, "scenario.png");
+    fs.writeFileSync(pngPath, PNG_BYTES);
+
+    const res = (await executeWorkbenchTool(root, "wb_screenshot_add", {
+      id,
+      shots: [
+        { file: pngPath, label: "弹窗打开态", phase: "after", theme: "dark", criterionIds: ["AC-1"] },
+        { dataBase64: PNG_BYTES.toString("base64"), label: "加载中状态", phase: "state" },
+      ],
+    })) as {
+      status: string;
+      source: string;
+      count: number;
+      screenshotCapture: { batch: { source: string; shots: Array<{ phase?: string; description?: string }> } };
+    };
+    expect(res.status).toBe("captured");
+    expect(res.source).toBe("scenario");
+    expect(res.count).toBe(2);
+    expect(res.screenshotCapture.batch.source).toBe("scenario");
+    expect(res.screenshotCapture.batch.shots.map((shot) => shot.phase)).toEqual(["after", "state"]);
+
+    const detail = (await executeWorkbenchTool(root, "wb_get", { id })) as {
+      screenshotBatches?: Array<{ source?: string; shots: unknown[] }>;
+    };
+    expect(detail.screenshotBatches).toHaveLength(1);
+    expect(detail.screenshotBatches?.[0]?.source).toBe("scenario");
+  });
+
+  test("REQ-018: wb_screenshot_add rejects invalid metadata instead of silently defaulting", async () => {
+    const { root, id } = await prepareReadyRequirement();
+    const pngPath = path.join(root, "scenario-invalid.png");
+    fs.writeFileSync(pngPath, PNG_BYTES);
+
+    const invalidShots = [
+      [{ file: pngPath, label: "非法主题", theme: "sepia" }],
+      [{ file: pngPath, label: "非法条件", criterionIds: ["AC-1", 7] }],
+      [{ file: pngPath, label: "非法阶段", phase: "during" }],
+      [{ file: pngPath, label: "非法说明", description: 42 }],
+    ];
+    for (const shots of invalidShots) {
+      await expect(executeWorkbenchTool(root, "wb_screenshot_add", { id, shots })).rejects.toMatchObject({
+        code: "invalid_input",
+      });
+    }
+
+    const detail = (await executeWorkbenchTool(root, "wb_get", { id })) as {
+      screenshotBatches?: unknown[];
+    };
+    expect(detail.screenshotBatches ?? []).toHaveLength(0);
   });
 });

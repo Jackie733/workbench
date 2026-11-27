@@ -23,9 +23,11 @@ import {
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import { runVerification } from "../../src/core/runner.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "../../src/core/sandbox.ts";
+import { screenshotStagingDir } from "../../src/core/screenshots.ts";
 import { buildExecutionPrompt, HubExecutor } from "../../src/hub/executor.ts";
 import { synthesizeHandoffPacket } from "../../src/hub/handoff.ts";
 import { appendRunLedger, computeTuningReport } from "../../src/hub/ledger.ts";
+import { runCodingPostGate } from "../../src/hub/post_run.ts";
 import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 import type { HarnessInfo } from "../../src/hub/types.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
@@ -35,6 +37,10 @@ const tempDirs: string[] = [];
 const servers: WorkbenchServerHandle[] = [];
 const origHubDir = process.env.WORKBENCH_HUB_DIR;
 const origChromePath = process.env.WORKBENCH_CHROME_PATH;
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lw7sNwAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 function makeTempHub(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-fp3-hub-"));
@@ -651,5 +657,87 @@ describe("Flow Phase 3 (WB-21 – WB-24)", () => {
     expect(bugDetail.state.agentRuns).toHaveLength(1); // No autoHeal fix run launched!
     expect(bugDetail.state.needsHuman?.source).toBe("bug_pause");
     expect(bugDetail.state.needsHuman?.reason).toContain("Requires breaking API schema change");
+  }, 20_000);
+
+  test("REQ-018: post-gate collects staged scenario screenshots even with pending manual criteria and skips the generic matrix", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("scenario-post-gate");
+    const hub = process.env.WORKBENCH_HUB_DIR!;
+    const screenshotScript = path.join(hub, "emit-scenario-shots.mjs");
+    fs.writeFileSync(
+      screenshotScript,
+      `
+import * as fs from "node:fs";
+import * as path from "node:path";
+const out = process.env.WORKBENCH_SCREENSHOT_OUT_DIR;
+if (!out) {
+  console.error("missing WORKBENCH_SCREENSHOT_OUT_DIR");
+  process.exit(2);
+}
+fs.mkdirSync(out, { recursive: true });
+const bytes = Buffer.from(${JSON.stringify(PNG_BYTES.toString("base64"))}, "base64");
+fs.writeFileSync(path.join(out, "before.png"), bytes);
+fs.writeFileSync(path.join(out, "after.png"), bytes);
+fs.writeFileSync(path.join(out, "manifest.json"), JSON.stringify([
+  { file: "before.png", label: "改动前", phase: "before" },
+  { file: "after.png", label: "改动后", phase: "after", criterionIds: ["AC-2"] },
+]));
+`,
+    );
+    const previousChrome = process.env.WORKBENCH_CHROME_PATH;
+    process.env.WORKBENCH_CHROME_PATH = path.join(repo, "missing-chrome");
+    try {
+      await initProject(repo, { name: "ScenarioPostGate", privacyMode: "local" });
+      await updateProjectConfig(repo, { verification: { autoScreenshots: true } });
+      const snapshot = await observeGitSnapshot(repo);
+      if (!snapshot) throw new Error("missing snapshot");
+      const created = await createRequirement(repo, {
+        goal: "UI 改动场景截图自动收录",
+        uiRelated: true,
+        track: "fast_track",
+        criteria: [
+          { id: "AC-1", description: "自动命令通过", required: true, command: `bun ${screenshotScript}` },
+          { id: "AC-2", description: "人工视觉核验", required: true, kind: "manual", steps: "查看场景截图" },
+        ],
+        currentCodeSnapshotHash: snapshot.fingerprint,
+      });
+      const id = created.state.id;
+      await authorizeFastTrack(repo, id, { baseline: snapshot, currentCodeSnapshotHash: snapshot.fingerprint });
+
+      const implementPrompt = buildExecutionPrompt(
+        getRequirement(repo, id, { currentCodeSnapshotHash: snapshot.fingerprint }),
+        "",
+        { root: repo, requirementId: id, action: "implement" },
+      );
+      expect(implementPrompt).toContain("2–4 张");
+      expect(implementPrompt).toContain("WORKBENCH_SCREENSHOT_OUT_DIR");
+      expect(implementPrompt).toContain(`wb screenshot add ${id}`);
+
+      const staging = screenshotStagingDir(repo, id);
+
+      const notes: string[] = [];
+      const out = await runCodingPostGate({
+        base: repo,
+        codeRoot: repo,
+        id,
+        action: "fix",
+        latestReq: getRequirement(repo, id, { currentCodeSnapshotHash: snapshot.fingerprint }),
+        snap: snapshot,
+        appendNote: (line) => notes.push(line),
+      });
+
+      expect(out.readyForReview).toBe(true);
+      expect(out.latestReq.validity.acceptanceGate.ok).toBe(false);
+      const batches = out.latestReq.state.screenshotBatches ?? [];
+      expect(batches).toHaveLength(1);
+      expect(batches[0]!.source).toBe("scenario");
+      expect(batches[0]!.trigger).toBe("auto_collect");
+      expect(batches[0]!.shots.map((shot) => shot.phase)).toEqual(["before", "after"]);
+      expect(notes.join("\n")).toContain("已自动收录 2 张需求场景截图");
+      expect(fs.existsSync(path.join(staging, "manifest.json"))).toBe(false);
+    } finally {
+      if (previousChrome === undefined) delete process.env.WORKBENCH_CHROME_PATH;
+      else process.env.WORKBENCH_CHROME_PATH = previousChrome;
+    }
   }, 20_000);
 });

@@ -14,8 +14,14 @@ import {
   recordVerification,
 } from "../../src/core/engine.ts";
 import { observeGitSnapshot } from "../../src/core/git.ts";
-import { captureRequirementScreenshots } from "../../src/core/screenshots.ts";
+import {
+  attachRequirementScreenshots,
+  captureRequirementScreenshots,
+  collectStagedScreenshots,
+  screenshotStagingDir,
+} from "../../src/core/screenshots.ts";
 import { readRequirementBundle, readRequirementScreenshot } from "../../src/core/store.ts";
+import { runCli } from "../../src/cli/index.ts";
 import {
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOTS_PER_BATCH,
@@ -282,5 +288,254 @@ describe("REQ-011 screenshot evidence persistence", () => {
     expect(res.status).toBe("skipped");
     expect(res.reasonCode).toBe("no_shots");
     expect(res.reason).toContain("外部业务项目");
+    expect(res.batch?.source).toBe("matrix");
+  });
+});
+
+describe("REQ-018 scenario screenshot attachment", () => {
+  test("attaches PNG scenario evidence, derives viewport from IHDR and persists scene metadata", async () => {
+    const { root, id, snapshot } = await prepareImplementingRequirement();
+    const pngPath = path.join(root, "focus-state.png");
+    fs.writeFileSync(pngPath, PNG_BYTES);
+
+    const res = await attachRequirementScreenshots(root, id, {
+      shots: [
+        {
+          file: pngPath,
+          label: "保存按钮焦点态",
+          description: "键盘聚焦后的高亮环",
+          phase: "after",
+          theme: "dark",
+          urlPath: "/#focus-state",
+          criterionIds: ["AC-1", "AC-1"],
+        },
+      ],
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+    expect(res.status).toBe("captured");
+    const batch = res.batch!;
+    expect(batch.source).toBe("scenario");
+    expect(batch.trigger).toBe("agent_attach");
+    const currentSnapshot = await observeGitSnapshot(root);
+    expect(currentSnapshot).toBeTruthy();
+    expect(batch.codeSnapshotHash).toBe(currentSnapshot!.fingerprint);
+    expect(batch.shots).toHaveLength(1);
+    expect(batch.shots[0]!.viewport).toBe("1x1");
+    expect(batch.shots[0]!.theme).toBe("dark");
+    expect(batch.shots[0]!.phase).toBe("after");
+    expect(batch.shots[0]!.description).toBe("键盘聚焦后的高亮环");
+    expect(batch.shots[0]!.criterionIds).toEqual(["AC-1"]);
+    expect(batch.shots[0]!.urlPath).toBe("/#focus-state");
+
+    const stored = readRequirementBundle(root, id).state.screenshotBatches ?? [];
+    expect(stored).toHaveLength(1);
+    expect(stored[0]!.source).toBe("scenario");
+    const png = readRequirementScreenshot(root, id, batch.shots[0]!.id);
+    expect(png.bytes.equals(PNG_BYTES)).toBe(true);
+  });
+
+  test("supports external repositories and enforces PNG magic, symlink and stage guards", async () => {
+    const { root, id } = await prepareImplementingRequirement();
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "external-ui-app", version: "1.0.0" }));
+    const pngPath = path.join(root, "external-state.png");
+    fs.writeFileSync(pngPath, PNG_BYTES);
+
+    const external = await attachRequirementScreenshots(root, id, {
+      shots: [{ file: pngPath, label: "外部项目场景", theme: "light" }],
+    });
+    expect(external.status).toBe("captured");
+    expect(external.batch?.source).toBe("scenario");
+
+    const invalidPath = path.join(root, "not-a-png.png");
+    fs.writeFileSync(invalidPath, "not a png");
+    await expect(
+      attachRequirementScreenshots(root, id, { shots: [{ file: invalidPath, label: "非法文件" }] }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+
+    const linkPath = path.join(root, "link-state.png");
+    fs.symlinkSync(pngPath, linkPath);
+    await expect(
+      attachRequirementScreenshots(root, id, { shots: [{ file: linkPath, label: "符号链接" }] }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+
+    const planningRoot = makeTempProject();
+    await initProject(planningRoot);
+    const planning = await createRequirement(planningRoot, { goal: "规划阶段不可提交截图" });
+    await expect(
+      attachRequirementScreenshots(planningRoot, planning.state.id, {
+        shots: [{ file: pngPath, label: "越阶段" }],
+      }),
+    ).rejects.toMatchObject({ code: "approval_required" });
+  });
+
+  test("collects staged manifest screenshots once and cleans the staging directory", async () => {
+    const { root, id, snapshot } = await prepareImplementingRequirement();
+    const staging = screenshotStagingDir(root, id);
+    fs.mkdirSync(staging, { recursive: true });
+    const beforePng = path.join(staging, "before.png");
+    const afterPng = path.join(staging, "after.png");
+    fs.writeFileSync(beforePng, PNG_BYTES);
+    fs.writeFileSync(afterPng, PNG_BYTES);
+    fs.writeFileSync(
+      path.join(staging, "manifest.json"),
+      JSON.stringify({
+        shots: [
+          { file: "before.png", label: "改动前基线", phase: "before", description: "旧版布局" },
+          { file: "after.png", label: "改动后结果", phase: "after", criterionIds: ["AC-1"] },
+        ],
+      }),
+    );
+
+    const collected = await collectStagedScreenshots(root, id, {
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+    expect(collected.attached).toBe(true);
+    expect(collected.count).toBe(2);
+    expect(collected.batch?.source).toBe("scenario");
+    expect(collected.batch?.trigger).toBe("auto_collect");
+    expect(collected.batch?.shots.map((shot) => shot.phase)).toEqual(["before", "after"]);
+    expect(fs.existsSync(beforePng)).toBe(false);
+    expect(fs.existsSync(afterPng)).toBe(false);
+    expect(fs.existsSync(path.join(staging, "manifest.json"))).toBe(false);
+
+    const again = await collectStagedScreenshots(root, id);
+    expect(again.attached).toBe(false);
+  });
+
+  test("rejects staged manifest paths that escape via symlinked directories", async () => {
+    const { root, id } = await prepareImplementingRequirement();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "wb-shot-outside-"));
+    tempDirs.push(outside);
+    const outsidePng = path.join(outside, "secret.png");
+    fs.writeFileSync(outsidePng, PNG_BYTES);
+    const staging = screenshotStagingDir(root, id);
+    fs.mkdirSync(staging, { recursive: true });
+    fs.symlinkSync(outside, path.join(staging, "sub"), "dir");
+    fs.writeFileSync(
+      path.join(staging, "manifest.json"),
+      JSON.stringify({ shots: [{ file: "sub/secret.png", label: "越界读取" }] }),
+    );
+
+    await expect(collectStagedScreenshots(root, id)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fs.existsSync(outsidePng)).toBe(true);
+    expect(readRequirementBundle(root, id).state.screenshotBatches ?? []).toHaveLength(0);
+  });
+
+  test("rejects invalid staged metadata instead of silently falling back to defaults", async () => {
+    const { root, id } = await prepareImplementingRequirement();
+    const staging = screenshotStagingDir(root, id);
+    fs.mkdirSync(staging, { recursive: true });
+    const png = path.join(staging, "shot.png");
+    fs.writeFileSync(png, PNG_BYTES);
+
+    const invalidEntries = [
+      { file: "shot.png", label: "非法主题", theme: "sepia" },
+      { file: "shot.png", label: "非法条件", criterionIds: ["AC-1", 7] },
+      { file: "shot.png", label: "非法阶段", phase: "during" },
+    ];
+    for (const entry of invalidEntries) {
+      fs.writeFileSync(path.join(staging, "manifest.json"), JSON.stringify({ shots: [entry] }));
+      await expect(collectStagedScreenshots(root, id)).rejects.toMatchObject({ code: "invalid_input" });
+      expect(fs.existsSync(png)).toBe(true);
+    }
+    expect(readRequirementBundle(root, id).state.screenshotBatches ?? []).toHaveLength(0);
+  });
+
+  test("CLI screenshot add registers a single scenario shot", async () => {
+    const { root, id } = await prepareImplementingRequirement();
+    const pngPath = path.join(root, "cli-scene.png");
+    fs.writeFileSync(pngPath, PNG_BYTES);
+
+    const code = await runCli([
+      "--root",
+      root,
+      "--json",
+      "screenshot",
+      "add",
+      id,
+      "--file",
+      pngPath,
+      "--label",
+      "CLI 场景",
+      "--phase",
+      "after",
+      "--theme",
+      "dark",
+      "--viewport",
+      "12x34",
+      "--url",
+      "/#cli",
+      "--description",
+      "CLI 提交说明",
+      "--criteria",
+      "AC-1,AC-2",
+    ]);
+    expect(code).toBe(0);
+    const batch = (readRequirementBundle(root, id).state.screenshotBatches ?? []).at(-1)!;
+    expect(batch.source).toBe("scenario");
+    expect(batch.trigger).toBe("agent_attach");
+    expect(batch.shots).toHaveLength(1);
+    expect(batch.shots[0]!.label).toBe("CLI 场景");
+    expect(batch.shots[0]!.phase).toBe("after");
+    expect(batch.shots[0]!.theme).toBe("dark");
+    expect(batch.shots[0]!.viewport).toBe("12x34");
+    expect(batch.shots[0]!.urlPath).toBe("/#cli");
+    expect(batch.shots[0]!.description).toBe("CLI 提交说明");
+    expect(batch.shots[0]!.criterionIds).toEqual(["AC-1", "AC-2"]);
+
+    const rejected = await runCli([
+      "--root",
+      root,
+      "--json",
+      "screenshot",
+      "add",
+      id,
+      "--file",
+      pngPath,
+      "--label",
+      "非法主题",
+      "--theme",
+      "sepia",
+    ]);
+    expect(rejected).toBe(1);
+    expect(readRequirementBundle(root, id).state.screenshotBatches ?? []).toHaveLength(1);
+  });
+
+  test("CLI screenshot add --manifest resolves relative files from the manifest directory", async () => {
+    const { root, id } = await prepareImplementingRequirement();
+    const shotDir = fs.mkdtempSync(path.join(root, "cli-manifest-"));
+    fs.writeFileSync(path.join(shotDir, "before.png"), PNG_BYTES);
+    fs.writeFileSync(path.join(shotDir, "after.png"), PNG_BYTES);
+    const manifestPath = path.join(shotDir, "manifest.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        shots: [
+          { file: "before.png", label: "清单改动前", phase: "before" },
+          { file: "after.png", label: "清单改动后", phase: "after", criteria: ["AC-1"] },
+        ],
+      }),
+    );
+
+    const code = await runCli(["--root", root, "--json", "screenshot", "add", id, "--manifest", manifestPath]);
+    expect(code).toBe(0);
+    const batch = (readRequirementBundle(root, id).state.screenshotBatches ?? []).at(-1)!;
+    expect(batch.source).toBe("scenario");
+    expect(batch.shots).toHaveLength(2);
+    expect(batch.shots.map((shot) => shot.phase)).toEqual(["before", "after"]);
+    expect(batch.shots[1]!.criterionIds).toEqual(["AC-1"]);
+  });
+
+  test("keeps legacy batches without source backward compatible", async () => {
+    const { root, id, snapshot } = await prepareImplementingRequirement();
+    const { shot, bytes } = makeShot(0);
+    await recordScreenshotBatch(root, id, {
+      batch: makeBatch(0, readRequirementBundle(root, id).state.specHash, snapshot.fingerprint, [shot]),
+      files: [{ shotId: shot.id, bytes }],
+      currentCodeSnapshotHash: snapshot.fingerprint,
+    });
+    const batch = (readRequirementBundle(root, id).state.screenshotBatches ?? [])[0]!;
+    expect(batch.source).toBeUndefined();
+    expect(batch.trigger).toBe("manual");
   });
 });
