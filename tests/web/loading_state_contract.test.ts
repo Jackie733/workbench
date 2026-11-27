@@ -140,8 +140,6 @@ describe("REQ-019 P0 关键按钮接入范围", () => {
       "evidence-rerun-btn-",
       "manual-verify-btn",
       "screenshot-recapture",
-      "sync-sandbox-base-btn",
-      "agent-sync-sandbox-btn",
       "run-selected-model-btn",
       "run-review-btn",
       "action-${",
@@ -193,12 +191,6 @@ describe("REQ-019 审查修复契约", () => {
     const closeIndex = askBranch.indexOf("ui.closeModal(modalInstanceId)");
     expect(runIndex).toBeGreaterThan(-1);
     expect(closeIndex).toBeGreaterThan(runIndex);
-  });
-
-  test("主操作与次操作按钮以需求标识和动作标识作为组件键", () => {
-    const workspace = read("src/web/components/WorkspaceView.tsx");
-    expect(workspace).toContain("key={`${s.id}:${banner.primaryAction.id}`}");
-    expect(workspace).toContain("key={`${s.id}:${sec.id}`}");
   });
 
   test("定价互斥操作的局部 loading 只跟随受保护请求结束", () => {

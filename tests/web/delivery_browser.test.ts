@@ -36,6 +36,7 @@ interface BrowserPage {
   click(sel: string): Promise<void>;
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
+  keyboard: { press(key: string): Promise<void> };
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
 }
@@ -346,6 +347,7 @@ describe("post-acceptance delivery wrap-up UI", () => {
       );
       await page.click('[data-testid="submit-deliver-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="deliver-modal"]'), { timeout: 10_000 });
+      await page.click('[data-testid="workspace-action-details-btn"]');
       await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="sync-pr-btn"]');
       await page.waitForFunction(
@@ -725,19 +727,25 @@ describe("post-acceptance delivery wrap-up UI", () => {
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
       await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10_000 });
       expect(
         await page.evaluate(() => document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? ""),
       ).toContain("PR #77 · 开启");
+      await page.keyboard.press("Escape");
 
       await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
+      await page.click('[data-testid="more-menu-btn"]');
       await page.waitForFunction(
         () =>
           (document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? "").includes("PR #77 · open"),
         { timeout: 10_000 },
       );
+      await page.keyboard.press("Escape");
 
       // Sync merged PR when main repo has uncommitted changes -> localized skip reason toast
+      await page.click('[data-testid="workspace-action-details-btn"]');
       await page.waitForSelector('[data-testid="sync-pr-btn"]', { timeout: 10_000 });
       await page.click('[data-testid="sync-pr-btn"]');
       await page.waitForFunction(

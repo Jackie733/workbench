@@ -103,7 +103,6 @@ const EXPECTED_LUCIDE = {
     "GitPullRequest",
     "History",
     "Link2",
-    "Loader2",
     "Lock",
     "Maximize2",
     "MessageSquare",

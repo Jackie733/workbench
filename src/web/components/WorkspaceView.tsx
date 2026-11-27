@@ -22,7 +22,6 @@ import {
   GitPullRequest,
   History,
   Link2,
-  Loader2,
   Lock,
   Maximize2,
   MessageSquare,
@@ -48,6 +47,7 @@ import {
 } from "lucide-react";
 import type {
   AgentRunRecord,
+  BannerAction,
   DecisionItem,
   RequirementDetail,
   ScreenshotSkipReasonCode,
@@ -56,6 +56,7 @@ import type {
 import { canDirectApproveWithDecisions } from "../state.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
 import {
+  formatAgentStatusLabel,
   formatPrStateLabel,
   prStateRef,
   resolveWarningParam,
@@ -68,7 +69,6 @@ import {
   cancelRun,
   dispatchDesignReview,
   dispatchFixFromReview,
-  dispatchSyncBaseWithAgent,
   executeVerify,
   guardRequirementRunLock,
   handleBannerAction,
@@ -83,7 +83,6 @@ import {
   reviseFromDesignReview,
   runBusy,
   setRequirementTierAction,
-  syncSandboxBaseAction,
   toggleVerificationLog,
   triggerActiveRun,
   useDeliveryQuery,
@@ -109,6 +108,7 @@ import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentGallery } from "./AttachmentGallery.tsx";
+import { WorkspaceSandbox } from "./WorkspaceSandbox.tsx";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
 import {
   BANNER_ACTION_ICONS,
@@ -131,10 +131,12 @@ import { Input } from "./ui/input.tsx";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "./ui/input-group.tsx";
 import { Label } from "./ui/label.tsx";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./ui/menu.tsx";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "./ui/popover.tsx";
 import { RadioGroupPrimitive, RadioPrimitive } from "./ui/radio-group.tsx";
 import { SegmentedControl, SegmentedControlItem } from "./ui/segmented-control.tsx";
 import { Tabs, TabsList, TabsTab } from "./ui/tabs.tsx";
 import { Textarea } from "./ui/textarea.tsx";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip.tsx";
 
 function mapTone(tone: string) {
   if (tone === "danger") return "error" as const;
@@ -202,7 +204,87 @@ function latestOutputLine(log: string): string {
   return "";
 }
 
-function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
+function WorkspaceTitle({ title }: { title: string }) {
+  const ref = useRef<HTMLHeadingElement>(null);
+  const [truncated, setTruncated] = useState(false);
+
+  useEffect(() => {
+    const heading = ref.current;
+    if (!heading) return;
+    const measure = () => setTruncated(heading.scrollWidth > heading.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    return () => observer.disconnect();
+  }, [title]);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger disabled={!truncated} render={<h1 ref={ref} className="ws-title truncate" tabIndex={truncated ? 0 : undefined} />}>
+        {title}
+      </TooltipTrigger>
+      <TooltipPopup role="tooltip" side="bottom" align="start" className="max-w-[min(36rem,90vw)] [overflow-wrap:anywhere]">
+        {title}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
+type ConfirmApproval = (label: string, action: (resetSandbox: boolean) => Promise<void>) => Promise<void> | void;
+
+function ApprovalConfirmation({
+  label, canResetSandbox, dirtyBaseline, disabled, onClose, onApprove,
+}: {
+  label: string;
+  canResetSandbox: boolean;
+  dirtyBaseline: boolean;
+  disabled: boolean;
+  onClose: () => void;
+  onApprove: (resetSandbox: boolean) => Promise<void>;
+}) {
+  const language = useUiStore((s) => s.language);
+  const [reset, setReset] = useState(false);
+
+  return (
+    <ModalShell onClose={onClose} testId="workspace-approval-modal" hasExplicitTitle>
+      <DialogHeader>
+        <DialogTitle>{label}</DialogTitle>
+        {dirtyBaseline && (
+          <DialogDescription data-testid="dirty-baseline-hint">{t(language, "ws.dirtyHint")}</DialogDescription>
+        )}
+      </DialogHeader>
+      {canResetSandbox && (
+        <DialogPanel>
+          <Label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              data-testid="approve-reset-sandbox-checkbox"
+              checked={reset}
+              disabled={disabled}
+              onCheckedChange={(checked) => setReset(Boolean(checked))}
+            />
+            {t(language, "ws.resetSandboxCheckbox")}
+          </Label>
+        </DialogPanel>
+      )}
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>{t(language, "common.cancel")}</Button>
+        <AsyncButton
+          type="button"
+          data-testid="confirm-workspace-approval-btn"
+          disabled={disabled}
+          onAction={async () => {
+            await onApprove(canResetSandbox && reset);
+            onClose();
+          }}
+        >
+          {t(language, "common.confirm")}
+        </AsyncButton>
+      </DialogFooter>
+    </ModalShell>
+  );
+}
+
+function LiveAgentRows({ run, headline }: { run: AgentRunRecord; headline: string }) {
   const language = useUiStore((s) => s.language);
   const setDrawerTab = useUiStore((s) => s.setDrawerTab);
   const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
@@ -217,58 +299,57 @@ function LiveAgentBanner({ run }: { run: AgentRunRecord }) {
     ask: t(language, "live.action.ask"),
   };
   const latestLine = latestOutput || t(language, "live.waiting");
+  const heading = t(language, "live.heading", { action: actionLabels[run.action] ?? run.action });
+  const model = `${run.harness}/${run.effectiveModel ?? run.model}`;
+  const modelHint = run.modelFallback && run.effectiveModel
+    ? `${run.harness}/${run.model} · ${t(language, "live.fallback", { model: run.effectiveModel })}`
+    : model;
 
   return (
-    <section className="live-agent-banner" data-testid="live-agent-banner">
-      <div className="live-agent-head">
-        <div className="live-agent-title">
-          <span className="pulse-dot" />
-          <strong>{t(language, "live.heading", { action: actionLabels[run.action] ?? run.action })}</strong>
-          <Badge variant="info">
-            {run.harness}/{run.model}
-          </Badge>
-          {run.modelFallback && run.effectiveModel && (
-            <Badge variant="warning">{t(language, "live.fallback", { model: run.effectiveModel })}</Badge>
-          )}
+    <>
+      <div className="ws-execution-row" data-testid="live-agent-banner">
+        <div className="ws-live-heading">
+          <span className="pulse-dot" aria-hidden="true" />
+          <strong className="truncate" title={heading}>{heading}</strong>
         </div>
-        <div className="live-agent-controls">
+        <div className="ws-inline-actions">
           <LiveTimer startedAt={run.startedAt} />
           <Button
             size="xs"
             variant="outline"
             type="button"
             data-testid="open-console-tab-btn"
+            aria-label={t(language, "live.viewTerminal")}
+            title={t(language, "live.viewTerminal")}
             onClick={() => {
               setDrawerOpen(true);
               setDrawerTab("console");
             }}
           >
-            <Icon icon={Terminal} size={14} /> {t(language, "live.viewTerminal")}
+            <Icon icon={Terminal} size={14} /> <span className="ws-compact-label">{t(language, "live.viewTerminal")}</span>
           </Button>
           <Button
             size="xs"
             variant="destructive"
             type="button"
+            data-testid="workspace-stop-run-btn"
             onClick={() => selectedId && void cancelRun(selectedId, run.id)}
           >
             <Icon icon={Square} size={14} /> {t(language, "live.stop")}
           </Button>
         </div>
       </div>
-      <div className="live-progress-track" aria-hidden="true">
-        <div className="live-shimmer-bar" />
+      <div className="ws-execution-row ws-live-context">
+        <Badge variant={run.modelFallback ? "warning" : "info"} title={modelHint}>
+          <span className="truncate">{run.modelFallback ? t(language, "live.fallback", { model }) : model}</span>
+        </Badge>
+        <code className="ws-live-preview truncate" data-testid="live-banner-preview" title={latestLine}>{latestLine}</code>
+        <span className="ws-live-stage truncate" title={headline}>{headline}</span>
+        <span className="ws-lock-summary" data-testid="run-lock-hint" role="status" title={t(language, "ws.runLockHint")}>
+          <Icon icon={Lock} size={14} /> {t(language, "ws.runLockShort")}
+        </span>
       </div>
-      <div className="live-preview-row">
-        <span className="muted xs">{t(language, "live.progress")}</span>
-        <code className="live-preview-line" data-testid="live-banner-preview">
-          {latestLine}
-        </code>
-      </div>
-      <div className="live-preview-row" data-testid="run-lock-hint" role="status">
-        <Icon icon={Lock} size={14} />
-        <span className="muted xs">{t(language, "ws.runLockHint")}</span>
-      </div>
-    </section>
+    </>
   );
 }
 
@@ -505,11 +586,11 @@ function AcceptanceSummaryPanel({
 function InlineDecisionCard({
   d,
   runLocked,
-  resetSandbox,
+  confirmApproval,
 }: {
   d: RequirementDetail;
   runLocked: boolean;
-  resetSandbox: boolean;
+  confirmApproval: ConfirmApproval;
 }) {
   const language = useUiStore((s) => s.language);
   const busy = useUiStore((s) => s.busy);
@@ -611,7 +692,7 @@ function InlineDecisionCard({
     }));
   };
 
-  const handleDirectApprove = async () => {
+  const handleDirectApprove = async (resetSandbox: boolean) => {
     if (guardRequirementRunLock(s.id) || !directCheck.allowed) return;
     const res = await runBusy(() =>
       api.approve(s.id, {
@@ -758,7 +839,7 @@ function InlineDecisionCard({
             disabled={busy || runLocked || !directCheck.allowed}
             title={!directCheck.allowed ? translateRef(language, directCheck.reasonKey, directCheck.reason ?? "") : undefined}
             onMouseDown={(e) => e.preventDefault()}
-            onAction={handleDirectApprove}
+            onAction={() => confirmApproval(t(language, "decisions.directApprove"), handleDirectApprove)}
           >
             <Icon icon={Check} size={14} /> {t(language, "decisions.directApprove")}
           </AsyncButton>
@@ -771,11 +852,11 @@ function InlineDecisionCard({
 function SpecDesignTab({
   d,
   runLocked,
-  resetSandbox,
+  confirmApproval,
 }: {
   d: RequirementDetail;
   runLocked: boolean;
-  resetSandbox: boolean;
+  confirmApproval: ConfirmApproval;
 }) {
   const language = useUiStore((s) => s.language);
   const busy = useUiStore((s) => s.busy);
@@ -1215,7 +1296,7 @@ function SpecDesignTab({
         </Card>
       )}
 
-      <InlineDecisionCard d={d} runLocked={runLocked} resetSandbox={resetSandbox} />
+      <InlineDecisionCard d={d} runLocked={runLocked} confirmApproval={confirmApproval} />
 
       {s.humanDecisions && s.humanDecisions.length > 0 && (
         <Card className="p-3.5 mb-3.5 border-info/35 bg-info/5" data-testid="adopted-decisions-card">
@@ -2702,11 +2783,16 @@ export function WorkspaceView() {
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const isDoneStage = reqData?.detail?.state.stage === "done";
   const { data: deliveryPreview } = useDeliveryQuery(activeProjectId, selectedId, Boolean(isDoneStage));
-  const [resetSandboxOnApprove, setResetSandboxOnApprove] = useState(false);
+  const [approval, setApproval] = useState<{
+    label: string;
+    run: (resetSandbox: boolean) => Promise<void>;
+  } | null>(null);
+  const [actionDetailsOpen, setActionDetailsOpen] = useState(false);
 
   useEffect(() => {
-    setResetSandboxOnApprove(false);
-  }, [selectedId, reqData?.detail?.state.stage]);
+    setApproval(null);
+    setActionDetailsOpen(false);
+  }, [activeProjectId, selectedId, reqData?.detail?.state.stage]);
 
   const d = reqData?.detail ?? null;
   if (!d) return <p className="muted">{t(language, "ws.loading")}</p>;
@@ -2791,6 +2877,98 @@ export function WorkspaceView() {
   const canRunModel = s.stage !== "done" && s.stage !== "cancelled" && modelOptions.length > 0;
   const canReview = modelOptions.length > 0 && s.stage === "coding";
 
+  const canResetSandbox = s.stage === "planning" && Boolean(s.designHash) && !s.lastFeedback &&
+    Boolean(reqData?.sandbox) && Boolean(s.revisedFromCoding || (reqData?.sandboxDrift?.aheadCount ?? 0) > 0);
+  const dirtyBaseline = s.stage === "planning" && Boolean(s.designHash) && Boolean(project?.git?.isGitRepo && project.git.dirty);
+  const confirmApproval: ConfirmApproval = (label, run) => {
+    if (canResetSandbox || dirtyBaseline) setApproval({ label, run });
+    else return run(false);
+  };
+
+  const headline = translateRef(language, banner.headlineKey, banner.headline, banner.headlineParams);
+  const pairedAction = banner.secondaryActions.find(({ id }) =>
+    id === "approve_only" || id === "authorize_fast_track" || id === "dispatch_implement" || id === "revise_plan" ||
+    id === "reopen" || id === "run_all_verifications" || id === "dispatch_fix" ||
+    (id === "accept" && banner.primaryAction?.id !== "dispatch_fix_review") ||
+    (id === "request_changes" && (banner.primaryAction?.id === "accept" || banner.primaryAction?.id === "dispatch_fix_review")),
+  );
+  const otherActions = banner.secondaryActions.filter((action) => action !== pairedAction);
+  const recentRun = s.agentRuns?.at(-1);
+  const runResult = recentRun && recentRun.status !== "running" && recentRun.action !== "ask"
+    ? t(language, "ws.lastRun", { status: formatAgentStatusLabel(language, recentRun.status) })
+    : undefined;
+
+  const renderBannerAction = (action: BannerAction, variant: "default" | "outline", inDetails = false) => {
+    const label = translateRef(language, action.labelKey, action.label, action.labelParams);
+    return (
+      <AsyncButton
+        key={`${s.id}:${action.id}`}
+        size="sm"
+        variant={variant}
+        type="button"
+        data-testid={`action-${action.id}`}
+        disabled={busy || runningThis || Boolean(action.disabledReason)}
+        title={action.disabledReason ?? label}
+        onAction={() => {
+          const run = (resetSandbox: boolean) => handleBannerAction(d, action.id, { resetSandbox });
+          if (action.id === "approve_only" || action.id === "approve_and_implement") {
+            if (inDetails) setActionDetailsOpen(false);
+            return confirmApproval(label, run);
+          }
+          if (inDetails && ["accept", "accept_override", "request_changes", "revise_plan", "reopen"].includes(action.id)) {
+            setActionDetailsOpen(false);
+          }
+          return run(false);
+        }}
+      >
+        <Icon icon={BANNER_ACTION_ICONS[action.id]} size={14} />
+        <span className="truncate">{label}</span>
+      </AsyncButton>
+    );
+  };
+
+  let stageContext: { testId: string; text: string } | undefined;
+  if (s.stage === "done" && s.delivery) {
+    stageContext = {
+      testId: "delivery-summary-line",
+      text: [
+        t(language, "ws.delivered", { hash: s.delivery.shortHash }) +
+          (s.delivery.branch ? t(language, "ws.deliveredBranch", { branch: s.delivery.branch }) : "") +
+          t(language, s.delivery.files.length === 1 ? "ws.deliveredFilesOne" : "ws.deliveredFilesOther", { count: s.delivery.files.length }),
+        formatDateTime(s.delivery.deliveredAt, language),
+        ...(s.github?.pr ? [`PR #${s.github.pr.number} (${formatPrStateLabel(language, s.github.pr.state)})`] : []),
+      ].join(" · "),
+    };
+  } else if (s.stage === "done" && !deliveryPreview?.sandboxActive && deliveryPreview?.canCommit) {
+    stageContext = {
+      testId: "delivery-pending-hint",
+      text: t(language, "ws.deliveryPending", { count: deliveryPreview.candidates.length }),
+    };
+  } else if (s.stage === "done" && deliveryPreview?.sandboxActive && !s.github?.pr) {
+    stageContext = {
+      testId: "delivery-sandbox-hint",
+      text: t(language, deliveryPreview.canCreatePr ? "ws.deliverySandboxPrPlatform" : "ws.deliverySandboxNoPrPlatform", {
+        branch: deliveryPreview.branch ?? reqData?.sandbox?.branch ?? "",
+        platform: prPlatformLabel,
+      }),
+    };
+  }
+
+  const canDeliver = s.stage === "done" && Boolean(deliveryPreview?.canCommit || deliveryPreview?.canCreatePr);
+  const canMerge = s.stage === "done" && Boolean(reqData?.sandbox && deliveryPreview?.canMergeLocal);
+  const canSyncPr = s.stage === "done" && Boolean(s.github?.pr);
+  const canApplySandbox = s.stage === "done" && Boolean(reqData?.sandbox);
+  const deliveryOptions = (canDeliver && canMerge) || canSyncPr || canApplySandbox;
+  const detailsLabel = t(language, !runningThis && deliveryOptions ? "ws.deliveryOptions" : "ws.actionDetails");
+  const mergeLocalButton = canMerge && !runningThis && (
+    <Button size="sm" variant={canDeliver ? "outline" : "default"} type="button" data-testid="merge-local-btn" disabled={busy} onClick={() => {
+      if (canDeliver) setActionDetailsOpen(false);
+      openDeliverModal(false, "local_merge");
+    }}>
+      <Icon icon={GitMerge} size={14} /> <span className="truncate">{t(language, "ws.mergeLocalBtn")}</span>
+    </Button>
+  );
+
   return (
     <div className="workspace-detail" data-testid="workspace-detail">
       <div className="workspace-pinned" data-testid="workspace-pinned">
@@ -2801,87 +2979,23 @@ export function WorkspaceView() {
           {s.id}
         </span>
         {s.kind === "bug" && (
-          <Badge variant="error" data-testid="bug-kind-badge">
-            <Icon icon={Bug} size={14} /> {t(language, "kind.bugBadge")}
+          <Badge className="ws-bug-badge" variant="error" data-testid="bug-kind-badge" title={t(language, "kind.bugBadge")}>
+            <Icon icon={Bug} size={14} /> <span className="ws-compact-label">{t(language, "kind.bugBadge")}</span>
           </Badge>
         )}
-        {s.parentId && (
-          <Badge
-            render={<button type="button" onClick={() => void openRequirement(s.parentId!)} />}
-            variant="info"
-            data-testid="ws-parent-link"
-          >
-            <Icon icon={ArrowUp} size={14} /> {t(language, "ws.parentLink", { id: s.parentId })}
-          </Badge>
-        )}
-        <h1 className="ws-title">{s.title}</h1>
+        <WorkspaceTitle title={s.title} />
         {reqData?.sandbox && (
-          <Badge
-            variant="info"
-            data-testid="sandbox-active-badge"
-            title={t(language, "ws.sandboxTitle", { branch: reqData.sandbox.branch })}
-          >
-            <Icon icon={GitBranch} size={14} /> {t(language, "ws.sandboxActive")}
-          </Badge>
+          <WorkspaceSandbox key={`${activeProjectId}:${s.id}`} d={d} sandbox={reqData.sandbox} drift={reqData.sandboxDrift} running={runningThis} />
         )}
-        {s.github?.issue && (
-          <Badge
-            render={
-              <a
-                href={s.github.issue.url}
-                target="_blank"
-                rel="noreferrer"
-              />
-            }
-            variant={s.github.issue.state === "closed" ? "secondary" : "info"}
-            data-testid="ws-github-issue-link"
-            title={s.github.issue.title}
-          >
-            <Icon icon={Link2} size={14} /> Issue #{s.github.issue.number}
-          </Badge>
-        )}
-        {s.github?.pr && (
-          <Badge
-            render={
-              <a
-                href={s.github.pr.url}
-                target="_blank"
-                rel="noreferrer"
-              />
-            }
-            variant={s.github.pr.state === "merged" ? "success" : s.github.pr.state === "closed" ? "secondary" : "info"}
-            data-testid="ws-github-pr-link"
-            title={s.github.pr.title}
-          >
-            <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {formatPrStateLabel(language, s.github.pr.state)}
-          </Badge>
-        )}
-        <Badge variant={mapTone(stageMeta.tone)} data-testid="ws-stage-badge">
+        <Badge className="ws-stage-badge" variant={mapTone(stageMeta.tone)} data-testid="ws-stage-badge">
           <Icon icon={STAGE_ICONS[s.stage]} size={14} />
           {stageMeta.labels[language]}
         </Badge>
         {derivedPill && (
-          <Badge variant={derivedPill.tone} data-testid="ws-derived-status-badge">
+          <Badge className="ws-derived-badge" variant={derivedPill.tone} data-testid="ws-derived-status-badge">
             {derivedPill.label}
           </Badge>
         )}
-        <Badge
-          render={
-            s.stage !== "done" && s.stage !== "cancelled" ? (
-              <button
-                type="button"
-                disabled={busy || runningThis}
-                onClick={() => void setRequirementTierAction(d, tier === "sota" ? "standard" : "sota")}
-              />
-            ) : undefined
-          }
-          variant={tier === "sota" ? "warning" : "secondary"}
-          data-testid="ws-tier-badge"
-          title={t(language, "tier.toggleTitle")}
-        >
-          <Icon icon={Zap} size={14} />
-          {t(language, tier === "sota" ? "tier.sota" : "tier.standard")}
-        </Badge>
         <div className="more-wrap">
           <Menu open={moreMenuOpen} onOpenChange={setMoreMenuOpen}>
             {/*
@@ -2891,8 +3005,8 @@ export function WorkspaceView() {
             <span ref={moreMenuAnchorRef} className="inline-flex shrink-0" data-testid="more-menu-anchor">
               <MenuTrigger
                 render={
-                  <Button ref={moreMenuButtonRef} size="sm" variant="outline" type="button" data-testid="more-menu-btn">
-                    <Icon icon={Ellipsis} size={14} /> {t(language, "ws.more")}
+                  <Button ref={moreMenuButtonRef} size="sm" variant="outline" type="button" title={t(language, "ws.more")} aria-label={t(language, "ws.more")} data-testid="more-menu-btn">
+                    <Icon icon={Ellipsis} size={14} /> <span className="ws-compact-label">{t(language, "ws.more")}</span>
                   </Button>
                 }
               />
@@ -3087,6 +3201,30 @@ export function WorkspaceView() {
               >
                 <Icon icon={Bug} size={14} /> {t(language, "ws.menu.debug")}
               </MenuItem>
+              <MenuSeparator />
+              {s.parentId && (
+                <MenuItem nativeButton onClick={() => void openRequirement(s.parentId!)} render={<button type="button" data-testid="ws-parent-link" />}>
+                  <Icon icon={ArrowUp} size={14} /> {t(language, "ws.parentLink", { id: s.parentId })}
+                </MenuItem>
+              )}
+              {s.github?.issue && (
+                <MenuItem render={<a href={s.github.issue.url} target="_blank" rel="noreferrer" data-testid="ws-github-issue-link" title={s.github.issue.title} />}>
+                  <Icon icon={Link2} size={14} /> Issue #{s.github.issue.number}
+                </MenuItem>
+              )}
+              {s.github?.pr && (
+                <MenuItem render={<a href={s.github.pr.url} target="_blank" rel="noreferrer" data-testid="ws-github-pr-link" title={s.github.pr.title} />}>
+                  <Icon icon={GitPullRequest} size={14} /> PR #{s.github.pr.number} · {formatPrStateLabel(language, s.github.pr.state)}
+                </MenuItem>
+              )}
+              <MenuItem
+                nativeButton
+                disabled={busy || runningThis || s.stage === "done" || s.stage === "cancelled"}
+                onClick={() => void setRequirementTierAction(d, tier === "sota" ? "standard" : "sota")}
+                render={<button type="button" data-testid="ws-tier-badge" title={t(language, "tier.toggleTitle")} />}
+              >
+                <Icon icon={Zap} size={14} /> {t(language, tier === "sota" ? "tier.sota" : "tier.standard")}
+              </MenuItem>
             </MenuPopup>
           </Menu>
         </div>
@@ -3106,447 +3244,149 @@ export function WorkspaceView() {
             <Icon icon={drawerOpen ? PanelRightClose : PanelRightOpen} size={14} />
             {runningThis && <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />}
           </span>
-          <span className="header-btn-label">{t(language, "topbar.drawerLabelClosed")}</span>
+          <span className="ws-compact-label">{t(language, "topbar.drawerLabelClosed")}</span>
         </Button>
       </div>
 
-      {s.lastFeedback && (
-        <Alert variant="warning" className="mb-3.5 text-xs">
-          <Icon icon={AlertTriangle} size={14} />
-          <AlertTitle>{t(language, "ws.lastFeedback")}</AlertTitle>
-          <AlertDescription className="text-foreground">{s.lastFeedback}</AlertDescription>
-        </Alert>
-      )}
-
-      {reqData?.sandbox &&
-        reqData.sandboxDrift &&
-        s.stage !== "cancelled" &&
-        !(s.stage === "done" && s.github?.pr?.state === "merged") &&
-        (reqData.sandboxDrift.behindCount > 0 ||
-          reqData.sandboxDrift.conflictFiles.length > 0 ||
-          (reqData.sandboxDrift.siblingConflicts?.length ?? 0) > 0) && (() => {
-          const drift = reqData.sandboxDrift!;
-          const hasTrueConflict = drift.conflictFiles.length > 0;
-          const isAutoMergeable = !hasTrueConflict && drift.driftStatus === "auto_mergeable";
-          const siblingList = drift.siblingConflicts ?? [];
-          const hasSiblingTrueConflict = siblingList.some((sc) => sc.conflictFiles.length > 0);
-          const canAgentResolveNow =
-            s.stage === "coding" ||
-            s.stage === "done" ||
-            (s.stage === "planning" && s.designHash !== "");
-          const sep = language === "en" ? ", " : "、";
-          return (
-            <Alert
-              variant={hasTrueConflict ? "error" : "warning"}
-              data-testid="sandbox-drift-callout"
-              className="mb-3.5"
-            >
-              <Icon icon={GitBranch} size={14} />
-              <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2.5 text-foreground">
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <strong>
-                      {drift.behindCount > 0
-                        ? t(language, "ws.sandboxDrift.title", {
-                            branch: drift.branch,
-                            count: drift.behindCount,
-                          })
-                        : t(language, "ws.sandboxDrift.radarOnlyTitle", { branch: drift.branch })}
-                    </strong>
-                    {hasTrueConflict && (
-                      <Badge variant="error">
-                        <Icon icon={AlertTriangle} size={14} />
-                        {t(language, "ws.sandboxDrift.conflictBadge", {
-                          count: drift.conflictFiles.length,
-                        })}
-                      </Badge>
-                    )}
-                    {isAutoMergeable && (
-                      <Badge variant="info">
-                        <Icon icon={CALLOUT_TONE_ICONS.info} size={14} />
-                        {t(language, "ws.sandboxDrift.autoMergeBadge", {
-                          count: drift.overlapFiles.length,
-                        })}
-                      </Badge>
-                    )}
-                  </div>
-                  {hasTrueConflict ? (
-                    <div className="xs" style={{ marginTop: 4 }}>
-                      {t(language, "ws.sandboxDrift.conflictDetail", {
-                        files:
-                          drift.conflictFiles.slice(0, 6).join(sep) +
-                          (drift.conflictFiles.length > 6 ? "…" : ""),
-                      })}
-                    </div>
-                  ) : isAutoMergeable ? (
-                    <div className="xs muted" style={{ marginTop: 4 }}>
-                      {t(language, "ws.sandboxDrift.autoMergeDetail", {
-                        files:
-                          drift.overlapFiles.slice(0, 6).join(sep) +
-                          (drift.overlapFiles.length > 6 ? "…" : ""),
-                      })}
-                    </div>
-                  ) : drift.behindCount > 0 ? (
-                    <div className="xs muted" style={{ marginTop: 4 }}>
-                      {t(language, "ws.sandboxDrift.safeDetail")}
-                    </div>
-                  ) : null}
-                  {siblingList.length > 0 && (
-                    <div
-                      className="xs"
-                      data-testid="sibling-conflict-radar"
-                      style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
-                    >
-                      <span className={hasSiblingTrueConflict ? "danger-text" : "muted"} style={{ fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                        <Icon icon={hasSiblingTrueConflict ? AlertTriangle : CALLOUT_TONE_ICONS.info} size={14} />
-                        {t(language, "ws.sandboxDrift.siblingTitle")}
-                      </span>
-                      {siblingList.map((sc) => {
-                        const filesText =
-                          (sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).slice(0, 3).join(sep) +
-                          ((sc.conflictFiles.length > 0 ? sc.conflictFiles : sc.overlapFiles).length > 3 ? "…" : "");
-                        return (
-                          <Badge
-                            key={sc.requirementId}
-                            render={<button type="button" onClick={() => void openRequirement(sc.requirementId)} />}
-                            variant={sc.conflictFiles.length > 0 ? "error" : "secondary"}
-                          >
-                            {t(
-                              language,
-                              sc.conflictFiles.length > 0
-                                ? "ws.sandboxDrift.siblingConflict"
-                                : "ws.sandboxDrift.siblingAuto",
-                              { id: sc.requirementId, files: filesText },
-                            )}
-                          </Badge>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {hasTrueConflict && !canAgentResolveNow && (
-                    <div className="xs muted" style={{ marginTop: 4 }}>
-                      {t(language, "ws.sandboxDrift.needDesignFirst")}
-                    </div>
-                  )}
-                </div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {drift.canAutoSync && (
-                    <AsyncButton
-                      size="xs"
-                      type="button"
-                      data-testid="sync-sandbox-base-btn"
-                      disabled={busy || runningThis}
-                      onAction={() => syncSandboxBaseAction(s.id)}
-                    >
-                      <Icon icon={RefreshCw} size={14} />{" "}
-                      {t(language, isAutoMergeable ? "ws.sandboxDrift.syncAutoMerge" : "ws.sandboxDrift.sync")}
-                    </AsyncButton>
-                  )}
-                  {hasTrueConflict && canAgentResolveNow && (
-                    <AsyncButton
-                      size="xs"
-                      type="button"
-                      data-testid="agent-sync-sandbox-btn"
-                      disabled={busy || runningThis}
-                      onAction={() => dispatchSyncBaseWithAgent(d, drift)}
-                    >
-                      <Icon icon={Wrench} size={14} />{" "}
-                      {t(
-                        language,
-                        s.stage === "planning"
-                          ? "ws.sandboxDrift.approveAndSyncWithAgent"
-                          : "ws.sandboxDrift.syncWithAgent",
-                      )}
-                    </AsyncButton>
-                  )}
-                </div>
-              </AlertDescription>
-            </Alert>
-          );
-        })()}
-
-      {reqData?.sandbox?.setupStatus === "failed" && (
-        <Alert variant="error" data-testid="sandbox-setup-failed-banner" className="mb-3.5">
-          <Icon icon={AlertTriangle} size={14} />
-          <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2 text-foreground">
-            <div className="min-w-0 flex-1">
-              <strong>{t(language, "sandbox.setupFailed.title")}</strong>
-              {reqData.sandbox.setupError && (
-                <div className="xs mt-0.5 break-all text-muted-foreground">{reqData.sandbox.setupError}</div>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              <AsyncButton
-                size="xs"
-                type="button"
-                data-testid="sandbox-setup-retry-btn"
-                disabled={busy || runningThis}
-                onAction={async () => {
-                  if (guardRequirementRunLock(s.id)) return;
-                  const res = await runBusy(() => api.retryOrIgnoreSandboxSetup(s.id, "retry"));
-                  if (res) {
-                    await invalidateAllWorkbenchQueries();
-                    showToastKey("sandbox.setupFailed.retriedToast");
-                  }
-                }}
-              >
-                <Icon icon={RefreshCw} size={14} /> {t(language, "sandbox.setupFailed.retryBtn")}
-              </AsyncButton>
-              <AsyncButton
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="sandbox-setup-ignore-btn"
-                disabled={busy || runningThis}
-                onAction={async () => {
-                  if (guardRequirementRunLock(s.id)) return;
-                  const res = await runBusy(() => api.retryOrIgnoreSandboxSetup(s.id, "ignore"));
-                  if (res) {
-                    await invalidateAllWorkbenchQueries();
-                    showToastKey("sandbox.setupFailed.ignoredToast");
-                  }
-                }}
-              >
-                {t(language, "sandbox.setupFailed.ignoreBtn")}
-              </AsyncButton>
-            </div>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {s.stage === "cancelled" && reqData?.sandbox && (
-        <Alert variant="warning" data-testid="cancelled-sandbox-callout" className="mb-3.5">
-          <Icon icon={GitBranch} size={14} />
-          <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2 text-foreground">
-            <div>
-              <strong>{t(language, "ws.cancelledSandboxTitle", { branch: reqData.sandbox.branch })}</strong>
-              <div className="xs muted mt-0.5">{t(language, "ws.cancelledSandboxDesc")}</div>
-            </div>
-            <AsyncButton
-              size="xs"
-              variant="outline"
-              type="button"
-              data-testid="discard-sandbox-btn"
-              disabled={busy || runningThis}
-              onAction={async () => {
-                if (guardRequirementRunLock(s.id)) return;
-                const res = await runBusy(() => api.discardSandbox(s.id));
-                if (res) {
-                  await invalidateAllWorkbenchQueries();
-                  showToastKey("ws.discardSandboxDone");
-                }
-              }}
-            >
-              <Icon icon={Trash2} size={14} /> {t(language, "ws.discardSandboxBtn")}
-            </AsyncButton>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <section className={`banner ${banner.tone}`} data-testid="action-banner">
-        <div>
-          <div className="banner-text">
-            {translateRef(language, banner.headlineKey, banner.headline, banner.headlineParams)}
-          </div>
-          {s.stage === "planning" &&
-            Boolean(s.designHash) &&
-            !s.lastFeedback &&
-            reqData?.sandbox &&
-            (s.revisedFromCoding || (reqData.sandboxDrift?.aheadCount ?? 0) > 0) && (
-              <Label className="mt-1.5 flex items-center gap-2 text-xs font-normal text-foreground">
-                <Checkbox
-                  data-testid="approve-reset-sandbox-checkbox"
-                  checked={resetSandboxOnApprove}
-                  onCheckedChange={(checked) => setResetSandboxOnApprove(Boolean(checked))}
-                />
-                <span>{t(language, "ws.resetSandboxCheckbox")}</span>
-              </Label>
-            )}
-          {s.stage === "planning" && Boolean(s.designHash) && project?.git?.isGitRepo && project.git.dirty && (
-            <div className="muted xs" style={{ marginTop: 4 }} data-testid="dirty-baseline-hint">
-              {t(language, "ws.dirtyHint")}
-            </div>
-          )}
-          {s.stage === "done" && s.delivery && (
-            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-summary-line">
-              {t(language, "ws.delivered", { hash: s.delivery.shortHash })}
-              {s.delivery.branch ? t(language, "ws.deliveredBranch", { branch: s.delivery.branch }) : ""} ·{" "}
-              {t(
-                language,
-                s.delivery.files.length === 1 ? "ws.deliveredFilesOne" : "ws.deliveredFilesOther",
-                { count: s.delivery.files.length },
-              )}{" "}
-              · {formatDateTime(s.delivery.deliveredAt, language)}
-              {s.github?.pr && ` · PR #${s.github.pr.number} (${formatPrStateLabel(language, s.github.pr.state)})`}
-            </div>
-          )}
-          {s.stage === "done" && !s.delivery && !deliveryPreview?.sandboxActive && deliveryPreview?.canCommit && (
-            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-pending-hint">
-              {t(language, "ws.deliveryPending", { count: deliveryPreview.candidates.length })}
-            </div>
-          )}
-          {s.stage === "done" && deliveryPreview?.sandboxActive && !s.github?.pr && (
-            <div className="muted xs" style={{ marginTop: 4 }} data-testid="delivery-sandbox-hint">
-              {deliveryPreview.canCreatePr
-                ? t(language, "ws.deliverySandboxPrPlatform", {
-                    branch: deliveryPreview.branch ?? reqData?.sandbox?.branch ?? "",
-                    platform: prPlatformLabel,
-                  })
-                : t(language, "ws.deliverySandboxNoPrPlatform", { platform: prPlatformLabel })}
-            </div>
-          )}
-          {canRunModel && (
-            <div className="banner-runner-row">
-              <span className="xs muted">{t(language, "ws.modelDispatch")}</span>
-              <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" tier={s.tier} />
-              <AsyncButton
-                size="sm"
-                variant="outline"
-                type="button"
-                data-testid="run-selected-model-btn"
-                disabled={busy || runningThis}
-                onAction={() => triggerActiveRun(s.id, defaultAct)}
-              >
-                {runningThis ? (
-                  <><Icon icon={Loader2} size={14} className="spin" /> {t(language, "ws.running")}</>
-                ) : (
-                  <>
-                    <Icon icon={Zap} size={14} /> {t(language, "ws.runBackground")}
-                  </>
+      <section className={`banner ${banner.tone}${runningThis ? " ws-execution-running" : ""}`} data-testid="action-banner">
+        {activeRun ? (
+          <LiveAgentRows run={activeRun} headline={headline} />
+        ) : (
+          <>
+            <div className="ws-execution-row">
+              <div className="banner-text truncate" title={headline}>{headline}</div>
+              <div className="ws-inline-actions">
+                {banner.primaryAction && renderBannerAction(banner.primaryAction, "default")}
+                {pairedAction && renderBannerAction(pairedAction, "outline")}
+                {canDeliver && (
+                  <Button
+                    size="sm"
+                    variant={s.delivery ? "outline" : "default"}
+                    type="button"
+                    data-testid="open-deliver-btn"
+                    disabled={busy}
+                    onClick={() => openDeliverModal(Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr))}
+                  >
+                    <Icon icon={reqData?.sandbox && deliveryPreview?.canCreatePr ? GitPullRequest : GitCommit} size={14} />
+                    <span className="truncate">
+                      {reqData?.sandbox && deliveryPreview?.canCreatePr
+                        ? s.github?.pr
+                          ? t(language, "ws.deliverPrAppend")
+                          : t(language, "ws.deliverPrCreatePlatform", { platform: prPlatformLabel })
+                        : t(language, s.delivery ? "ws.deliverMore" : "ws.deliverStart")}
+                    </span>
+                  </Button>
                 )}
-              </AsyncButton>
-              {canReview && (
-                <AsyncButton
-                  size="sm"
-                  variant="outline"
-                  type="button"
-                  data-testid="run-review-btn"
-                  disabled={busy || runningThis}
-                  onAction={() => triggerActiveRun(s.id, "review")}
-                >
-                  <Icon icon={Search} size={14} /> {t(language, "ws.crossReview")}
-                </AsyncButton>
+                {!canDeliver && mergeLocalButton}
+              </div>
+            </div>
+            <div className="ws-execution-row">
+              {canRunModel ? (
+                <div className="banner-runner-row" role="group" aria-label={t(language, "ws.modelDispatch")}>
+                  <RunnerSelect stageAction={defaultAct} testId="banner-runner-select" tier={s.tier} />
+                  <AsyncButton
+                    size="sm"
+                    variant="outline"
+                    type="button"
+                    data-testid="run-selected-model-btn"
+                    disabled={busy}
+                    title={t(language, "ws.runBackground")}
+                    aria-label={t(language, "ws.runBackground")}
+                    onAction={() => triggerActiveRun(s.id, defaultAct)}
+                  >
+                    <Icon icon={Zap} size={14} /> <span className="ws-compact-label">{t(language, "ws.runBackground")}</span>
+                  </AsyncButton>
+                  {canReview && (
+                    <AsyncButton
+                      size="sm"
+                      variant="outline"
+                      type="button"
+                      data-testid="run-review-btn"
+                      disabled={busy}
+                      title={t(language, "ws.crossReview")}
+                      aria-label={t(language, "ws.crossReview")}
+                      onAction={() => triggerActiveRun(s.id, "review")}
+                    >
+                      <Icon icon={Search} size={14} /> <span className="ws-compact-label">{t(language, "ws.crossReview")}</span>
+                    </AsyncButton>
+                  )}
+                </div>
+              ) : stageContext ? (
+                <div className="ws-stage-context truncate" data-testid={stageContext.testId} title={stageContext.text}>{stageContext.text}</div>
+              ) : s.lastFeedback ? (
+                <div className="ws-stage-context truncate" title={s.lastFeedback}>{t(language, "ws.lastFeedback")} {s.lastFeedback}</div>
+              ) : null}
+              {runResult && (
+                <span className="ws-run-result truncate" data-testid="workspace-run-result" title={recentRun?.errorSummary ?? runResult}>
+                  {runResult}
+                </span>
               )}
             </div>
-          )}
-        </div>
-        <div className="banner-actions">
-          {banner.primaryAction && (
-            <AsyncButton
-              key={`${s.id}:${banner.primaryAction.id}`}
-              type="button"
-              data-testid={`action-${banner.primaryAction.id}`}
-              disabled={busy || runningThis || Boolean(banner.primaryAction.disabledReason)}
-              title={banner.primaryAction.disabledReason}
-              onAction={() =>
-                handleBannerAction(d, banner.primaryAction!.id, {
-                  resetSandbox: resetSandboxOnApprove,
-                })
-              }
-            >
-              <Icon icon={BANNER_ACTION_ICONS[banner.primaryAction.id]} size={14} />{" "}
-              {translateRef(
-                language,
-                banner.primaryAction.labelKey,
-                banner.primaryAction.label,
-                banner.primaryAction.labelParams,
+          </>
+        )}
+        <Popover open={actionDetailsOpen} onOpenChange={setActionDetailsOpen}>
+          <PopoverTrigger
+            render={<Button size="sm" variant="outline" type="button" className="ws-action-details" data-testid="workspace-action-details-btn" aria-label={detailsLabel} title={detailsLabel} />}
+          >
+            <Icon icon={Ellipsis} size={14} /> <span className="ws-compact-label">{detailsLabel}</span>
+          </PopoverTrigger>
+          <PopoverPopup align="end" className="w-96 max-w-(--available-width)" data-testid="workspace-action-details">
+            <div className="ws-popup-content">
+              <PopoverTitle>{detailsLabel}</PopoverTitle>
+              <p>{headline}</p>
+              {runningThis && <p>{t(language, "ws.runLockHint")}</p>}
+              {s.lastFeedback && <p className="whitespace-pre-wrap"><strong>{t(language, "ws.lastFeedback")}</strong> {s.lastFeedback}</p>}
+              {stageContext && <p>{stageContext.text}</p>}
+              {runResult && !runningThis && <p>{runResult}{recentRun?.errorSummary ? ` · ${recentRun.errorSummary}` : ""}</p>}
+              {!runningThis && (otherActions.length > 0 || deliveryOptions) && (
+                <div className="ws-popup-actions">
+                  {otherActions.map((action) => renderBannerAction(action, "outline", true))}
+                  {canDeliver && mergeLocalButton}
+                  {canSyncPr && (
+                    <AsyncButton size="sm" variant="outline" type="button" data-testid="sync-pr-btn" disabled={busy} onAction={syncPrStatus}>
+                      <Icon icon={RefreshCw} size={14} /> <span className="truncate">{t(language, reqData?.sandbox ? "ws.syncPrCleanup" : "ws.syncPr")}</span>
+                    </AsyncButton>
+                  )}
+                  {canApplySandbox && (
+                    <AsyncButton
+                      size="sm"
+                      variant="outline"
+                      type="button"
+                      data-testid="apply-sandbox-btn"
+                      disabled={busy}
+                      onAction={async () => {
+                        if (guardRequirementRunLock(s.id)) return;
+                        const res = await runBusy(() => api.applySandbox(s.id));
+                        if (res) {
+                          await invalidateAllWorkbenchQueries();
+                          showToastKey(
+                            res.webReloaded ? "toast.appliedReload" : res.restartRecommended ? "toast.appliedRestart" : "toast.applied",
+                            { count: res.appliedFiles.length },
+                          );
+                          notifyCascadeSyncResults(res.cascadeResults);
+                        }
+                      }}
+                    >
+                      <Icon icon={GitMerge} size={14} /> <span className="truncate">{t(language, deliveryPreview?.canCreatePr ? "ws.applySandboxLocal" : "ws.applySandbox")}</span>
+                    </AsyncButton>
+                  )}
+                </div>
               )}
-            </AsyncButton>
-          )}
-          {banner.secondaryActions.map((sec) => (
-            <AsyncButton
-              key={`${s.id}:${sec.id}`}
-              variant="outline"
-              type="button"
-              data-testid={`action-${sec.id}`}
-              disabled={busy || runningThis || Boolean(sec.disabledReason)}
-              title={sec.disabledReason}
-              onAction={() =>
-                handleBannerAction(d, sec.id, {
-                  resetSandbox: resetSandboxOnApprove,
-                })
-              }
-            >
-              <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
-              {translateRef(language, sec.labelKey, sec.label, sec.labelParams)}
-            </AsyncButton>
-          ))}
-          {s.stage === "done" && (deliveryPreview?.canCommit || deliveryPreview?.canCreatePr) && (
-            <Button
-              variant={s.delivery ? "outline" : "default"}
-              type="button"
-              data-testid="open-deliver-btn"
-              disabled={busy || runningThis}
-              onClick={() => openDeliverModal(Boolean(reqData?.sandbox && deliveryPreview?.canCreatePr))}
-            >
-              <Icon
-                icon={reqData?.sandbox && deliveryPreview?.canCreatePr ? GitPullRequest : GitCommit}
-                size={14}
-              />{" "}
-              {reqData?.sandbox && deliveryPreview?.canCreatePr
-                ? s.github?.pr
-                  ? t(language, "ws.deliverPrAppend")
-                  : t(language, "ws.deliverPrCreatePlatform", { platform: prPlatformLabel })
-                : s.delivery
-                  ? t(language, "ws.deliverMore")
-                  : t(language, "ws.deliverStart")}
-            </Button>
-          )}
-          {reqData?.sandbox && s.stage === "done" && deliveryPreview?.canMergeLocal && (
-            <Button
-              variant={deliveryPreview?.canCreatePr ? "outline" : "default"}
-              type="button"
-              data-testid="merge-local-btn"
-              disabled={busy || runningThis}
-              onClick={() => openDeliverModal(false, "local_merge")}
-            >
-              <Icon icon={GitMerge} size={14} /> {t(language, "ws.mergeLocalBtn")}
-            </Button>
-          )}
-          {s.stage === "done" && s.github?.pr && (
-            <AsyncButton
-              variant="outline"
-              type="button"
-              data-testid="sync-pr-btn"
-              disabled={busy || runningThis}
-              onAction={syncPrStatus}
-            >
-              <Icon icon={RefreshCw} size={14} />{" "}
-              {reqData?.sandbox ? t(language, "ws.syncPrCleanup") : t(language, "ws.syncPr")}
-            </AsyncButton>
-          )}
-          {reqData?.sandbox && s.stage === "done" && (
-            <AsyncButton
-              variant="outline"
-              type="button"
-              data-testid="apply-sandbox-btn"
-              disabled={busy || runningThis}
-              onAction={async () => {
-                if (guardRequirementRunLock(s.id)) return;
-                const res = await runBusy(() => api.applySandbox(s.id));
-                if (res) {
-                  await invalidateAllWorkbenchQueries();
-                  showToastKey(
-                    res.webReloaded
-                      ? "toast.appliedReload"
-                      : res.restartRecommended
-                        ? "toast.appliedRestart"
-                        : "toast.applied",
-                    { count: res.appliedFiles.length },
-                  );
-                  notifyCascadeSyncResults(res.cascadeResults);
-                }
-              }}
-            >
-              <Icon icon={GitMerge} size={14} />{" "}
-              {deliveryPreview?.canCreatePr ? t(language, "ws.applySandboxLocal") : t(language, "ws.applySandbox")}
-            </AsyncButton>
-          )}
-        </div>
+            </div>
+          </PopoverPopup>
+        </Popover>
       </section>
-
-      {activeRun && <LiveAgentBanner run={activeRun} />}
       </div>
+      {approval && s.stage === "planning" && (
+        <ApprovalConfirmation
+          label={approval.label}
+          canResetSandbox={canResetSandbox}
+          dirtyBaseline={dirtyBaseline}
+          disabled={busy || runningThis}
+          onClose={() => setApproval(null)}
+          onApprove={approval.run}
+        />
+      )}
 
       <Tabs
         className="w-full shrink-0 gap-0 mb-4 border-b border-border"
@@ -3591,7 +3431,7 @@ export function WorkspaceView() {
                   onOpenDiff={() => setWorkspaceTab("diff")}
                 />
               )}
-            <SpecDesignTab d={d} runLocked={runningThis} resetSandbox={resetSandboxOnApprove} />
+            <SpecDesignTab d={d} runLocked={runningThis} confirmApproval={confirmApproval} />
           </>
         ) : workspaceTab === "diff" ? (
           <DiffViewerPanel d={d} />

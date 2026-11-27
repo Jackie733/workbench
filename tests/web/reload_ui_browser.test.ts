@@ -295,6 +295,8 @@ suite("REQ-008 同步 PR 不打断已打开弹窗", () => {
       await page.click('[data-action="set-scope"][data-value="done"]');
       await page.waitForSelector(`[data-testid="req-row-${req1}"]`, { timeout: 10_000 });
       await page.click(`[data-testid="req-row-${req1}"]`);
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
       await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10_000 });
       const prLink = await page.evaluate(
         () => document.querySelector('[data-testid="ws-github-pr-link"]')?.textContent ?? "",
