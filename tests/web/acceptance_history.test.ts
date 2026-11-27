@@ -91,7 +91,7 @@ afterAll(async () => {
 });
 
 describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", () => {
-  test("API, CLI, MCP, and Web UI agree on accepted snapshot, legacy unavailable diff, and separate live comparison", async () => {
+  test("API, CLI, MCP, and Web UI agree on accepted snapshot and legacy unavailable diff", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "WebHistRepo", privacyMode: "local" });
@@ -214,19 +214,21 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       expect(bannerText1).toContain("已固化验收快照");
       expect(bannerText1).toContain("验收时间");
 
-      // Switch to Code Changes tab -> shows frozen diff and separate live comparison
+      // Switch to Code Changes tab -> only the frozen diff is shown, in both surfaces.
       await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-context-badge"]', { timeout: 5000 });
       const diffHtml1 = await page.evaluate(() => document.body.innerText);
       expect(diffHtml1).toContain("acceptedMarker");
       expect(diffHtml1).not.toContain("post_acceptance_dirty.ts");
 
-      await page.click('[data-testid="toggle-live-diff-btn"]');
-      await page.waitForSelector('[data-testid="live-diff-comparison-card"]', { timeout: 5000 });
-      await page.waitForFunction(
-        () => (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes("post_acceptance_dirty.ts"),
-        { timeout: 5000 },
-      );
+      expect(await page.evaluate(() => document.body.innerText)).not.toContain("对比当前工作区");
+      await page.click('[data-testid="dock-diff-to-drawer-btn"]');
+      await page.waitForSelector('[data-testid="drawer-diff-context-badge"]', { timeout: 5000 });
+      const drawerDiff = await page.evaluate(() => document.querySelector('[data-testid="drawer-diff-panel"]')?.textContent ?? "");
+      expect(drawerDiff).toContain("acceptedMarker");
+      expect(drawerDiff).not.toContain("post_acceptance_dirty.ts");
+      expect(drawerDiff).not.toContain("对比当前工作区");
+      await page.click('[data-testid="toggle-drawer-btn"]');
 
       // Open REQ-002 (legacy unavailable diff)
       await page.click('[data-testid="back-home-btn"]');
@@ -244,7 +246,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
     }
   }, { timeout: 30_000 });
 
-  test("localizes live diff and post-acceptance live comparison unavailability when baseline commit is missing", async () => {
+  test("localizes unavailable live diffs and preserves accepted snapshots when baseline commit is missing", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "LiveDiffUnavailableRepo", privacyMode: "local" });
@@ -268,9 +270,9 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
     };
     atomicWriteJson(req1Path, req1State);
 
-    // REQ-002: accepted requirement whose baseline commit later became unavailable for live comparison
+    // REQ-002: accepted snapshot remains readable even when its baseline becomes unavailable.
     await createRequirement(repo, {
-      goal: "Accepted live comparison baseline missing check",
+      goal: "Accepted snapshot with missing baseline check",
       criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
     });
     await propose(repo, "REQ-002", { designMarkdown: "# Design 2", actor: "agent" });
@@ -322,7 +324,7 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
         { timeout: 10_000 },
       );
 
-      // 2. Post-acceptance live comparison unavailable shows localized English & Chinese reasons
+      // 2. Accepted diff stays available without consulting the missing workspace baseline.
       await selectUiOption(page, '[data-testid="ui-language-select"]', "en");
       await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 10_000 });
       await page.click('[data-testid="back-home-btn"]');
@@ -332,29 +334,13 @@ describe("REQ-003 AC-6: Web, API, CLI, and MCP historical evidence agreement", (
       await page.click('[data-testid="req-row-REQ-002"]');
       await page.waitForSelector('[data-testid="tab-diff"]', { timeout: 10_000 });
       await page.click('[data-testid="tab-diff"]');
-      await page.waitForSelector('[data-testid="toggle-live-diff-btn"]', { timeout: 10_000 });
-      await page.click('[data-testid="toggle-live-diff-btn"]');
-      await page.waitForSelector('[data-testid="live-diff-comparison-card"]', { timeout: 10_000 });
-      await page.waitForFunction(
-        () =>
-          (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes(
-            "Acceptance baseline deadbeef1234 is unavailable",
-          ),
-        { timeout: 10_000 },
+      await page.waitForSelector('[data-testid="diff-context-badge"]', { timeout: 10_000 });
+      const acceptedDiff = await page.evaluate(
+        () => document.querySelector('[data-testid="diff-viewer-panel"]')?.textContent ?? "",
       );
-      const compareEnText = await page.evaluate(
-        () => document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "",
-      );
-      expect(/[\u4e00-\u9fff]/.test(compareEnText)).toBe(false);
-
-      await selectUiOption(page, '[data-testid="ui-language-select"]', "zh-CN");
-      await page.waitForFunction(
-        () =>
-          (document.querySelector('[data-testid="live-diff-comparison-card"]')?.textContent ?? "").includes(
-            "验收基线 deadbeef1234 在当前仓库中不可用",
-          ),
-        { timeout: 10_000 },
-      );
+      expect(acceptedDiff).toContain("acceptedCompare");
+      expect(acceptedDiff).not.toContain("deadbeef1234");
+      expect(acceptedDiff).not.toContain("Compare current workspace");
 
       // 3. Missing and corrupt acceptance snapshot diagnostics localize cleanly in both languages
       const reqMissing = await createRequirement(repo, {

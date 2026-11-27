@@ -2260,7 +2260,6 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
   const [drawerSelectedFile, setDrawerSelectedFile] = useState<string | null>(null);
   const [drawerViewMode, setDrawerViewMode] = useState<DiffViewMode>("split");
   const [drawerFileQuery, setDrawerFileQuery] = useState("");
-  const [showLiveComparison, setShowLiveComparison] = useState(false);
 
   const { state: s, validity } = d;
   useEffect(() => {
@@ -2280,9 +2279,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
 
   const isDone = s.stage === "done";
   const { data: diffRes } = useDiffQuery(activeProjectId, s.id, true, false);
-  const { data: liveDiffRes } = useDiffQuery(activeProjectId, s.id, isDone && showLiveComparison, true);
   const diffObs = diffRes?.observation ?? diffRes?.changes ?? null;
-  const liveDiffObs = liveDiffRes?.observation ?? liveDiffRes?.changes ?? null;
   const evidenceSummary = describeEvidenceContext(validity, diffRes ?? null, language);
 
   const rawDiffText = diffObs?.diff ?? "";
@@ -2308,13 +2305,6 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
   );
   const activeDiffFile =
     visibleFiles.find((f) => f.path === selectedDiffFile) ?? visibleFiles[0] ?? null;
-
-  const liveDiffText = liveDiffObs?.diff ?? "";
-  const liveParsedFiles = useMemo(() => (liveDiffText ? parseUnifiedDiff(liveDiffText) : []), [liveDiffText]);
-  const liveDiffHtml = useMemo(
-    () => (liveDiffText ? renderDiffLinesHtml(liveDiffText.split("\n")) : ""),
-    [liveDiffText],
-  );
 
   const effectiveMode = inDrawer && diffViewMode === "split" && parsedFiles.length <= 1 ? "unified" : diffViewMode;
 
@@ -2393,21 +2383,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
               <Icon icon={PanelRightOpen} size={14} />{" "}
               {inDrawer ? t(language, "changes.openInMain") : t(language, "changes.dockToDrawer")}
             </Button>
-            {isDone ? (
-              <Button
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid={tid("toggle-live-diff-btn")}
-                onClick={() => setShowLiveComparison((prev) => !prev)}
-              >
-                {showLiveComparison ? (
-                  <><Icon icon={EyeOff} size={14} /> {t(language, "changes.hideCompare")}</>
-                ) : (
-                  <><Icon icon={FileDiff} size={14} /> {t(language, "changes.compareLive")}</>
-                )}
-              </Button>
-            ) : (
+            {!isDone && (
               <Button
                 size="icon-sm"
                 variant="outline"
@@ -2603,63 +2579,6 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
           </div>
         )}
       </Card>
-
-      {isDone && showLiveComparison && (
-        <Card className="p-4 mb-3.5" data-testid={tid("live-diff-comparison-card")}>
-          <div className="card-head">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <h3>{t(language, "changes.liveTitle")}</h3>
-              <Badge variant="info">{t(language, "changes.liveBadge")}</Badge>
-            </div>
-            <Button
-              size="xs"
-              variant="outline"
-              type="button"
-              onClick={() => {
-                void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, true) });
-                showToastKey("changes.refreshedCompare");
-              }}
-            >
-              <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshCompare")}
-            </Button>
-          </div>
-          {!liveDiffRes ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.loadingCompare")}
-            </p>
-          ) : liveDiffRes.status === "unavailable" || !liveDiffObs ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.compareUnavailable", {
-                reason:
-                  translateRef(
-                    language,
-                    liveDiffRes.reasonKey,
-                    liveDiffRes.reason ?? t(language, "changes.cannotRead"),
-                    liveDiffRes.reasonParams,
-                  ) || t(language, "changes.cannotRead"),
-              })}
-            </p>
-          ) : liveDiffObs.files.length === 0 ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-              {t(language, "changes.compareEmpty")}
-            </p>
-          ) : (
-            <div className="muted" style={{ fontSize: 12.5 }}>
-              {t(language, "changes.compareSummary", {
-                files: liveDiffObs.files.length,
-                patches: liveParsedFiles.length,
-              })}
-              <div
-                className="diff-code"
-                style={{ marginTop: 8, maxHeight: 420, overflow: "auto" }}
-                dangerouslySetInnerHTML={{
-                  __html: liveDiffHtml,
-                }}
-              />
-            </div>
-          )}
-        </Card>
-      )}
     </>
   );
 }
