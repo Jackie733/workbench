@@ -247,7 +247,7 @@ function tryBreakStaleLock(lockPath: string, staleMs = LOCK_STALE_MS): boolean {
   return false;
 }
 
-function tryCreateLockFile(lockPath: string): string | null {
+function tryCreateLockFile(lockPath: string, holderMeta?: Record<string, string>): string | null {
   const token = randomUUID();
   try {
     const fd = fs.openSync(
@@ -256,7 +256,13 @@ function tryCreateLockFile(lockPath: string): string | null {
       0o600,
     );
     try {
-      fs.writeFileSync(fd, JSON.stringify({ token, pid: process.pid, createdAt: Date.now() }), "utf8");
+      const payload = {
+        token,
+        pid: process.pid,
+        createdAt: Date.now(),
+        ...(holderMeta && Object.keys(holderMeta).length > 0 ? { holder: holderMeta } : {}),
+      };
+      fs.writeFileSync(fd, JSON.stringify(payload), "utf8");
     } finally {
       fs.closeSync(fd);
     }
@@ -269,20 +275,68 @@ function tryCreateLockFile(lockPath: string): string | null {
   }
 }
 
+function readLockHolder(lockPath: string): Record<string, string> | null {
+  try {
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as { holder?: unknown };
+    if (!parsed.holder || typeof parsed.holder !== "object" || Array.isArray(parsed.holder)) {
+      return null;
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed.holder as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface NamedAdvisoryLockOptions {
+  waitTimeoutMs?: number;
+  staleMs?: number;
+  pollMs?: number;
+  busyMessage?: string;
+  holderMeta?: Record<string, string>;
+  onWait?: (info: { waitedMs: number; holder: Record<string, string> | null }) => void;
+  waitNotifyIntervalMs?: number;
+}
+
+const inProcessHolders = new Map<string, Record<string, string> | null>();
+
 async function acquireAdvisoryLock(
   lockPath: string,
-  options: { waitTimeoutMs?: number; staleMs?: number; pollMs?: number; busyMessage?: string } = {},
+  options: NamedAdvisoryLockOptions = {},
 ): Promise<string> {
   const waitTimeoutMs = options.waitTimeoutMs ?? LOCK_WAIT_MS;
   const staleMs = options.staleMs ?? LOCK_STALE_MS;
   const pollMs = options.pollMs ?? 25;
-  const deadline = Date.now() + waitTimeoutMs;
+  const notifyIntervalMs = options.waitNotifyIntervalMs ?? 15_000;
+  const startedWaitAt = Date.now();
+  const deadline = startedWaitAt + waitTimeoutMs;
+  let notifiedOnce = false;
+  let lastNotifiedAt = 0;
+
   while (true) {
-    const token = tryCreateLockFile(lockPath);
+    const token = tryCreateLockFile(lockPath, options.holderMeta);
     if (token) return token;
     if (tryBreakStaleLock(lockPath, staleMs)) continue;
-    if (Date.now() >= deadline) {
+    const now = Date.now();
+    if (now >= deadline) {
       throw new WorkbenchError("lock_timeout", options.busyMessage ?? "项目正在被另一个工作台进程写入，请稍后重试");
+    }
+    const waitedMs = now - startedWaitAt;
+    if (
+      options.onWait &&
+      ((!notifiedOnce && waitedMs >= 200) || (notifiedOnce && now - lastNotifiedAt >= notifyIntervalMs))
+    ) {
+      notifiedOnce = true;
+      lastNotifiedAt = now;
+      try {
+        options.onWait({ waitedMs, holder: readLockHolder(lockPath) });
+      } catch {
+        // Progress notifications are strictly best-effort.
+      }
     }
     await delay(pollMs);
   }
@@ -330,9 +384,10 @@ export function withFileLockSync<T>(lockPath: string, fn: () => T): T {
 export async function withNamedAdvisoryLock<T>(
   lockPath: string,
   fn: () => Promise<T> | T,
-  options: { waitTimeoutMs?: number; staleMs?: number; pollMs?: number; busyMessage?: string } = {},
+  options: NamedAdvisoryLockOptions = {},
 ): Promise<T> {
   const queueKey = path.resolve(lockPath);
+  const hasPrevious = inProcessQueue.has(queueKey);
   const previous = inProcessQueue.get(queueKey) ?? Promise.resolve();
   let releaseQueue!: () => void;
   const current = new Promise<void>((resolve) => {
@@ -341,13 +396,41 @@ export async function withNamedAdvisoryLock<T>(
   const tail = previous.then(() => current, () => current);
   inProcessQueue.set(queueKey, tail);
 
-  await previous.catch(() => {});
+  if (hasPrevious && options.onWait) {
+    const waitStartedAt = Date.now();
+    const notifyIntervalMs = options.waitNotifyIntervalMs ?? 15_000;
+    const emitInProcessWait = () => {
+      try {
+        options.onWait?.({
+          waitedMs: Date.now() - waitStartedAt,
+          holder: inProcessHolders.get(queueKey) ?? readLockHolder(queueKey),
+        });
+      } catch {
+        // Best-effort wait progress notification.
+      }
+    };
+    const initialTimer = setTimeout(emitInProcessWait, 200);
+    const repeatTimer = setInterval(emitInProcessWait, notifyIntervalMs);
+    initialTimer.unref?.();
+    repeatTimer.unref?.();
+    try {
+      await previous.catch(() => {});
+    } finally {
+      clearTimeout(initialTimer);
+      clearInterval(repeatTimer);
+    }
+  } else {
+    await previous.catch(() => {});
+  }
+
   let token: string | null = null;
   try {
     fs.mkdirSync(path.dirname(queueKey), { recursive: true, mode: 0o700 });
     token = await acquireAdvisoryLock(queueKey, options);
+    inProcessHolders.set(queueKey, options.holderMeta ?? null);
     return await fn();
   } finally {
+    inProcessHolders.delete(queueKey);
     if (token !== null) {
       releaseAdvisoryLock(queueKey, token);
     }

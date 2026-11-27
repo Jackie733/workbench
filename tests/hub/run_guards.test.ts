@@ -719,7 +719,7 @@ describe("execution guards", () => {
     expect(getRequirement(repo, "REQ-002").state.agentRuns?.[0]?.status).toBe("failed");
   }, { timeout: 15000 });
 
-  test("Phase 2: preserves session_affinity and native_resume even when prior peakContextTokens exceeds 100k", async () => {
+  test("Phase 2: preserves session_affinity and native_resume below 100k while resetting bloated >= 100k sessions to fresh_handoff", async () => {
     makeTempHub();
     const repo = makeGitRepo("bloat-guard");
     await initProject(repo, { name: "BloatGuard", privacyMode: "local" });
@@ -732,30 +732,30 @@ describe("execution guards", () => {
     await approveDesign(repo, "REQ-001");
 
     const { startAgentRun, finishAgentRun } = await import("../../src/core/engine.ts");
-    const runId = "RUN-BLOATED-1";
+    const runId1 = "RUN-HEALTHY-80K";
     await startAgentRun(repo, "REQ-001", {
-      id: runId,
+      id: runId1,
       action: "implement",
       harness: "opencode",
       model: "opencode-go/deepseek-v4.1-flash",
       status: "running",
-      startedAt: Date.now() - 2000,
+      startedAt: Date.now() - 4000,
       endedAt: null,
       exitCode: null,
       durationMs: 0,
-      logPath: `runs/run-${runId}.log`,
+      logPath: `runs/run-${runId1}.log`,
     });
     await finishAgentRun(
       repo,
       "REQ-001",
-      runId,
+      runId1,
       {
         status: "succeeded",
-        endedAt: Date.now() - 1000,
+        endedAt: Date.now() - 3000,
         exitCode: 0,
         durationMs: 1000,
-        nativeSessionId: "ses_bloated_123456",
-        peakContextTokens: 150_000,
+        nativeSessionId: "ses_healthy_80k",
+        peakContextTokens: 80_000,
       },
       "ok\n",
     );
@@ -776,17 +776,53 @@ describe("execution guards", () => {
       },
     });
 
-    const started = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
-    await waitForRun(executor, started.run.id);
-
-    expect(seen).toEqual([
-      {
-        harness: "opencode",
-        model: "opencode-go/deepseek-v4.1-flash",
-        nativeSessionId: "ses_bloated_123456",
-      },
-    ]);
+    // 1. Below 100k: preserves both session_affinity and native_resume
+    const started1 = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
+    await waitForRun(executor, started1.run.id);
+    expect(seen[0]).toEqual({
+      harness: "opencode",
+      model: "opencode-go/deepseek-v4.1-flash",
+      nativeSessionId: "ses_healthy_80k",
+    });
     expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("native_resume");
+
+    // 2. At/above 100k (150k): preserves session_affinity but resets native_resume to fresh_handoff
+    const runId2 = "RUN-BLOATED-150K";
+    await startAgentRun(repo, "REQ-001", {
+      id: runId2,
+      action: "fix",
+      harness: "opencode",
+      model: "opencode-go/deepseek-v4.1-flash",
+      status: "running",
+      startedAt: Date.now() - 2000,
+      endedAt: null,
+      exitCode: null,
+      durationMs: 0,
+      logPath: `runs/run-${runId2}.log`,
+    });
+    await finishAgentRun(
+      repo,
+      "REQ-001",
+      runId2,
+      {
+        status: "succeeded",
+        endedAt: Date.now() - 1000,
+        exitCode: 0,
+        durationMs: 1000,
+        nativeSessionId: "ses_bloated_123456",
+        peakContextTokens: 150_000,
+      },
+      "ok\n",
+    );
+
+    const started2 = await executor.startRun({ root: repo, requirementId: "REQ-001", action: "fix" });
+    await waitForRun(executor, started2.run.id);
+    expect(seen[1]).toEqual({
+      harness: "opencode",
+      model: "opencode-go/deepseek-v4.1-flash",
+      nativeSessionId: undefined,
+    });
+    expect(getRequirement(repo, "REQ-001").state.agentRuns?.at(-1)?.handoffMode).toBe("fresh_handoff");
   }, { timeout: 15000 });
 
   test("Phase 3: builds clean File-Native design prompt and records drift/bloat healthWarnings", async () => {
@@ -969,7 +1005,7 @@ describe("execution guards", () => {
       { root: repo, requirementId: "REQ-001", action: "implement" },
       { fastCommand: "bun run typecheck", fullCommand: "bun run test" },
     );
-    expect(promptWithFull).toContain("不要通过普通 shell 手动跑耗时的全量测试（`bun run test`）");
+    expect(promptWithFull).toContain("禁止在本轮内执行 `wb verify REQ-001 --all` 或耗时的全量测试（`bun run test`）");
     expect(promptWithFull).toContain("wb verify REQ-001 --all");
 
     // 5. Extreme context bloat (>= 200k tokens) resets native_resume to fresh_handoff

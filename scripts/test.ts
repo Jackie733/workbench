@@ -131,14 +131,23 @@ async function main(): Promise<number> {
   const defaultWorkers = Math.min(3, Math.max(2, Math.floor(os.cpus().length / 2)));
   const concurrency = Math.max(1, Math.min(files.length, Number.isFinite(rawWorkers) && rawWorkers > 0 ? Math.floor(rawWorkers) : defaultWorkers));
   const rawBrowserWorkers = Number(process.env.WORKBENCH_BROWSER_WORKERS ?? "");
+  const defaultBrowserWorkers = 1;
   const maxBrowserWorkers = Math.max(
     1,
-    Math.min(concurrency, Number.isFinite(rawBrowserWorkers) && rawBrowserWorkers > 0 ? Math.floor(rawBrowserWorkers) : 1),
+    Math.min(
+      concurrency,
+      Number.isFinite(rawBrowserWorkers) && rawBrowserWorkers > 0 ? Math.floor(rawBrowserWorkers) : defaultBrowserWorkers,
+    ),
   );
+  const rawFlakyRetries = process.env.WORKBENCH_TEST_FLAKY_RETRIES;
+  const parsedFlakyRetries = rawFlakyRetries !== undefined ? Number(rawFlakyRetries) : 1;
+  const flakyRetries =
+    Number.isFinite(parsedFlakyRetries) && parsedFlakyRetries >= 0 ? Math.min(3, Math.floor(parsedFlakyRetries)) : 1;
 
   const suiteStart = Date.now();
   const queue = [...files];
   const results: FileRunResult[] = [];
+  const retriedPassed: string[] = [];
   let completed = 0;
   let activeBrowserWorkers = 0;
   const browserWaiters: Array<() => void> = [];
@@ -171,7 +180,9 @@ async function main(): Promise<number> {
     }
   };
 
-  process.stdout.write(`Running ${files.length} test files across ${concurrency} isolated workers...\n`);
+  process.stdout.write(
+    `Running ${files.length} test files across ${concurrency} isolated workers (browserSlots=${maxBrowserWorkers}, flakyRetries=${flakyRetries})...\n`,
+  );
 
   const workers = Array.from({ length: concurrency }, async () => {
     const workerTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-test-worker-"));
@@ -180,14 +191,32 @@ async function main(): Promise<number> {
         const next = await acquireNextFile();
         if (!next) break;
         let res: FileRunResult;
+        let passedOnRetry = 0;
         try {
           res = await runTestFile(next.file, workerTmpDir);
+          for (let attempt = 1; res.code !== 0 && attempt <= flakyRetries; attempt++) {
+            const retryTmpDir = fs.mkdtempSync(path.join(workerTmpDir, `retry-${attempt}-`));
+            try {
+              const retryRes = await runTestFile(next.file, retryTmpDir);
+              res = {
+                ...retryRes,
+                durationMs: res.durationMs + retryRes.durationMs,
+              };
+              if (retryRes.code === 0) {
+                passedOnRetry = attempt;
+                break;
+              }
+            } finally {
+              fs.rmSync(retryTmpDir, { recursive: true, force: true });
+            }
+          }
         } finally {
           if (next.isBrowser) releaseBrowserSlot();
         }
         results.push(res);
         completed += 1;
-        const status = res.code === 0 ? "PASS" : "FAIL";
+        if (passedOnRetry > 0) retriedPassed.push(next.file);
+        const status = res.code === 0 ? (passedOnRetry > 0 ? `FLAKY-PASS (retry ${passedOnRetry}/${flakyRetries})` : "PASS") : "FAIL";
         const sec = (res.durationMs / 1000).toFixed(1);
         process.stdout.write(
           `[${completed}/${files.length}] ${status} ${next.file} (${sec}s, ${res.passCount} pass, ${res.failCount} fail)\n`,
@@ -206,6 +235,10 @@ async function main(): Promise<number> {
     for (const item of failed) {
       process.stderr.write(`\n--- ${item.file} (exit ${item.code}) ---\n${item.output}\n`);
     }
+  }
+
+  if (retriedPassed.length > 0) {
+    process.stdout.write(`\nFlaky tests passed on retry (${retriedPassed.length}): ${retriedPassed.join(", ")}\n`);
   }
 
   const totalPass = results.reduce((sum, r) => sum + r.passCount, 0);

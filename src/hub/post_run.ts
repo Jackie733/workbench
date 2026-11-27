@@ -5,18 +5,20 @@ import {
   extractInlineDecisionsFromDesign,
   getProjectStatus,
   getRequirement,
+  getVerificationEvidence,
   isUiRelatedRequirement,
   propose,
 } from "../core/engine.ts";
 import { readBoundedText, resolveSafePath } from "../core/fs.ts";
-import { observeGitSnapshot } from "../core/git.ts";
-import { runAllVerifications } from "../core/runner.ts";
+import { observeGitChanges, observeGitSnapshot } from "../core/git.ts";
+import { isHeavyVerificationCommand, runAllVerifications } from "../core/runner.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
 import {
   MAX_DESIGN_BYTES,
   MAX_SPEC_BYTES,
   WORKBENCH_DIR,
   type AgentAction,
+  type Criterion,
   type CriterionInput,
   type DecisionItem,
   type RequirementDetail,
@@ -24,7 +26,12 @@ import {
   type ReviewVerdict,
 } from "../core/types.ts";
 import { normalizeCriteria, sanitizeOutput, validateMarkdownContent } from "../core/validate.ts";
-import { computeDesignHash, computeSpecHash, isEnvironmentVerificationFailure } from "../core/validity.ts";
+import {
+  computeDesignHash,
+  computeSpecHash,
+  isEnvironmentVerificationFailure,
+  isManualCriterion,
+} from "../core/validity.ts";
 
 export interface ParsedReviewOutput {
   verdict: ReviewVerdict;
@@ -118,6 +125,102 @@ export function parseReviewOutput(rawOutput: string): ParsedReviewOutput | null 
     }
   }
   return null;
+}
+
+const MANUAL_UNVERIFIED_RE =
+  /(人工验收|人工核验|人工确认|尚未完成|未核验|未勾选|manual.*(?:accept|verif|check|sign[- ]?off)|unverified.*manual|not yet (?:manually )?verified)/i;
+
+/**
+ * Prevents reviewers from falsely blocking a coding review solely because human-only
+ * `kind: "manual"` criteria are still `unverified` prior to human acceptance.
+ */
+export function normalizeReviewVerdictForManualCriteria(
+  parsed: ParsedReviewOutput,
+  criteria: Criterion[],
+): ParsedReviewOutput {
+  const manualIds = new Set(criteria.filter((c) => isManualCriterion(c)).map((c) => c.id));
+  if (manualIds.size === 0 || !parsed.findings || parsed.findings.length === 0) {
+    return parsed;
+  }
+
+  let anyDowngraded = false;
+  const updatedFindings = parsed.findings.map((finding) => {
+    const cids = finding.criterionIds ?? [];
+    const referencesOnlyManual = cids.length > 0 && cids.every((cid) => manualIds.has(cid));
+    if (!referencesOnlyManual) return finding;
+    const text = `${finding.title} ${finding.detail ?? ""}`;
+    if (!MANUAL_UNVERIFIED_RE.test(text)) return finding;
+    if (finding.severity !== "low") {
+      anyDowngraded = true;
+      return { ...finding, severity: "low" as const };
+    }
+    return finding;
+  });
+
+  if (!anyDowngraded) return parsed;
+
+  let verdict = parsed.verdict;
+  if (verdict === "block") {
+    const hasHigh = updatedFindings.some((f) => f.severity === "high");
+    if (!hasHigh) {
+      const hasMedium = updatedFindings.some((f) => f.severity === "medium");
+      verdict = hasMedium ? "concern" : "pass";
+    }
+  }
+  return {
+    ...parsed,
+    verdict,
+    findings: updatedFindings,
+  };
+}
+
+function normalizeRelPath(p: string): string {
+  return p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/**
+ * Classifies heavy verification failures where every failing test file is an untouched
+ * file that timed out without assertion mismatches, so auto-heal does not mutate unrelated tests.
+ */
+export function classifyUnrelatedTimeoutFailure(
+  log: string,
+  changedFilePaths: string[],
+): { unrelatedTimeoutOnly: boolean; failedFiles: string[] } {
+  const changedSet = new Set(changedFilePaths.map(normalizeRelPath).filter(Boolean));
+  if (changedSet.size === 0) return { unrelatedTimeoutOnly: false, failedFiles: [] };
+
+  const markerIdx = log.indexOf("=== Failed Test File Outputs ===");
+  const scope = markerIdx !== -1 ? log.slice(markerIdx) : log;
+  const headerRe = /^---\s+(.+?)\s+\(exit\s+\d+\)\s+---$/gm;
+  const headers: Array<{ file: string; start: number; bodyStart: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = headerRe.exec(scope)) !== null) {
+    headers.push({
+      file: normalizeRelPath(match[1]!),
+      start: match.index,
+      bodyStart: match.index + match[0].length,
+    });
+  }
+  if (headers.length === 0) return { unrelatedTimeoutOnly: false, failedFiles: [] };
+
+  const failedFiles: string[] = [];
+  for (let i = 0; i < headers.length; i++) {
+    const cur = headers[i]!;
+    const end = i + 1 < headers.length ? headers[i + 1]!.start : scope.length;
+    const section = scope.slice(cur.bodyStart, end);
+    if (changedSet.has(cur.file)) {
+      return { unrelatedTimeoutOnly: false, failedFiles: [] };
+    }
+    const hasTimeout = /TimeoutError:|timed out after \d+ms/i.test(section);
+    const hasAssertionMismatch = /expect\(received\)/i.test(section);
+    if (!hasTimeout || hasAssertionMismatch) {
+      return { unrelatedTimeoutOnly: false, failedFiles: [] };
+    }
+    if (!failedFiles.includes(cur.file)) {
+      failedFiles.push(cur.file);
+    }
+  }
+  return { unrelatedTimeoutOnly: failedFiles.length > 0, failedFiles };
 }
 
 function readDiskDesignCandidate(
@@ -328,6 +431,7 @@ export async function runCodingPostGate(input: {
   readyForReview: boolean;
   noCodeChange: boolean;
   environmentFailure: boolean;
+  unrelatedTimeoutFiles?: string[];
 }> {
   let latestReq = input.latestReq;
   let snap = input.snap;
@@ -335,6 +439,7 @@ export async function runCodingPostGate(input: {
   let readyForReview = false;
   let noCodeChange = false;
   let environmentFailure = false;
+  let unrelatedTimeoutFiles: string[] | undefined;
 
   if (latestReq.state.stage !== "coding" || !latestReq.validity.approval.valid) {
     return { latestReq, snap, autoHealPending, readyForReview, noCodeChange, environmentFailure };
@@ -363,7 +468,11 @@ export async function runCodingPostGate(input: {
   try {
     if (hasPendingCmdVerification) {
       input.appendNote("\n[workbench] Agent 已完成修改，正在自动执行必需验收命令...\n");
-      await runAllVerifications(input.base, input.id, { failFast: true, lockLeaseId: input.lockLeaseId });
+      await runAllVerifications(input.base, input.id, {
+        failFast: true,
+        lockLeaseId: input.lockLeaseId,
+        onProgress: input.appendNote,
+      });
       snap = await observeGitSnapshot(input.codeRoot);
       latestReq = getRequirement(input.base, input.id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
     }
@@ -423,10 +532,59 @@ export async function runCodingPostGate(input: {
           "[workbench] ⚠ 检测到验证失败属于环境/基础设施故障（命令不存在或执行超时），已跳过自动修复，请人工排查环境后重跑验证。\n",
         );
       } else {
-        input.appendNote(
-          `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
-        );
-        autoHealPending = true;
+        const allHeavy =
+          latestFailedByCriterion.length > 0 &&
+          latestFailedByCriterion.every((v) => isHeavyVerificationCommand(v.record.command));
+        let detectedUnrelatedTimeout: string[] | null = null;
+        if (allHeavy) {
+          try {
+            const gitObs = await observeGitChanges(input.codeRoot, {
+              sinceHead: latestReq.state.baseline?.head ?? null,
+              maxDiffBytes: 32 * 1024,
+            });
+            const changedPaths = gitObs.files.map((f) => f.path);
+            if (changedPaths.length > 0) {
+              const collectedFiles: string[] = [];
+              let allMatch = true;
+              for (const ev of latestFailedByCriterion) {
+                let fullLog = ev.record.outputPreview ?? "";
+                try {
+                  const loaded = getVerificationEvidence(input.base, input.id, ev.record.id);
+                  if (loaded.log) fullLog = loaded.log;
+                } catch {
+                  // Fallback to preview.
+                }
+                const classified = classifyUnrelatedTimeoutFailure(fullLog, changedPaths);
+                if (!classified.unrelatedTimeoutOnly) {
+                  allMatch = false;
+                  break;
+                }
+                for (const ff of classified.failedFiles) {
+                  if (!collectedFiles.includes(ff)) collectedFiles.push(ff);
+                }
+              }
+              if (allMatch && collectedFiles.length > 0) {
+                detectedUnrelatedTimeout = collectedFiles;
+              }
+            }
+          } catch {
+            // Best-effort classification; fall through to normal auto-heal on inspection error.
+          }
+        }
+
+        if (detectedUnrelatedTimeout) {
+          environmentFailure = true;
+          autoHealPending = false;
+          unrelatedTimeoutFiles = detectedUnrelatedTimeout;
+          input.appendNote(
+            `[workbench] ⚠ 检测到全量测试失败仅来自无关测试文件的超时波动（${detectedUnrelatedTimeout.join("、")}），已跳过自动修复以避免越界修改无关文件，请核查环境或重跑验证。\n`,
+          );
+        } else {
+          input.appendNote(
+            `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+          );
+          autoHealPending = true;
+        }
       }
     } else if (hasPendingCmdVerification) {
       input.appendNote(
@@ -439,5 +597,13 @@ export async function runCodingPostGate(input: {
     );
   }
 
-  return { latestReq, snap, autoHealPending, readyForReview, noCodeChange, environmentFailure };
+  return {
+    latestReq,
+    snap,
+    autoHealPending,
+    readyForReview,
+    noCodeChange,
+    environmentFailure,
+    ...(unrelatedTimeoutFiles ? { unrelatedTimeoutFiles } : {}),
+  };
 }

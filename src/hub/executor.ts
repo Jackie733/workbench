@@ -27,6 +27,7 @@ import {
   observeGitSnapshot,
   observeIncrementalDiff,
 } from "../core/git.ts";
+import { isHeavyVerificationCommand } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
   MAX_RUN_LOG_BYTES,
@@ -67,7 +68,12 @@ import {
   type TimeoutReason,
 } from "./harness_cmd.ts";
 import { appendRunLedger, type RunLedgerEntry } from "./ledger.ts";
-import { parseReviewOutput, runCodingPostGate, syncDesignRunResult } from "./post_run.ts";
+import {
+  normalizeReviewVerdictForManualCriteria,
+  parseReviewOutput,
+  runCodingPostGate,
+  syncDesignRunResult,
+} from "./post_run.ts";
 import { estimateTokens, resolveModelSpec, resolveQuotaPool } from "./pricing.ts";
 import { buildExecutionPrompt } from "./prompt.ts";
 import { readHubConfig } from "./registry.ts";
@@ -149,6 +155,8 @@ export interface StartRunInput {
   mode?: "ask" | "refine";
   useFallback?: boolean;
   autoFallbackAttempt?: number;
+  failedTargets?: string[];
+  failedQuotaPools?: string[];
   autoHealAttempt?: number;
   /** Tracks the bounded 1-round automatic `block -> fix -> verify -> re-review` cycle (0 or 1). */
   reviewFixCycle?: number;
@@ -191,8 +199,63 @@ interface ActiveJob {
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
 const MAX_AUTO_HEAL_ATTEMPTS = 2;
-const MAX_RESUME_CONTEXT_TOKENS = 200_000;
+const MAX_AUTO_FALLBACK_ATTEMPTS = 3;
+const MAX_RESUME_CONTEXT_TOKENS = 100_000;
 const globalActiveRunIds = new Set<string>();
+
+function checkAutoLoopBudget(
+  detail: RequirementDetail,
+  now = Date.now(),
+): { exceeded: boolean; reason?: string } {
+  const defaultBudgetMs = detail.state.tier === "sota" ? 45 * 60_000 : 30 * 60_000;
+  const rawBudget = Number(process.env.WORKBENCH_AUTO_LOOP_BUDGET_MS ?? "");
+  const budgetMs = Number.isFinite(rawBudget) && rawBudget > 0 ? Math.floor(rawBudget) : defaultBudgetMs;
+
+  const rawMaxHeavy = Number(process.env.WORKBENCH_AUTO_LOOP_MAX_HEAVY_VERIFIES ?? "");
+  const maxHeavyVerifies = Number.isFinite(rawMaxHeavy) && rawMaxHeavy > 0 ? Math.floor(rawMaxHeavy) : 3;
+
+  const runs = detail.state.agentRuns ?? [];
+  let anchorAt = 0;
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const r = runs[i]!;
+    if (
+      (r.action === "implement" || r.action === "fix") &&
+      (!r.dispatchReason ||
+        r.dispatchReason === "user" ||
+        r.dispatchReason === "sota_escalate" ||
+        r.dispatchReason === "manual_fallback" ||
+        r.dispatchReason === "route_primary")
+    ) {
+      anchorAt = r.startedAt;
+      break;
+    }
+  }
+  if (!anchorAt) {
+    anchorAt = detail.state.approval?.approvedAt ?? 0;
+  }
+  if (!anchorAt) return { exceeded: false };
+
+  const elapsedMs = now - anchorAt;
+  if (elapsedMs > budgetMs) {
+    const elapsedMin = Math.max(1, Math.round(elapsedMs / 60_000));
+    const budgetMin = Math.max(1, Math.round(budgetMs / 60_000));
+    return {
+      exceeded: true,
+      reason: `自动闭环已持续 ${elapsedMin} 分钟（超过上限 ${budgetMin} 分钟），已自动熔断等待人工确认`,
+    };
+  }
+
+  const heavyCount = detail.state.verifications.filter(
+    (v) => v.startedAt >= anchorAt && isHeavyVerificationCommand(v.command),
+  ).length;
+  if (heavyCount >= maxHeavyVerifies) {
+    return {
+      exceeded: true,
+      reason: `本轮自动闭环全量验证次数已达上限（${heavyCount}/${maxHeavyVerifies} 次），已自动熔断等待人工确认`,
+    };
+  }
+  return { exceeded: false };
+}
 
 function isHealthyForNativeResume(candidate: AgentRunRecord | null | undefined): boolean {
   if (!candidate || !candidate.nativeSessionId) return false;
@@ -551,7 +614,11 @@ export class HubExecutor {
 
     const candidates = resolveRouteCandidates(activeRouting, harnesses, input.action, tier, override);
     let target = candidates[0]!;
-    if (input.useFallback && prevRun) {
+    if (
+      input.useFallback &&
+      prevRun &&
+      !(input.autoFallbackAttempt && input.autoFallbackAttempt > 0 && input.harness && input.model)
+    ) {
       const next = candidates.find((c) => `${c.harness}::${c.model}` !== `${prevRun.harness}::${prevRun.model}`);
       if (next) target = next;
     }
@@ -1036,6 +1103,7 @@ export class HubExecutor {
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
       WORKBENCH_ROOT: base,
       WORKBENCH_REQ_ID: id,
+      WORKBENCH_RUN_ACTION: input.action,
       WORKBENCH_HUB_PID: String(process.pid),
       WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
       ...(target.harness === "opencode"
@@ -1282,6 +1350,7 @@ export class HubExecutor {
       let readyForReview = false;
       let noCodeChange = false;
       let bugPausedReason: string | null = null;
+      let unrelatedTimeoutFiles: string[] | undefined;
 
       try {
         if (stdoutLineBuf.trim()) {
@@ -1363,6 +1432,9 @@ export class HubExecutor {
           stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
         parsedReview =
           status === "succeeded" && input.action === "review" ? parseReviewOutput(replySource) : null;
+        if (parsedReview && !isDesignReview && latestReq) {
+          parsedReview = normalizeReviewVerdictForManualCriteria(parsedReview, latestReq.state.criteria);
+        }
         if (
           parsedReview &&
           parsedReview.verdict === "concern" &&
@@ -1529,6 +1601,7 @@ export class HubExecutor {
           autoHealPending = gateResult.autoHealPending;
           readyForReview = gateResult.readyForReview;
           noCodeChange = gateResult.noCodeChange;
+          unrelatedTimeoutFiles = gateResult.unrelatedTimeoutFiles;
         }
       } finally {
         job.lockLease?.release();
@@ -1681,6 +1754,7 @@ export class HubExecutor {
               action: input.action,
               status,
               durationMs,
+              quotaPool: poolInfo.quotaPool,
               rateLimited,
               timedOut: job.timedOut,
               modelFallback: job.modelFallback === true,
@@ -1840,6 +1914,21 @@ export class HubExecutor {
         return;
       }
 
+      if (unrelatedTimeoutFiles && unrelatedTimeoutFiles.length > 0 && postRunDetail?.state.stage === "coding") {
+        await setRequirementNeedsHuman(
+          base,
+          id,
+          {
+            source: "env_failure",
+            reason: `全量验证仅在无关测试文件发生超时波动（${unrelatedTimeoutFiles.join("、")}），已跳过自动修复以避免越界修改，请核查环境或重跑验证`,
+            at: Date.now(),
+          },
+          snap?.fingerprint ?? null,
+        ).catch(() => null);
+        this.emit({ type: "workbench.updated", root: base, requirementId: id, runId, at: Date.now() });
+        return;
+      }
+
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
 
@@ -1850,6 +1939,21 @@ export class HubExecutor {
       const reviewFixCycle = input.reviewFixCycle ?? 0;
       const maxHealAttempts = reviewFixCycle > 0 ? 1 : MAX_AUTO_HEAL_ATTEMPTS;
       if (autoHealPending && healAttempt < maxHealAttempts) {
+        const budgetCheck = postRunDetail ? checkAutoLoopBudget(postRunDetail) : { exceeded: false };
+        if (budgetCheck.exceeded && postRunDetail?.state.stage === "coding") {
+          await setRequirementNeedsHuman(
+            base,
+            id,
+            {
+              source: reviewFixCycle > 0 ? "review_loop_exhausted" : "auto_heal_exhausted",
+              reason: budgetCheck.reason ?? "自动闭环已达预算上限，请人工接管",
+              at: Date.now(),
+            },
+            snap?.fingerprint ?? null,
+          ).catch(() => null);
+          this.emit({ type: "workbench.updated", root: base, requirementId: id, runId, at: Date.now() });
+          return;
+        }
         try {
           const latestRouting = this.resolveProjectRouting(base);
           if (latestRouting.autoHeal !== false && !alreadyRunning()) {
@@ -1945,6 +2049,21 @@ export class HubExecutor {
         postRunDetail &&
         postRunDetail.state.stage === "coding"
       ) {
+        const budgetCheck = checkAutoLoopBudget(postRunDetail);
+        if (budgetCheck.exceeded) {
+          await setRequirementNeedsHuman(
+            base,
+            id,
+            {
+              source: "review_loop_exhausted",
+              reason: budgetCheck.reason ?? "自动审查修复闭环已达预算上限，请人工接管",
+              at: Date.now(),
+            },
+            snap?.fingerprint ?? null,
+          ).catch(() => null);
+          this.emit({ type: "workbench.updated", root: base, requirementId: id, runId, at: Date.now() });
+          return;
+        }
         try {
           const latestRouting = this.resolveProjectRouting(base);
           if (latestRouting.autoReview !== false && latestRouting.autoHeal !== false && !alreadyRunning()) {
@@ -2049,42 +2168,78 @@ export class HubExecutor {
         }
       }
 
-      // Bounded single-hop automatic fallback within the SAME tier's fallbacks on 429 / model unavailable.
-      // WB-16: Removed durationMs < 60_000 cap so mid-run rate limits at any duration relay via fresh_handoff from WIP checkpoint.
+      // Bounded multi-hop automatic fallback within the SAME tier's fallbacks on 429 / model unavailable.
+      // Skips any model already tried AND any quota pool already hit by rateLimit in this chain.
       const attempt = input.autoFallbackAttempt ?? 0;
-      const isExplicitOverride = Boolean(input.harness && input.model);
+      const isExplicitOverride = Boolean(input.harness && input.model) && attempt === 0;
       const shouldAutoFallback =
         status === "failed" &&
         !job.cancelled &&
         !job.timedOut &&
-        attempt < 1 &&
+        attempt < MAX_AUTO_FALLBACK_ATTEMPTS &&
         ((!isExplicitOverride && (modelUnavailable || rateLimited)) ||
           (input.isAutoReview === true && (reviewParseFailed || modelUnavailable || rateLimited)));
 
+      let dispatchedFallback = false;
       if (shouldAutoFallback && !alreadyRunning()) {
         try {
           const availHarnesses = await this.getHarnesses(false);
           const latestRouting = this.resolveProjectRouting(base);
           const fallbackPool = resolveRouteCandidates(latestRouting, availHarnesses, input.action, tier);
-          const fallbackCandidate = fallbackPool.find(
-            (c) =>
-              `${c.harness}::${c.model}` !== `${target.harness}::${target.model}` &&
-              isHarnessRunnable(c.harness, availHarnesses),
+          const nextFailedTargets = Array.from(
+            new Set([...(input.failedTargets ?? []), `${target.harness}::${target.model}`]),
           );
+          const nextFailedPools = rateLimited
+            ? Array.from(new Set([...(input.failedQuotaPools ?? []), poolInfo.quotaPool]))
+            : [...(input.failedQuotaPools ?? [])];
+          const fallbackCandidate = fallbackPool.find((c) => {
+            const key = `${c.harness}::${c.model}`;
+            if (nextFailedTargets.includes(key)) return false;
+            const cPool = resolveQuotaPool(c.harness, c.model).quotaPool;
+            if (nextFailedPools.includes(cPool)) return false;
+            return isHarnessRunnable(c.harness, availHarnesses);
+          });
           if (fallbackCandidate) {
+            dispatchedFallback = true;
             void this.startRun({
               ...input,
-              harness: undefined,
-              model: undefined,
-              reasoningEffort: undefined,
+              harness: fallbackCandidate.harness,
+              model: fallbackCandidate.model,
+              reasoningEffort: fallbackCandidate.reasoningEffort,
               useFallback: true,
               ...(rateLimited ? { forceFreshSession: true } : {}),
               autoFallbackAttempt: attempt + 1,
+              failedTargets: nextFailedTargets,
+              failedQuotaPools: nextFailedPools,
+              ...(input.dispatchReasonOverride ? {} : { dispatchReasonOverride: "auto_fallback" }),
             }).catch(() => {});
           }
         } catch {
           // Ignore routing errors on auto-fallback.
         }
+      }
+
+      if (
+        !dispatchedFallback &&
+        status === "failed" &&
+        !job.cancelled &&
+        !job.timedOut &&
+        (rateLimited || modelUnavailable) &&
+        postRunDetail &&
+        (postRunDetail.state.stage === "coding" || postRunDetail.state.stage === "planning") &&
+        !alreadyRunning()
+      ) {
+        await setRequirementNeedsHuman(
+          base,
+          id,
+          {
+            source: "env_failure",
+            reason: `模型 ${target.harness}/${target.model} 额度不足或不可用，且所有可用备援池均已耗尽，请检查额度或切换路由后重试`,
+            at: Date.now(),
+          },
+          snap?.fingerprint ?? null,
+        ).catch(() => null);
+        this.emit({ type: "workbench.updated", root: base, requirementId: id, runId, at: Date.now() });
       }
     };
 

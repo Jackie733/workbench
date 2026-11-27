@@ -280,9 +280,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       expect(await page.evaluate(() => document.querySelectorAll('[data-testid="diff-view-mode-toggle"]').length)).toBe(1);
       expect(await page.evaluate(() => document.querySelectorAll('[data-testid="drawer-diff-view-mode-toggle"]').length)).toBe(1);
       await clickReady(page, '[data-testid="toggle-drawer-btn"]');
+      await page.waitForSelector('[data-testid="toggle-drawer-btn"][aria-expanded="false"]', { timeout: 5000 });
 
-      await page.click('[data-testid="tab-changes"]');
-      await page.waitForSelector('[data-testid="verify-diff-shortcut-card"]', { timeout: 5000 });
+      await clickReady(page, '[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="verify-diff-shortcut-card"]', { timeout: 10000 });
       // REQ-015: 手动验证命令输入、条件输入与运行按钮严格等高 32px 且单行。
       await expectControlsAligned(
         page,

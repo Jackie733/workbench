@@ -69,7 +69,13 @@ describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
     const hubDir = makeTempDir("wb-revisions-");
     process.env.WORKBENCH_HUB_DIR = hubDir;
     const repo = makeGitRepo();
-    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    const server = await startWorkbenchServer({
+      root: repo,
+      port: 0,
+      writeDiscovery: false,
+      hubMode: true,
+      isRevisionPublished: () => true,
+    });
     servers.push(server);
     const client = startWorkbenchNodeClient({
       hubUrl: server.url, token: resetAuthPassword(hubDir).password,
@@ -128,6 +134,22 @@ describe("cross-machine Hub + outbound remote node bridge (wb node)", () => {
     } finally {
       socket.close();
     }
+
+    const unpublishedServer = await startWorkbenchServer({
+      root: repo,
+      port: 0,
+      writeDiscovery: false,
+      hubMode: true,
+      isRevisionPublished: () => false,
+    });
+    servers.push(unpublishedServer);
+    const unpubRes = await fetch(`${unpublishedServer.url}/api/hub/nodes/other/update`, {
+      method: "POST",
+      headers: { Origin: unpublishedServer.url, "Content-Type": "application/json" },
+      body: JSON.stringify({ revision: expected }),
+    });
+    expect(unpubRes.status).toBe(409);
+    expect(await unpubRes.text()).toContain("has not been pushed to origin yet");
   });
 
   test("manages remote project lifecycle, fs browse, attachments, streaming execution, and offline degradation", async () => {

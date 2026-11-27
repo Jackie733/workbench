@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { WorkbenchError } from "../core/errors.ts";
 import type { AgentAction, AgentRunRecord } from "../core/types.ts";
 import { atomicWriteJson, readJsonStrict, withFileLockSync } from "../core/fs.ts";
+import { resolveQuotaPool } from "./pricing.ts";
 import { resolveHubDir } from "./registry.ts";
 
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
@@ -33,6 +34,7 @@ export interface ModelTelemetrySnapshot {
   updatedAt: number;
   entries: Record<string, ModelStageStats>;
   cooldowns: Record<string, number>;
+  poolCooldowns?: Record<string, number>;
 }
 
 export function telemetryFilePath(): string {
@@ -49,6 +51,7 @@ function emptySnapshot(): ModelTelemetrySnapshot {
     updatedAt: Date.now(),
     entries: {},
     cooldowns: {},
+    poolCooldowns: {},
   };
 }
 
@@ -73,11 +76,20 @@ export function readModelTelemetry(): ModelTelemetrySnapshot {
         }
       }
     }
+    const poolCooldowns: Record<string, number> = {};
+    if (raw.poolCooldowns && typeof raw.poolCooldowns === "object") {
+      for (const [k, v] of Object.entries(raw.poolCooldowns)) {
+        if (typeof v === "number" && Number.isFinite(v)) {
+          poolCooldowns[k] = v;
+        }
+      }
+    }
     return {
       schemaVersion: 1,
       updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
       entries,
       cooldowns,
+      poolCooldowns,
     };
   } catch (error) {
     if (error instanceof WorkbenchError && error.code === "not_found") {
@@ -103,6 +115,7 @@ export function recordModelRunOutcome(input: {
   action: AgentAction;
   status: AgentRunRecord["status"];
   durationMs: number;
+  quotaPool?: string;
   rateLimited?: boolean;
   timedOut?: boolean;
   modelFallback?: boolean;
@@ -169,10 +182,17 @@ export function recordModelRunOutcome(input: {
       ...(input.rateLimited ? { lastRateLimitedAt: now } : prev.lastRateLimitedAt ? { lastRateLimitedAt: prev.lastRateLimitedAt } : {}),
     };
 
-    if (input.rateLimited || input.modelFallback || input.modelUnavailable) {
+    const pool = input.quotaPool ?? resolveQuotaPool(input.harness, input.model).quotaPool;
+    const poolCooldowns = (snap.poolCooldowns ??= {});
+    if (input.rateLimited) {
+      const until = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
+      snap.cooldowns[modelKey] = until;
+      poolCooldowns[pool] = until;
+    } else if (input.modelFallback || input.modelUnavailable) {
       snap.cooldowns[modelKey] = now + (input.cooldownMs ?? DEFAULT_COOLDOWN_MS);
     } else if (input.status === "succeeded") {
       delete snap.cooldowns[modelKey];
+      delete poolCooldowns[pool];
     }
 
     snap.updatedAt = now;
@@ -182,11 +202,23 @@ export function recordModelRunOutcome(input: {
 
 export function getModelCooldownUntil(harness: string, model: string, now = Date.now()): number | null {
   const snap = readModelTelemetry();
-  const until = snap.cooldowns[`${harness}::${model}`];
-  if (typeof until === "number" && until > now) {
-    return until;
+  const modelUntil = snap.cooldowns[`${harness}::${model}`];
+  const pool = resolveQuotaPool(harness, model).quotaPool;
+  const poolUntil = snap.poolCooldowns?.[pool];
+  const maxUntil = Math.max(
+    typeof modelUntil === "number" ? modelUntil : 0,
+    typeof poolUntil === "number" ? poolUntil : 0,
+  );
+  if (maxUntil > now) {
+    return maxUntil;
   }
   return null;
+}
+
+export function isQuotaPoolCoolingDown(quotaPool: string, now = Date.now()): boolean {
+  const snap = readModelTelemetry();
+  const until = snap.poolCooldowns?.[quotaPool];
+  return typeof until === "number" && until > now;
 }
 
 export function isModelCoolingDown(harness: string, model: string, now = Date.now()): boolean {
@@ -198,8 +230,13 @@ export function clearModelCooldown(harness?: string, model?: string): ModelTelem
     const snap = readModelTelemetry();
     if (harness && model) {
       delete snap.cooldowns[`${harness}::${model}`];
+      const pool = resolveQuotaPool(harness, model).quotaPool;
+      if (snap.poolCooldowns) {
+        delete snap.poolCooldowns[pool];
+      }
     } else {
       snap.cooldowns = {};
+      snap.poolCooldowns = {};
     }
     snap.updatedAt = Date.now();
     return writeModelTelemetry(snap);

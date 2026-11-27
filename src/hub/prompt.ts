@@ -284,7 +284,7 @@ export function buildExecutionPrompt(
             `1. Use native file & Git tools to inspect \`${itemDirHint}/spec.md\`, \`${itemDirHint}/design.md\`, actual Git Diff (or \`wb_get({ id: "${reqId}", includeDiff: true })\`), and verification evidence.`,
             `2. Reuse matching verification logs under \`${itemDirHint}/evidence/\` first; only run ${fastVerifyHint} if evidence is missing or stale.`,
             "3. Do NOT modify repository files or run background commands (`&` / `run_in_background`). Focus on real bugs, missing requirements, security issues, or test tampering.",
-            "4. Distinguish severities strictly within `spec.md` scope: `block` only for confirmed functional bugs, data/security risks, or unmet required criteria (for every `block` finding, include minimal reproduction and expected behavior in `detail`/`suggestion`); `concern` for medium risks; put minor nits or out-of-scope edge cases in `findings` (`low`) and use `pass` when acceptable.",
+            "4. Distinguish severities strictly within `spec.md` scope: `block` only for confirmed functional bugs, data/security risks, or unmet automated criteria (for every `block` finding, include minimal reproduction and expected behavior in `detail`/`suggestion`). Manual verification items (`kind: \"manual\"`) are checked by a human AFTER review — seeing them `unverified` during code review is normal and MUST NEVER be marked `block` or `high`. Out-of-scope architecture or non-goal items excluded by `spec.md` MUST NEVER receive `block` (at most `low` advisory findings); use `pass` when acceptable.",
             reReviewRuleEn,
             "",
             buildOutputLanguageDirective(lang, "review"),
@@ -301,7 +301,7 @@ export function buildExecutionPrompt(
             `1. 使用原生文件与 Git 工具检查 \`${itemDirHint}/spec.md\`、\`${itemDirHint}/design.md\`、实际 Git Diff（或调用 \`wb_get({ id: "${reqId}", includeDiff: true })\`）与验收证据。`,
             `2. 优先复用匹配证据：先核验 \`${itemDirHint}/evidence/\` 中与当前代码快照一致的验证日志，无需重跑已匹配的耗时测试（仅在证据缺失或过期时按需运行${fastVerifyHint}）。`,
             "3. 禁止修改任何仓库代码，禁止在后台运行命令（如 `&` 或 `run_in_background`）或等待外部通知；同步完成检查并聚焦真实问题：实现是否满足需求、是否存在功能/安全缺陷、是否存在删改或跳过测试的迹象。",
-            "4. 严格结合 `spec.md` 范围区分严重度：`block` 仅用于确定性功能故障、数据/安全风险或必需验收条件未满足（每条阻塞项请在 `detail`/`suggestion` 中附上最小复现与预期行为）；`concern` 用于待确认的中等风险；低优先级优化或超出需求边界的极端假设放 `findings`（`low`）即可，若达标直接给 `pass`。",
+            "4. 严格结合 `spec.md` 范围区分严重度：`block` 仅用于确定性功能故障、数据/安全风险或必需自动化验收条件未满足（每条阻塞项请在 `detail`/`suggestion` 中附上最小复现与预期行为）。标注为 `kind: \"manual\"` 的人工核验项由人类在代码审查之后手动核验，审查时处于 `unverified` 属正常状态，严禁将其列为 `block` 或 `high`；超出 `spec.md` 范围或非目标的系统架构建议也严禁打 `block`（最多放 `low` 建议）；若达标直接给 `pass`。",
             reReviewRuleZh,
             "",
             buildOutputLanguageDirective(lang, "review"),
@@ -360,7 +360,7 @@ export function buildExecutionPrompt(
             "Workflow:",
             `1. The full \`spec.md\`, latest feedback, and unresolved annotations are already inlined below — do NOT run \`wb --help\` or \`wb get\`. Inspect only relevant source files (avoid redundant exploration or running full test suites); lightweight read-only checks are allowed.`,
             `2. Edit \`${itemDirHint}/spec.md\` if needed and write a clear technical plan in \`${itemDirHint}/design.md\` (adapt detail to complexity; skip boilerplate sections).`,
-            "3. Append verifiable acceptance criteria in a fenced `workbench-criteria` JSON block at the end of `design.md` (supports executable `command` or `manual` human-checked items with `steps`):",
+            "3. Append verifiable acceptance criteria in a fenced `workbench-criteria` JSON block at the end of `design.md` (supports executable `command` or `manual` human-checked items with `steps`). Prefer fast checks (typecheck/lint) plus targeted tests for modified/new modules as `required: true` inner-loop commands; do NOT put slow full-repository E2E suites in `required: true` unless the change alters shared core infrastructure across the whole repo (mark optional full-repo regression as `\"required\": false`):",
             '```workbench-criteria\n[{"id":"AC-1","description":"Core behavior passes unit test","required":true,"command":"bun test tests/feature.test.ts"},{"id":"AC-2","description":"Visual layout verified","required":true,"kind":"manual","steps":"Open workspace page and verify alignment"}]\n```',
             "4. ONLY when genuine architectural/product forks require human sign-off, append an optional `workbench-decisions` JSON block (2-4 options per item, marking one `recommended: true`); when pending decisions exist, you may defer criteria until resolved:",
             '```workbench-decisions\n[{"id":"D-1","question":"Choose storage strategy?","options":[{"id":"opt-a","label":"SQLite local file","description":"Zero external dependency","recommended":true},{"id":"opt-b","label":"JSON file","description":"Simpler diff"}]}]\n```',
@@ -378,7 +378,7 @@ export function buildExecutionPrompt(
             "工作方式：",
             `1. 下文已直接内联 \`spec.md\` 全文、最新打回意见与未解决批注，无需执行 \`wb --help\` 或 \`wb get\` 反复回读；仅精准调研相关源码（避免无关探索或跑全量耗时测试），可按需运行只读测试或检查命令复现定位。`,
             `2. 如需细化目标/边界可直接编辑 \`${itemDirHint}/spec.md\`，并在 \`${itemDirHint}/design.md\` 中写出清晰的技术方案（按复杂度自适应详略，无需凑固定模板章节）。`,
-            "3. 在 `design.md` 末尾附带一个 `workbench-criteria` JSON 代码块声明验收条件（支持可执行 `command` 或标注 `kind: \"manual\"` 及人工检查 `steps`）：",
+            "3. 在 `design.md` 末尾附带一个 `workbench-criteria` JSON 代码块声明验收条件（支持可执行 `command` 或标注 `kind: \"manual\"` 及人工检查 `steps`）。内循环必需命令（`required: true`）优先选用快速检查（typecheck/lint）与本需求新增/受影响模块的定向测试，普通需求不要把耗时的全仓 E2E 全量测试设为内循环必需阻塞项（除非改动触及全仓共享核心底座，否则全量回归可设为 `\"required\": false`）：",
             '```workbench-criteria\n[{"id":"AC-1","description":"核心逻辑单元测试通过","required":true,"command":"bun test tests/feature.test.ts"},{"id":"AC-2","description":"页面交互与布局人工核验","required":true,"kind":"manual","steps":"打开工作区页面检查对齐与状态切换"}]\n```',
             "4. 仅当存在真正需要人类拍板的选型/边界分叉时，在 `design.md` 末尾可选附带 `workbench-decisions` JSON 代码块（每题 2-4 个选项并标出 `recommended: true`；存在待拍板决策时可暂缓补齐验收条件）：",
             '```workbench-decisions\n[{"id":"D-1","question":"数据持久化选型？","options":[{"id":"opt-a","label":"本地 JSON 文件","description":"零外部依赖、易于审计","recommended":true},{"id":"opt-b","label":"SQLite 数据库","description":"查询更强"}]}]\n```',
@@ -481,12 +481,21 @@ export function buildExecutionPrompt(
     ? `1. 当前为同会话续接且规范未变，无需重读全文，直接聚焦目标文件与反馈修改（需核对细节时再按需读取 \`${itemDirHint}/spec.md\`${hasDesign ? ` 或 \`${itemDirHint}/design.md\`` : ""}）。${decisionRuleZh}`
     : `1. 使用原生文件工具完整阅读 \`${itemDirHint}/spec.md\`${hasDesign ? ` 与 \`${itemDirHint}/design.md\`` : ""}，以磁盘完整原文为准。${decisionRuleZh}`;
 
+  const scopeGuardEn =
+    input.action === "fix"
+      ? " Do NOT modify unrelated existing tests or unrelated source modules just to work around flaky/baseline failures outside `spec.md` scope; report them and end the turn."
+      : "";
+  const scopeGuardZh =
+    input.action === "fix"
+      ? " 严禁为了凑全绿而修改与 `spec.md` 无关的存量测试或无关业务模块；若发现仅由无关测试超时或基线故障导致，请直接说明原因并结束本轮。"
+      : "";
+
   const step2En = hasDistinctFullCmd
-    ? `2. Modify only code and tests relevant to this requirement; run ${fastVerifyHint} and targeted tests for your changes locally, and do NOT manually run the slow full suite (\`${fullCmd}\`) via raw shell — Workbench runs it automatically on exit (or run \`wb verify ${reqId} --all\` if you need full-suite output early so Workbench can reuse the evidence).`
-    : "2. Modify only code and tests relevant to this requirement, and run fast or targeted checks locally as needed.";
+    ? `2. Modify only code and tests relevant to this requirement; run ${fastVerifyHint} and targeted tests for your changes locally, and do NOT run \`wb verify ${reqId} --all\` or the slow full suite (\`${fullCmd}\`) inside this turn — Workbench runs post-gate verification automatically on exit.${scopeGuardEn}`
+    : `2. Modify only code and tests relevant to this requirement, and run fast or targeted checks locally as needed.${scopeGuardEn}`;
   const step2Zh = hasDistinctFullCmd
-    ? `2. 只改动与本需求相关的代码与测试；本地验证只需运行${fastVerifyHint}及本次新增/相关的定向测试，不要通过普通 shell 手动跑耗时的全量测试（\`${fullCmd}\`），工作台会在你退出后统一执行并记录验收证据（若确需提前跑全量，请调用 \`wb verify ${reqId} --all\` 以便工作台复用结果）。`
-    : "2. 只改动与本需求相关的代码与测试，并按需在本地运行快速检查或定向测试验证改动正确性。";
+    ? `2. 只改动与本需求相关的代码与测试；本地验证只需运行${fastVerifyHint}及本次新增/相关的定向测试，禁止在本轮内执行 \`wb verify ${reqId} --all\` 或耗时的全量测试（\`${fullCmd}\`），工作台会在你退出后统一执行并记录验收证据。${scopeGuardZh}`
+    : `2. 只改动与本需求相关的代码与测试，并按需在本地运行快速检查或定向测试验证改动正确性。${scopeGuardZh}`;
 
   return (
     isEn

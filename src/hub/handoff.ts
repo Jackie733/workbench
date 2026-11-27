@@ -621,7 +621,9 @@ export async function synthesizeHandoffPacket(
       const reqTag = item.criterion.required ? "必需" : "参考";
       const cmdTag =
         item.criterion.kind === "manual"
-          ? ` | 人工核验${item.criterion.steps ? `: ${item.criterion.steps}` : ""}`
+          ? options.action === "review" && item.state !== "passed"
+            ? ` | 人工核验·审查阶段待人类核验，勿判 block${item.criterion.steps ? `: ${item.criterion.steps}` : ""}`
+            : ` | 人工核验${item.criterion.steps ? `: ${item.criterion.steps}` : ""}`
           : item.criterion.command
             ? ` | 命令: \`${item.criterion.command}\``
             : "";

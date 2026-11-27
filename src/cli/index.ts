@@ -880,8 +880,19 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const timeoutMs = typeof timeoutFlag === "string" ? Number(timeoutFlag) : undefined;
 
         if (parsed.flags.get("all") === true) {
+          const runAction = process.env.WORKBENCH_RUN_ACTION?.trim();
+          if (process.env.WORKBENCH_HUB_PID?.trim() && (runAction === "implement" || runAction === "fix")) {
+            throw new WorkbenchError(
+              "invalid_transition",
+              "当前处于工作台托管的编码/修复会话中，禁止手动执行 wb verify --all；请仅运行快速或定向测试并直接结束本轮，宿主将在退出后统一执行完整验收。",
+            );
+          }
           const force = parsed.flags.get("force") === true;
-          const allRes = await runAllVerifications(root, id, { timeoutMs, force });
+          const allRes = await runAllVerifications(root, id, {
+            timeoutMs,
+            force,
+            onProgress: (line) => process.stderr.write(line),
+          });
           printResult(
             {
               id: allRes.detail.state.id,

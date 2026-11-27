@@ -25,6 +25,8 @@ export interface RunVerificationInput {
   timeoutMs?: number;
   /** Optional parent write lease ID when invoked inside an active coding run's post-gate. */
   lockLeaseId?: string;
+  /** Optional progress callback invoked while waiting on shared heavy verification locks. */
+  onProgress?: (line: string) => void;
 }
 
 export interface RunVerificationResult {
@@ -52,9 +54,10 @@ function executeShellCommand(cwd: string, command: string, timeoutMs: number): P
     const shellArgs = isWin ? ["/d", "/s", "/c", command] : ["-lc", command];
 
     const childEnv: NodeJS.ProcessEnv = { ...process.env };
-    // Never leak a parent agent's WORKBENCH_ROOT/WORKBENCH_REQ_ID/RSI depth into verification test children.
+    // Never leak a parent agent's WORKBENCH_ROOT/WORKBENCH_REQ_ID/RUN_ACTION/RSI depth into verification test children.
     delete childEnv.WORKBENCH_ROOT;
     delete childEnv.WORKBENCH_REQ_ID;
+    delete childEnv.WORKBENCH_RUN_ACTION;
     delete childEnv.WORKBENCH_RSI_DEPTH;
     delete childEnv.WORKBENCH_HUB_PID;
     delete childEnv.WORKBENCH_OUTPUT_LANGUAGE;
@@ -291,6 +294,16 @@ export async function runVerification(
               staleMs: MAX_TIMEOUT_MS + 60_000,
               pollMs: 250,
               busyMessage: "另一个全量验证正在执行且排队等待超时，请稍后重试",
+              holderMeta: { requirementId: id, command },
+              onWait: (info) => {
+                const holderLabel = info.holder?.requirementId
+                  ? `${info.holder.requirementId}${info.holder.command ? ` (${info.holder.command})` : ""}`
+                  : "其他任务";
+                const sec = Math.max(1, Math.round(info.waitedMs / 1000));
+                input.onProgress?.(
+                  `[workbench] 正在排队等待全局全量验证锁（当前占用：${holderLabel}，已等待 ${sec}s）...\n`,
+                );
+              },
             },
           )
         : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
@@ -362,7 +375,14 @@ function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
 export async function runAllVerifications(
   root: string,
   id: string,
-  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean; failFast?: boolean; lockLeaseId?: string } = {},
+  options: {
+    timeoutMs?: number;
+    force?: boolean;
+    includeOptional?: boolean;
+    failFast?: boolean;
+    lockLeaseId?: string;
+    onProgress?: (line: string) => void;
+  } = {},
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
@@ -477,6 +497,7 @@ export async function runAllVerifications(
           criterionIds,
           timeoutMs: options.timeoutMs,
           lockLeaseId: lease.id,
+          onProgress: options.onProgress,
         });
         runs.push(result);
         latestDetail = result.detail;

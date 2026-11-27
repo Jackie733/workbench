@@ -159,6 +159,8 @@ export async function startWorkbenchServer(options: {
   executor?: HubExecutor;
   githubDeps?: GitHubCommandDeps;
   giteeDeps?: GiteeApiDeps;
+  /** Test hook to override Git remote publication checks for isolated worktrees. */
+  isRevisionPublished?: (revision: string) => boolean | undefined;
 }): Promise<WorkbenchServerHandle> {
   const defaultRoot = canonicalRoot(options.root);
   const hubMode = options.hubMode === true;
@@ -544,7 +546,7 @@ export async function startWorkbenchServer(options: {
       }
       const body = await readBody(req);
       if (body.revision !== revision) throw new WorkbenchError("revision_conflict", "Hub revision changed; reload before updating the node");
-      if (isSourceRevisionPublished(revision) === false) {
+      if ((options.isRevisionPublished ?? isSourceRevisionPublished)(revision) === false) {
         throw new WorkbenchError(
           "revision_conflict",
           `Hub commit ${revision.slice(0, 7)} has not been pushed to origin yet; run git push first`,
