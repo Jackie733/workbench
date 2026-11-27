@@ -38,6 +38,7 @@ import {
   Terminal,
   Trash2,
   Undo2,
+  Upload,
   Wrench,
   X,
   XCircle,
@@ -49,6 +50,9 @@ import type {
   DecisionItem,
   RequirementDetail,
   ReviewReport,
+  ScreenshotBatch,
+  ScreenshotPhase,
+  ScreenshotShot,
   ScreenshotSkipReasonCode,
   Stage,
 } from "../../core/types.ts";
@@ -91,6 +95,7 @@ import {
   useHubStateQuery,
   useProjectQuery,
   useRequirementQuery,
+  uploadScenarioScreenshots,
 } from "../queries.ts";
 import { parseUnifiedDiff, renderDiffLinesHtml, renderSimpleLineDiff } from "../render.ts";
 import {
@@ -565,10 +570,15 @@ function AcceptanceSummaryPanel({
   const revState = d.validity.reviewValidity.effectiveState;
   const tamperingSignals = diffData?.testTamperingSignals ?? [];
   const fileCount = diffData?.observation?.files.length ?? 0;
+  const latestScenarioBatch = latestScenarioScreenshotBatch(
+    s.screenshotBatches,
+    d.validity.provenance.codeSnapshotHash,
+  );
   const latestShotBatch =
-    s.screenshotBatches && s.screenshotBatches.length > 0
+    latestScenarioBatch ??
+    (s.screenshotBatches && s.screenshotBatches.length > 0
       ? s.screenshotBatches[s.screenshotBatches.length - 1]
-      : null;
+      : null);
   const showScreenshots = Boolean(s.uiRelated || (latestShotBatch && latestShotBatch.shots.length > 0));
   const manualItems = cov.items.filter((item) => isManualChecklistCriterion(item.criterion));
   const manualPending = d.validity.manualCheckPending ?? null;
@@ -652,20 +662,59 @@ function AcceptanceSummaryPanel({
 
         {showScreenshots && (
           <div className="rounded-lg border bg-background/70 p-2.5 space-y-1.5 md:col-span-2" data-testid="acceptance-screenshots-card">
-            <div className="text-xs font-semibold">{t(language, "accept.screenshotsTitle")}</div>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="text-xs font-semibold">{t(language, "accept.screenshotsTitle")}</div>
+              {latestShotBatch && (
+                <Badge
+                  variant={screenshotBatchSource(latestShotBatch) === "scenario" ? "success" : "secondary"}
+                  size="sm"
+                  data-testid="acceptance-screenshot-source-badge"
+                >
+                  {t(
+                    language,
+                    screenshotBatchSource(latestShotBatch) === "scenario"
+                      ? "shot.source.scenario"
+                      : "shot.source.matrix",
+                  )}
+                </Badge>
+              )}
+            </div>
             <div className="text-xs text-muted-foreground">
               {t(language, "accept.screenshotsCount", { count: latestShotBatch?.shots.length ?? 0 })}
             </div>
-            {latestShotBatch && latestShotBatch.shots.length > 0 && (
+            {latestShotBatch && latestShotBatch.shots.length > 0 ? (
               <div className="flex flex-wrap gap-2">
-                {latestShotBatch.shots.slice(0, 4).map((shot) => (
-                  <img
-                    key={shot.id}
-                    src={screenshotUrl(s.id, shot.id)}
-                    alt={shot.label}
-                    className="h-16 w-28 rounded border object-cover"
-                  />
-                ))}
+                {latestShotBatch.shots.slice(0, 4).map((shot) => {
+                  const phaseLabel = screenshotPhaseBadge(language, shot.phase);
+                  return (
+                    <div
+                      key={shot.id}
+                      className="relative w-28 rounded border bg-background/60 p-1"
+                      data-testid={`acceptance-screenshot-${shot.id}`}
+                    >
+                      <img
+                        src={screenshotUrl(s.id, shot.id)}
+                        alt={shot.label}
+                        className="h-16 w-full rounded object-cover"
+                      />
+                      {phaseLabel && (
+                        <Badge
+                          variant={shot.phase === "before" ? "secondary" : "success"}
+                          size="sm"
+                          className="absolute left-1 top-1"
+                          data-testid={`acceptance-shot-phase-${shot.id}`}
+                        >
+                          {phaseLabel}
+                        </Badge>
+                      )}
+                      <div className="mt-1 truncate text-[11px] text-muted-foreground">{shot.label}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground" data-testid="acceptance-screenshot-empty">
+                {t(language, "shot.scenarioEmpty")}
               </div>
             )}
           </div>
@@ -2212,6 +2261,43 @@ function pluralScreenshots(language: "zh-CN" | "en", count: number): string {
   return count === 1 ? t(language, "shot.countOne", { count }) : t(language, "shot.countOther", { count });
 }
 
+const SCREENSHOT_PHASE_KEYS: Record<ScreenshotPhase, MessageKey> = {
+  before: "shot.phase.before",
+  after: "shot.phase.after",
+  state: "shot.phase.state",
+};
+
+const SCREENSHOT_TRIGGER_KEYS: Record<ScreenshotBatch["trigger"], MessageKey> = {
+  auto_submit: "shot.trigger.auto",
+  manual: "shot.trigger.manual",
+  agent_attach: "shot.trigger.agentAttach",
+  auto_collect: "shot.trigger.autoCollect",
+};
+
+function screenshotBatchSource(batch: ScreenshotBatch): "scenario" | "matrix" {
+  return batch.source === "scenario" ? "scenario" : "matrix";
+}
+
+function latestScenarioScreenshotBatch(
+  batches: ScreenshotBatch[] | undefined,
+  currentCodeSnapshotHash: string | null | undefined,
+): ScreenshotBatch | null {
+  const scenarios = (batches ?? []).filter(
+    (batch) => screenshotBatchSource(batch) === "scenario" && batch.shots.length > 0,
+  );
+  const matching = currentCodeSnapshotHash
+    ? scenarios.filter((batch) => batch.codeSnapshotHash === currentCodeSnapshotHash)
+    : [];
+  const pool = matching.length > 0 ? matching : scenarios;
+  return pool.length > 0
+    ? pool.reduce((latest, batch) => (batch.createdAt > latest.createdAt ? batch : latest))
+    : null;
+}
+
+function screenshotPhaseBadge(language: "zh-CN" | "en", phase: ScreenshotShot["phase"]): string | null {
+  return phase ? t(language, SCREENSHOT_PHASE_KEYS[phase]) : null;
+}
+
 const SCREENSHOT_REASON_KEYS: Record<ScreenshotSkipReasonCode, MessageKey> = {
   browser_missing: "shot.reason.browser_missing",
   chrome_path_missing: "shot.reason.chrome_path_missing",
@@ -2221,15 +2307,40 @@ const SCREENSHOT_REASON_KEYS: Record<ScreenshotSkipReasonCode, MessageKey> = {
   no_shots: "shot.reason.no_shots",
 };
 
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取截图文件"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; runLocked: boolean }) {
   const language = useUiStore((s) => s.language);
   const showToastKey = useUiStore((s) => s.showToastKey);
+  const showToastError = useUiStore((s) => s.showToastError);
   const [capturing, setCapturing] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [lightbox, setLightbox] = useState<{ batchId: string; index: number } | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const isDone = d.state.stage === "done";
   const frozen = d.acceptanceSnapshot?.screenshots;
-  const batches = (frozen && frozen.length > 0 ? frozen : d.state.screenshotBatches ?? []).slice().reverse();
   const currentHash = d.validity.provenance.codeSnapshotHash;
+  const batches = (frozen && frozen.length > 0 ? frozen : d.state.screenshotBatches ?? [])
+    .slice()
+    .sort((a, b) => {
+      const sourceRank = (batch: ScreenshotBatch) => (screenshotBatchSource(batch) === "scenario" ? 0 : 1);
+      const matchRank = (batch: ScreenshotBatch) => (currentHash && batch.codeSnapshotHash === currentHash ? 0 : 1);
+      return sourceRank(a) - sourceRank(b) || matchRank(a) - matchRank(b) || b.createdAt - a.createdAt;
+    });
+  const hasScenario = batches.some(
+    (batch) => screenshotBatchSource(batch) === "scenario" && batch.shots.length > 0,
+  );
   const canCapture = d.state.stage === "coding";
   const activeBatch = lightbox ? batches.find((batch) => batch.id === lightbox.batchId) ?? null : null;
   const activeShot = activeBatch && lightbox ? activeBatch.shots[lightbox.index] ?? null : null;
@@ -2280,6 +2391,36 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
     }
   };
 
+  const uploadScreenshots = async (fileList: FileList | null) => {
+    const files = Array.from(fileList ?? []).filter(
+      (file) => file.type === "image/png" || file.name.toLowerCase().endsWith(".png"),
+    );
+    if (files.length === 0) {
+      showToastKey("shot.uploadEmpty", undefined, true);
+      return;
+    }
+    if (uploading) return;
+    if (guardRequirementRunLock(d.state.id)) return;
+    setUploading(true);
+    try {
+      const shots = await Promise.all(
+        files.slice(0, 12).map(async (file) => ({
+          label: file.name.replace(/\.png$/i, "") || "screenshot",
+          dataBase64: await fileToBase64(file),
+        })),
+      );
+      const res = await uploadScenarioScreenshots(d.state.id, shots);
+      if (res) {
+        showToastKey("shot.uploaded", { count: res.screenshotCapture.batch?.shots.length ?? shots.length });
+      }
+    } catch (error) {
+      showToastError(error);
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
   return (
     <Card className="p-4 mb-3.5" data-testid="screenshot-section">
       <div className="card-head">
@@ -2292,91 +2433,164 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
           )}
         </div>
         {canCapture && (
-          <AsyncButton
-            size="xs"
-            variant="outline"
-            type="button"
-            data-testid="screenshot-recapture"
-            disabled={capturing || runLocked}
-            onAction={recapture}
-          >
-            <Icon icon={RefreshCw} size={14} />{" "}
-            {capturing ? t(language, "shot.capturing") : t(language, "shot.captureAgain")}
-          </AsyncButton>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept="image/png,.png"
+              multiple
+              hidden
+              data-testid="screenshot-upload-input"
+              onChange={(event) => void uploadScreenshots(event.target.files)}
+            />
+            <Button
+              size="xs"
+              variant="outline"
+              type="button"
+              data-testid="screenshot-upload-btn"
+              disabled={uploading || runLocked}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              <Icon icon={Upload} size={14} /> {uploading ? t(language, "shot.uploading") : t(language, "shot.upload")}
+            </Button>
+            <AsyncButton
+              size="xs"
+              variant="outline"
+              type="button"
+              data-testid="screenshot-recapture"
+              disabled={capturing || runLocked}
+              title={t(language, "shot.matrixHint")}
+              onAction={recapture}
+            >
+              <Icon icon={RefreshCw} size={14} />{" "}
+              {capturing ? t(language, "shot.matrixCapturing") : t(language, "shot.matrixCapture")}
+            </AsyncButton>
+          </div>
         )}
       </div>
 
       {batches.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
-          {isDone ? t(language, "shot.noneDone") : t(language, "shot.none")}
-        </p>
+        <div className="space-y-1">
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            {isDone ? t(language, "shot.noneDone") : t(language, "shot.scenarioEmpty")}
+          </p>
+          {!isDone && (
+            <p className="muted" style={{ fontSize: 12, margin: 0 }} data-testid="screenshot-upload-hint">
+              {t(language, "shot.uploadHint")}
+            </p>
+          )}
+        </div>
       ) : (
-        batches.map((batch) => {
-          const fingerprintMatch = Boolean(currentHash && batch.codeSnapshotHash === currentHash);
-          const statusMeta =
-            batch.status === "captured"
-              ? { label: t(language, "shot.status.captured"), tone: "success" as const }
-              : batch.status === "partial"
-                ? { label: t(language, "shot.status.partial"), tone: "warning" as const }
-                : { label: t(language, "shot.status.skipped"), tone: "warning" as const };
-          return (
-            <div key={batch.id} className="screenshot-batch" data-testid={`screenshot-batch-${batch.id}`}>
-              <div className="screenshot-batch-head">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <Badge variant={statusMeta.tone}>
-                    <Icon
-                      icon={batch.status === "captured" ? CheckCircle2 : AlertTriangle}
-                      size={14}
-                    />{" "}
-                    {statusMeta.label}
-                  </Badge>
-                  <span className="muted" style={{ fontSize: 12.5 }}>
-                    {formatDateTime(batch.createdAt, language)} ·{" "}
-                    {batch.trigger === "auto_submit"
-                      ? t(language, "shot.trigger.auto")
-                      : t(language, "shot.trigger.manual")}{" "}
-                    · {pluralScreenshots(language, batch.shots.length)}
-                  </span>
-                  <Badge variant={fingerprintMatch ? "success" : "warning"} data-testid="screenshot-fingerprint-badge">
-                    <Icon icon={fingerprintMatch ? Check : RefreshCw} size={14} />{" "}
-                    {fingerprintMatch ? t(language, "shot.match") : t(language, "shot.stale")}
-                  </Badge>
-                </div>
-                <span className="muted" style={{ fontSize: 11.5 }}>
-                  {batch.codeSnapshotHash.slice(0, 8)}
-                </span>
-              </div>
-
-              {batch.skipReason && (
-                <Alert variant="warning" className="my-2 text-xs" data-testid="screenshot-skip-reason">
-                  <Icon icon={AlertTriangle} size={14} />
-                  <AlertDescription className="text-foreground">{batch.skipReason}</AlertDescription>
-                </Alert>
-              )}
-
-              {batch.shots.length > 0 && (
-                <div className="screenshot-grid">
-                  {batch.shots.map((shot, index) => (
-                    <button
-                      key={shot.id}
-                      type="button"
-                      className="screenshot-thumb"
-                      data-testid={`shot-${shot.id}`}
-                      onClick={() => setLightbox({ batchId: batch.id, index })}
+        <>
+          {!hasScenario && !isDone && (
+            <Alert variant="warning" className="mb-2 text-xs" data-testid="screenshot-scenario-missing">
+              <Icon icon={AlertTriangle} size={14} />
+              <AlertDescription className="text-foreground">
+                {t(language, "shot.scenarioEmpty")}
+              </AlertDescription>
+            </Alert>
+          )}
+          {batches.map((batch) => {
+            const fingerprintMatch = Boolean(currentHash && batch.codeSnapshotHash === currentHash);
+            const source = screenshotBatchSource(batch);
+            const statusMeta =
+              batch.status === "captured"
+                ? { label: t(language, "shot.status.captured"), tone: "success" as const }
+                : batch.status === "partial"
+                  ? { label: t(language, "shot.status.partial"), tone: "warning" as const }
+                  : { label: t(language, "shot.status.skipped"), tone: "warning" as const };
+            return (
+              <div key={batch.id} className="screenshot-batch" data-testid={`screenshot-batch-${batch.id}`}>
+                <div className="screenshot-batch-head">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <Badge
+                      variant={source === "scenario" ? "success" : "secondary"}
+                      data-testid={`screenshot-source-badge-${batch.id}`}
                     >
-                      <img src={screenshotUrl(d.state.id, shot.id)} alt={shot.label} loading="lazy" />
-                      <span className="screenshot-thumb-label">{shot.label}</span>
-                      <span className="muted" style={{ fontSize: 11 }}>
-                        {shot.viewport} ·{" "}
-                        {shot.theme === "dark" ? t(language, "shot.theme.dark") : t(language, "shot.theme.light")}
-                      </span>
-                    </button>
-                  ))}
+                      {t(language, source === "scenario" ? "shot.source.scenario" : "shot.source.matrix")}
+                    </Badge>
+                    <Badge variant={statusMeta.tone}>
+                      <Icon
+                        icon={batch.status === "captured" ? CheckCircle2 : AlertTriangle}
+                        size={14}
+                      />{" "}
+                      {statusMeta.label}
+                    </Badge>
+                    <span className="muted" style={{ fontSize: 12.5 }}>
+                      {formatDateTime(batch.createdAt, language)} ·{" "}
+                      {t(language, SCREENSHOT_TRIGGER_KEYS[batch.trigger])}{" "}
+                      · {pluralScreenshots(language, batch.shots.length)}
+                    </span>
+                    <Badge variant={fingerprintMatch ? "success" : "warning"} data-testid="screenshot-fingerprint-badge">
+                      <Icon icon={fingerprintMatch ? Check : RefreshCw} size={14} />{" "}
+                      {fingerprintMatch ? t(language, "shot.match") : t(language, "shot.stale")}
+                    </Badge>
+                  </div>
+                  <span className="muted" style={{ fontSize: 11.5 }}>
+                    {batch.codeSnapshotHash.slice(0, 8)}
+                  </span>
                 </div>
-              )}
-            </div>
-          );
-        })
+
+                {source === "matrix" && (
+                  <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }} data-testid={`screenshot-matrix-note-${batch.id}`}>
+                    {t(language, "shot.matrixNote")}
+                  </div>
+                )}
+
+                {batch.skipReason && (
+                  <Alert variant="warning" className="my-2 text-xs" data-testid="screenshot-skip-reason">
+                    <Icon icon={AlertTriangle} size={14} />
+                    <AlertDescription className="text-foreground">{batch.skipReason}</AlertDescription>
+                  </Alert>
+                )}
+
+                {batch.shots.length > 0 && (
+                  <div className="screenshot-grid">
+                    {batch.shots.map((shot, index) => {
+                      const phaseLabel = screenshotPhaseBadge(language, shot.phase);
+                      return (
+                        <button
+                          key={shot.id}
+                          type="button"
+                          className="screenshot-thumb"
+                          data-testid={`shot-${shot.id}`}
+                          onClick={() => setLightbox({ batchId: batch.id, index })}
+                        >
+                          <img src={screenshotUrl(d.state.id, shot.id)} alt={shot.label} loading="lazy" />
+                          <span style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                            {phaseLabel && (
+                              <Badge
+                                variant={shot.phase === "before" ? "secondary" : "success"}
+                                size="sm"
+                                data-testid={`screenshot-phase-${shot.id}`}
+                              >
+                                {phaseLabel}
+                              </Badge>
+                            )}
+                            <span className="screenshot-thumb-label">{shot.label}</span>
+                          </span>
+                          {shot.description && (
+                            <span
+                              className="muted"
+                              style={{ fontSize: 11 }}
+                              data-testid={`screenshot-description-${shot.id}`}
+                            >
+                              {shot.description}
+                            </span>
+                          )}
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            {shot.viewport} ·{" "}
+                            {shot.theme === "dark" ? t(language, "shot.theme.dark") : t(language, "shot.theme.light")}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </>
       )}
 
       {activeBatch && activeShot && lightbox && (
@@ -2428,6 +2642,41 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
               >
                 {t(language, "shot.next")} <Icon icon={ChevronRight} size={14} />
               </Button>
+            </div>
+            <div className="mt-3 space-y-1.5 text-xs" data-testid="screenshot-lightbox-meta">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-muted-foreground">{t(language, "shot.sourceLabel")}</span>
+                <Badge
+                  variant={screenshotBatchSource(activeBatch) === "scenario" ? "success" : "secondary"}
+                  size="sm"
+                  data-testid="screenshot-lightbox-source"
+                >
+                  {t(
+                    language,
+                    screenshotBatchSource(activeBatch) === "scenario"
+                      ? "shot.source.scenario"
+                      : "shot.source.matrix",
+                  )}
+                </Badge>
+                {activeShot.phase && (
+                  <>
+                    <span className="text-muted-foreground">{t(language, "shot.phaseLabel")}</span>
+                    <Badge variant={activeShot.phase === "before" ? "secondary" : "success"} size="sm">
+                      {t(language, SCREENSHOT_PHASE_KEYS[activeShot.phase])}
+                    </Badge>
+                  </>
+                )}
+              </div>
+              <div data-testid="screenshot-lightbox-description">
+                <span className="text-muted-foreground">{t(language, "shot.descriptionLabelWithColon")}</span>
+                {activeShot.description || t(language, "shot.noDescription")}
+              </div>
+              {activeShot.criterionIds && activeShot.criterionIds.length > 0 && (
+                <div data-testid="screenshot-lightbox-criteria">
+                  <span className="text-muted-foreground">{t(language, "shot.criteriaLabelWithColon")}</span>
+                  {activeShot.criterionIds.join(", ")}
+                </div>
+              )}
             </div>
           </DialogPanel>
           <DialogFooter>

@@ -2125,12 +2125,13 @@ export async function recordScreenshotBatch(
       throw new WorkbenchError("invalid_input", `截图批次 ID 已存在: ${batch.id}`);
     }
     const nextBatches = [...existing, batch];
+    const evidenceKind = batch.source === "scenario" ? "需求场景截图" : "通用页面巡检截图";
     const summary =
       batch.status === "skipped"
-        ? `已记录截图采集跳过：${batch.skipReason ?? "浏览器环境不可用"}`
+        ? `已记录${evidenceKind}跳过：${batch.skipReason ?? "浏览器环境不可用"}`
         : batch.status === "partial"
-          ? `截图证据部分完成（${batch.shots.length} 张），存在跳过项`
-          : `已采集 UI 截图证据（${batch.shots.length} 张）`;
+          ? `${evidenceKind}部分完成（${batch.shots.length} 张），存在跳过项`
+          : `已采集${evidenceKind}（${batch.shots.length} 张）`;
     return {
       screenshotWrite: { batch, files },
       state: {

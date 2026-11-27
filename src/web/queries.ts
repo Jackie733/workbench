@@ -955,6 +955,21 @@ export async function captureUiScreenshots(id: string, label?: string) {
   });
 }
 
+/** Uploads human/agent-supplied scenario screenshots (PNG base64) as one scenario batch. */
+export async function uploadScenarioScreenshots(
+  id: string,
+  shots: Parameters<typeof api.attachScenarioScreenshots>[1],
+) {
+  if (guardRequirementRunLock(id)) return null;
+  return runBusy(async () => {
+    if (guardRequirementRunLock(id)) return null;
+    const out = await api.attachScenarioScreenshots(id, shots);
+    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+    await queryClient.invalidateQueries({ queryKey: ["requirements"] });
+    return out;
+  });
+}
+
 export async function dispatchFixFromReview(
   detail: RequirementDetail,
   opts?: { selectedFindingIds?: string[] },

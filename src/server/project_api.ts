@@ -85,7 +85,7 @@ import {
 import { normalizeOutputLanguage, resolveEffectiveOutputLanguage } from "../core/language.ts";
 import { runAllVerifications, runVerification } from "../core/runner.ts";
 import { getSandboxForRequirement, listProjectSandboxes, resolveCodeRoot } from "../core/sandbox.ts";
-import { captureRequirementScreenshots } from "../core/screenshots.ts";
+import { attachRequirementScreenshots, captureRequirementScreenshots, type ScreenshotAttachShotInput } from "../core/screenshots.ts";
 import { isProjectInitialized, readRequirementScreenshot } from "../core/store.ts";
 import {
   AGENT_ACTIONS,
@@ -200,6 +200,102 @@ export async function readBody(req: Request): Promise<Record<string, unknown>> {
     throw new WorkbenchError("invalid_input", "请求体必须是 JSON 对象");
   }
   return parsed;
+}
+
+function normalizeShotRecords(raw: unknown, label: string): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new WorkbenchError("invalid_input", `${label} 必须是非空截图数组`);
+  }
+  return raw.map((item, index) => {
+    if (!isRecord(item)) {
+      throw new WorkbenchError("invalid_input", `${label}[${index}] 必须是对象`);
+    }
+    return item;
+  });
+}
+
+/**
+ * Accepts scenario screenshots as JSON base64 or multipart/form-data. Multipart `shots` metadata
+ * aligns with `files` entries by index; without metadata each file becomes one labelled shot.
+ */
+async function readScenarioScreenshotShots(req: Request): Promise<ScreenshotAttachShotInput[]> {
+  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+  if (contentType.includes("multipart/form-data")) {
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      throw new WorkbenchError("invalid_input", "无法解析截图上传内容");
+    }
+    const rawMeta = form.get("shots") ?? form.get("manifest");
+    const files = form.getAll("files").filter((value): value is File => typeof value !== "string");
+    const metadata =
+      typeof rawMeta === "string" && rawMeta.trim()
+        ? (() => {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(rawMeta);
+            } catch {
+              throw new WorkbenchError("invalid_input", "shots 元数据必须是合法 JSON");
+            }
+            const list = Array.isArray(parsed)
+              ? parsed
+              : isRecord(parsed) && Array.isArray(parsed.shots)
+                ? parsed.shots
+                : null;
+            return normalizeShotRecords(list, "shots");
+          })()
+        : [];
+    if (metadata.length === 0 && files.length === 0) {
+      throw new WorkbenchError("invalid_input", "请选择至少一张 PNG 场景截图");
+    }
+    if (metadata.length > 0) {
+      if (files.length > 0 && files.length < metadata.length) {
+        throw new WorkbenchError("invalid_input", "截图文件数量少于元数据条目");
+      }
+      return await Promise.all(
+        metadata.map(async (item, index) => {
+          const file = files[index];
+          const bytes = file ? Buffer.from(await file.arrayBuffer()) : undefined;
+          const payload = { ...item };
+          delete payload.file;
+          return {
+            ...payload,
+            ...(bytes ? { bytes } : {}),
+            label:
+              typeof item.label === "string" && item.label.trim()
+                ? item.label
+                : file?.name?.replace(/\.png$/i, "") ?? `screenshot-${index + 1}`,
+          } as ScreenshotAttachShotInput;
+        }),
+      );
+    }
+    return await Promise.all(
+      files.map(async (file) => ({
+        label: file.name.replace(/\.png$/i, "") || "screenshot",
+        bytes: Buffer.from(await file.arrayBuffer()),
+      })),
+    );
+  }
+
+  const body = await readBody(req);
+  return normalizeShotRecords(body.shots, "shots").map((item, index) => {
+    const encoded =
+      typeof item.dataBase64 === "string"
+        ? item.dataBase64
+        : typeof item.base64 === "string"
+          ? item.base64
+          : null;
+    if (!encoded) {
+      throw new WorkbenchError(
+        "invalid_input",
+        `shots[${index}] 通过 HTTP 提交时必须提供 dataBase64（或 base64）；文件路径仅适用于 CLI/MCP`,
+      );
+    }
+    const payload: Record<string, unknown> = { ...item, dataBase64: encoded };
+    delete payload.file;
+    return payload as unknown as ScreenshotAttachShotInput;
+  });
 }
 
 /** Collects active/decision/running counts for a single local project root. */
@@ -1114,6 +1210,20 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             "Cache-Control": "private, max-age=31536000, immutable",
           },
         });
+      }
+
+      if (method === "POST" && sub === "screenshots/attach") {
+        const shots = await readScenarioScreenshotShots(req);
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const capture = await attachRequirementScreenshots(base, id, {
+          shots,
+          trigger: "agent_attach",
+          actor: "human",
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        deps.broadcastUi({ type: "workbench.updated", reason: "screenshots.attached", root: base, id, at: Date.now() });
+        return jsonResponse({ detail, screenshotCapture: capture }, 201);
       }
 
       if (method === "POST" && sub === "screenshots/capture") {

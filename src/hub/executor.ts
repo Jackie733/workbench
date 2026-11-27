@@ -29,6 +29,7 @@ import {
 } from "../core/git.ts";
 import { isHeavyVerificationCommand } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
+import { screenshotStagingDir } from "../core/screenshots.ts";
 import {
   MAX_RUN_LOG_BYTES,
   WORKBENCH_DIR,
@@ -1103,6 +1104,12 @@ export class HubExecutor {
 
     const shimBin = ensureWbShim(this.cliEntryPath);
     const isReadOnly = input.action === "ask" || input.action === "review";
+    const screenshotOutDir =
+      input.action === "implement" || input.action === "fix" ? screenshotStagingDir(base, id) : null;
+    if (screenshotOutDir) {
+      fs.rmSync(screenshotOutDir, { recursive: true, force: true });
+      fs.mkdirSync(screenshotOutDir, { recursive: true });
+    }
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...buildHarnessIsolationEnv(target.harness),
@@ -1112,6 +1119,7 @@ export class HubExecutor {
       WORKBENCH_RUN_ACTION: input.action,
       WORKBENCH_HUB_PID: String(process.pid),
       WORKBENCH_OUTPUT_LANGUAGE: outputLanguage,
+      ...(screenshotOutDir ? { WORKBENCH_SCREENSHOT_OUT_DIR: screenshotOutDir } : {}),
       ...(target.harness === "opencode"
         ? { OPENCODE_CONFIG_CONTENT: buildOpencodeNonInteractiveConfig(process.env.OPENCODE_CONFIG_CONTENT, { readOnly: isReadOnly }) }
         : {}),
