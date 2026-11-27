@@ -179,7 +179,7 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
   }, [activeProjectId, projectsCollapsed]);
 
   const { data: hub } = useHubStateQuery();
-  const { data: project } = useProjectQuery(activeProjectId);
+  const { data: project, isLoading: projectLoading } = useProjectQuery(activeProjectId);
 
   const isHub = Boolean(hub?.hubMode);
   const projects = hub?.projects ?? [];
@@ -196,7 +196,8 @@ export function HubSidebar({ layoutRef }: { layoutRef?: RefObject<HTMLDivElement
     null;
   const noHubProject = Boolean(isHub && projects.length === 0);
   const remoteOffline = Boolean(isHub && activeSummary && activeSummary.nodeOnline === false);
-  const showReqNav = Boolean(project?.initialized && !remoteOffline && !noHubProject);
+  const projectPending = projectLoading && !project;
+  const showReqNav = Boolean((project?.initialized || projectPending) && !remoteOffline && !noHubProject);
 
   const updateNode = useMutation({
     mutationFn: api.updateNode,

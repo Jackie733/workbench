@@ -7,12 +7,15 @@ import { Card } from "./ui/card.tsx";
 import { Skeleton } from "./ui/skeleton.tsx";
 import { Spinner } from "./ui/spinner.tsx";
 
+export type WorkspaceLoadingVariant = "detail" | "workspace";
+
 export interface WorkspaceLoadingStateProps {
   selectedId: string | null;
   language: UiLanguage;
   isError?: boolean;
   errorMessage?: string;
   onRetry?: () => Promise<unknown>;
+  variant?: WorkspaceLoadingVariant;
 }
 
 const STEPPER_COUNT = 4;
@@ -30,7 +33,11 @@ export function WorkspaceLoadingState({
   isError = false,
   errorMessage,
   onRetry,
+  variant = "detail",
 }: WorkspaceLoadingStateProps): React.ReactElement {
+  const isWorkspaceBoot = variant === "workspace";
+  const showRequirementId = !isWorkspaceBoot && Boolean(selectedId);
+
   if (isError) {
     return (
       <div
@@ -44,7 +51,7 @@ export function WorkspaceLoadingState({
               <Icon icon={AlertTriangle} size={20} />
             </div>
             <p className="ws-loading-title">{t(language, "ws.loadFailedTitle")}</p>
-            {selectedId ? (
+            {showRequirementId ? (
               <span className="req-id ws-loading-req-id" data-testid="workspace-loading-id">
                 {selectedId}
               </span>
@@ -145,14 +152,16 @@ export function WorkspaceLoadingState({
                 className="ws-loading-spinner size-5"
               />
             </div>
-            <p className="ws-loading-title">{t(language, "ws.loading")}</p>
+            <p className="ws-loading-title">{t(language, isWorkspaceBoot ? "app.loading" : "ws.loading")}</p>
             <div className="ws-loading-meta">
-              {selectedId ? (
+              {showRequirementId ? (
                 <span className="req-id ws-loading-req-id" data-testid="workspace-loading-id">
                   {selectedId}
                 </span>
               ) : null}
-              <span className="ws-loading-hint">{t(language, "ws.loadingHint")}</span>
+              <span className="ws-loading-hint">
+                {t(language, isWorkspaceBoot ? "app.loadingHint" : "ws.loadingHint")}
+              </span>
             </div>
             <div className="ws-loading-bar" aria-hidden="true">
               <span className="ws-loading-bar-thumb" />

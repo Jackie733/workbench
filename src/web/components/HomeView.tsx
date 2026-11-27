@@ -49,6 +49,7 @@ import {
 import { useStreamStore } from "../stores/streamStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { Icon, STAGE_ICONS } from "./Icon.tsx";
+import { RequirementListLoadingState } from "./RequirementListLoadingState.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
@@ -491,9 +492,13 @@ export function HomeView() {
       >
         <div id="home-body">
           {!allReqList ? (
-            <p className="muted xs" role={reqListError ? "alert" : "status"}>
-              {t(language, reqListError ? "home.loadFailed" : "app.loading")}
-            </p>
+            reqListError ? (
+              <p className="muted xs" role="alert">
+                {t(language, "home.loadFailed")}
+              </p>
+            ) : (
+              <RequirementListLoadingState language={language} />
+            )
           ) : listSource.length === 0 ? (
             <Card className="sb-empty-box text-center p-3.5" data-testid="sb-empty-state">
               <p className="muted xs" style={{ margin: "0 0 10px" }}>

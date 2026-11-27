@@ -9,6 +9,7 @@ import { Modals } from "./components/Modals.tsx";
 import { RightDrawer } from "./components/RightDrawer.tsx";
 import { Topbar } from "./components/Topbar.tsx";
 import { WorkspaceView } from "./components/WorkspaceView.tsx";
+import { WorkspaceLoadingState } from "./components/WorkspaceLoadingState.tsx";
 import { InsightsView } from "./components/InsightsView.tsx";
 import {
   isRequirementNotFoundError,
@@ -211,7 +212,11 @@ function WorkbenchShell() {
                 {mainView === "insights" ? (
                   <InsightsView />
                 ) : (hubLoading && !hub) || (!noHubProject && !remoteOffline && projectLoading && !project) ? (
-                  <p className="muted">{t(language, "app.loading")}</p>
+                  <WorkspaceLoadingState
+                    variant="workspace"
+                    selectedId={null}
+                    language={language}
+                  />
                 ) : noHubProject ? (
                   <EmptyHubCard />
                 ) : remoteOffline && activeSummary ? (
@@ -221,9 +226,17 @@ function WorkbenchShell() {
                 ) : selectedId ? (
                   <WorkspaceView />
                 ) : !allReqList || defaultId ? (
-                  <p className="muted" role={reqListError && !allReqList ? "alert" : "status"}>
-                    {t(language, reqListError && !allReqList ? "home.loadFailed" : "app.loading")}
-                  </p>
+                  reqListError && !allReqList ? (
+                    <p className="muted" role="alert">
+                      {t(language, "home.loadFailed")}
+                    </p>
+                  ) : (
+                    <WorkspaceLoadingState
+                      variant="workspace"
+                      selectedId={null}
+                      language={language}
+                    />
+                  )
                 ) : (
                   <EmptyRequirementsCard hasHistory={allReqList.items.length > 0} />
                 )}

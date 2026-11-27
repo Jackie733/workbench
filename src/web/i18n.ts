@@ -18,6 +18,7 @@ export interface UiMessageRef {
 const zhCN = {
   "app.title": "Workbench — 规范与验证",
   "app.loading": "正在加载工作台…",
+  "app.loadingHint": "正在准备工作区、需求列表与项目状态",
   "app.authChecking": "正在检查工作台访问状态…",
   "app.dialogTitle": "对话框",
   "app.languageLabel": "界面语言",
@@ -214,6 +215,7 @@ const zhCN = {
   "home.emptyNew": "新建第一条需求",
   "home.viewAll": "查看全部需求",
   "home.loadFailed": "需求加载失败，请刷新页面重试。",
+  "home.listLoading": "正在加载需求列表…",
   "home.noMatch": "没有匹配“{query}”的需求",
   "home.clearSearch": "清除搜索",
   "home.sandboxesTitle": "并行 Worktree 沙箱与推荐合并顺序 ({count})",
@@ -1697,6 +1699,7 @@ export type MessageKey = keyof typeof zhCN;
 const en: Record<MessageKey, string> = {
   "app.title": "Workbench — Spec & Verification",
   "app.loading": "Loading workspace…",
+  "app.loadingHint": "Preparing workspace, requirements, and project state",
   "app.authChecking": "Checking workspace access…",
   "app.dialogTitle": "Dialog",
   "app.languageLabel": "Interface language",
@@ -1893,6 +1896,7 @@ const en: Record<MessageKey, string> = {
   "home.emptyNew": "Create the first requirement",
   "home.viewAll": "View all requirements",
   "home.loadFailed": "Couldn't load requirements. Refresh the page to try again.",
+  "home.listLoading": "Loading requirements…",
   "home.noMatch": "No requirements match “{query}”",
   "home.clearSearch": "Clear search",
   "home.sandboxesTitle": "Parallel Worktree Sandboxes & Merge Order ({count})",
