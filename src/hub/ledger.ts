@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getRequirement, listRequirements } from "../core/engine.ts";
-import { atomicWriteFile, resolveSafePath, withFileLockSync } from "../core/fs.ts";
+import { atomicWriteFile, canonicalRoot, resolveSafePath, withFileLockSync } from "../core/fs.ts";
 import {
   WORKBENCH_DIR,
   type AgentAction,
@@ -930,5 +930,296 @@ export function queryHubInsights(
         .map((id) => ({ id, label: formatQuotaPoolLabel(id) })),
       harnesses: Array.from(harnessSet.values()).sort(),
     },
+  };
+}
+
+export type TuningTrackBucket = "plan_first" | "fast_track" | "bug";
+
+export interface TuningGroupStats {
+  key: string;
+  acceptedCount: number;
+  cancelledCount: number;
+  inProgressCount: number;
+  totalRunsOnAccepted: number;
+  avgModelCallsPerAccepted: number | null;
+  /** Sum of observable totalTokens across runs with telemetry; null when no runs reported token usage. */
+  observableTokensTotal: number | null;
+  /** Average observable tokens per accepted requirement that had full telemetry; null when unknown. */
+  avgObservableTokensPerAccepted: number | null;
+  knownTokenRuns: number;
+  unknownTokenRuns: number;
+  /** Average elapsed ms from requirement creation to acceptance; null when no accepted items. */
+  avgTimeToAcceptMs: number | null;
+  /** Share of ever-accepted requirements that were later reopened; null when no ever-accepted items. */
+  reopenRateAfterAccept: number | null;
+  everAcceptedCount: number;
+  reopenedAfterAcceptCount: number;
+}
+
+export interface TuningReport {
+  generatedAt: number;
+  scannedProjects: string[];
+  totals: {
+    requirements: number;
+    accepted: number;
+    cancelled: number;
+    inProgress: number;
+    knownTokenRuns: number;
+    unknownTokenRuns: number;
+  };
+  byTrack: TuningGroupStats[];
+  byHarness: TuningGroupStats[];
+}
+
+interface ReqTuningMeta {
+  projectRoot: string;
+  id: string;
+  bucket: TuningTrackBucket;
+  stage: "planning" | "coding" | "done" | "cancelled";
+  createdAt: number;
+  acceptedAt: number | null;
+  everAccepted: boolean;
+  reopenedAfterAccept: boolean;
+  runs: Array<{ harness: string; totalTokens: number | null }>;
+}
+
+function summarizeTuningGroup(key: string, items: ReqTuningMeta[], harnessFilter?: string): TuningGroupStats {
+  let acceptedCount = 0;
+  let cancelledCount = 0;
+  let inProgressCount = 0;
+  let totalRunsOnAccepted = 0;
+  let knownTokenRuns = 0;
+  let unknownTokenRuns = 0;
+  let observableTokensSum = 0;
+  let acceptedWithAllKnownTokens = 0;
+  let acceptedKnownTokensSum = 0;
+  let timeToAcceptSum = 0;
+  let timeToAcceptCount = 0;
+  let everAcceptedCount = 0;
+  let reopenedAfterAcceptCount = 0;
+
+  for (const item of items) {
+    const runs = harnessFilter ? item.runs.filter((r) => r.harness === harnessFilter) : item.runs;
+    if (harnessFilter && runs.length === 0) continue;
+
+    if (item.stage === "done" && item.acceptedAt !== null) {
+      acceptedCount += 1;
+      totalRunsOnAccepted += runs.length;
+      if (item.acceptedAt >= item.createdAt) {
+        timeToAcceptSum += item.acceptedAt - item.createdAt;
+        timeToAcceptCount += 1;
+      }
+      let allKnown = runs.length > 0;
+      let reqTokens = 0;
+      for (const r of runs) {
+        if (r.totalTokens !== null) {
+          reqTokens += r.totalTokens;
+        } else {
+          allKnown = false;
+        }
+      }
+      if (allKnown) {
+        acceptedWithAllKnownTokens += 1;
+        acceptedKnownTokensSum += reqTokens;
+      }
+    } else if (item.stage === "cancelled") {
+      cancelledCount += 1;
+    } else {
+      inProgressCount += 1;
+    }
+
+    if (item.everAccepted) {
+      everAcceptedCount += 1;
+      if (item.reopenedAfterAccept) reopenedAfterAcceptCount += 1;
+    }
+
+    for (const r of runs) {
+      if (r.totalTokens !== null) {
+        knownTokenRuns += 1;
+        observableTokensSum += r.totalTokens;
+      } else {
+        unknownTokenRuns += 1;
+      }
+    }
+  }
+
+  return {
+    key,
+    acceptedCount,
+    cancelledCount,
+    inProgressCount,
+    totalRunsOnAccepted,
+    avgModelCallsPerAccepted: acceptedCount > 0 ? Number((totalRunsOnAccepted / acceptedCount).toFixed(2)) : null,
+    observableTokensTotal: knownTokenRuns > 0 ? observableTokensSum : null,
+    avgObservableTokensPerAccepted:
+      acceptedWithAllKnownTokens > 0 ? Math.round(acceptedKnownTokensSum / acceptedWithAllKnownTokens) : null,
+    knownTokenRuns,
+    unknownTokenRuns,
+    avgTimeToAcceptMs: timeToAcceptCount > 0 ? Math.round(timeToAcceptSum / timeToAcceptCount) : null,
+    reopenRateAfterAccept:
+      everAcceptedCount > 0 ? Number((reopenedAfterAcceptCount / everAcceptedCount).toFixed(4)) : null,
+    everAcceptedCount,
+    reopenedAfterAcceptCount,
+  };
+}
+
+/**
+ * WB-24 / FLOW §5 Tuning Verification:
+ * Joins `runs-ledger.jsonl` with per-project requirement states to compare accepted requirements by track
+ * (`plan_first` / `fast_track` / `bug`) and by harness, reporting missing token telemetry explicitly as unknown (`null`).
+ */
+export function computeTuningReport(options: { roots?: string[]; hubDir?: string } = {}): TuningReport {
+  const prevHubEnv = process.env.WORKBENCH_HUB_DIR;
+  if (options.hubDir) {
+    process.env.WORKBENCH_HUB_DIR = options.hubDir;
+  }
+  let ledgerEntries: RunLedgerEntry[] = [];
+  let hubCfgProjects: Array<{ root?: string }> = [];
+  try {
+    ledgerEntries = readRunLedger({});
+    try {
+      hubCfgProjects = readHubConfig().projects ?? [];
+    } catch {
+      hubCfgProjects = [];
+    }
+  } finally {
+    if (options.hubDir) {
+      if (prevHubEnv === undefined) delete process.env.WORKBENCH_HUB_DIR;
+      else process.env.WORKBENCH_HUB_DIR = prevHubEnv;
+    }
+  }
+  const ledgerByReqKey = new Map<string, Map<string, { harness: string; totalTokens: number | null }>>();
+  for (const entry of ledgerEntries) {
+    if (entry.status === "running") continue;
+    const normRoot =
+      entry.projectRoot && fs.existsSync(entry.projectRoot)
+        ? canonicalRoot(entry.projectRoot)
+        : path.resolve(entry.projectRoot);
+    const reqKey = `${normRoot}::${entry.requirementId}`;
+    let runMap = ledgerByReqKey.get(reqKey);
+    if (!runMap) {
+      runMap = new Map();
+      ledgerByReqKey.set(reqKey, runMap);
+    }
+    const tokens =
+      entry.usage && typeof entry.usage.totalTokens === "number" && Number.isFinite(entry.usage.totalTokens) && entry.usage.totalTokens > 0
+        ? entry.usage.totalTokens
+        : null;
+    runMap.set(entry.runId, { harness: entry.harness, totalTokens: tokens });
+  }
+
+  const candidateRoots = new Set<string>();
+  if (options.roots && options.roots.length > 0) {
+    for (const r of options.roots) candidateRoots.add(canonicalRoot(r));
+  } else {
+    for (const proj of hubCfgProjects) {
+      if (proj.root && fs.existsSync(path.join(proj.root, WORKBENCH_DIR))) {
+        candidateRoots.add(canonicalRoot(proj.root));
+      }
+    }
+    for (const entry of ledgerEntries) {
+      if (entry.projectRoot && fs.existsSync(path.join(entry.projectRoot, WORKBENCH_DIR))) {
+        candidateRoots.add(canonicalRoot(entry.projectRoot));
+      }
+    }
+  }
+
+  const items: ReqTuningMeta[] = [];
+  const harnessSet = new Set<string>();
+  const scannedProjects = Array.from(candidateRoots).sort();
+
+  for (const root of scannedProjects) {
+    let summaries: ReturnType<typeof listRequirements> = [];
+    try {
+      summaries = listRequirements(root, { scope: "all" });
+    } catch {
+      continue;
+    }
+    for (const sum of summaries) {
+      try {
+        const detail = getRequirement(root, sum.id);
+        const { state } = detail;
+        const bucket: TuningTrackBucket =
+          state.kind === "bug" ? "bug" : state.track === "fast_track" ? "fast_track" : "plan_first";
+
+        const reqKey = `${root}::${state.id}`;
+        const runMap = new Map<string, { harness: string; totalTokens: number | null }>(
+          ledgerByReqKey.get(reqKey) ?? [],
+        );
+        for (const r of state.agentRuns ?? []) {
+          if (r.status === "running") continue;
+          if (!runMap.has(r.id)) {
+            const tokens =
+              r.usage && typeof r.usage.totalTokens === "number" && Number.isFinite(r.usage.totalTokens) && r.usage.totalTokens > 0
+                ? r.usage.totalTokens
+                : null;
+            runMap.set(r.id, { harness: r.harness, totalTokens: tokens });
+          }
+        }
+        const runs = Array.from(runMap.values());
+        for (const r of runs) harnessSet.add(r.harness);
+
+        let sawAccepted = Boolean(state.acceptance);
+        let reopenedAfterAccept = false;
+        let seenAcceptInTimeline = false;
+        for (const ev of state.timeline) {
+          if (ev.kind === "accepted") {
+            sawAccepted = true;
+            seenAcceptInTimeline = true;
+          } else if (ev.kind === "reopened" && seenAcceptInTimeline) {
+            reopenedAfterAccept = true;
+          }
+        }
+
+        items.push({
+          projectRoot: root,
+          id: state.id,
+          bucket,
+          stage: state.stage,
+          createdAt: state.createdAt,
+          acceptedAt: state.acceptance?.acceptedAt ?? null,
+          everAccepted: sawAccepted,
+          reopenedAfterAccept,
+          runs,
+        });
+      } catch {
+        // Skip corrupt items cleanly.
+      }
+    }
+  }
+
+  const tracks: TuningTrackBucket[] = ["plan_first", "fast_track", "bug"];
+  const byTrack = tracks.map((track) =>
+    summarizeTuningGroup(
+      track,
+      items.filter((i) => i.bucket === track),
+    ),
+  );
+  const byHarness = Array.from(harnessSet)
+    .sort()
+    .map((h) => summarizeTuningGroup(h, items, h));
+
+  let knownTokenRuns = 0;
+  let unknownTokenRuns = 0;
+  for (const item of items) {
+    for (const r of item.runs) {
+      if (r.totalTokens !== null) knownTokenRuns += 1;
+      else unknownTokenRuns += 1;
+    }
+  }
+
+  return {
+    generatedAt: Date.now(),
+    scannedProjects,
+    totals: {
+      requirements: items.length,
+      accepted: items.filter((i) => i.stage === "done" && i.acceptedAt !== null).length,
+      cancelled: items.filter((i) => i.stage === "cancelled").length,
+      inProgress: items.filter((i) => i.stage !== "cancelled" && !(i.stage === "done" && i.acceptedAt !== null)).length,
+      knownTokenRuns,
+      unknownTokenRuns,
+    },
+    byTrack,
+    byHarness,
   };
 }

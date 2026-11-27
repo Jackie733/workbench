@@ -13,6 +13,11 @@ export interface SandboxRecord {
   baseHead?: string;
   /** Latest codeSnapshotHash recorded right after a clean main-baseline sync in `done` stage. */
   lastCleanSyncFingerprint?: string;
+  /** Status of optional project worktree setupScript execution. */
+  setupStatus?: "ok" | "failed" | "skipped";
+  setupError?: string;
+  /** Gitignored local config files copied into this worktree on creation. */
+  copiedFiles?: string[];
   createdAt: number;
 }
 
@@ -61,6 +66,13 @@ export function readSandboxes(): Record<string, SandboxRecord> {
           ...(typeof rec.baseHead === "string" ? { baseHead: rec.baseHead } : {}),
           ...(typeof rec.lastCleanSyncFingerprint === "string"
             ? { lastCleanSyncFingerprint: rec.lastCleanSyncFingerprint }
+            : {}),
+          ...(rec.setupStatus === "ok" || rec.setupStatus === "failed" || rec.setupStatus === "skipped"
+            ? { setupStatus: rec.setupStatus }
+            : {}),
+          ...(typeof rec.setupError === "string" ? { setupError: rec.setupError } : {}),
+          ...(Array.isArray(rec.copiedFiles)
+            ? { copiedFiles: rec.copiedFiles.filter((f): f is string => typeof f === "string") }
             : {}),
           createdAt: rec.createdAt,
         };

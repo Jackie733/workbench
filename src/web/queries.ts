@@ -6,6 +6,7 @@ import type {
   AgentRunRecord,
   CascadeSyncItemResult,
   RequirementDetail,
+  RequirementKind,
   RequirementTier,
   RunTraceEvent,
   SandboxDriftInfo,
@@ -734,6 +735,7 @@ export async function triggerActiveRun(
     anchorIds?: string[];
     mode?: "ask" | "refine";
     useFallback?: boolean;
+    forceFreshSession?: boolean;
     runnerActionKey?: AgentAction;
   },
 ): Promise<void> {
@@ -781,6 +783,7 @@ export async function triggerActiveRun(
       anchorIds: opts?.anchorIds,
       mode: opts?.mode,
       useFallback: opts?.useFallback,
+      forceFreshSession: opts?.forceFreshSession,
     });
   });
 
@@ -909,6 +912,7 @@ export function notifyCascadeSyncResults(results?: CascadeSyncItemResult[]): voi
   if (!results || results.length === 0) return;
   const ui = useUiStore.getState();
   const synced = results.filter((r) => r.status === "synced");
+  const drifted = results.filter((r) => r.status === "drifted");
   const conflicted = results.filter((r) => r.status === "conflict");
   if (conflicted.length > 0) {
     ui.showToastKey(
@@ -919,6 +923,11 @@ export function notifyCascadeSyncResults(results?: CascadeSyncItemResult[]): voi
       },
       true,
     );
+  } else if (drifted.length > 0) {
+    ui.showToastKey("home.cascadeDrifted", {
+      synced: synced.length,
+      drifted: drifted.map((d) => d.requirementId).join(", "),
+    });
   } else if (synced.length > 0) {
     ui.showToastKey("home.cascadeSynced", {
       count: synced.length,
@@ -995,7 +1004,164 @@ export async function dispatchSyncBaseWithAgent(
   await invalidateAllWorkbenchQueries();
 }
 
-export async function handleBannerAction(detail: RequirementDetail, actionId: string): Promise<void> {
+export async function reviseDecisionsAndDispatch(
+  id: string,
+  input: {
+    selections: Array<{ id: string; selectedOptionId?: string | null; customAnswer?: string | null }>;
+    expectedRevision: number;
+    dispatchAgent?: boolean;
+  },
+): Promise<boolean> {
+  if (guardRequirementRunLock(id)) return false;
+  const scope = resolveRunScope();
+  const ui = useUiStore.getState();
+  let requestStartedAt = 0;
+  const res = await runBusy(() => {
+    requestStartedAt = Date.now();
+    return api.reviseDecisions(id, input);
+  });
+  if (!res) return false;
+  useDraftStore.getState().clearPendingAnnotations();
+  if (res.run && res.target) {
+    useStreamStore.getState().setRunStarted(
+      {
+        ...res.run,
+        requirementId: id,
+        ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+      },
+      requestStartedAt,
+    );
+    ui.setDrawerOpen(true);
+    ui.setDrawerTab("console");
+  }
+  await invalidateAllWorkbenchQueries();
+  ui.showToastKey("decisions.revisedToast");
+  return true;
+}
+
+export async function dispatchDesignReview(reqId: string): Promise<void> {
+  if (guardRequirementRunLock(reqId)) return;
+  const scope = resolveRunScope();
+  const ui = useUiStore.getState();
+  let requestStartedAt = 0;
+  const res = await runBusy(() => {
+    requestStartedAt = Date.now();
+    return api.triggerDesignReview(reqId);
+  });
+  if (res) {
+    useStreamStore.getState().setRunStarted(
+      {
+        ...res.run,
+        requirementId: reqId,
+        ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+      },
+      requestStartedAt,
+    );
+    ui.setDrawerOpen(true);
+    ui.setDrawerTab("console");
+    ui.showToastKey("toast.runStarted", {
+      target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
+      action: "review",
+    });
+    await invalidateAllWorkbenchQueries();
+  }
+}
+
+export async function reviseFromDesignReview(detail: RequirementDetail): Promise<void> {
+  const id = detail.state.id;
+  if (guardRequirementRunLock(id)) return;
+  const report = detail.state.designReviewReport;
+  if (!report) return;
+  const lines: string[] = [
+    `请结合独立异构方案评审（${report.reviewerHarness}/${report.reviewerModel} · ${report.verdict}）的意见修订技术方案：`,
+    `核心结论：${report.summary}`,
+  ];
+  if (report.findings && report.findings.length > 0) {
+    lines.push("", "待修订方案要点：");
+    for (const f of report.findings.slice(0, 12)) {
+      lines.push(`- [${f.severity}] ${f.id} ${f.title}${f.detail ? `：${f.detail}` : ""}`);
+      if (f.suggestion) lines.push(`  建议：${f.suggestion}`);
+    }
+  }
+  const feedback = lines.join("\n").slice(0, 1950);
+  const res = await runBusy(() =>
+    api.requestChanges(id, {
+      feedback,
+      expectedRevision: detail.state.revision,
+    }),
+  );
+  if (res) {
+    await invalidateAllWorkbenchQueries();
+    await triggerActiveRun(id, "design", { message: feedback });
+  }
+}
+
+export async function openDeliverModal(
+  reqId: string,
+  opts?: { preferredMode?: "local" | "pr" | "local_merge" },
+): Promise<void> {
+  if (guardRequirementRunLock(reqId)) return;
+  const ui = useUiStore.getState();
+  const preview = await runBusy(() => api.getDelivery(reqId));
+  if (!preview) return;
+  const candidates = preview.candidates ?? [];
+  const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
+  const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
+  const deliveryMode = preview.sandboxActive
+    ? opts?.preferredMode === "pr" && preview.canCreatePr
+      ? "pr"
+      : preview.canMergeLocal
+        ? "local_merge"
+        : preview.canCreatePr
+          ? "pr"
+          : "local_merge"
+    : preview.canCommit
+      ? "local"
+      : preview.canCreatePr
+        ? "pr"
+        : "local";
+  ui.setModal({
+    kind: "deliver",
+    commitMessage: preview.suggestedMessage || `feat(${reqId.toLowerCase()}): deliver`,
+    selectedFiles: defaultSelected,
+    note: "",
+    createPr: deliveryMode === "pr",
+    deliveryMode,
+    branchName: preview.suggestedBranch ?? `feat/${reqId.toLowerCase()}`,
+    baseBranch: preview.baseBranch ?? "main",
+    prTitle: preview.suggestedPrTitle ?? reqId,
+  });
+}
+
+export async function rememberProjectLesson(
+  lesson: string,
+  source: "reject" | "accept" | "review_block" | "manual",
+  requirementId?: string,
+): Promise<boolean> {
+  const ui = useUiStore.getState();
+  const clean = lesson.trim();
+  if (!clean) return false;
+  const res = await runBusy(() =>
+    api.appendPlaybookLesson({
+      lesson: clean,
+      source,
+      ...(requirementId ? { requirementId } : {}),
+    }),
+  );
+  if (res) {
+    ui.showToastKey(res.added ? "playbook.savedToast" : "playbook.duplicateToast");
+    return true;
+  }
+  return false;
+}
+
+export async function handleBannerAction(
+  detail: RequirementDetail,
+  actionId: string,
+  opts?: { resetSandbox?: boolean; openDeliverAfter?: boolean; rememberLesson?: boolean; note?: string },
+): Promise<void> {
   const id = detail.state.id;
   if (guardRequirementRunLock(id)) return;
   const rev = detail.state.revision;
@@ -1008,7 +1174,12 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
     }
     case "approve":
     case "approve_only": {
-      const res = await runBusy(() => api.approve(id, { expectedRevision: rev }));
+      const res = await runBusy(() =>
+        api.approve(id, {
+          expectedRevision: rev,
+          ...(opts?.resetSandbox ? { resetSandbox: true } : {}),
+        }),
+      );
       if (res) {
         await invalidateAllWorkbenchQueries();
         ui.showToastKey("toast.approved", { id });
@@ -1019,6 +1190,7 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       const res = await runBusy(() =>
         api.approve(id, {
           expectedRevision: rev,
+          ...(opts?.resetSandbox ? { resetSandbox: true } : {}),
         }),
       );
       if (res) {
@@ -1056,6 +1228,10 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       await triggerActiveRun(id, "review");
       break;
     }
+    case "dispatch_design_review": {
+      await dispatchDesignReview(id);
+      break;
+    }
     case "dispatch_fix_review": {
       await dispatchFixFromReview(detail);
       break;
@@ -1068,6 +1244,14 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
       ui.setModal({
         kind: "feedback",
         feedback: "",
+        dispatchAgent: true,
+      });
+      break;
+    }
+    case "revise_plan": {
+      ui.setModal({
+        kind: "revise_plan",
+        reason: "",
         dispatchAgent: true,
       });
       break;
@@ -1091,8 +1275,10 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
           kind: "accept_override",
           verdict: "block",
           summary: detail.validity.acceptanceGate.blockers.join("；"),
-          reason: "",
+          reason: opts?.note?.trim() ?? "",
           acceptedRisks: detail.validity.acceptanceGate.blockers,
+          rememberLesson: Boolean(opts?.rememberLesson),
+          openDeliverAfter: Boolean(opts?.openDeliverAfter),
         });
         break;
       }
@@ -1107,15 +1293,26 @@ export async function handleBannerAction(detail: RequirementDetail, actionId: st
           kind: "accept_override",
           verdict: revState === "stale" ? "stale" : report.verdict,
           summary: report.summary,
-          reason: "",
+          reason: opts?.note?.trim() ?? "",
           acceptedRisks: (report.findings ?? []).map((f) => `[${f.severity}] ${f.id}: ${f.title}`),
+          rememberLesson: Boolean(opts?.rememberLesson),
+          openDeliverAfter: Boolean(opts?.openDeliverAfter),
         });
         break;
       }
-      const res = await runBusy(() => api.accept(id, { expectedRevision: rev }));
+      const res = await runBusy(() =>
+        api.accept(id, {
+          expectedRevision: rev,
+          ...(opts?.note?.trim() ? { note: opts.note.trim() } : {}),
+          ...(opts?.rememberLesson ? { rememberLesson: true, lessonText: opts.note?.trim() } : {}),
+        }),
+      );
       if (res) {
         await invalidateAllWorkbenchQueries();
         ui.showToastKey("toast.accepted", { id });
+        if (opts?.openDeliverAfter) {
+          await openDeliverModal(id, { preferredMode: "local_merge" });
+        }
       }
       break;
     }
@@ -1218,7 +1415,13 @@ export async function submitNewRequirement(
   dispatchAgent: boolean,
   createGitHubIssue?: boolean,
   attachmentIds: string[] = [],
-  sandboxOpts?: { createSandbox?: boolean; stackedOnReqId?: string; tier?: RequirementTier },
+  sandboxOpts?: {
+    createSandbox?: boolean;
+    stackedOnReqId?: string;
+    tier?: RequirementTier;
+    reqKind?: RequirementKind;
+    startImmediately?: boolean;
+  },
 ): Promise<void> {
   const goal = goalRaw.trim();
   const ui = useUiStore.getState();
@@ -1227,9 +1430,12 @@ export async function submitNewRequirement(
     ui.showToastKey("toast.needGoal", undefined, true);
     return;
   }
+  const isBugStart = sandboxOpts?.reqKind === "bug" && sandboxOpts?.startImmediately === true;
   const res = await runBusy(() =>
     api.createRequirement({
       goal,
+      ...(sandboxOpts?.reqKind ? { kind: sandboxOpts.reqKind } : {}),
+      ...(isBugStart ? { startImmediately: true } : {}),
       ...(sandboxOpts?.tier ? { tier: sandboxOpts.tier } : {}),
       ...(createGitHubIssue !== undefined ? { createGitHubIssue } : {}),
       ...(sandboxOpts?.createSandbox ? { createSandbox: true } : {}),
@@ -1262,7 +1468,7 @@ export async function submitNewRequirement(
     }
     await invalidateAllWorkbenchQueries();
     if (dispatchAgent) {
-      await triggerActiveRun(res.detail.state.id, "design");
+      await triggerActiveRun(res.detail.state.id, isBugStart ? "implement" : "design");
     }
   }
 }
@@ -1342,7 +1548,42 @@ export async function submitImportGiteeIssue(opts: {
   }
 }
 
-export async function submitFeedback(detail: RequirementDetail, feedbackRaw: string, dispatchAgent: boolean): Promise<void> {
+export async function submitRevisePlan(
+  detail: RequirementDetail,
+  reasonRaw: string,
+  dispatchAgent: boolean,
+): Promise<void> {
+  const reason = reasonRaw.trim();
+  const ui = useUiStore.getState();
+  const modalInstanceId = ui.modalInstanceId;
+  if (!reason) {
+    ui.showToastKey("toast.needReason", undefined, true);
+    return;
+  }
+  if (guardRequirementRunLock(detail.state.id)) return;
+  const res = await runBusy(() =>
+    api.revisePlan(detail.state.id, {
+      reason,
+      expectedRevision: detail.state.revision,
+    }),
+  );
+  if (res) {
+    ui.closeModal(modalInstanceId);
+    await invalidateAllWorkbenchQueries();
+    if (dispatchAgent) {
+      await triggerActiveRun(detail.state.id, "design", { message: reason });
+    } else {
+      ui.showToastKey("toast.planRevised");
+    }
+  }
+}
+
+export async function submitFeedback(
+  detail: RequirementDetail,
+  feedbackRaw: string,
+  dispatchAgent: boolean,
+  opts?: { rememberLesson?: boolean },
+): Promise<void> {
   const feedback = feedbackRaw.trim();
   const ui = useUiStore.getState();
   const modalInstanceId = ui.modalInstanceId;
@@ -1356,6 +1597,7 @@ export async function submitFeedback(detail: RequirementDetail, feedbackRaw: str
     api.requestChanges(detail.state.id, {
       feedback,
       expectedRevision: detail.state.revision,
+      ...(opts?.rememberLesson ? { rememberLesson: true, lessonText: feedback } : {}),
     }),
   );
   if (res) {
@@ -1374,11 +1616,13 @@ export async function submitAcceptOverride(
   verdict: "pass" | "concern" | "block" | "stale" | "missing",
   reasonRaw: string,
   acceptedRisks: string[],
+  opts?: { rememberLesson?: boolean; openDeliverAfter?: boolean },
 ): Promise<void> {
   const reason = reasonRaw.trim();
   const ui = useUiStore.getState();
   const modalInstanceId = ui.modalInstanceId;
-  if (verdict === "block" && !reason) {
+  const requiresReason = verdict === "block" || verdict === "stale";
+  if (requiresReason && !reason) {
     ui.showToastKey("toast.acceptOverrideReasonRequired", undefined, true);
     return;
   }
@@ -1388,12 +1632,16 @@ export async function submitAcceptOverride(
       expectedRevision: detail.state.revision,
       overrideReason: reason || "已人工确认并接受当前审查风险",
       ...(acceptedRisks.length > 0 ? { acceptedRisks } : {}),
+      ...(opts?.rememberLesson ? { rememberLesson: true, lessonText: reason || acceptedRisks[0] } : {}),
     }),
   );
   if (res) {
     ui.closeModal(modalInstanceId);
     await invalidateAllWorkbenchQueries();
     ui.showToastKey("toast.acceptOverrideDone", { id: detail.state.id });
+    if (opts?.openDeliverAfter) {
+      await openDeliverModal(detail.state.id, { preferredMode: "local_merge" });
+    }
   }
 }
 

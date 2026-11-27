@@ -113,30 +113,18 @@ flowchart TD
 
 ---
 
-### 2.3 分阶段模型路由矩阵与预设策略（Stage Routing Matrix）
+### 2.3 项目级 3 角色双档路由与默认触发策略（v6 Project-Level 3-Role Routing）
 
-Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上逐阶段自定义修改主模型、推理强度与备援链，并结合 L2 模型遥测账本在触发限流/配额耗尽后自动冷却 15 分钟顺延至健康备援），确保 **“规划与跨模型审查用强推理，高频编码与修 Bug 用大额度高速主力”**：
+Workbench Hub 在 v6 收敛中已彻底移除旧版按 4 阶段拆分的全局路由预设矩阵，改为按项目保存在 `.workbench/project.json` 中的 **3 角色极简路由**：
 
-#### A. 默认推荐：`balanced`（性价比均衡型 — 强烈推荐日常默认）
+| 路由角色 | 职责与执行阶段 | 备援与额度边界 |
+| :--- | :--- | :--- |
+| **`defaultLead`** | 常规档位（`tier: "standard"`）主力主程，端到端执行 `ask` / `design` / `implement` / `fix` | 仅在自身 `fallbacks` 链路内执行 429/不可用单跳容灾，绝不自动升级消耗 `sotaLead` 额度 |
+| **`sotaLead`** | 旗舰档位（`tier: "sota"`）主程，用于复杂架构攻坚或人类显式点击「升级 SOTA 主程接管」 | 仅由人类显式触发（新建/切换 `sota` 档位或一键升级接管）；备援严格限同档 `fallbacks` |
+| **`reviewer`** | 独立异构评审专家（优先选择与当前主程不同的 Harness），负责代码交付盲审与按需方案评审 | 编码后按轨道自动触发：`plan_first` 与 `kind: "bug"` 在必需验证通过后默认自动审查（受 `autoReview` 开关控制），常规 `feature + fast_track` 默认不自动审；方案评审在 `sota` 档位默认自动触发，常规需求可在审批页一键按需触发 |
 
-| 执行阶段 | 首选执行器与模型（Primary） | 备援链（Fallback Chain，自动/一键切换） | 额度与工程设计考量 |
-| :--- | :--- | :--- | :--- |
-| **`design`（架构与规范整理）** | `codex` · `gpt-6-astra`（`reasoning_effort: medium`） | 1. `agy` · `gemini-4-argon-high`<br>2. `qodercn` · `DeepSeek-V4-Pro`<br>3. `qodercn` · `Qwen4-Max` | **低频高价值**：出方案和拆验收条件一次仅需少数几轮对话，调用强推理模型可大幅减少后续返工 Token。 |
-| **`implement`（编码与自测）** | `qodercn` · `Qwen4-Max`（或 `Auto`） | 1. `opencode` · `opencode/deepseek-v4.1-flash-free`<br>2. `opencode` · `opencode/glm-5.3-flash-free`<br>3. `codex` · `gpt-6-luna` | **高频大吞吐**：编码阶段反复读写文件和跑测试，优先使用 QoderCN 与 OpenCode Go/Free 模型保护 ChatGPT Plus SOTA 额度。 |
-| **`fix`（诊断与自动自愈）** | 默认继承最近 `implement`/`fix` 会话；回退与 `implement` 同档路由 | 与 `implement` 同级候选链路 | **连续上下文零失忆**：保持原代码会话与推理强度继续修复失败或审查问题，避免弱模型切换与上下文重建损耗。 |
-| **`review`（跨模型交付审查）** | `codex` · `codex-auto-review`（或 `gpt-6.1-sol`） | 1. `qodercn` · `DeepSeek-Flash`<br>2. `agy` · `gemini-4-argon-medium`<br>3. `qodercn` · `DeepSeek-V4-Pro` | **异构交叉验收**：强制避免“同一模型自己写自己审”，由 ChatGPT Plus / QoderCN / Antigravity 独立审阅 Git Diff 与 Spec 一致性。 |
-
-#### B. 高上限攻坚：`sota_first`（复杂架构与关键核心改动）
-- **`design`**：`codex` · `gpt-6.1-sol`（`high`）→ 备援 `agy` · `gemini-4-hydrogen-high` → `qodercn` · `DeepSeek-V4-Pro`
-- **`implement`**：`codex` · `gpt-6-astra` → 备援 `qodercn` · `DeepSeek-V4-Pro` / `Qwen4-Max`
-- **`fix`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `codex` · `gpt-6.1-sol`
-- **`review`**：`agy` · `gemini-4-argon-high`（独立审查视角，避开与 Codex 同源）→ 备援 `qodercn` · `Qwen4-Max` / `codex` · `codex-auto-review`
-
-#### C. 极致省流：`quota_saver`（最大程度保留 SOTA 订阅额度）
-- **`design`**：`qodercn` · `DeepSeek-V4-Pro` → 备援 `agy` · `gemini-3.8-flash-medium` → `qodercn` · `Kimi-K3.1-Pro`
-- **`implement`**：`opencode` · `opencode/deepseek-v4.1-flash-free` → 备援 `opencode/glm-5.3-flash-free` → `qodercn` · `DeepSeek-Flash`
-- **`fix`**：`opencode` · `opencode/glm-5.3-flash-free` → 备援 `qodercn` · `DeepSeek-Flash` / `Qwen3.8-Flash`
-- **`review`**：`qodercn` · `Qwen4-Max` → 备援 `qodercn` · `DeepSeek-Flash` / `agy` · `gemini-3.8-flash-medium`
+- **项目级开关**：`autoReview`（默认 `true`，验证通过后自动触发独立异构代码审查与 `sota` 方案评审）与 `autoHeal`（默认 `true`，非环境类验证失败自动同档自愈最多 2 次，第 2 次强制 `fresh_handoff` 破局；`block` 审查自动闭环封顶 1 轮，耗尽后进入 `needs_human` 交人拍板）。
+- **冷却遥测**：结合 `~/.workbench-hub/telemetry/model-stats.json` 在触发限流/配额耗尽后自动冷却 15 分钟顺延至健康备援，并可通过 `scripts/tuning-report.ts` 按轨道（`plan_first` / `fast_track` / `bug`）与 Harness 对比调优。
 
 ---
 
@@ -202,7 +190,7 @@ Workbench Hub 内置 **三套开箱即用预设策略**（并支持在界面上�
 1. **左栏：项目切换器与算力路由入口（Sidebar，窄屏可折叠为抽屉）**
    - **已纳管项目列表**：显示项目名称、待拍板红点/数字（`awaiting_approval` / `awaiting_acceptance` / `blocked`）、以及后台是否正在运行 Agent（呼吸指示灯）。
    - **`+ 添加项目`（目录浏览器弹窗）**：支持直接输入路径或点击浏览本机目录，识别是否为 Git 仓库；若尚未初始化 `.workbench/`，提供一键「本机排除 / 随 Git 跟踪」初始化。
-   - **算力与路由中心入口**：直接展示各 Harness（`codex` / `qodercn` / `opencode` / `agy` / `omp`）的可用状态；点击进入配置中心切换 `balanced | sota_first | quota_saver` 预设、编辑各阶段主/备援模型、添加自定义模型并一键刷新探测。
+   - **算力与路由中心入口**：直接展示各 Harness（`codex` / `qodercn` / `opencode` / `agy` / `omp`）的可用状态；点击进入项目设置配置 `defaultLead / sotaLead / reviewer` 3 角色主/备援模型、`autoReview` / `autoHeal` 开关、Worktree 沙箱引导项并一键刷新探测。
 
 2. **中栏：项目首页（Mission Control）与需求工作区（Workspace）**
    - **项目首页**：顶部搜索 + 四段式范围筛选（活跃 / 待拍板 / 已完成 / 全部，含计数与待拍板告警） + 动态「待你拍板」区 + 布局切换（干净列表与四栏只读看板）+ `+ 新建需求`（一句话创建后可直接选模型执行）。

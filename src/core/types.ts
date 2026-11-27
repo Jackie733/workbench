@@ -67,6 +67,9 @@ export type Stage = (typeof STAGES)[number];
 export const TRACKS = ["plan_first", "fast_track"] as const;
 export type Track = (typeof TRACKS)[number];
 
+export const REQUIREMENT_KINDS = ["feature", "bug"] as const;
+export type RequirementKind = (typeof REQUIREMENT_KINDS)[number];
+
 export const REQUIREMENT_TIERS = ["standard", "sota"] as const;
 export type RequirementTier = (typeof REQUIREMENT_TIERS)[number];
 
@@ -159,6 +162,15 @@ export interface ProjectVerificationConfig {
   autoScreenshots?: boolean;
 }
 
+export interface ProjectWorktreeConfig {
+  /** Default true for Git repos; set false to opt out of automatic worktree isolation on entering coding. */
+  enabled?: boolean;
+  /** Additional gitignored local files to copy into newly created worktrees (complements .worktreeinclude). */
+  copyFiles?: string[];
+  /** Optional shell command executed once inside a newly created worktree (e.g. offline install / CoW clone). */
+  setupScript?: string;
+}
+
 export interface ProjectMetadata {
   schemaVersion: typeof SCHEMA_VERSION;
   projectId: string;
@@ -170,22 +182,85 @@ export interface ProjectMetadata {
   github?: ProjectGitHubConfig;
   gitee?: ProjectGiteeConfig;
   verification?: ProjectVerificationConfig;
+  worktree?: ProjectWorktreeConfig;
   createdAt: number;
   updatedAt: number;
 }
+
+export type CriterionKind = "command" | "manual";
 
 export interface Criterion {
   id: string;
   description: string;
   required: boolean;
+  /** Execution mode: executable shell command (default when `command` is set) or human `manual` check. */
+  kind?: CriterionKind;
   command?: string;
+  /** Explicit human verification steps for `manual` criteria (WB-18 / FLOW §1.2). */
+  steps?: string;
+  /** True when auto-injected from generic project baseline command (e.g. fast_track / fallback) without requirement-specific test (WB-23). */
+  systemInjected?: boolean;
 }
 
 export interface CriterionInput {
   id?: string;
   description: string;
   required?: boolean;
+  kind?: CriterionKind;
   command?: string;
+  steps?: string;
+  systemInjected?: boolean;
+}
+
+export interface ManualCriterionCheck {
+  criterionId: string;
+  checked: boolean;
+  checkedAt: number;
+  specHash: string;
+  codeSnapshotHash: string;
+  note?: string;
+}
+
+export interface DecisionOption {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export interface DecisionItem {
+  id: string;
+  question: string;
+  context?: string;
+  options: DecisionOption[];
+  /** Selected preset option ID (persisted as user ticks options asynchronously). */
+  selectedOptionId?: string | null;
+  /** Freeform custom answer typed by human (triggers revision exit rather than direct approve). */
+  customAnswer?: string | null;
+  decidedAt?: number | null;
+}
+
+export interface AdoptedDecision {
+  id: string;
+  question: string;
+  answer: string;
+  optionId?: string;
+  optionLabel?: string;
+  adoptedAt: number;
+}
+
+export type NeedsHumanSource =
+  | "auto_heal_exhausted"
+  | "review_loop_exhausted"
+  | "agent_paused"
+  | "bug_pause"
+  | "env_failure";
+
+export interface NeedsHumanState {
+  reason: string;
+  reasonKey?: string;
+  source: NeedsHumanSource;
+  at: number;
 }
 
 export interface ApprovalRecord {
@@ -194,6 +269,8 @@ export interface ApprovalRecord {
   specHash: string;
   designVersion: number;
   designHash: string;
+  /** SHA-256 hash of adopted `humanDecisions` bound to this approval (WB-18). */
+  decisionsHash?: string;
   baselineHead: string | null;
   baselineFingerprint: string | null;
   note?: string;
@@ -425,7 +502,7 @@ export interface MergeOrderRecommendation {
 
 export interface CascadeSyncItemResult {
   requirementId: string;
-  status: "synced" | "up_to_date" | "conflict" | "error";
+  status: "synced" | "up_to_date" | "drifted" | "conflict" | "error";
   behindCount: number;
   driftStatus?: SandboxDriftStatus;
   conflictFiles?: string[];
@@ -444,6 +521,14 @@ export interface DeliveryPreview {
   aheadCommitsCount: number;
   canCommit: boolean;
   canCreatePr: boolean;
+  /** True when an accepted sandbox can be squashed and merged directly into local main (WB-20). */
+  canMergeLocal?: boolean;
+  /** Number of WIP checkpoint commits on the sandbox branch that will be squashed on delivery. */
+  wipCommitCount?: number;
+  /** True when the current content tree matches the accepted snapshot tree OID (WB-20 / FLOW §4.2). */
+  treeMatchesAcceptance?: boolean;
+  /** Human-readable reason when content tree or target base differs from acceptance. */
+  treeMismatchReason?: string | null;
   remoteProvider: GitRemoteProvider | null;
   baseBranch: string | null;
   githubRepo: string | null;
@@ -452,6 +537,9 @@ export interface DeliveryPreview {
   reason: string | null;
   suggestedMessage: string;
   suggestedBranch: string;
+  /** Deterministic zero-LLM-token pre-filled PR title and body (WB-20 / FLOW §4.2). */
+  suggestedPrTitle?: string;
+  suggestedPrBody?: string;
   candidates: DeliveryCandidateFile[];
   acceptedSnapshotFileCount: number;
   delivered: DeliveryRecord | null;
@@ -468,8 +556,12 @@ export type TimelineEventKind =
   | "approved"
   | "fast_tracked"
   | "changes_requested"
+  | "plan_revised"
   | "tier_changed"
   | "verified"
+  | "manual_checked"
+  | "decisions_updated"
+  | "needs_human"
   | "screenshots_captured"
   | "accepted"
   | "delivered"
@@ -488,7 +580,9 @@ export type TimelineEventKind =
   | "sub_requirements_spawned"
   | "agent_run_started"
   | "agent_run_finished"
-  | "agent_handoff";
+  | "agent_handoff"
+  | "design_review_submitted"
+  | "playbook_updated";
 
 export interface RequirementGitHubIssueLink {
   /** GitHub uses positive integer numbers (e.g. 42); Gitee uses alphanumeric ident (e.g. "I8ABCD"). */
@@ -544,6 +638,10 @@ export type RunDispatchReason =
   | "auto_fallback"
   | "auto_heal"
   | "auto_review"
+  | "auto_review_fix"
+  | "auto_re_review"
+  | "auto_design_review"
+  | "design_review"
   | "sota_escalate"
   | "conflict_resolve"
   | "refine"
@@ -805,6 +903,10 @@ export interface AgentRunRecord {
   specChanged?: boolean;
   specHashAfter?: string;
   codeChanged?: boolean;
+  /** True when an implement run exited cleanly with zero changes relative to baseline (zero-change guard). */
+  noCodeChange?: boolean;
+  /** Commit SHA of the automatic WIP checkpoint created at run end, when applicable. */
+  wipCommitHash?: string;
   tracePath?: string;
   contextPath?: string;
   traceTruncated?: boolean;
@@ -834,6 +936,24 @@ export interface ReviewReport {
   findings?: ReviewFinding[];
   reviewedSpecHash: string;
   reviewedCodeSnapshotHash: string;
+  /** Git HEAD commit SHA reviewed (e.g. WIP checkpoint), enabling exact incremental re-review diffs. */
+  reviewedCommit?: string;
+  /** Native reviewer CLI session ID, enabling same-harness same-model session resume on automatic re-review. */
+  reviewerSessionId?: string;
+  reviewedAt: number;
+}
+
+/** Independent heterogeneous design review report bound to specHash + designHash (WB-22 / FLOW §1.3). */
+export interface DesignReviewReport {
+  id: string;
+  reviewerHarness: string;
+  reviewerModel: string;
+  verdict: ReviewVerdict;
+  summary: string;
+  markdown: string;
+  findings?: ReviewFinding[];
+  reviewedSpecHash: string;
+  reviewedDesignHash: string;
   reviewedAt: number;
 }
 
@@ -901,14 +1021,28 @@ export interface RequirementState {
   id: string;
   parentId?: string;
   title: string;
+  /** Immutable original user input saved at creation time and pinned verbatim above spec.md (WB-18 / FLOW §1.1). */
+  originalGoal?: string;
   stage: Stage;
   track: Track;
+  /** Requirement kind: feature (default for legacy items) or bug (WB-21 / FLOW §1B). */
+  kind?: RequirementKind;
   tier: RequirementTier;
   revision: number;
   specHash: string;
   designVersion: number;
   designHash: string;
   criteria: Criterion[];
+  /** Human manual criterion verification checkoffs bound to specHash + codeSnapshotHash (WB-18). */
+  manualChecks?: ManualCriterionCheck[];
+  /** Structured unresolved design decisions proposed by agent for inline human sign-off (WB-18). */
+  pendingDecisions?: DecisionItem[];
+  /** Authoritative human decisions adopted during planning and shared with coding/fixing/review (WB-18). */
+  humanDecisions?: AdoptedDecision[];
+  /** Explicit human takeover escalation when auto-heal or review-fix loop exhausts its budget (WB-19). */
+  needsHuman?: NeedsHumanState | null;
+  /** True when human triggered revisePlan (coding -> planning) so re-approval can offer sandbox reset (WB-19). */
+  revisedFromCoding?: boolean;
   approval: ApprovalRecord | null;
   acceptance: AcceptanceRecord | null;
   delivery?: DeliveryRecord | null;
@@ -924,6 +1058,8 @@ export interface RequirementState {
   discussions?: DiscussionEntry[];
   agentRuns?: AgentRunRecord[];
   reviewReport?: ReviewReport | null;
+  /** Independent heterogeneous design review report; strictly isolated from coding `reviewReport` (WB-22). */
+  designReviewReport?: DesignReviewReport | null;
   github?: RequirementGitHubLink | null;
   /** 可选附件元数据；旧数据无该字段时行为不变。 */
   attachments?: AttachmentMeta[];
@@ -1036,11 +1172,13 @@ export type ActionId =
   | "approve_and_implement"
   | "approve_only"
   | "request_changes"
+  | "revise_plan"
   | "dispatch_implement"
   | "run_all_verifications"
   | "dispatch_fix"
   | "escalate_sota"
   | "dispatch_review"
+  | "dispatch_design_review"
   | "dispatch_fix_review"
   | "sync_base"
   | "accept"
@@ -1070,12 +1208,22 @@ export interface ReviewValidity {
   reasonKey?: string;
 }
 
+export interface DesignReviewValidity {
+  effectiveState: "current" | "stale" | "missing";
+  reason: string | null;
+  reasonKey?: string;
+}
+
 export interface ValidityReport {
   approval: ApprovalStatus;
   verifications: EvaluatedVerification[];
   coverage: CriteriaCoverage;
   acceptanceGate: AcceptanceGate;
   reviewValidity: ReviewValidity;
+  /** Validity of independent design review report against current specHash + designHash (WB-22). */
+  designReviewValidity?: DesignReviewValidity;
+  /** Honest signal when fast_track only passed system-injected generic baseline checks with no dedicated tests (WB-23). */
+  baselineOnlyWarning?: boolean;
   banner: ActionBanner;
   needsDecision: boolean;
   decisionReason: string | null;
@@ -1091,6 +1239,8 @@ export interface RequirementSummary {
   title: string;
   stage: Stage;
   track: Track;
+  /** Requirement kind: feature (default for legacy items) or bug (WB-21 / FLOW §1B). */
+  kind?: RequirementKind;
   tier: RequirementTier;
   revision: number;
   designVersion: number;

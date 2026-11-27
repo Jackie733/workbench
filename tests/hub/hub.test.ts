@@ -564,6 +564,7 @@ describe("REQ-013 AGY 启动参数按动作边界构建", () => {
         "stream-json",
         "--mode",
         "plan",
+        "--disable-slash-commands",
         "--model",
         "gemini-4-hydrogen-high",
         "--effort",
@@ -591,6 +592,7 @@ describe("REQ-013 AGY 启动参数按动作边界构建", () => {
         "--output-format",
         "stream-json",
         "--dangerously-skip-permissions",
+        "--disable-slash-commands",
         "--model",
         "gemini-4-hydrogen-high",
         "--effort",
@@ -614,6 +616,7 @@ describe("REQ-013 AGY 启动参数按动作边界构建", () => {
       "-p",
       "PROMPT_MARKER",
       "--dangerously-skip-permissions",
+      "--disable-slash-commands",
       "--model",
       "gpt-oss-120b-medium",
       "--effort",
@@ -1595,7 +1598,10 @@ printf 'done\\n'
     const sessionOf = (requirementId: string, runId: string) =>
       getRequirement(repo, requirementId).state.agentRuns?.find((r) => r.id === runId)?.nativeSessionId ?? null;
     const approveForImplementation = async (requirementId: string) => {
-      await propose(repo, requirementId, { designMarkdown: "# Design" });
+      await propose(repo, requirementId, {
+        designMarkdown: "# Design",
+        criteria: [{ id: "AC-1", description: "passes", required: true, command: "echo ok" }],
+      });
       await approveDesign(repo, requirementId);
     };
 

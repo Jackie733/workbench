@@ -187,9 +187,17 @@ describe("WB-01 core store and domain engine", () => {
     expect(approved.state.stage).toBe("coding");
     expect(approved.validity.approval.valid).toBe(true);
 
-    // If spec mutates after approval, approval MUST invalidate back to planning
+    // Agent cannot unilaterally mutate spec or revert coding -> planning; human spec drift invalidates approval back to planning
+    await expect(
+      propose(root, "REQ-001", {
+        specMarkdown: "支持中日英文错误提示",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+    expect(getRequirement(root, "REQ-001").state.stage).toBe("coding");
+
     const drifted = await propose(root, "REQ-001", {
       specMarkdown: "支持中日英文错误提示",
+      actor: "human",
     });
     expect(drifted.state.stage).toBe("planning");
     expect(drifted.state.approval).toBeNull();
@@ -209,12 +217,14 @@ describe("WB-01 core store and domain engine", () => {
     expect(fast.state.stage).toBe("coding");
     expect(fast.validity.approval.valid).toBe(true);
 
-    // If agent changes criteria during fast_track, it must drop back to planning
-    const tampered = await propose(root, "REQ-001", {
-      criteria: [{ id: "AC-1", description: "放宽条件", required: false }],
-    });
-    expect(tampered.state.stage).toBe("planning");
-    expect(tampered.state.approval).toBeNull();
+    // If agent tries to tamper with criteria during fast_track, it is rejected with invalid_transition (FLOW §1.5)
+    await expect(
+      propose(root, "REQ-001", {
+        criteria: [{ id: "AC-1", description: "放宽条件", required: false }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+    expect(getRequirement(root, "REQ-001").state.stage).toBe("coding");
+    expect(getRequirement(root, "REQ-001").validity.approval.valid).toBe(true);
 
     // However, if a requirement started on fast_track with ZERO criteria, agent populating initial criteria preserves fast_track coding stage
     await createRequirement(root, { goal: "输出 hello 脚本" });
@@ -461,9 +471,8 @@ describe("WB-01 core store and domain engine", () => {
     expect(approved.state.stage).toBe("coding");
     const approvedHash = approved.state.approval!.designHash;
 
-    // Adding a criterion or enriching designMarkdown while preserving all required criteria keeps approval valid.
+    // Adding a criterion while preserving all required criteria and design keeps approval valid.
     const refined = await propose(dir, "REQ-001", {
-      designMarkdown: "# Design\n\nInitial plan.\n\n## Edge Case Notes\nAdded detail.",
       criteria: [
         { id: "AC-1", description: "passes core tests", command: "bun test", required: true },
         { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
@@ -472,29 +481,43 @@ describe("WB-01 core store and domain engine", () => {
     });
     expect(refined.state.stage).toBe("coding");
     expect(refined.state.approval).not.toBeNull();
-    expect(refined.state.approval?.designHash).not.toBe(approvedHash);
 
-    // Mutating an existing required criterion's command or description drops approval back to planning.
-    const cmdTamper = await propose(dir, "REQ-001", {
-      criteria: [
-        { id: "AC-1", description: "passes core tests", command: "echo ok", required: true },
-        { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
-      ],
-      actor: "agent",
-    });
-    expect(cmdTamper.state.stage).toBe("planning");
-    expect(cmdTamper.state.approval).toBeNull();
+    // Agent attempting breaking edits (command mutation, design rewrite, or weakening required->optional) in coding
+    // MUST be rejected with invalid_transition instead of unilaterally reverting coding -> planning (FLOW §1.5).
+    await expect(
+      propose(dir, "REQ-001", {
+        criteria: [
+          { id: "AC-1", description: "passes core tests", command: "echo ok", required: true },
+          { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
+        ],
+        actor: "agent",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
 
-    // Re-approve before checking required: true -> false weakening.
-    await approveDesign(dir, "REQ-001");
-    const breaking = await propose(dir, "REQ-001", {
-      criteria: [
-        { id: "AC-1", description: "passes core tests", command: "echo ok", required: false },
-      ],
-      actor: "agent",
+    await expect(
+      propose(dir, "REQ-001", {
+        designMarkdown: "# Design\n\nRewritten in coding.",
+        actor: "agent",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+
+    await expect(
+      propose(dir, "REQ-001", {
+        criteria: [
+          { id: "AC-1", description: "passes core tests", command: "bun test", required: false },
+          { id: "AC-2", description: "passes typecheck", command: "bun run typecheck", required: true },
+        ],
+        actor: "agent",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+
+    // Human-initiated breaking edit (actor: "human") cleanly invalidates approval back to planning.
+    const humanBreaking = await propose(dir, "REQ-001", {
+      criteria: [{ id: "AC-1", description: "passes core tests", command: "echo ok", required: false }],
+      actor: "human",
     });
-    expect(breaking.state.stage).toBe("planning");
-    expect(breaking.state.approval).toBeNull();
+    expect(humanBreaking.state.stage).toBe("planning");
+    expect(humanBreaking.state.approval).toBeNull();
   });
 
   test("authorizeFastTrack auto-populates AC-1 when project.verification.fastCommand is configured", async () => {
@@ -511,6 +534,7 @@ describe("WB-01 core store and domain engine", () => {
         description: "项目快速基线验证通过",
         command: "npm run lint",
         required: true,
+        systemInjected: true,
       },
     ]);
   });
@@ -544,10 +568,10 @@ describe("WB-01 core store and domain engine", () => {
     await expect(spawnSubRequirements(dir, "REQ-001")).rejects.toThrow("已取消");
   });
 
-  test("preserves approval when agent updates design during coding after verifications pass", async () => {
+  test("blocks agent design rewrites during coding after verifications pass while allowing non-breaking criteria additions", async () => {
     const dir = makeTempProject();
     await initProject(dir, { name: "NonBreaking Acceptance" });
-    await createRequirement(dir, { goal: "待验收期更新交付说明不清空批准" });
+    await createRequirement(dir, { goal: "待验收期锁定已批准方案并支持非破坏性补充条件" });
 
     await propose(dir, "REQ-001", {
       designMarkdown: "# Design\n\nInitial plan.",
@@ -563,13 +587,24 @@ describe("WB-01 core store and domain engine", () => {
       currentCodeSnapshotHash: snap1,
     });
 
-    const updatedDesign = await propose(dir, "REQ-001", {
-      designMarkdown: "# Design\n\nInitial plan.\n\n## 交付说明\n已补充证据。",
+    await expect(
+      propose(dir, "REQ-001", {
+        designMarkdown: "# Design\n\nInitial plan.\n\n## 交付说明\n已补充证据。",
+        actor: "agent",
+        currentCodeSnapshotHash: snap1,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_transition" });
+
+    const withExtraCheck = await propose(dir, "REQ-001", {
+      criteria: [
+        { id: "AC-1", description: "ok", command: "echo ok", required: true },
+        { id: "AC-2", description: "交付说明已补充", required: false },
+      ],
       actor: "agent",
       currentCodeSnapshotHash: snap1,
     });
-    expect(updatedDesign.state.stage).toBe("coding");
-    expect(updatedDesign.state.approval).not.toBeNull();
+    expect(withExtraCheck.state.stage).toBe("coding");
+    expect(withExtraCheck.state.approval).not.toBeNull();
   });
 
   test("discoverProjectContext skips mutating --fix/--write scripts and prefers lint:check / test:local", () => {

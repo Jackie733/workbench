@@ -332,6 +332,7 @@ describe("exhaustive status icon maps", () => {
       "approve_only",
       "authorize_fast_track",
       "dispatch_design",
+      "dispatch_design_review",
       "dispatch_fix",
       "dispatch_fix_review",
       "dispatch_implement",
@@ -339,6 +340,7 @@ describe("exhaustive status icon maps", () => {
       "escalate_sota",
       "reopen",
       "request_changes",
+      "revise_plan",
       "run_all_verifications",
       "sync_base",
     ]);

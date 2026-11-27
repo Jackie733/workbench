@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resolveCodeRoot } from "../../src/core/sandbox.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import { ensureServerForProject, removeServerDiscovery } from "../../src/server/runtime.ts";
@@ -10,6 +11,13 @@ import type { GitHubCommandDeps } from "../../src/core/github.ts";
 
 const tempDirs: string[] = [];
 const runningServers: WorkbenchServerHandle[] = [];
+const origHubDir = process.env.WORKBENCH_HUB_DIR;
+
+beforeEach(() => {
+  const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-hub-"));
+  tempDirs.push(hubDir);
+  process.env.WORKBENCH_HUB_DIR = hubDir;
+});
 
 function initGitRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-srv-test-"));
@@ -36,6 +44,8 @@ afterEach(() => {
   while (runningServers.length > 0) {
     runningServers.pop()!.stop();
   }
+  if (origHubDir === undefined) delete process.env.WORKBENCH_HUB_DIR;
+  else process.env.WORKBENCH_HUB_DIR = origHubDir;
   while (tempDirs.length > 0) {
     fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -95,8 +105,11 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
         body: JSON.stringify({}),
       });
       expect(approveRes.status).toBe(200);
+      expect(approveRes.body.sandbox).toBeTruthy();
 
-      fs.writeFileSync(path.join(root, "main.ts"), "export const ready = true;\nexport const tested = 1;\n");
+      const codeRoot = resolveCodeRoot(root, "REQ-001");
+      expect(codeRoot).not.toBe(root);
+      fs.writeFileSync(path.join(codeRoot, "main.ts"), "export const ready = true;\nexport const tested = 1;\n");
       const diffRes = await apiJson(`${server.url}/api/requirements/REQ-001/diff`);
       expect(diffRes.status).toBe(200);
       expect((diffRes.body.changes as { diff: string }).diff).toContain("export const tested = 1");
@@ -275,7 +288,8 @@ describe("WB-04 local HTTP/WS server and omp bridge adapter", () => {
 
       await executeWorkbenchTool(root, "wb_propose", { id: req2Id, design: "# PR 方案" });
       await apiJson(`${server.url}/api/requirements/${req2Id}/approve`, { method: "POST", body: JSON.stringify({}) });
-      fs.writeFileSync(path.join(root, "index.ts"), "export const v = 2;\n");
+      const req2CodeRoot = resolveCodeRoot(root, req2Id);
+      fs.writeFileSync(path.join(req2CodeRoot, "index.ts"), "export const v = 2;\n");
       const verifyRes = await apiJson(`${server.url}/api/requirements/${req2Id}/verify`, {
         method: "POST",
         body: JSON.stringify({ command: "echo ok", criterionIds: ["AC-1"] }),

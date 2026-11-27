@@ -219,7 +219,6 @@ describe("Workbench v6 architecture convergence", () => {
     expect(longOut.record.outputPreview).toContain("TAIL_ERROR_MARKER");
 
     await propose(root, req.state.id, {
-      designMarkdown: "# Design",
       criteria: [
         { id: "AC-HEAVY", description: "heavy test", required: true, command: "bun test && echo heavy" },
         { id: "AC-FAST", description: "fast typecheck", required: true, command: "echo typecheck_fail && exit 1" },

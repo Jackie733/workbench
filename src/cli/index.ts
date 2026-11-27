@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  appendBugRegressionCriteria,
   createRequirement,
   getProjectStatus,
   getRequirement,
@@ -32,6 +33,7 @@ import {
   type CriterionInput,
   type OutputLanguage,
   type PrivacyMode,
+  type RequirementKind,
   type ReviewVerdict,
 } from "../core/types.ts";
 import { discoverHarnessesQuick } from "../hub/discovery.ts";
@@ -748,11 +750,18 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const goal = readValueOrFile(goalRaw);
         const titleFlag = parsed.flags.get("title");
         const parentFlag = parsed.flags.get("parent");
+        const kindFlag = parsed.flags.get("kind");
+        const kind: RequirementKind | undefined =
+          kindFlag === "bug" ? "bug" : kindFlag === "feature" ? "feature" : undefined;
+        if (typeof kindFlag === "string" && kindFlag !== "bug" && kindFlag !== "feature") {
+          throw new WorkbenchError("invalid_input", `无效的 kind: ${kindFlag}（应为 feature 或 bug）`);
+        }
         const attachmentIds = stageCliAttachments(parsed.attachments);
         let detail: Awaited<ReturnType<typeof createRequirement>>;
         try {
           detail = await createRequirement(root, {
             goal,
+            ...(kind ? { kind } : {}),
             title: typeof titleFlag === "string" ? titleFlag : undefined,
             parentId: typeof parentFlag === "string" ? parentFlag : undefined,
             track: parsed.flags.get("fast-track") === true ? "fast_track" : "plan_first",
@@ -766,6 +775,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         printResult(
           {
             id: detail.state.id,
+            kind: detail.state.kind ?? "feature",
             ...(detail.state.parentId ? { parentId: detail.state.parentId } : {}),
             title: detail.state.title,
             stage: detail.state.stage,
@@ -821,6 +831,33 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
 
         const res = await executeWorkbenchTool(root, "wb_propose", payload);
         printResult(res, asJson);
+        return 0;
+      }
+
+      case "bug-criteria": {
+        const id = parsed.positionals[0];
+        if (!id) throw new WorkbenchError("invalid_input", "请提供需求编号，例如: wb bug-criteria REQ-001 --criteria '[...]'");
+        const criteriaFlag = parsed.flags.get("criteria");
+        if (typeof criteriaFlag !== "string") {
+          throw new WorkbenchError("invalid_input", "请通过 --criteria 提供要追加的回归测试验收条件 JSON 数组");
+        }
+        const criteria = parseJsonValue<CriterionInput[]>(criteriaFlag, "criteria");
+        const revision = parsed.flags.get("revision");
+        const snap = await observeGitSnapshot(resolveCodeRoot(root, id));
+        const detail = await appendBugRegressionCriteria(root, id, {
+          criteria,
+          actor: "agent",
+          ...(typeof revision === "string" ? { expectedRevision: Number(revision) } : {}),
+          currentCodeSnapshotHash: snap?.fingerprint ?? null,
+        });
+        printResult(
+          {
+            id: detail.state.id,
+            revision: detail.state.revision,
+            criteriaCount: detail.state.criteria.length,
+          },
+          asJson,
+        );
         return 0;
       }
 

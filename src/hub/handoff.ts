@@ -7,6 +7,7 @@ import {
   getProjectStatus,
   getRequirement,
   getVerificationEvidence,
+  readProjectPlaybook,
   saveHandoffMarkdown,
 } from "../core/engine.ts";
 import { observeGitChanges } from "../core/git.ts";
@@ -46,6 +47,13 @@ export interface ConflictHandoffContext {
   conflictExcerpt?: string;
 }
 
+export interface IncrementalReviewContext {
+  fromCommit: string;
+  files: string[];
+  diff: string;
+  truncated: boolean;
+}
+
 export interface HandoffSynthesisOptions {
   action: AgentAction;
   humanInstruction?: string;
@@ -55,6 +63,10 @@ export interface HandoffSynthesisOptions {
   hubOutputLanguage?: OutputLanguage;
   resolveConflict?: boolean;
   conflictContext?: ConflictHandoffContext;
+  /** Target harness ID so CLIs that auto-read repo AGENTS.md/CLAUDE.md skip duplicate references. */
+  targetHarness?: string;
+  /** Exact incremental diff since the prior reviewed commit (`lastReviewCommit..HEAD`) for re-reviews. */
+  incrementalReview?: IncrementalReviewContext;
 }
 
 interface BudgetedSection {
@@ -88,6 +100,15 @@ function clipTextByBytes(text: string, maxBytes: number, suffix = ""): string {
   return `${sanitizeOutput(text, maxBytes - suffixBytes).text.trimEnd()}${suffix}`;
 }
 
+/** Output order keeps static/stable contract sections FIRST and dynamic latest feedback/failures LAST for prompt cache reuse. */
+const CACHE_FRIENDLY_SECTION_ORDER: Record<string, number> = {
+  contract: 1,
+  git: 2,
+  trace: 3,
+  failures: 4,
+  steering: 5,
+};
+
 function assembleBudgetedPacket(
   headerText: string,
   sections: BudgetedSection[],
@@ -99,8 +120,11 @@ function assembleBudgetedPacket(
   }
   const trimmedKeys = new Set<string>();
 
+  const orderedForOutput = [...sections].sort(
+    (a, b) => (CACHE_FRIENDLY_SECTION_ORDER[a.key] ?? 99) - (CACHE_FRIENDLY_SECTION_ORDER[b.key] ?? 99),
+  );
   const joinAll = () =>
-    [headerText, ...sections.map((s) => s.text).filter((t) => t.trim().length > 0)].join("\n");
+    [headerText, ...orderedForOutput.map((s) => s.text).filter((t) => t.trim().length > 0)].join("\n");
 
   let assembled = joinAll();
   if (Buffer.byteLength(assembled, "utf8") > maxBytes) {
@@ -269,8 +293,15 @@ export async function synthesizeHandoffPacket(
       `- **父架构需求**：\`${state.parentId}\`（父方案参考：\`${WORKBENCH_DIR}/items/${state.parentId}/design.md\`）`,
     );
   }
-  if (projectContext.archDocs.length > 0) {
-    const docSummary = projectContext.archDocs
+  const autoReadsRepoInstructions = Boolean(
+    options.targetHarness &&
+      ["codex", "qodercn", "opencode", "agy", "omp"].includes(options.targetHarness),
+  );
+  const effectiveArchDocs = autoReadsRepoInstructions
+    ? projectContext.archDocs.filter((doc) => doc.path !== "AGENTS.md" && doc.path !== "CLAUDE.md")
+    : projectContext.archDocs;
+  if (effectiveArchDocs.length > 0) {
+    const docSummary = effectiveArchDocs
       .map((doc) =>
         doc.headings.length > 0 ? `\`${doc.path}\`（${doc.headings.slice(0, 4).join(" / ")}）` : `\`${doc.path}\``,
       )
@@ -320,11 +351,17 @@ export async function synthesizeHandoffPacket(
     Boolean(review) &&
     (review!.verdict !== "pass" || options.action === "fix" || options.action === "implement");
   const includeReReviewPriorChecklist =
-    options.action === "review" && Boolean(review) && review!.verdict !== "pass";
+    options.action === "review" && state.stage !== "planning" && Boolean(review) && review!.verdict !== "pass";
+  const revisePlanDiffMatch =
+    options.action === "design"
+      ? /(?:^|\n)(## 退回修改方案前的代码改动现场（revisePlan）[\s\S]*?)(?=\n## (?!#)|$)/.exec(detail.handoffMarkdown)
+      : null;
+  const revisePlanDiffSection = revisePlanDiffMatch?.[1]?.trim() || "";
   const hasSteering =
     Boolean(options.resolveConflict) ||
     includeReviewDetail ||
     includeReReviewPriorChecklist ||
+    Boolean(revisePlanDiffSection) ||
     pendingNotes.length > 0 ||
     Boolean(state.lastFeedback) ||
     Boolean(options.humanInstruction?.trim());
@@ -463,6 +500,9 @@ export async function synthesizeHandoffPacket(
     } else {
       steerLines.push(...buildReviewLines(1600), ...buildHumanLines());
     }
+    if (revisePlanDiffSection) {
+      steerLines.push(clipTextByBytes(revisePlanDiffSection, 2000), "");
+    }
     sections.push({
       key: "steering",
       priority: 1,
@@ -551,7 +591,7 @@ export async function synthesizeHandoffPacket(
     }
   }
 
-  // Authoritative file pointers + criteria coverage
+  // Authoritative file pointers + adopted human decisions + criteria coverage
   const contractLines: string[] = [
     "## 权威文件指引与验收条件",
     `- **需求规范**：\`${itemDirHint}/spec.md\`（请用原生工具直接读取全文）`,
@@ -563,12 +603,26 @@ export async function synthesizeHandoffPacket(
     contractLines.push(`- **验证证据目录**：\`${itemDirHint}/evidence/\`（共 ${validity.verifications.length} 条记录）`);
   }
   contractLines.push("");
+  if (state.humanDecisions && state.humanDecisions.length > 0) {
+    contractLines.push("### 人类已采纳决策（权威裁决）");
+    contractLines.push("以下由人类在方案评审中明确拍板的结论具有最高权威，编码、修复与审查均须严格遵守：");
+    for (const dec of state.humanDecisions) {
+      const optSuffix = dec.optionId ? ` [\`${dec.optionId}\`]` : "";
+      contractLines.push(`- **${dec.id}** ${dec.question} → **${dec.answer}**${optSuffix}`);
+    }
+    contractLines.push("");
+  }
   if (validity.coverage.items.length > 0) {
     contractLines.push("### 验收条件状态");
     for (const item of validity.coverage.items) {
       const sym = item.state === "passed" ? "✓" : item.state === "failed" ? "×" : item.state === "stale" ? "⟳" : "○";
       const reqTag = item.criterion.required ? "必需" : "参考";
-      const cmdTag = item.criterion.command ? ` | 命令: \`${item.criterion.command}\`` : "";
+      const cmdTag =
+        item.criterion.kind === "manual"
+          ? ` | 人工核验${item.criterion.steps ? `: ${item.criterion.steps}` : ""}`
+          : item.criterion.command
+            ? ` | 命令: \`${item.criterion.command}\``
+            : "";
       contractLines.push(`- ${sym} **${item.criterion.id}** (${reqTag}, ${item.state}): ${item.criterion.description}${cmdTag}`);
     }
     contractLines.push("");
@@ -587,6 +641,17 @@ export async function synthesizeHandoffPacket(
       contractLines.push(`- ${meta.name}（${meta.mimeType}，${formatAttachmentSize(meta.size)}）：\`${absPath}\``);
     }
     contractLines.push("");
+  }
+  if (options.action !== "review") {
+    const playbook = readProjectPlaybook(root);
+    if (playbook.lessons.length > 0) {
+      contractLines.push("### 项目经验法则（`.workbench/playbook.md`）");
+      const recentLessons = playbook.lessons.slice(-12);
+      for (const lesson of recentLessons) {
+        contractLines.push(`- ${sanitizeOutput(lesson, 260).text}`);
+      }
+      contractLines.push("");
+    }
   }
   sections.push({
     key: "contract",
@@ -636,11 +701,22 @@ export async function synthesizeHandoffPacket(
       }
       const diffCmd = state.baseline?.head ? `git diff ${state.baseline.head}` : "git diff";
       gitLines.push(`- 完整代码差异请直接运行 \`${diffCmd}\`（工作区未暂存改动用 \`git status\` / \`git diff\`）。`);
+      if (options.action === "review" && options.incrementalReview) {
+        const inc = options.incrementalReview;
+        gitLines.push(
+          `- **本轮复审增量范围**：\`${inc.fromCommit.slice(0, 7)}..HEAD\`（共变更 ${inc.files.length} 个文件${inc.files.length > 0 ? `：${inc.files.slice(0, 12).map((f) => `\`${f}\``).join("、")}` : ""}）`,
+        );
+        if (inc.diff.trim()) {
+          gitLines.push("```diff");
+          gitLines.push(clipTextByBytes(inc.diff.trim(), 2400, "\n…（增量 Diff 已截断，请运行 git diff 查看完整内容）"));
+          gitLines.push("```");
+        }
+      }
     }
     gitLines.push("");
     sections.push({
       key: "git",
-      priority: 5,
+      priority: options.action === "review" && options.incrementalReview ? 2 : 5,
       text: gitLines.join("\n"),
       minText: gitChanges.isGitRepo
         ? `## Git 变更现场\n- HEAD: \`${gitChanges.head || "(unborn)"}\` | 变更文件数: ${gitChanges.files.length}\n`

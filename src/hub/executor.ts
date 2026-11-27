@@ -2,6 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { acquireCodeRootLock, type CodeRootLockLease } from "../core/code_lock.ts";
 import { discoverProjectContext } from "../core/context.ts";
 import {
   addDiscussion,
@@ -10,14 +11,22 @@ import {
   getProjectStatus,
   getRequirement,
   listRequirements,
+  recordDesignReviewReport,
   recordReviewReport,
   resolveDiscussions,
   saveAgentRunContext,
+  setRequirementNeedsHuman,
   startAgentRun,
 } from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot, isProcessAlive, readBoundedText, resolveSafePath } from "../core/fs.ts";
-import { extractMergeConflictContext, observeGitSnapshot } from "../core/git.ts";
+import {
+  extractMergeConflictContext,
+  hasMergeCommitsBetween,
+  isAncestorCommit,
+  observeGitSnapshot,
+  observeIncrementalDiff,
+} from "../core/git.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import {
   MAX_RUN_LOG_BYTES,
@@ -35,17 +44,21 @@ import {
 import { clipHeadTailUtf8, sanitizeOutput } from "../core/validate.ts";
 import { evaluateApproval } from "../core/validity.ts";
 import {
+  commitSandboxWipCheckpoint,
   inspectSandboxDrift,
   prepareSandboxConflictResolution,
   reconcileSandboxBaseline,
+  syncCleanSandboxBeforeFirstImplement,
   syncRequirementMirrorToSandbox,
 } from "../core/worktree.ts";
 import { discoverHarnesses, discoverHarnessesQuick, getLocalCatalogFingerprint } from "./discovery.ts";
-import { synthesizeHandoffPacket, type ConflictHandoffContext } from "./handoff.ts";
+import { synthesizeHandoffPacket, type ConflictHandoffContext, type IncrementalReviewContext } from "./handoff.ts";
 import {
   buildHarnessCommand,
+  buildHarnessIsolationEnv,
   buildOpencodeNonInteractiveConfig,
   ensureWbShim,
+  HARNESS_ISOLATION_MATRIX,
   isSessionExpiredError,
   NON_FATAL_FORM_CANCEL_RE,
   resolveRunTimeouts,
@@ -72,7 +85,9 @@ import type { HarnessId, HarnessInfo, HubObservabilityConfig, ModelTarget, Routi
 export { buildExecutionPrompt } from "./prompt.ts";
 export {
   buildHarnessCommand,
+  buildHarnessIsolationEnv,
   buildOpencodeNonInteractiveConfig,
+  HARNESS_ISOLATION_MATRIX,
   resolveRunTimeouts,
   type BuiltCommand,
   type CustomCommandBuilder,
@@ -131,6 +146,8 @@ export interface StartRunInput {
   useFallback?: boolean;
   autoFallbackAttempt?: number;
   autoHealAttempt?: number;
+  /** Tracks the bounded 1-round automatic `block -> fix -> verify -> re-review` cycle (0 or 1). */
+  reviewFixCycle?: number;
   forcePlainText?: boolean;
   forceFreshSession?: boolean;
   reviewFormatRescue?: { sessionId: string; harness: HarnessId; model: string; reasoningEffort?: ModelTarget["reasoningEffort"] };
@@ -163,6 +180,7 @@ interface ActiveJob {
   timedOut: boolean;
   timeoutReason: TimeoutReason | null;
   killTimer?: ReturnType<typeof setTimeout>;
+  lockLease?: CodeRootLockLease;
 }
 
 const ORPHAN_LEGACY_GRACE_MS = 5_000;
@@ -412,32 +430,60 @@ export class HubExecutor {
     const observability = prefs?.observability ?? cfg?.observability;
 
     const codeRoot = resolveCodeRoot(base, id);
-    let currentDetail = getRequirement(base, id, {
-      currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null,
-    });
-    if (input.action === "fix" && input.resolveConflict && currentDetail.state.stage === "done") {
-      currentDetail = await prepareSandboxConflictResolution(base, id);
-    }
-    if (input.action === "implement" || input.action === "fix") {
-      const stage = currentDetail.state.stage;
-      if (stage !== "coding") {
-        throw new WorkbenchError(
-          "approval_required",
-          `${id} 当前阶段（${stage}）不能执行 ${input.action}；必须先由人类批准方案或启用快速通道进入编码阶段`,
-        );
-      }
-      const approval = evaluateApproval(currentDetail.state);
-      if (!approval.valid) {
-        throw new WorkbenchError(
-          "approval_required",
-          `${id} 尚未获得有效方案批准：${approval.reason ?? "请先由人类批准方案"}`,
-        );
-      }
-    }
+    const lockMode =
+      input.action === "implement" || input.action === "fix"
+        ? ("write" as const)
+        : input.action === "ask" || input.action === "review"
+          ? ("read" as const)
+          : null;
+    const codeRootLockLease = lockMode
+      ? acquireCodeRootLock(codeRoot, lockMode, { kind: input.action, requirementId: id })
+      : undefined;
 
-    const tier = currentDetail.state.tier;
-    const runsList = currentDetail.state.agentRuns ?? [];
-    const prevRun = runsList.slice(-1)[0] ?? null;
+    try {
+      let currentDetail = getRequirement(base, id, {
+        currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null,
+      });
+      if (input.action === "fix" && input.resolveConflict && currentDetail.state.stage === "done") {
+        currentDetail = await prepareSandboxConflictResolution(base, id);
+      }
+      if (input.action === "implement" || input.action === "fix") {
+        const stage = currentDetail.state.stage;
+        if (stage !== "coding") {
+          throw new WorkbenchError(
+            "approval_required",
+            `${id} 当前阶段（${stage}）不能执行 ${input.action}；必须先由人类批准方案或启用快速通道进入编码阶段`,
+          );
+        }
+        const approval = evaluateApproval(currentDetail.state);
+        if (!approval.valid) {
+          throw new WorkbenchError(
+            "approval_required",
+            `${id} 尚未获得有效方案批准：${approval.reason ?? "请先由人类批准方案"}`,
+          );
+        }
+      }
+
+      // FLOW §2.1: before first `implement` on a clean isolated sandbox with zero ahead commits, auto fast-forward to latest main.
+      const preRunsList = currentDetail.state.agentRuns ?? [];
+      if (
+        input.action === "implement" &&
+        codeRoot !== base &&
+        !preRunsList.some((r) => r.action === "implement" || r.action === "fix")
+      ) {
+        const synced = await syncCleanSandboxBeforeFirstImplement(base, id, {
+          parentLeaseId: codeRootLockLease?.id,
+        }).catch(() => ({ synced: false }));
+        if (synced.synced) {
+          currentDetail = getRequirement(base, id, {
+            currentCodeSnapshotHash: (await observeGitSnapshot(codeRoot))?.fingerprint ?? null,
+          });
+        }
+      }
+
+      const tier = currentDetail.state.tier;
+      const runsList = currentDetail.state.agentRuns ?? [];
+      const prevRun = runsList.slice(-1)[0] ?? null;
 
     let sessionAffinityApplied = false;
     let override: Partial<ModelTarget> | null = input.reviewFormatRescue
@@ -564,6 +610,71 @@ export class HubExecutor {
       }
     }
 
+    const isDesignReview =
+      input.action === "review" &&
+      currentDetail.state.stage === "planning" &&
+      currentDetail.state.designHash !== "";
+
+    // WB-15: Native session resume and exact incremental re-review diff (`lastReviewCommit..HEAD`)
+    // ONLY when isolated worktree is active, reviewer harness+model match, prior context is healthy, and history is linear.
+    // Otherwise ALWAYS degrade cleanly to full diff (`baselineHead..HEAD`) + `fresh_handoff`.
+    let prevReviewRun: AgentRunRecord | null = null;
+    if (
+      input.action === "review" &&
+      !isDesignReview &&
+      !input.reviewFormatRescue &&
+      !input.forceFreshSession &&
+      !input.useFallback &&
+      codeRoot !== base
+    ) {
+      const priorReview = currentDetail.state.reviewReport;
+      const isCodingReviewRun = (r: AgentRunRecord) =>
+        r.action === "review" &&
+        r.dispatchReason !== "design_review" &&
+        r.dispatchReason !== "auto_design_review";
+      prevReviewRun =
+        (priorReview?.reviewerSessionId
+          ? [...runsList].reverse().find((r) => isCodingReviewRun(r) && r.nativeSessionId === priorReview.reviewerSessionId)
+          : null) ??
+        [...runsList].reverse().find((r) => isCodingReviewRun(r) && Boolean(r.nativeSessionId)) ??
+        null;
+    }
+    let canResumeReviewSession = Boolean(
+      prevReviewRun &&
+        prevReviewRun.harness === target.harness &&
+        prevReviewRun.model === target.model &&
+        isHealthyForNativeResume(prevReviewRun),
+    );
+
+    let incrementalReview: IncrementalReviewContext | undefined;
+    if (
+      canResumeReviewSession &&
+      currentDetail.state.reviewReport?.reviewedCommit
+    ) {
+      const prevCommit = currentDetail.state.reviewReport.reviewedCommit;
+      const curSnap = await observeGitSnapshot(codeRoot);
+      if (curSnap?.head && !curSnap.dirty) {
+        const isAnc = await isAncestorCommit(codeRoot, prevCommit, curSnap.head);
+        const hasMerges = isAnc ? await hasMergeCommitsBetween(codeRoot, prevCommit, "HEAD") : true;
+        const baselineHead = currentDetail.state.baseline?.head ?? null;
+        const baselineOk = !baselineHead || (await isAncestorCommit(codeRoot, baselineHead, prevCommit));
+        if (isAnc && !hasMerges && baselineOk) {
+          const inc = await observeIncrementalDiff(codeRoot, prevCommit);
+          if (inc.ok) {
+            incrementalReview = {
+              fromCommit: prevCommit,
+              files: inc.files,
+              diff: inc.diff,
+              truncated: inc.truncated,
+            };
+          }
+        }
+      }
+    }
+    if (!incrementalReview) {
+      canResumeReviewSession = false;
+    }
+
     const prevTail = prevRun ? (this.runLogs.get(prevRun.id) ?? undefined) : undefined;
     const {
       markdown: handoffMd,
@@ -579,22 +690,44 @@ export class HubExecutor {
       hubOutputLanguage,
       resolveConflict: input.resolveConflict,
       conflictContext,
+      targetHarness: target.harness,
+      incrementalReview,
     });
 
-    // Native session resume within the coding phase (implement <-> fix) and same-action retries.
-    // Design runs are NOT resumed into implement/fix so 50+ turns of planning exploration don't bloat coding context
-    // (authoritative planning output is already crystallized in spec.md and design.md).
+    // Native session resume within the coding phase (implement <-> fix), post-approval ask -> implement,
+    // same-action retries, and eligible same-harness same-model incremental re-reviews (WB-15).
+    // Design runs and pre-revisePlan runs are NEVER resumed across phases into implement/fix (FLOW §1.5).
+    const findLeadCodingRunForResume = (): AgentRunRecord | null => {
+      const approvedAt = currentDetail.state.approval?.approvedAt ?? 0;
+      const lastPlanRevisedAt = currentDetail.state.timeline.reduce(
+        (max, ev) => (ev.kind === "plan_revised" && ev.at > max ? ev.at : max),
+        0,
+      );
+      for (let idx = runsList.length - 1; idx >= 0; idx--) {
+        const r = runsList[idx]!;
+        if (r.action === "design") break;
+        if (lastPlanRevisedAt > 0 && r.startedAt < lastPlanRevisedAt) break;
+        if (r.action === "implement" || r.action === "fix") return r;
+      }
+      const askCutoff = Math.max(approvedAt, lastPlanRevisedAt);
+      for (let idx = runsList.length - 1; idx >= 0; idx--) {
+        const r = runsList[idx]!;
+        if (r.action === "design") break;
+        if (r.startedAt < askCutoff) break;
+        if (r.action === "ask") return r;
+      }
+      return null;
+    };
     const prevLeadRun =
       input.action === "review"
-        ? null
+        ? prevReviewRun
         : input.action === "implement" || input.action === "fix"
-          ? ([...runsList].reverse().find((r) => r.action === "implement" || r.action === "fix") ??
-            [...runsList].reverse().find((r) => r.action !== "review" && r.action !== "design") ??
-            null)
+          ? findLeadCodingRunForResume()
           : ([...runsList].reverse().find((r) => r.action === input.action) ?? null);
 
     const canResumeSameHarness = Boolean(
       input.reviewFormatRescue ||
+        canResumeReviewSession ||
         (!input.useFallback &&
           !input.forceFreshSession &&
           prevLeadRun &&
@@ -670,12 +803,13 @@ export class HubExecutor {
             fastCommand: projectContext.fastCommand,
             fullCommand: projectContext.fullCommand,
             previousSpecHash,
+            incrementalReviewFromCommit: incrementalReview?.fromCommit ?? null,
           },
         );
 
     const structuredJsonEnabled =
       !input.forcePlainText && !this.plainTextFallbackHarnesses.has(target.harness);
-    const allowResumeOnReview = Boolean(input.reviewFormatRescue);
+    const allowResumeOnReview = Boolean(input.reviewFormatRescue || canResumeReviewSession);
     const built = this.commandBuilder
       ? this.commandBuilder(target, {
           root: codeRoot,
@@ -771,6 +905,18 @@ export class HubExecutor {
     };
 
     const detail = await startAgentRun(base, id, record, snapshotBefore?.fingerprint ?? null);
+    if (
+      detail.state.needsHuman &&
+      (input.action === "implement" || input.action === "fix" || input.action === "design") &&
+      (dispatchReason === "user" ||
+        dispatchReason === "sota_escalate" ||
+        dispatchReason === "route_primary" ||
+        dispatchReason === "session_affinity" ||
+        dispatchReason === "manual_fallback" ||
+        dispatchReason === "refine")
+    ) {
+      await setRequirementNeedsHuman(base, id, null, snapshotBefore?.fingerprint ?? null).catch(() => null);
+    }
     if (codeRoot !== base) {
       syncRequirementMirrorToSandbox(base, id, codeRoot);
     }
@@ -860,6 +1006,7 @@ export class HubExecutor {
     const isReadOnly = input.action === "ask" || input.action === "review";
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
+      ...buildHarnessIsolationEnv(target.harness),
       PATH: `${shimBin}:${process.env.PATH ?? ""}`,
       WORKBENCH_ROOT: base,
       WORKBENCH_REQ_ID: id,
@@ -911,6 +1058,7 @@ export class HubExecutor {
       cancelled: false,
       timedOut: false,
       timeoutReason: null,
+      lockLease: codeRootLockLease,
     };
     this.activeJobs.set(runId, job);
     globalActiveRunIds.add(runId);
@@ -1061,199 +1209,278 @@ export class HubExecutor {
       clearTimeout(maxDurationTimer);
       if (livenessTimer) clearInterval(livenessTimer);
       if (job.killTimer) clearTimeout(job.killTimer);
-      this.activeJobs.delete(runId);
-      globalActiveRunIds.delete(runId);
 
-      if (stdoutLineBuf.trim()) {
-        handleAdapterResult(streamAdapter.feedLine(stdoutLineBuf), false);
-        stdoutLineBuf = "";
-      }
-      const flushed = streamAdapter.flush();
-      if (flushed) handleAdapterResult(flushed);
-
-      const endedAt = Date.now();
-      const durationMs = Math.max(0, endedAt - startedAt);
-      const assembledLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
-      let rawLog =
-        Buffer.byteLength(assembledLog, "utf8") > MAX_RUN_LOG_BYTES
-          ? clipHeadTailUtf8(assembledLog, 1_500_000, 2_500_000).text
-          : assembledLog;
-      this.runLogs.set(runId, rawLog);
-
-      const rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
-      const modelUnavailable = !job.cancelled && !job.timedOut && detectModelUnavailableError(rawLog, exitCode);
-      const sessionExpired =
-        canResumeSameHarness &&
-        !input.forceFreshSession &&
-        !job.cancelled &&
-        !job.timedOut &&
-        !spawnErr &&
-        isSessionExpiredError(rawLog, exitCode);
-      const shouldRetryPlainText =
-        structuredJsonEnabled &&
-        !input.forcePlainText &&
-        !job.cancelled &&
-        !job.timedOut &&
-        !spawnErr &&
-        exitCode !== 0 &&
-        durationMs < 5000 &&
-        isUnsupportedJsonFlagError(rawLog);
-      if (shouldRetryPlainText) {
-        this.plainTextFallbackHarnesses.add(target.harness);
-      }
-
+      let status: AgentRunRecord["status"] = "failed";
+      let rateLimited = false;
+      let modelUnavailable = false;
+      let sessionExpired = false;
+      let shouldRetryPlainText = false;
       let snap: Awaited<ReturnType<typeof observeGitSnapshot>> = null;
       let latestReq: RequirementDetail | null = null;
-      try {
-        if (codeRoot !== base) {
-          await reconcileSandboxBaseline(base, id).catch(() => null);
-        }
-        snap = await observeGitSnapshot(codeRoot);
-        latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
-      } catch {
-        // Ignore git/requirement read errors during finalize pre-observation.
-      }
-
-      let status: AgentRunRecord["status"] = job.cancelled
-        ? "cancelled"
-        : exitCode === 0 && !spawnErr && !job.timedOut
-          ? "succeeded"
-          : "failed";
-      if (
-        status === "failed" &&
-        (input.action === "implement" || input.action === "fix") &&
-        !job.cancelled &&
-        !job.timedOut &&
-        !spawnErr &&
-        !rateLimited &&
-        !modelUnavailable &&
-        NON_FATAL_FORM_CANCEL_RE.test(rawLog.slice(-4096)) &&
-        latestReq &&
-        latestReq.state.stage === "coding" &&
-        latestReq.validity.acceptanceGate.ok &&
-        latestReq.state.updatedAt >= startedAt
-      ) {
-        status = "succeeded";
-        const note = "[workbench] 检测到 CLI 非致命交互表单取消退出码，但本轮已完成全部验证，按成功终态收尾。\n";
-        rawLog = `${rawLog}${rawLog.endsWith("\n") || !rawLog ? "" : "\n"}${note}`;
-        this.runLogs.set(runId, rawLog);
-      }
-
-      const replySource =
-        cleanReplyParts.join("\n\n").trim() ||
-        stdoutReplyTail.trim() ||
-        stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
-      const parsedReview =
-        status === "succeeded" && input.action === "review" ? parseReviewOutput(replySource) : null;
-      if (
-        parsedReview &&
-        parsedReview.verdict === "concern" &&
-        Array.isArray(parsedReview.findings) &&
-        parsedReview.findings.length > 0 &&
-        parsedReview.findings.every((f) => f.severity === "low")
-      ) {
-        parsedReview.verdict = "pass";
-      }
-      const reviewParseFailed = status === "succeeded" && input.action === "review" && parsedReview === null;
-      if (reviewParseFailed) status = "failed";
-
-      const invalidSessionTokens = new Set([
-        "string",
-        "number",
-        "boolean",
-        "undefined",
-        "null",
-        "object",
-        "unknown",
-        "default",
-        "canresumesameharness",
-      ]);
-      const sessMatches = Array.from(
-        rawLog.matchAll(/^(?:session id|session_id)\s*:\s*["']?([0-9a-f]{8}-[0-9a-f-]{27}|[A-Za-z0-9][A-Za-z0-9._-]{7,63})["']?\s*$/gim),
-      );
-      let matchedSessionId: string | undefined;
-      for (let i = sessMatches.length - 1; i >= 0; i--) {
-        const cand = sessMatches[i]![1]!;
-        if (!invalidSessionTokens.has(cand.toLowerCase())) {
-          matchedSessionId = cand;
-          break;
-        }
-      }
-      const nativeSessionId = capturedSessionId ?? matchedSessionId;
-      const canRescueReviewFormat =
-        reviewParseFailed &&
-        !input.reviewFormatRescue &&
-        Boolean(nativeSessionId) &&
-        replySource.length > 80;
-
-      const errorSummary =
-        status === "failed"
-          ? shouldRetryPlainText
-            ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
-            : sessionExpired
-              ? "原生会话已过期或不存在，已自动降级为全新交接重试"
-              : reviewParseFailed
-                ? canRescueReviewFormat
-                  ? "审查输出缺少结构化 JSON 结论块，正在自动补全格式化输出"
-                  : "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
-                : job.timedOut
-                  ? job.timeoutReason === "max_duration"
-                    ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
-                    : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
-                  : modelUnavailable
-                    ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
-                    : rateLimited
-                      ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
-                      : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
-          : undefined;
-      const codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
-
-      const appendFinalizeNote = (line: string) => {
-        emitCleanChunk(line);
-        rawLog = this.runLogs.get(runId) ?? rawLog;
-      };
-
-      // 1. File-Native Design Sync (inline ```workbench-criteria, skip duplicate propose)
-      if (status === "succeeded" && input.action === "design" && latestReq) {
-        latestReq = await syncDesignRunResult({
-          base,
-          codeRoot,
-          id,
-          latestReq,
-          preSpecMarkdown,
-          preDesignMarkdown,
-          codeChanged,
-          projectContext,
-          snapshotFingerprint: snap?.fingerprint ?? null,
-          appendNote: appendFinalizeNote,
-        });
-      }
-
-      // 2. Deterministic Post-Coding Gate (auto-verify + auto-screenshot + auto-heal signal)
+      let parsedReview: ReturnType<typeof parseReviewOutput> = null;
+      let reviewParseFailed = false;
+      let nativeSessionId: string | undefined;
+      let canRescueReviewFormat = false;
+      let errorSummary: string | undefined;
+      let rawLog = this.runLogs.get(runId) ?? "";
+      let endedAt = Date.now();
+      let durationMs = Math.max(0, endedAt - startedAt);
+      let codeChanged = false;
+      let wipCommitHash: string | undefined;
       let autoHealPending = false;
       let readyForReview = false;
-      if (
-        status === "succeeded" &&
-        (input.action === "implement" || input.action === "fix") &&
-        latestReq &&
-        !job.cancelled &&
-        !job.timedOut &&
-        !spawnErr &&
-        !rateLimited &&
-        !modelUnavailable
-      ) {
-        const gateResult = await runCodingPostGate({
-          base,
-          codeRoot,
-          id,
-          latestReq,
-          snap,
-          appendNote: appendFinalizeNote,
-        });
-        latestReq = gateResult.latestReq;
-        snap = gateResult.snap;
-        autoHealPending = gateResult.autoHealPending;
-        readyForReview = gateResult.readyForReview;
+      let noCodeChange = false;
+      let bugPausedReason: string | null = null;
+
+      try {
+        if (stdoutLineBuf.trim()) {
+          handleAdapterResult(streamAdapter.feedLine(stdoutLineBuf), false);
+          stdoutLineBuf = "";
+        }
+        const flushed = streamAdapter.flush();
+        if (flushed) handleAdapterResult(flushed);
+
+        endedAt = Date.now();
+        durationMs = Math.max(0, endedAt - startedAt);
+        const assembledLog = (this.runLogs.get(runId) ?? "") + (spawnErr ? `\n[spawn error] ${spawnErr}\n` : "");
+        rawLog =
+          Buffer.byteLength(assembledLog, "utf8") > MAX_RUN_LOG_BYTES
+            ? clipHeadTailUtf8(assembledLog, 1_500_000, 2_500_000).text
+            : assembledLog;
+        this.runLogs.set(runId, rawLog);
+
+        rateLimited = !job.cancelled && !job.timedOut && detectRateLimitOrQuotaError(rawLog, exitCode);
+        modelUnavailable = !job.cancelled && !job.timedOut && detectModelUnavailableError(rawLog, exitCode);
+        sessionExpired =
+          canResumeSameHarness &&
+          !input.forceFreshSession &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          isSessionExpiredError(rawLog, exitCode);
+        shouldRetryPlainText =
+          structuredJsonEnabled &&
+          !input.forcePlainText &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          exitCode !== 0 &&
+          durationMs < 5000 &&
+          isUnsupportedJsonFlagError(rawLog);
+        if (shouldRetryPlainText) {
+          this.plainTextFallbackHarnesses.add(target.harness);
+        }
+
+        try {
+          if (codeRoot !== base) {
+            await reconcileSandboxBaseline(base, id).catch(() => null);
+          }
+          snap = await observeGitSnapshot(codeRoot);
+          latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+        } catch {
+          // Ignore git/requirement read errors during finalize pre-observation.
+        }
+
+        status = job.cancelled
+          ? "cancelled"
+          : exitCode === 0 && !spawnErr && !job.timedOut
+            ? "succeeded"
+            : "failed";
+        if (
+          status === "failed" &&
+          (input.action === "implement" || input.action === "fix") &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          !rateLimited &&
+          !modelUnavailable &&
+          NON_FATAL_FORM_CANCEL_RE.test(rawLog.slice(-4096)) &&
+          latestReq &&
+          latestReq.state.stage === "coding" &&
+          latestReq.validity.acceptanceGate.ok &&
+          latestReq.state.updatedAt >= startedAt
+        ) {
+          status = "succeeded";
+          const note = "[workbench] 检测到 CLI 非致命交互表单取消退出码，但本轮已完成全部验证，按成功终态收尾。\n";
+          rawLog = `${rawLog}${rawLog.endsWith("\n") || !rawLog ? "" : "\n"}${note}`;
+          this.runLogs.set(runId, rawLog);
+        }
+
+        const replySource =
+          cleanReplyParts.join("\n\n").trim() ||
+          stdoutReplyTail.trim() ||
+          stripCliNoise(rawLog.replace(/^\$ .*\n/, ""));
+        parsedReview =
+          status === "succeeded" && input.action === "review" ? parseReviewOutput(replySource) : null;
+        if (
+          parsedReview &&
+          parsedReview.verdict === "concern" &&
+          Array.isArray(parsedReview.findings) &&
+          parsedReview.findings.length > 0 &&
+          parsedReview.findings.every((f) => f.severity === "low")
+        ) {
+          parsedReview.verdict = "pass";
+        }
+        reviewParseFailed = status === "succeeded" && input.action === "review" && parsedReview === null;
+        if (reviewParseFailed) status = "failed";
+
+        const invalidSessionTokens = new Set([
+          "string",
+          "number",
+          "boolean",
+          "undefined",
+          "null",
+          "object",
+          "unknown",
+          "default",
+          "canresumesameharness",
+        ]);
+        const sessMatches = Array.from(
+          rawLog.matchAll(/^(?:session id|session_id)\s*:\s*["']?([0-9a-f]{8}-[0-9a-f-]{27}|[A-Za-z0-9][A-Za-z0-9._-]{7,63})["']?\s*$/gim),
+        );
+        let matchedSessionId: string | undefined;
+        for (let i = sessMatches.length - 1; i >= 0; i--) {
+          const cand = sessMatches[i]![1]!;
+          if (!invalidSessionTokens.has(cand.toLowerCase())) {
+            matchedSessionId = cand;
+            break;
+          }
+        }
+        nativeSessionId = capturedSessionId ?? matchedSessionId;
+        canRescueReviewFormat =
+          reviewParseFailed &&
+          !input.reviewFormatRescue &&
+          Boolean(nativeSessionId) &&
+          replySource.length > 80;
+
+        errorSummary =
+          status === "failed"
+            ? shouldRetryPlainText
+              ? "CLI 不支持结构化 JSON 输出参数，已自动降级为纯文本模式重试"
+              : sessionExpired
+                ? "原生会话已过期或不存在，已自动降级为全新交接重试"
+                : reviewParseFailed
+                  ? canRescueReviewFormat
+                    ? "审查输出缺少结构化 JSON 结论块，正在自动补全格式化输出"
+                    : "审查输出缺少可解析的结构化结论（需在末尾输出 ```json {\"verdict\":\"pass|concern|block\",\"summary\":\"…\"} ```），未写入审查报告；请重跑跨模型审查"
+                  : job.timedOut
+                    ? job.timeoutReason === "max_duration"
+                      ? `执行超时（单次运行已达安全上限 ${Math.round(maxDurationMs / 1000)}s），已保留当前代码与会话进度，可直接继续执行接力完成`
+                      : `执行超时（连续 ${Math.round(idleTimeoutMs / 1000)}s 无输出或进展，疑似网络断流或命令挂起），建议检查代理或重试`
+                    : modelUnavailable
+                      ? `${target.harness}/${target.model} 模型不可用或未在当前 CLI 授权，已临时冷却并建议切换备援模型`
+                      : rateLimited
+                        ? `${target.harness}/${target.model} 疑似额度不足或触发限流，建议切换备援模型接力重试`
+                        : (spawnErr || rawLog.trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300) || `退出码 ${exitCode}`)
+            : undefined;
+        codeChanged = (snap?.fingerprint ?? null) !== (snapshotBefore?.fingerprint ?? null);
+
+        const appendFinalizeNote = (line: string) => {
+          emitCleanChunk(line);
+          rawLog = this.runLogs.get(runId) ?? rawLog;
+        };
+
+        // 0. Commit sandbox WIP checkpoint BEFORE checking bug_pause or running post-gate so partial edits persist cleanly.
+        if ((input.action === "implement" || input.action === "fix") && codeRoot !== base) {
+          try {
+            const wipRes = await commitSandboxWipCheckpoint(base, id, {
+              action: input.action,
+              runId,
+              status,
+              parentLeaseId: job.lockLease?.id,
+            });
+            if (wipRes.committed && wipRes.commitHash) {
+              wipCommitHash = wipRes.commitHash;
+              appendFinalizeNote(
+                `[workbench] 已自动提交沙箱 WIP 检查点 ${wipRes.commitHash.slice(0, 7)}（${wipRes.files.length} 个文件）。\n`,
+              );
+              snap = await observeGitSnapshot(codeRoot);
+              latestReq = getRequirement(base, id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
+            } else if (wipRes.commitHash) {
+              wipCommitHash = wipRes.commitHash;
+            }
+          } catch (err) {
+            appendFinalizeNote(
+              `[workbench] 自动提交沙箱 WIP 检查点跳过：${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
+
+        // WB-21 / FLOW §1B: detect explicit Bug pause marker (`workbench-pause`) BEFORE post-coding verification/autoHeal
+        // so intentional pauses (e.g. after writing a failing repro test requiring an architecture change) escalate directly.
+        if (
+          status === "succeeded" &&
+          (input.action === "implement" || input.action === "fix") &&
+          latestReq?.state.kind === "bug" &&
+          latestReq.state.stage === "coding" &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          !rateLimited &&
+          !modelUnavailable
+        ) {
+          const combinedText = `${cleanReplyParts.join("\n")}\n${stdoutReplyTail}\n${rawLog.slice(-4000)}`;
+          const pauseMatch = /```workbench-pause\s*\n([\s\S]*?)\n```/i.exec(combinedText);
+          if (pauseMatch) {
+            const blockBody = pauseMatch[1]!.trim();
+            try {
+              const parsedPause = JSON.parse(blockBody) as { reason?: unknown };
+              if (typeof parsedPause.reason === "string" && parsedPause.reason.trim()) {
+                bugPausedReason = sanitizeOutput(parsedPause.reason.trim(), 1000).text.trim();
+              }
+            } catch {
+              if (blockBody) bugPausedReason = sanitizeOutput(blockBody, 1000).text.trim();
+            }
+          }
+        }
+
+        // 1. File-Native Design Sync (inline ```workbench-criteria, skip duplicate propose)
+        if (status === "succeeded" && input.action === "design" && latestReq) {
+          latestReq = await syncDesignRunResult({
+            base,
+            codeRoot,
+            id,
+            latestReq,
+            preSpecMarkdown,
+            preDesignMarkdown,
+            codeChanged,
+            projectContext,
+            snapshotFingerprint: snap?.fingerprint ?? null,
+            appendNote: appendFinalizeNote,
+          });
+        }
+
+        // 2. Deterministic Post-Coding Gate (auto-verify + auto-screenshot + zero-change & env-failure guards)
+        if (
+          !bugPausedReason &&
+          status === "succeeded" &&
+          (input.action === "implement" || input.action === "fix") &&
+          latestReq &&
+          !job.cancelled &&
+          !job.timedOut &&
+          !spawnErr &&
+          !rateLimited &&
+          !modelUnavailable
+        ) {
+          const gateResult = await runCodingPostGate({
+            base,
+            codeRoot,
+            id,
+            action: input.action,
+            codeChanged,
+            lockLeaseId: job.lockLease?.id,
+            latestReq,
+            snap,
+            appendNote: appendFinalizeNote,
+          });
+          latestReq = gateResult.latestReq;
+          snap = gateResult.snap;
+          autoHealPending = gateResult.autoHealPending;
+          readyForReview = gateResult.readyForReview;
+          noCodeChange = gateResult.noCodeChange;
+        }
+      } finally {
+        job.lockLease?.release();
       }
 
       const specChanged = latestReq ? latestReq.state.specHash !== specHashBefore : false;
@@ -1284,17 +1511,33 @@ export class HubExecutor {
               message: answerText,
             });
           }
-        } else if (status === "succeeded" && input.action === "review" && snap?.fingerprint && parsedReview && latestReq) {
-          await recordReviewReport(base, id, {
-            reviewerHarness: target.harness,
-            reviewerModel: target.model,
-            verdict: parsedReview.verdict,
-            summary: parsedReview.summary,
-            markdown: parsedReview.markdown,
-            ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
-            reviewedSpecHash: latestReq.state.specHash,
-            reviewedCodeSnapshotHash: snap.fingerprint,
-          });
+        } else if (status === "succeeded" && input.action === "review" && parsedReview && latestReq) {
+          if (isDesignReview) {
+            await recordDesignReviewReport(base, id, {
+              reviewerHarness: target.harness,
+              reviewerModel: target.model,
+              verdict: parsedReview.verdict,
+              summary: parsedReview.summary,
+              markdown: parsedReview.markdown,
+              ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
+              reviewedSpecHash: latestReq.state.specHash,
+              reviewedDesignHash: latestReq.state.designHash,
+              currentCodeSnapshotHash: snap?.fingerprint ?? null,
+            });
+          } else if (snap?.fingerprint) {
+            await recordReviewReport(base, id, {
+              reviewerHarness: target.harness,
+              reviewerModel: target.model,
+              verdict: parsedReview.verdict,
+              summary: parsedReview.summary,
+              markdown: parsedReview.markdown,
+              ...(parsedReview.findings ? { findings: parsedReview.findings } : {}),
+              reviewedSpecHash: latestReq.state.specHash,
+              reviewedCodeSnapshotHash: snap.fingerprint,
+              ...(codeRoot !== base && snap.head && !snap.dirty ? { reviewedCommit: snap.head } : {}),
+              ...(nativeSessionId ? { reviewerSessionId: nativeSessionId } : {}),
+            });
+          }
         } else if (status === "succeeded" && (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0))) {
           if (input.anchorIds && input.anchorIds.length > 0) {
             await resolveDiscussions(base, id, { ids: input.anchorIds, resolved: true });
@@ -1331,6 +1574,8 @@ export class HubExecutor {
             specChanged,
             ...(latestReq?.state.specHash ? { specHashAfter: latestReq.state.specHash } : {}),
             codeChanged,
+            ...(noCodeChange ? { noCodeChange: true } : {}),
+            ...(wipCommitHash ? { wipCommitHash } : {}),
             tracePath: traceRelPath,
             contextPath: contextRelPath,
             ...(traceSummary.traceTruncated ? { traceTruncated: true } : {}),
@@ -1340,20 +1585,28 @@ export class HubExecutor {
           snap?.fingerprint ?? null,
         );
         postRunDetail = finishedDetail;
+        this.activeJobs.delete(runId);
+        globalActiveRunIds.delete(runId);
 
-        const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
-        await synthesizeHandoffPacket(base, id, {
-          action: input.action,
-          previousRun: lastRunObj,
-          previousLogTail: rawLog.slice(-1500),
-        });
-        if (codeRoot !== base) {
-          syncRequirementMirrorToSandbox(base, id, codeRoot);
+        if (!this.getActiveRuns(base).some((r) => r.requirementId === id)) {
+          const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
+          await synthesizeHandoffPacket(base, id, {
+            action: input.action,
+            previousRun: lastRunObj,
+            previousLogTail: rawLog.slice(-1500),
+            targetHarness: target.harness,
+          });
+          if (codeRoot !== base) {
+            syncRequirementMirrorToSandbox(base, id, codeRoot);
+          }
         }
       } catch (error) {
         console.error(
           `[workbench] finalize failed for ${id}/${runId}: ${error instanceof Error ? error.message : String(error)}`,
         );
+      } finally {
+        this.activeJobs.delete(runId);
+        globalActiveRunIds.delete(runId);
       }
 
       // Decoupled fire-and-forget telemetry & ledger sidecars
@@ -1499,6 +1752,8 @@ export class HubExecutor {
           requirementId: id,
           action: "review",
           isAutoReview: input.isAutoReview,
+          ...(input.reviewFixCycle !== undefined ? { reviewFixCycle: input.reviewFixCycle } : {}),
+          ...(input.dispatchReasonOverride ? { dispatchReasonOverride: input.dispatchReasonOverride } : {}),
           reviewFormatRescue: {
             sessionId: nativeSessionId,
             harness: target.harness,
@@ -1509,49 +1764,206 @@ export class HubExecutor {
         return;
       }
 
+      if (bugPausedReason && postRunDetail?.state.kind === "bug" && postRunDetail.state.stage === "coding") {
+        await setRequirementNeedsHuman(
+          base,
+          id,
+          { source: "bug_pause", reason: bugPausedReason, at: Date.now() },
+          snap?.fingerprint ?? null,
+        ).catch(() => null);
+        this.emit({ type: "workbench.updated", root: base, requirementId: id, runId, at: Date.now() });
+        return;
+      }
+
       const isHarnessRunnable = (hId: string, availHarnesses: HarnessInfo[]): boolean =>
         availHarnesses.some((h) => h.id === hId && h.installed) || Boolean(this.commandBuilder);
 
       // Deterministic Auto-Heal: strictly stays within the current tier (never silently escalates to SOTA).
+      // Anti-Loop (WB-16): 1st fix resumes native session; 2nd fix forces fresh_handoff to break fixation.
+      // During a review `block` remediation cycle (WB-14), cap test-failure rescue to at most 1 attempt.
       const healAttempt = input.autoHealAttempt ?? 0;
-      if (autoHealPending && healAttempt < MAX_AUTO_HEAL_ATTEMPTS) {
+      const reviewFixCycle = input.reviewFixCycle ?? 0;
+      const maxHealAttempts = reviewFixCycle > 0 ? 1 : MAX_AUTO_HEAL_ATTEMPTS;
+      if (autoHealPending && healAttempt < maxHealAttempts) {
         try {
           const latestRouting = this.resolveProjectRouting(base);
           if (latestRouting.autoHeal !== false && !alreadyRunning()) {
+            const nextHealAttempt = healAttempt + 1;
             void this.startRun({
               root: base,
               requirementId: id,
               action: "fix",
-              autoHealAttempt: healAttempt + 1,
+              autoHealAttempt: nextHealAttempt,
+              ...(reviewFixCycle > 0 ? { reviewFixCycle } : {}),
+              ...(nextHealAttempt >= 2 ? { forceFreshSession: true } : {}),
             }).catch(() => {});
             return;
           }
         } catch {
           // Ignore routing errors on auto-heal.
         }
+      } else if (autoHealPending && healAttempt >= maxHealAttempts && postRunDetail?.state.stage === "coding") {
+        // WB-19 / FLOW §3.1: explicitly escalate to `needs_human` once auto-heal or review-fix rescue budget is exhausted.
+        const blockersSummary = postRunDetail.validity.acceptanceGate.blockers.slice(0, 3).join("；");
+        const reason =
+          reviewFixCycle > 0
+            ? `审查阻断修复后的验证抢救已达上限（1 次）仍未通过${blockersSummary ? `：${blockersSummary}` : ""}`
+            : `自动自愈已达上限（${maxHealAttempts} 次）仍未通过验证${blockersSummary ? `：${blockersSummary}` : ""}`;
+        await setRequirementNeedsHuman(
+          base,
+          id,
+          {
+            source: reviewFixCycle > 0 ? "review_loop_exhausted" : "auto_heal_exhausted",
+            reason,
+            at: Date.now(),
+          },
+          snap?.fingerprint ?? null,
+        ).catch(() => null);
+        this.emit({
+          type: "workbench.updated",
+          root: base,
+          requirementId: id,
+          runId,
+          at: Date.now(),
+        });
       }
 
-      // One-shot blind cross-model review once plan_first coding passes verification.
+      // WB-22 / FLOW §1.3: SOTA tier automatically triggers 1 independent heterogeneous design review after design submission.
       if (
         status === "succeeded" &&
-        (input.action === "implement" || input.action === "fix") &&
-        readyForReview &&
+        input.action === "design" &&
         postRunDetail &&
-        postRunDetail.state.track !== "fast_track" &&
-        postRunDetail.state.stage === "coding" &&
-        postRunDetail.validity.acceptanceGate.ok &&
-        postRunDetail.validity.reviewValidity.effectiveState !== "current"
+        postRunDetail.state.stage === "planning" &&
+        postRunDetail.state.tier === "sota" &&
+        postRunDetail.state.designHash !== "" &&
+        !postRunDetail.state.lastFeedback &&
+        postRunDetail.validity.designReviewValidity?.effectiveState !== "current"
       ) {
         try {
           const availHarnesses = await this.getHarnesses(false);
           const latestRouting = this.resolveProjectRouting(base);
-          const alreadyReviewedOnce = Boolean(postRunDetail.state.reviewReport);
-          if (latestRouting.autoReview !== false && !alreadyReviewedOnce) {
+          if (latestRouting.autoReview !== false && !alreadyRunning()) {
             const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review", tier).filter((c) =>
               isHarnessRunnable(c.harness, availHarnesses),
             );
             const reviewTarget =
               reviewCandidates.find((c) => c.harness !== target.harness) ?? reviewCandidates[0];
+            if (reviewTarget) {
+              void this.startRun({
+                root: base,
+                requirementId: id,
+                action: "review",
+                harness: reviewTarget.harness,
+                model: reviewTarget.model,
+                ...(reviewTarget.reasoningEffort ? { reasoningEffort: reviewTarget.reasoningEffort } : {}),
+                isAutoReview: true,
+                dispatchReasonOverride: "auto_design_review",
+              }).catch(() => {});
+              return;
+            }
+          }
+        } catch {
+          // Ignore routing errors on auto design review.
+        }
+      }
+
+      // Capped 1-round `block` auto-remediation loop (WB-14 / FLOW §3.2):
+      // Initial auto-review returning `block` -> 1 same-tier `fix` -> verify (max 1 rescue) -> 1 automatic re-review -> stop.
+      // WB-22: design reviews (`isDesignReview`) NEVER auto-remediate or escalate to needs_human.
+      if (
+        status === "succeeded" &&
+        input.action === "review" &&
+        !isDesignReview &&
+        input.isAutoReview === true &&
+        parsedReview?.verdict === "block" &&
+        reviewFixCycle < 1 &&
+        postRunDetail &&
+        postRunDetail.state.stage === "coding"
+      ) {
+        try {
+          const latestRouting = this.resolveProjectRouting(base);
+          if (latestRouting.autoReview !== false && latestRouting.autoHeal !== false && !alreadyRunning()) {
+            void this.startRun({
+              root: base,
+              requirementId: id,
+              action: "fix",
+              reviewFixCycle: 1,
+              dispatchReasonOverride: "auto_review_fix",
+            }).catch(() => {});
+            return;
+          }
+        } catch {
+          // Ignore routing errors on auto review fix.
+        }
+      } else if (
+        status === "succeeded" &&
+        input.action === "review" &&
+        input.isAutoReview === true &&
+        parsedReview &&
+        parsedReview.verdict !== "pass" &&
+        reviewFixCycle >= 1 &&
+        postRunDetail &&
+        postRunDetail.state.stage === "coding"
+      ) {
+        // WB-19: 1-round block remediation completed and re-review still did not pass -> escalate to `needs_human`.
+        await setRequirementNeedsHuman(
+          base,
+          id,
+          {
+            source: "review_loop_exhausted",
+            reason: `自动审查修复闭环（1 轮）后复审结论仍为 ${parsedReview.verdict}：${parsedReview.summary.slice(0, 240)}`,
+            at: Date.now(),
+          },
+          snap?.fingerprint ?? null,
+        ).catch(() => null);
+        this.emit({
+          type: "workbench.updated",
+          root: base,
+          requirementId: id,
+          runId,
+          at: Date.now(),
+        });
+      }
+
+      // Automatic cross-model review (initial review once automated commands pass, or 1-shot re-review closing reviewFixCycle=1).
+      // WB-21 / FLOW §3.2: auto-review runs for `plan_first` AND `kind: "bug"`, decoupled from regular `feature + fast_track`.
+      if (
+        status === "succeeded" &&
+        (input.action === "implement" || input.action === "fix") &&
+        readyForReview &&
+        !noCodeChange &&
+        postRunDetail &&
+        (postRunDetail.state.track !== "fast_track" || postRunDetail.state.kind === "bug") &&
+        postRunDetail.state.stage === "coding" &&
+        postRunDetail.validity.approval.valid &&
+        postRunDetail.validity.reviewValidity.effectiveState !== "current"
+      ) {
+        try {
+          const availHarnesses = await this.getHarnesses(false);
+          const latestRouting = this.resolveProjectRouting(base);
+          const alreadyReviewedOnce = Boolean(
+            postRunDetail.state.reviewReport &&
+              postRunDetail.state.reviewReport.reviewedAt >= (postRunDetail.state.approval?.approvedAt ?? 0),
+          );
+          const isClosingReviewFixCycle = reviewFixCycle === 1;
+          if (latestRouting.autoReview !== false && (!alreadyReviewedOnce || isClosingReviewFixCycle)) {
+            const reviewCandidates = resolveRouteCandidates(latestRouting, availHarnesses, "review", tier).filter((c) =>
+              isHarnessRunnable(c.harness, availHarnesses),
+            );
+            const priorReview = postRunDetail.state.reviewReport;
+            const sameReviewerTarget =
+              isClosingReviewFixCycle && priorReview
+                ? reviewCandidates.find(
+                    (c) =>
+                      c.harness === priorReview.reviewerHarness &&
+                      c.model === priorReview.reviewerModel &&
+                      !isModelCoolingDown(c.harness, c.model),
+                  )
+                : undefined;
+            const reviewTarget =
+              sameReviewerTarget ??
+              reviewCandidates.find((c) => c.harness !== target.harness) ??
+              reviewCandidates[0];
             if (reviewTarget && !alreadyRunning()) {
               void this.startRun({
                 root: base,
@@ -1561,6 +1973,9 @@ export class HubExecutor {
                 model: reviewTarget.model,
                 ...(reviewTarget.reasoningEffort ? { reasoningEffort: reviewTarget.reasoningEffort } : {}),
                 isAutoReview: true,
+                ...(isClosingReviewFixCycle
+                  ? { reviewFixCycle: 1, dispatchReasonOverride: "auto_re_review" as const }
+                  : { reviewFixCycle: 0 }),
               }).catch(() => {});
             }
           }
@@ -1570,6 +1985,7 @@ export class HubExecutor {
       }
 
       // Bounded single-hop automatic fallback within the SAME tier's fallbacks on 429 / model unavailable.
+      // WB-16: Removed durationMs < 60_000 cap so mid-run rate limits at any duration relay via fresh_handoff from WIP checkpoint.
       const attempt = input.autoFallbackAttempt ?? 0;
       const isExplicitOverride = Boolean(input.harness && input.model);
       const shouldAutoFallback =
@@ -1577,7 +1993,7 @@ export class HubExecutor {
         !job.cancelled &&
         !job.timedOut &&
         attempt < 1 &&
-        ((!isExplicitOverride && (modelUnavailable || (rateLimited && durationMs < 60_000))) ||
+        ((!isExplicitOverride && (modelUnavailable || rateLimited)) ||
           (input.isAutoReview === true && (reviewParseFailed || modelUnavailable || rateLimited)));
 
       if (shouldAutoFallback && !alreadyRunning()) {
@@ -1597,6 +2013,7 @@ export class HubExecutor {
               model: undefined,
               reasoningEffort: undefined,
               useFallback: true,
+              ...(rateLimited ? { forceFreshSession: true } : {}),
               autoFallbackAttempt: attempt + 1,
             }).catch(() => {});
           }
@@ -1614,6 +2031,10 @@ export class HubExecutor {
     });
 
     return { run: record, detail, target };
+    } catch (err) {
+      codeRootLockLease?.release();
+      throw err;
+    }
   }
 
   private killProcessGroup(job: ActiveJob): void {

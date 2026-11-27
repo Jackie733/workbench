@@ -9,6 +9,7 @@ import type {
   PrivacyMode,
   RequirementDetail,
   RequirementDiffView,
+  RequirementKind,
   RequirementSummary,
   RequirementTier,
   ReviewReport,
@@ -44,7 +45,9 @@ export interface CriterionDraft {
   id: string;
   description: string;
   required: boolean;
+  kind?: "command" | "manual";
   command: string;
+  steps?: string;
 }
 
 export interface PendingAnnotation {
@@ -58,6 +61,7 @@ export type ModalState =
   | {
       kind: "new_req";
       goal: string;
+      reqKind?: RequirementKind;
       tier?: RequirementTier;
       mode?: "create" | "import_issue";
       issueRef?: string;
@@ -71,13 +75,16 @@ export type ModalState =
       stackedOnReqId?: string;
       attachments?: AttachmentMeta[];
     }
-  | { kind: "feedback"; feedback: string; dispatchAgent: boolean }
+  | { kind: "feedback"; feedback: string; dispatchAgent: boolean; rememberLesson?: boolean }
+  | { kind: "revise_plan"; reason: string; dispatchAgent: boolean }
   | {
       kind: "accept_override";
       verdict: ReviewVerdict | "stale" | "missing";
       summary: string;
       reason: string;
       acceptedRisks: string[];
+      rememberLesson?: boolean;
+      openDeliverAfter?: boolean;
     }
   | { kind: "lifecycle"; action: "cancel" | "reopen"; reason: string; preserveApproval?: boolean }
   | {
@@ -108,6 +115,9 @@ export type ModalState =
       fastCmdDraft?: string;
       fullCmdDraft?: string;
       autoScreenshotsDraft?: boolean;
+      worktreeEnabledDraft?: boolean;
+      worktreeSetupScriptDraft?: string;
+      worktreeCopyFilesDraft?: string;
     }
   | {
       kind: "spawn_children";
@@ -123,6 +133,7 @@ export type ModalState =
       selectedFiles: string[];
       note: string;
       createPr?: boolean;
+      deliveryMode?: "local" | "pr" | "local_merge";
       branchName?: string;
       baseBranch?: string;
       prTitle?: string;
@@ -555,7 +566,11 @@ export function partitionPendingDecisions(
 
 export function isBlockingDecisionRequirement(item: RequirementSummary): boolean {
   if (item.decisionReasonKey) {
-    return item.decisionReasonKey === "core.decision.reviewBlock";
+    return (
+      item.decisionReasonKey === "core.decision.reviewBlock" ||
+      item.decisionReasonKey === "core.decision.needsHuman" ||
+      item.decisionReasonKey === "core.decision.bugPaused"
+    );
   }
   return false;
 }
@@ -759,6 +774,44 @@ export function formatReviewFixFeedback(report: ReviewReport, selectedFindingIds
     lines.push("", "审查详情摘要：", report.markdown.trim().slice(0, 1400));
   }
   return lines.join("\n").slice(0, 1950);
+}
+
+export function canDirectApproveWithDecisions(state: Pick<RequirementDetail["state"], "pendingDecisions" | "criteria">): {
+  allowed: boolean;
+  reason: string | null;
+  reasonKey?: string;
+} {
+  const pending = state.pendingDecisions ?? [];
+  if (pending.length > 0) {
+    for (const item of pending) {
+      if (item.customAnswer && item.customAnswer.trim().length > 0) {
+        return {
+          allowed: false,
+          reason: `决策 ${item.id} 包含自定义输入，需先提交决策并修订方案后再批准`,
+          reasonKey: "decisions.directBlockedCustom",
+        };
+      }
+      const validPreset =
+        Boolean(item.selectedOptionId) &&
+        item.options.some((opt) => opt.id === item.selectedOptionId);
+      if (!validPreset) {
+        return {
+          allowed: false,
+          reason: `仍有未作答的待拍板决策（${item.id}），请先完成选择`,
+          reasonKey: "decisions.directBlockedUnanswered",
+        };
+      }
+    }
+  }
+  const hasRequiredCriterion = state.criteria.some((c) => c.required);
+  if (!hasRequiredCriterion) {
+    return {
+      allowed: false,
+      reason: "尚未定义必需验收条件，请先修订方案补齐验收条件后再批准",
+      reasonKey: "decisions.directBlockedNoCriteria",
+    };
+  }
+  return { allowed: true, reason: null };
 }
 
 export function routedTargetForAction(

@@ -48,10 +48,12 @@ import {
 } from "lucide-react";
 import type {
   AgentRunRecord,
+  DecisionItem,
   RequirementDetail,
   ScreenshotSkipReasonCode,
   Stage,
 } from "../../core/types.ts";
+import { canDirectApproveWithDecisions } from "../state.ts";
 import { api, requirementAttachmentUrl, screenshotUrl } from "../api.ts";
 import {
   formatPrStateLabel,
@@ -64,6 +66,7 @@ import {
 import {
   captureUiScreenshots,
   cancelRun,
+  dispatchDesignReview,
   dispatchFixFromReview,
   dispatchSyncBaseWithAgent,
   executeVerify,
@@ -75,6 +78,9 @@ import {
   openRequirement,
   queryClient,
   queryKeys,
+  rememberProjectLesson,
+  reviseDecisionsAndDispatch,
+  reviseFromDesignReview,
   runBusy,
   setRequirementTierAction,
   syncSandboxBaseAction,
@@ -300,12 +306,476 @@ function buildSpawnDrafts(d: RequirementDetail): Array<{ title: string; goal: st
   return out.length > 0 ? out.slice(0, 12) : [{ title: "", goal: "" }];
 }
 
-function SpecDesignTab({
+function AcceptanceSummaryPanel({
+  d,
+  busy,
+  runLocked,
+  onOpenDiff,
+}: {
+  d: RequirementDetail;
+  busy: boolean;
+  runLocked: boolean;
+  onOpenDiff: () => void;
+}) {
+  const language = useUiStore((st) => st.language);
+  const activeProjectId = useUiStore((st) => st.activeProjectId);
+  const { data: diffData } = useDiffQuery(activeProjectId, d.state.id, true, false);
+  const [openDeliverAfter, setOpenDeliverAfter] = useState(false);
+  const [acceptNote, setAcceptNote] = useState("");
+  const [rememberLesson, setRememberLesson] = useState(false);
+  const s = d.state;
+  const cov = d.validity.coverage;
+  const rev = s.reviewReport;
+  const revState = d.validity.reviewValidity.effectiveState;
+  const tamperingSignals = diffData?.testTamperingSignals ?? [];
+  const fileCount = diffData?.observation?.files.length ?? 0;
+  const latestShotBatch =
+    s.screenshotBatches && s.screenshotBatches.length > 0
+      ? s.screenshotBatches[s.screenshotBatches.length - 1]
+      : null;
+  const showScreenshots = Boolean(s.uiRelated || (latestShotBatch && latestShotBatch.shots.length > 0));
+
+  const reviewLabel =
+    rev && revState === "current"
+      ? rev.verdict === "pass"
+        ? t(language, "accept.reviewPassed")
+        : rev.verdict === "block"
+          ? t(language, "accept.reviewBlock")
+          : t(language, "accept.reviewConcern")
+      : revState === "stale"
+        ? t(language, "accept.reviewStale")
+        : t(language, "accept.reviewMissing");
+
+  return (
+    <Card className="p-3.5 mb-3.5 border-primary/30 bg-card" data-testid="acceptance-summary-panel">
+      <div className="flex items-center justify-between gap-2 mb-2.5 flex-wrap">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+          <Icon icon={ShieldCheck} size={14} /> {t(language, "accept.panelTitle")}
+        </h3>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+        <div className="rounded-lg border bg-background/70 p-2.5 space-y-1.5" data-testid="acceptance-credibility-card">
+          <div className="text-xs font-semibold">{t(language, "accept.credibilityTitle")}</div>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <Badge variant={d.validity.acceptanceGate.ok ? "success" : "warning"} size="sm">
+              {t(language, "accept.coverageLine", { passed: cov.requiredPassed, total: cov.requiredTotal })}
+            </Badge>
+            <Badge
+              variant={
+                rev && revState === "current"
+                  ? rev.verdict === "pass"
+                    ? "success"
+                    : rev.verdict === "block"
+                      ? "error"
+                      : "warning"
+                  : "secondary"
+              }
+              size="sm"
+            >
+              {reviewLabel}
+            </Badge>
+          </div>
+          {d.validity.baselineOnlyWarning && (
+            <Alert variant="warning" data-testid="fast-track-baseline-warning" className="py-1.5 px-2.5">
+              <Icon icon={AlertTriangle} size={14} />
+              <AlertDescription className="text-xs">
+                {t(language, "accept.fastTrackBaselineWarn")}
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <div className="rounded-lg border bg-background/70 p-2.5 space-y-1.5" data-testid="acceptance-diff-card">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-semibold">{t(language, "accept.diffTitle")}</span>
+            <Button size="xs" variant="outline" type="button" onClick={onOpenDiff} data-testid="acceptance-view-diff-btn">
+              <Icon icon={FileDiff} size={14} /> {t(language, "accept.viewDiffBtn")}
+            </Button>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {t(language, "accept.diffFilesCount", { count: fileCount })}
+          </div>
+          {tamperingSignals.length > 0 && (
+            <Alert variant="error" data-testid="acceptance-tampering-warning" className="py-1.5 px-2.5">
+              <Icon icon={AlertTriangle} size={14} />
+              <AlertDescription className="text-xs">
+                {t(language, "accept.tamperingWarn", { detail: tamperingSignals.join("；") })}
+              </AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        {showScreenshots && (
+          <div className="rounded-lg border bg-background/70 p-2.5 space-y-1.5 md:col-span-2" data-testid="acceptance-screenshots-card">
+            <div className="text-xs font-semibold">{t(language, "accept.screenshotsTitle")}</div>
+            <div className="text-xs text-muted-foreground">
+              {t(language, "accept.screenshotsCount", { count: latestShotBatch?.shots.length ?? 0 })}
+            </div>
+            {latestShotBatch && latestShotBatch.shots.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {latestShotBatch.shots.slice(0, 4).map((shot) => (
+                  <img
+                    key={shot.id}
+                    src={screenshotUrl(s.id, shot.id)}
+                    alt={shot.label}
+                    className="h-16 w-28 rounded border object-cover"
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-2.5 pt-2.5 border-t space-y-2" data-testid="acceptance-exit-actions">
+        <div className="flex flex-wrap items-center gap-3">
+          <Input
+            size="sm"
+            className="max-w-sm"
+            data-testid="accept-summary-note"
+            value={acceptNote}
+            placeholder={t(language, "deliver.notePlaceholder")}
+            onChange={(e) => setAcceptNote(e.target.value)}
+          />
+          <Label className="flex items-center gap-1.5 text-xs font-normal">
+            <Checkbox
+              data-testid="accept-remember-lesson"
+              checked={rememberLesson}
+              onCheckedChange={(checked) => setRememberLesson(Boolean(checked))}
+            />
+            <span>{t(language, "playbook.rememberLabel")}</span>
+          </Label>
+          <Label className="flex items-center gap-1.5 text-xs font-normal">
+            <Checkbox
+              data-testid="accept-and-deliver-checkbox"
+              checked={openDeliverAfter}
+              onCheckedChange={(checked) => setOpenDeliverAfter(Boolean(checked))}
+            />
+            <span>{t(language, "accept.openDeliverAfter")}</span>
+          </Label>
+        </div>
+        {rememberLesson && !acceptNote.trim() && (
+          <div className="text-[11px] text-warning" data-testid="accept-remember-empty-hint">
+            {t(language, "accept.rememberEmptyHint")}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <AsyncButton
+            size="sm"
+            type="button"
+            data-testid="acceptance-exit-accept-btn"
+            disabled={busy || runLocked || !d.validity.acceptanceGate.ok}
+            onAction={() =>
+              handleBannerAction(d, "accept", {
+                openDeliverAfter,
+                rememberLesson,
+                note: acceptNote,
+              })
+            }
+          >
+            <Icon icon={Check} size={14} /> {t(language, "accept.exitAccept")}
+          </AsyncButton>
+          <AsyncButton
+            size="sm"
+            variant="outline"
+            type="button"
+            data-testid="acceptance-exit-reject-btn"
+            disabled={busy || runLocked}
+            onAction={() => handleBannerAction(d, "request_changes")}
+          >
+            <Icon icon={Undo2} size={14} /> {t(language, "accept.exitReject")}
+          </AsyncButton>
+          <AsyncButton
+            size="sm"
+            variant="outline"
+            type="button"
+            data-testid="acceptance-exit-revise-btn"
+            disabled={busy || runLocked}
+            onAction={() => handleBannerAction(d, "revise_plan")}
+          >
+            <Icon icon={RotateCcw} size={14} /> {t(language, "accept.exitRevisePlan")}
+          </AsyncButton>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function InlineDecisionCard({
   d,
   runLocked,
+  resetSandbox,
 }: {
   d: RequirementDetail;
   runLocked: boolean;
+  resetSandbox: boolean;
+}) {
+  const language = useUiStore((s) => s.language);
+  const busy = useUiStore((s) => s.busy);
+  const { state: s } = d;
+  const pending = s.pendingDecisions ?? [];
+
+  const dirtyCustomRef = useRef<Set<string>>(new Set());
+  const lastReqIdRef = useRef<string>(s.id);
+
+  const [drafts, setDrafts] = useState<
+    Record<string, { selectedOptionId: string | null; customAnswer: string }>
+  >(() => {
+    const init: Record<string, { selectedOptionId: string | null; customAnswer: string }> = {};
+    for (const item of pending) {
+      init[item.id] = {
+        selectedOptionId: item.selectedOptionId ?? null,
+        customAnswer: item.customAnswer ?? "",
+      };
+    }
+    return init;
+  });
+
+  useEffect(() => {
+    const isNewReq = lastReqIdRef.current !== s.id;
+    if (isNewReq) {
+      lastReqIdRef.current = s.id;
+      dirtyCustomRef.current.clear();
+    }
+    setDrafts((prev) => {
+      const next: Record<string, { selectedOptionId: string | null; customAnswer: string }> = {};
+      for (const item of s.pendingDecisions ?? []) {
+        if (!isNewReq && dirtyCustomRef.current.has(item.id) && prev[item.id]) {
+          next[item.id] = prev[item.id]!;
+        } else {
+          next[item.id] = {
+            selectedOptionId: item.selectedOptionId ?? null,
+            customAnswer: item.customAnswer ?? "",
+          };
+        }
+      }
+      return next;
+    });
+  }, [s.id, s.revision]);
+
+  if (s.stage !== "planning" || pending.length === 0) return null;
+
+  const toSelections = (map: typeof drafts) =>
+    pending.map((item) => {
+      const cur = map[item.id];
+      const custom = cur?.customAnswer?.trim() || "";
+      return {
+        id: item.id,
+        selectedOptionId: custom ? null : (cur?.selectedOptionId ?? null),
+        customAnswer: custom || null,
+      };
+    });
+
+  const mergedPending: DecisionItem[] = pending.map((item) => {
+    const cur = drafts[item.id];
+    const custom = cur?.customAnswer?.trim() || "";
+    return {
+      ...item,
+      selectedOptionId: custom ? null : (cur?.selectedOptionId ?? null),
+      customAnswer: custom || null,
+    };
+  });
+  const directCheck = canDirectApproveWithDecisions({ ...s, pendingDecisions: mergedPending });
+
+  const persistDrafts = async (nextMap: typeof drafts) => {
+    if (guardRequirementRunLock(s.id)) return;
+    try {
+      await api.saveDecisions(s.id, {
+        selections: toSelections(nextMap),
+      });
+      await invalidateAllWorkbenchQueries();
+    } catch {
+      // Passive autosave; explicit submit/approve still sends the full draft selections.
+    }
+  };
+
+  const selectPresetOption = (decisionId: string, optionId: string) => {
+    dirtyCustomRef.current.delete(decisionId);
+    const nextMap = {
+      ...drafts,
+      [decisionId]: { selectedOptionId: optionId, customAnswer: "" },
+    };
+    setDrafts(nextMap);
+    void persistDrafts(nextMap);
+  };
+
+  const updateCustomAnswer = (decisionId: string, val: string) => {
+    dirtyCustomRef.current.add(decisionId);
+    setDrafts((prev) => ({
+      ...prev,
+      [decisionId]: {
+        selectedOptionId: val.trim() ? null : (prev[decisionId]?.selectedOptionId ?? null),
+        customAnswer: val,
+      },
+    }));
+  };
+
+  const handleDirectApprove = async () => {
+    if (guardRequirementRunLock(s.id) || !directCheck.allowed) return;
+    const res = await runBusy(() =>
+      api.approve(s.id, {
+        expectedRevision: s.revision,
+        decisionSelections: toSelections(drafts),
+        ...(resetSandbox ? { resetSandbox: true } : {}),
+      }),
+    );
+    if (res) {
+      dirtyCustomRef.current.clear();
+      await invalidateAllWorkbenchQueries();
+      await triggerActiveRun(s.id, "implement");
+    }
+  };
+
+  const handleSubmitAndRevise = async () => {
+    const ok = await reviseDecisionsAndDispatch(s.id, {
+      selections: toSelections(drafts),
+      expectedRevision: s.revision,
+      dispatchAgent: true,
+    });
+    if (ok) {
+      dirtyCustomRef.current.clear();
+    }
+  };
+
+  const unresolvedRefineCount = (s.discussions ?? []).filter((disc) => disc.mode === "refine" && !disc.resolved).length;
+
+  return (
+    <Card className="p-4 mb-3.5 border-warning/45 bg-warning/5" data-testid="decision-card">
+      <div className="card-head">
+        <div>
+          <h3>{t(language, "decisions.cardTitle", { count: pending.length })}</h3>
+          <div className="muted xs mt-1">{t(language, "decisions.cardSubtitle")}</div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3 mt-2">
+        {pending.map((item) => {
+          const cur = drafts[item.id] ?? { selectedOptionId: null, customAnswer: "" };
+          const hasCustom = cur.customAnswer.trim().length > 0;
+          return (
+            <div
+              key={item.id}
+              data-testid={`decision-item-${item.id}`}
+              className="rounded-lg border bg-background p-3 space-y-2"
+            >
+              <div className="flex items-start gap-2">
+                <Badge variant="warning" size="sm">
+                  {item.id}
+                </Badge>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13.5px] font-medium">{item.question}</div>
+                  {item.context && <div className="muted xs mt-0.5">{item.context}</div>}
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {item.options.map((opt) => {
+                  const selected = !hasCustom && cur.selectedOptionId === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      disabled={busy || runLocked}
+                      data-testid={`decision-option-${item.id}-${opt.id}`}
+                      aria-pressed={selected}
+                      className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors ${
+                        selected
+                          ? "border-primary bg-primary/8 font-medium"
+                          : "border-border hover:border-primary/40 hover:bg-accent/40"
+                      }`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => selectPresetOption(item.id, opt.id)}
+                    >
+                      <span
+                        className={`mt-0.5 inline-flex size-3.5 shrink-0 items-center justify-center rounded-full border ${
+                          selected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/50"
+                        }`}
+                      >
+                        {selected && <Icon icon={Check} size={14} />}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5 flex-wrap">
+                          <span>{opt.label}</span>
+                          {opt.recommended && (
+                            <Badge variant="info" size="sm">
+                              {t(language, "decisions.recommended")}
+                            </Badge>
+                          )}
+                        </span>
+                        {opt.description && <span className="block muted mt-0.5 font-normal">{opt.description}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div>
+                <Label className="mb-1 block text-[11.5px] text-muted-foreground font-normal">
+                  {t(language, "decisions.customLabel")}
+                </Label>
+                <Input
+                  size="sm"
+                  data-testid={`decision-custom-${item.id}`}
+                  disabled={busy || runLocked}
+                  value={cur.customAnswer}
+                  placeholder={t(language, "decisions.customPlaceholder")}
+                  onChange={(e) => updateCustomAnswer(item.id, e.target.value)}
+                  onBlur={() => {
+                    if (cur.customAnswer.trim() !== (item.customAnswer ?? "")) {
+                      void persistDrafts(drafts);
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+        <div className="muted xs" data-testid="decision-direct-hint">
+          {!directCheck.allowed
+            ? translateRef(language, directCheck.reasonKey, directCheck.reason ?? "")
+            : unresolvedRefineCount > 0
+              ? t(language, "decisions.unresolvedAnnotationsHint", { count: unresolvedRefineCount })
+              : ""}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <AsyncButton
+            size="sm"
+            variant="outline"
+            type="button"
+            data-testid="decision-revise-btn"
+            disabled={busy || runLocked}
+            onMouseDown={(e) => e.preventDefault()}
+            onAction={handleSubmitAndRevise}
+          >
+            <Icon icon={Undo2} size={14} /> {t(language, "decisions.submitRevise")}
+          </AsyncButton>
+          <AsyncButton
+            size="sm"
+            type="button"
+            data-testid="decision-direct-approve-btn"
+            disabled={busy || runLocked || !directCheck.allowed}
+            title={!directCheck.allowed ? translateRef(language, directCheck.reasonKey, directCheck.reason ?? "") : undefined}
+            onMouseDown={(e) => e.preventDefault()}
+            onAction={handleDirectApprove}
+          >
+            <Icon icon={Check} size={14} /> {t(language, "decisions.directApprove")}
+          </AsyncButton>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function SpecDesignTab({
+  d,
+  runLocked,
+  resetSandbox,
+}: {
+  d: RequirementDetail;
+  runLocked: boolean;
+  resetSandbox: boolean;
 }) {
   const language = useUiStore((s) => s.language);
   const busy = useUiStore((s) => s.busy);
@@ -403,7 +873,9 @@ function SpecDesignTab({
         id: c.id.trim() || undefined,
         description: c.description.trim(),
         required: c.required,
-        command: c.command.trim() || undefined,
+        ...(c.kind === "manual" ? { kind: "manual" as const } : {}),
+        command: c.kind === "manual" ? undefined : c.command.trim() || undefined,
+        ...(c.kind === "manual" && c.steps?.trim() ? { steps: c.steps.trim() } : {}),
       }));
     const res = await runBusy(async () => {
       const out = await api.updateSpec(s.id, {
@@ -531,6 +1003,16 @@ function SpecDesignTab({
               >
                 <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
               </AsyncButton>
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="review-fresh-rerun-btn"
+                disabled={busy || runLocked}
+                onAction={() => triggerActiveRun(s.id, "review", { forceFreshSession: true })}
+              >
+                <Icon icon={Search} size={14} /> {t(language, "review.freshRerun")}
+              </AsyncButton>
               <Button
                 size="xs"
                 variant="outline"
@@ -601,6 +1083,155 @@ function SpecDesignTab({
             </summary>
             <MarkdownView markdown={review.markdown} className="md-body xs" />
           </details>
+          {review.verdict === "block" && (
+            <div className="mt-2 pt-2 border-t flex justify-end">
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="review-remember-lesson-btn"
+                disabled={busy}
+                onAction={() => rememberProjectLesson(review.summary, "review_block", s.id)}
+              >
+                <Icon icon={Save} size={14} /> {t(language, "playbook.rememberReviewBtn")}
+              </AsyncButton>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {s.stage === "planning" && Boolean(s.designHash) && (
+        <Card
+          className={`p-4 mb-3.5 ${
+            s.designReviewReport?.verdict === "block"
+              ? "border-destructive/50 bg-destructive/5"
+              : s.designReviewReport?.verdict === "concern"
+                ? "border-warning/45 bg-warning/5"
+                : "border-border bg-muted/20"
+          }`}
+          data-testid="design-review-card"
+        >
+          <div className="card-head" style={{ marginBottom: s.designReviewReport ? 8 : 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <h3>{t(language, "designReview.cardTitle")}</h3>
+              {s.designReviewReport && (
+                <>
+                  <Badge
+                    variant={
+                      s.designReviewReport.verdict === "pass"
+                        ? "success"
+                        : s.designReviewReport.verdict === "block"
+                          ? "error"
+                          : "warning"
+                    }
+                    data-testid="design-review-verdict"
+                  >
+                    <Icon icon={VERDICT_ICONS[s.designReviewReport.verdict]} size={14} />{" "}
+                    {VERDICT_META[s.designReviewReport.verdict].labels[language]}
+                  </Badge>
+                  {d.validity.designReviewValidity?.effectiveState === "stale" && (
+                    <Badge variant="warning" data-testid="design-review-stale-badge">
+                      {t(language, "designReview.staleBadge")}
+                    </Badge>
+                  )}
+                  <span className="muted xs">
+                    {s.designReviewReport.reviewerHarness}/{s.designReviewReport.reviewerModel}
+                  </span>
+                </>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {s.designReviewReport && s.designReviewReport.verdict !== "pass" && (
+                <AsyncButton
+                  size="xs"
+                  variant="default"
+                  type="button"
+                  data-testid="revise-from-design-review-btn"
+                  disabled={busy || runLocked}
+                  onAction={() => reviseFromDesignReview(d)}
+                >
+                  <Icon icon={Undo2} size={14} /> {t(language, "designReview.reviseBtn")}
+                </AsyncButton>
+              )}
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="dispatch-design-review-btn"
+                disabled={busy || runLocked}
+                onAction={() => dispatchDesignReview(s.id)}
+              >
+                <Icon icon={Search} size={14} /> {t(language, "designReview.triggerBtn")}
+              </AsyncButton>
+            </div>
+          </div>
+          {s.designReviewReport && (
+            <>
+              <div style={{ fontWeight: 500, marginBottom: 6 }}>{s.designReviewReport.summary}</div>
+              {s.designReviewReport.verdict === "block" && (
+                <div className="muted xs mb-2">{t(language, "designReview.nonBlockingNote")}</div>
+              )}
+              {s.designReviewReport.findings && s.designReviewReport.findings.length > 0 && (
+                <div className="space-y-1.5 mb-2">
+                  {s.designReviewReport.findings.map((f) => (
+                    <div key={f.id} className="rounded border bg-background/80 px-2.5 py-1.5 text-xs">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <Badge variant={f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary"} size="sm">
+                          {f.severity}
+                        </Badge>
+                        <code>{f.id}</code>
+                        <strong>{f.title}</strong>
+                      </div>
+                      {f.detail && <div className="muted mt-0.5">{f.detail}</div>}
+                      {f.suggestion && <div className="muted mt-0.5">{t(language, "review.suggestionLabel")}{f.suggestion}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <details>
+                <summary className="xs muted" style={{ cursor: "pointer" }}>
+                  {t(language, "designReview.expand")}
+                </summary>
+                <MarkdownView markdown={s.designReviewReport.markdown} className="md-body xs" />
+              </details>
+            </>
+          )}
+        </Card>
+      )}
+
+      {s.originalGoal && (
+        <Card className="p-3.5 mb-3.5 bg-muted/30" data-testid="original-goal-card">
+          <div className="card-head" style={{ marginBottom: 6 }}>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {t(language, "spec.originalGoalTitle")}
+            </h3>
+            <Badge variant="secondary" size="sm">
+              <Icon icon={Lock} size={14} /> {t(language, "spec.frozen")}
+            </Badge>
+          </div>
+          <div className="text-[13px] whitespace-pre-wrap break-words" data-testid="original-goal-text">
+            {s.originalGoal}
+          </div>
+        </Card>
+      )}
+
+      <InlineDecisionCard d={d} runLocked={runLocked} resetSandbox={resetSandbox} />
+
+      {s.humanDecisions && s.humanDecisions.length > 0 && (
+        <Card className="p-3.5 mb-3.5 border-info/35 bg-info/5" data-testid="adopted-decisions-card">
+          <div className="card-head" style={{ marginBottom: 6 }}>
+            <h3>{t(language, "decisions.adoptedTitle", { count: s.humanDecisions.length })}</h3>
+          </div>
+          <div className="flex flex-col gap-1.5 text-xs">
+            {s.humanDecisions.map((dec) => (
+              <div key={dec.id} className="flex flex-wrap items-baseline gap-1.5">
+                <Badge variant="info" size="sm">{dec.id}</Badge>
+                <span className="text-muted-foreground">{dec.question}</span>
+                <span>→</span>
+                <strong>{dec.answer}</strong>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
 
@@ -646,7 +1277,9 @@ function SpecDesignTab({
                       id: c.id,
                       description: c.description,
                       required: c.required,
+                      kind: c.kind,
                       command: c.command ?? "",
+                      steps: c.steps ?? "",
                     })),
                   );
                 }}
@@ -719,16 +1352,38 @@ function SpecDesignTab({
                   <Input
                     size="sm"
                     data-crit-field="command"
-                    value={c.command}
-                    placeholder={t(language, "spec.commandPlaceholder")}
+                    value={c.kind === "manual" ? (c.steps ?? "") : c.command}
+                    placeholder={
+                      c.kind === "manual"
+                        ? t(language, "spec.stepsPlaceholder")
+                        : t(language, "spec.commandPlaceholder")
+                    }
                     onChange={(e) =>
                       setSpecDraftCriteria((prev) => {
                         const next = [...prev];
-                        next[idx] = { ...next[idx]!, command: e.target.value };
+                        next[idx] =
+                          c.kind === "manual"
+                            ? { ...next[idx]!, steps: e.target.value }
+                            : { ...next[idx]!, command: e.target.value };
                         return next;
                       })
                     }
                   />
+                  <Label className="gap-1.5 text-xs whitespace-nowrap font-normal">
+                    <Checkbox
+                      checked={c.kind === "manual"}
+                      onCheckedChange={(checked) =>
+                        setSpecDraftCriteria((prev) => {
+                          const next = [...prev];
+                          next[idx] = checked
+                            ? { ...next[idx]!, kind: "manual" }
+                            : { ...next[idx]!, kind: "command", steps: undefined };
+                          return next;
+                        })
+                      }
+                    />
+                    {t(language, "spec.manualKindLabel")}
+                  </Label>
                   <Label className="gap-1.5 text-xs whitespace-nowrap font-normal">
                     <Checkbox
                       checked={c.required}
@@ -850,8 +1505,19 @@ function SpecDesignTab({
                         ? t(language, "common.required")
                         : t(language, "common.reference")}
                     </Badge>
+                    {(item.criterion.kind === "manual" || (!item.criterion.command && Boolean(item.criterion.steps))) && (
+                      <Badge variant="info" className="ms-1.5">
+                        {t(language, "spec.manualBadge")}
+                      </Badge>
+                    )}
                   </div>
                   {item.criterion.command && <div className="crit-cmd">{item.criterion.command}</div>}
+                  {item.criterion.steps && (
+                    <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                      <strong>{t(language, "spec.manualStepsLabel")}</strong>
+                      {item.criterion.steps}
+                    </div>
+                  )}
                   {(item.reason || item.reasonKey) && (
                     <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
                       {translateRef(language, item.reasonKey, item.reason ?? "", item.reasonParams)}
@@ -871,6 +1537,35 @@ function SpecDesignTab({
                   >
                     <Icon icon={MessageSquare} size={14} />
                   </Button>
+                  {!item.criterion.command && s.stage === "coding" && (
+                    <AsyncButton
+                      size="xs"
+                      variant={item.state === "passed" ? "default" : "outline"}
+                      type="button"
+                      data-testid={`manual-check-${item.criterion.id}`}
+                      disabled={busy || runLocked}
+                      onAction={async () => {
+                        if (guardRequirementRunLock(s.id)) return;
+                        const nextChecked = item.state !== "passed";
+                        const out = await runBusy(() =>
+                          api.setManualCheck(s.id, {
+                            criterionId: item.criterion.id,
+                            checked: nextChecked,
+                            expectedRevision: s.revision,
+                          }),
+                        );
+                        if (out) {
+                          await invalidateAllWorkbenchQueries();
+                          showToastKey("spec.manualCheckSaved");
+                        }
+                      }}
+                    >
+                      <Icon icon={Check} size={14} />{" "}
+                      {item.state === "passed"
+                        ? t(language, "spec.manualVerified")
+                        : t(language, "spec.manualMarkVerified")}
+                    </AsyncButton>
+                  )}
                   {item.criterion.command && s.stage !== "done" && s.stage !== "cancelled" && (
                     <AsyncButton
                       size="xs"
@@ -2007,6 +2702,11 @@ export function WorkspaceView() {
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const isDoneStage = reqData?.detail?.state.stage === "done";
   const { data: deliveryPreview } = useDeliveryQuery(activeProjectId, selectedId, Boolean(isDoneStage));
+  const [resetSandboxOnApprove, setResetSandboxOnApprove] = useState(false);
+
+  useEffect(() => {
+    setResetSandboxOnApprove(false);
+  }, [selectedId, reqData?.detail?.state.stage]);
 
   const d = reqData?.detail ?? null;
   if (!d) return <p className="muted">{t(language, "ws.loading")}</p>;
@@ -2031,22 +2731,25 @@ export function WorkspaceView() {
     s.github?.provider === "gitee";
   const prPlatformLabel = isGiteeProject ? "Gitee" : "GitHub";
 
-  const openDeliverModal = (preferPr?: boolean) => {
+  const openDeliverModal = (preferPr?: boolean, explicitMode?: "local" | "pr" | "local_merge") => {
     if (guardRequirementRunLock(s.id)) return;
     const candidates = deliveryPreview?.candidates ?? [];
     const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);
     const defaultSelected = matched.length > 0 ? matched : candidates.map((c) => c.path);
     const usePr =
       preferPr ?? Boolean((reqData?.sandbox || !deliveryPreview?.canCommit) && deliveryPreview?.canCreatePr);
+    const deliveryMode =
+      explicitMode ?? (reqData?.sandbox ? (usePr ? "pr" : "local_merge") : usePr ? "pr" : "local");
     setModal({
       kind: "deliver",
       commitMessage: deliveryPreview?.suggestedMessage ?? `feat(${s.id.toLowerCase()}): ${s.title}`,
       selectedFiles: defaultSelected,
       note: "",
-      createPr: usePr,
+      createPr: deliveryMode === "pr",
+      deliveryMode,
       branchName: deliveryPreview?.suggestedBranch ?? `feat/${s.id.toLowerCase()}`,
       baseBranch: deliveryPreview?.baseBranch ?? (isGiteeProject ? "master" : "main"),
-      prTitle: `${s.id}: ${s.title}`,
+      prTitle: deliveryPreview?.suggestedPrTitle ?? `${s.id}: ${s.title}`,
     });
   };
 
@@ -2097,6 +2800,11 @@ export function WorkspaceView() {
         <span className="req-id" style={{ fontSize: 14 }}>
           {s.id}
         </span>
+        {s.kind === "bug" && (
+          <Badge variant="error" data-testid="bug-kind-badge">
+            <Icon icon={Bug} size={14} /> {t(language, "kind.bugBadge")}
+          </Badge>
+        )}
         {s.parentId && (
           <Badge
             render={<button type="button" onClick={() => void openRequirement(s.parentId!)} />}
@@ -2214,7 +2922,9 @@ export function WorkspaceView() {
                       id: c.id,
                       description: c.description,
                       required: c.required,
+                      kind: c.kind,
                       command: c.command ?? "",
+                      steps: c.steps ?? "",
                     })),
                   );
                 }}
@@ -2304,6 +3014,18 @@ export function WorkspaceView() {
                   render={<button type="button" data-testid="menu-fast-track-btn" />}
                 >
                   <Icon icon={Zap} size={14} /> {t(language, "ws.menu.fastTrack")}
+                </MenuItem>
+              )}
+              {s.stage === "coding" && (
+                <MenuItem
+                  disabled={runningThis}
+                  nativeButton
+                  onClick={() => {
+                    void handleBannerAction(d, "revise_plan");
+                  }}
+                  render={<button type="button" data-testid="menu-revise-plan-btn" />}
+                >
+                  <Icon icon={Undo2} size={14} /> {t(language, "ws.menu.revisePlan")}
                 </MenuItem>
               )}
               {s.stage !== "done" && s.stage !== "cancelled" && (
@@ -2543,11 +3265,103 @@ export function WorkspaceView() {
           );
         })()}
 
+      {reqData?.sandbox?.setupStatus === "failed" && (
+        <Alert variant="error" data-testid="sandbox-setup-failed-banner" className="mb-3.5">
+          <Icon icon={AlertTriangle} size={14} />
+          <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2 text-foreground">
+            <div className="min-w-0 flex-1">
+              <strong>{t(language, "sandbox.setupFailed.title")}</strong>
+              {reqData.sandbox.setupError && (
+                <div className="xs mt-0.5 break-all text-muted-foreground">{reqData.sandbox.setupError}</div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <AsyncButton
+                size="xs"
+                type="button"
+                data-testid="sandbox-setup-retry-btn"
+                disabled={busy || runningThis}
+                onAction={async () => {
+                  if (guardRequirementRunLock(s.id)) return;
+                  const res = await runBusy(() => api.retryOrIgnoreSandboxSetup(s.id, "retry"));
+                  if (res) {
+                    await invalidateAllWorkbenchQueries();
+                    showToastKey("sandbox.setupFailed.retriedToast");
+                  }
+                }}
+              >
+                <Icon icon={RefreshCw} size={14} /> {t(language, "sandbox.setupFailed.retryBtn")}
+              </AsyncButton>
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="sandbox-setup-ignore-btn"
+                disabled={busy || runningThis}
+                onAction={async () => {
+                  if (guardRequirementRunLock(s.id)) return;
+                  const res = await runBusy(() => api.retryOrIgnoreSandboxSetup(s.id, "ignore"));
+                  if (res) {
+                    await invalidateAllWorkbenchQueries();
+                    showToastKey("sandbox.setupFailed.ignoredToast");
+                  }
+                }}
+              >
+                {t(language, "sandbox.setupFailed.ignoreBtn")}
+              </AsyncButton>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {s.stage === "cancelled" && reqData?.sandbox && (
+        <Alert variant="warning" data-testid="cancelled-sandbox-callout" className="mb-3.5">
+          <Icon icon={GitBranch} size={14} />
+          <AlertDescription className="flex w-full flex-wrap items-center justify-between gap-2 text-foreground">
+            <div>
+              <strong>{t(language, "ws.cancelledSandboxTitle", { branch: reqData.sandbox.branch })}</strong>
+              <div className="xs muted mt-0.5">{t(language, "ws.cancelledSandboxDesc")}</div>
+            </div>
+            <AsyncButton
+              size="xs"
+              variant="outline"
+              type="button"
+              data-testid="discard-sandbox-btn"
+              disabled={busy || runningThis}
+              onAction={async () => {
+                if (guardRequirementRunLock(s.id)) return;
+                const res = await runBusy(() => api.discardSandbox(s.id));
+                if (res) {
+                  await invalidateAllWorkbenchQueries();
+                  showToastKey("ws.discardSandboxDone");
+                }
+              }}
+            >
+              <Icon icon={Trash2} size={14} /> {t(language, "ws.discardSandboxBtn")}
+            </AsyncButton>
+          </AlertDescription>
+        </Alert>
+      )}
+
       <section className={`banner ${banner.tone}`} data-testid="action-banner">
         <div>
           <div className="banner-text">
             {translateRef(language, banner.headlineKey, banner.headline, banner.headlineParams)}
           </div>
+          {s.stage === "planning" &&
+            Boolean(s.designHash) &&
+            !s.lastFeedback &&
+            reqData?.sandbox &&
+            (s.revisedFromCoding || (reqData.sandboxDrift?.aheadCount ?? 0) > 0) && (
+              <Label className="mt-1.5 flex items-center gap-2 text-xs font-normal text-foreground">
+                <Checkbox
+                  data-testid="approve-reset-sandbox-checkbox"
+                  checked={resetSandboxOnApprove}
+                  onCheckedChange={(checked) => setResetSandboxOnApprove(Boolean(checked))}
+                />
+                <span>{t(language, "ws.resetSandboxCheckbox")}</span>
+              </Label>
+            )}
           {s.stage === "planning" && Boolean(s.designHash) && project?.git?.isGitRepo && project.git.dirty && (
             <div className="muted xs" style={{ marginTop: 4 }} data-testid="dirty-baseline-hint">
               {t(language, "ws.dirtyHint")}
@@ -2622,8 +3436,13 @@ export function WorkspaceView() {
               key={`${s.id}:${banner.primaryAction.id}`}
               type="button"
               data-testid={`action-${banner.primaryAction.id}`}
-              disabled={busy || runningThis}
-              onAction={() => handleBannerAction(d, banner.primaryAction!.id)}
+              disabled={busy || runningThis || Boolean(banner.primaryAction.disabledReason)}
+              title={banner.primaryAction.disabledReason}
+              onAction={() =>
+                handleBannerAction(d, banner.primaryAction!.id, {
+                  resetSandbox: resetSandboxOnApprove,
+                })
+              }
             >
               <Icon icon={BANNER_ACTION_ICONS[banner.primaryAction.id]} size={14} />{" "}
               {translateRef(
@@ -2640,8 +3459,13 @@ export function WorkspaceView() {
               variant="outline"
               type="button"
               data-testid={`action-${sec.id}`}
-              disabled={busy || runningThis}
-              onAction={() => handleBannerAction(d, sec.id)}
+              disabled={busy || runningThis || Boolean(sec.disabledReason)}
+              title={sec.disabledReason}
+              onAction={() =>
+                handleBannerAction(d, sec.id, {
+                  resetSandbox: resetSandboxOnApprove,
+                })
+              }
             >
               <Icon icon={BANNER_ACTION_ICONS[sec.id]} size={14} />{" "}
               {translateRef(language, sec.labelKey, sec.label, sec.labelParams)}
@@ -2666,6 +3490,17 @@ export function WorkspaceView() {
                 : s.delivery
                   ? t(language, "ws.deliverMore")
                   : t(language, "ws.deliverStart")}
+            </Button>
+          )}
+          {reqData?.sandbox && s.stage === "done" && deliveryPreview?.canMergeLocal && (
+            <Button
+              variant={deliveryPreview?.canCreatePr ? "outline" : "default"}
+              type="button"
+              data-testid="merge-local-btn"
+              disabled={busy || runningThis}
+              onClick={() => openDeliverModal(false, "local_merge")}
+            >
+              <Icon icon={GitMerge} size={14} /> {t(language, "ws.mergeLocalBtn")}
             </Button>
           )}
           {s.stage === "done" && s.github?.pr && (
@@ -2744,7 +3579,20 @@ export function WorkspaceView() {
 
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (
-          <SpecDesignTab d={d} runLocked={runningThis} />
+          <>
+            {s.stage === "coding" &&
+              (d.validity.acceptanceGate.ok ||
+                (d.validity.baselineOnlyWarning && d.validity.coverage.requiredPassed > 0)) && (
+                <AcceptanceSummaryPanel
+                  key={s.id}
+                  d={d}
+                  busy={busy}
+                  runLocked={runningThis}
+                  onOpenDiff={() => setWorkspaceTab("diff")}
+                />
+              )}
+            <SpecDesignTab d={d} runLocked={runningThis} resetSandbox={resetSandboxOnApprove} />
+          </>
         ) : workspaceTab === "diff" ? (
           <DiffViewerPanel d={d} />
         ) : workspaceTab === "changes" ? (

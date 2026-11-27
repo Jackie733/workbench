@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  Bug,
   Check,
   CircleAlert,
   Clock,
@@ -587,6 +588,11 @@ export function HomeView() {
                       <div className="sb-req-item-head">
                         <div className="sb-req-item-id-group">
                           <span className="req-id">{item.id}</span>
+                          {item.kind === "bug" && (
+                            <Badge variant="error" size="sm" data-testid={`req-bug-badge-${item.id}`}>
+                              <Icon icon={Bug} size={14} /> {t(language, "kind.bugBadge")}
+                            </Badge>
+                          )}
                           {isPendingDecision && (
                             <Badge
                               variant={isBlockingDecision ? "error" : "warning"}

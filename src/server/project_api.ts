@@ -4,6 +4,9 @@ import {
   acceptRequirement,
   addDiscussion,
   addRequirementAttachments,
+  appendBugRegressionCriteria,
+  appendProjectPlaybookLesson,
+  applyDecisionSelectionsToItems,
   approveDesign,
   authorizeFastTrack,
   cancelRequirement,
@@ -23,17 +26,25 @@ import {
   listRequirementAgentRuns,
   listRequirements,
   pruneProjectTraces,
+  readProjectPlaybook,
   recordRequirementGitHubSync,
   removeRequirementAttachment,
   reopenRequirement,
   requestChanges,
   resolveDiscussions,
+  revisePlan,
+  saveDecisionSelections,
+  setManualCriterionCheck,
+  setRequirementNeedsHuman,
   setRequirementTier,
   spawnSubRequirements,
+  submitDecisionsAndRevise,
   updateDesign,
   updateProjectConfig,
   updateSpec,
   type CorruptRequirementEntry,
+  type DecisionSelectionInput,
+  type PlaybookLessonSource,
   type SpawnSubRequirementItem,
 } from "../core/engine.ts";
 import { discoverProjectContext } from "../core/context.ts";
@@ -44,6 +55,7 @@ import {
   requirementAttachmentsDir,
 } from "../core/attachments.ts";
 import { extractMessageRef, WorkbenchError, type StructuredMessageRef, type WorkbenchErrorCode } from "../core/errors.ts";
+import { canDirectApproveWithDecisions } from "../core/validity.ts";
 import { getGitRemoteUrl, observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
 import {
   detectGitRemoteProvider,
@@ -84,7 +96,9 @@ import {
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectVerificationConfig,
+  type ProjectWorktreeConfig,
   type RequirementDetail,
+  type RequirementKind,
   type RequirementTier,
   type Stage,
   type Track,
@@ -92,11 +106,16 @@ import {
 import { isRecord, sanitizeOutput, validateGiteeIssueIdent } from "../core/validate.ts";
 import {
   applySandboxToMain,
+  cleanupSandboxOnCancel,
   createOrReuseWorktree,
+  discardSandboxWorktree,
   inspectSandboxDrift,
+  mergeSandboxToMain,
   prepareSandboxConflictResolution,
   recommendSandboxMergeOrder,
   reconcileSandboxBaseline,
+  resetSandboxToBaseHead,
+  retryOrIgnoreSandboxSetup,
   syncRequirementMirrorToSandbox,
   syncSandboxBase,
   syncSandboxPrAndCleanup,
@@ -461,6 +480,18 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
             : {}),
         };
       }
+      let worktreePatch: ProjectWorktreeConfig | null | undefined = undefined;
+      if (body.worktree === null) {
+        worktreePatch = null;
+      } else if (isRecord(body.worktree)) {
+        worktreePatch = {
+          ...(typeof body.worktree.enabled === "boolean" ? { enabled: body.worktree.enabled } : {}),
+          ...(Array.isArray(body.worktree.copyFiles)
+            ? { copyFiles: body.worktree.copyFiles.filter((f): f is string => typeof f === "string") }
+            : {}),
+          ...(typeof body.worktree.setupScript === "string" ? { setupScript: body.worktree.setupScript } : {}),
+        };
+      }
       const project = await updateProjectConfig(base, {
         ...(typeof body.name === "string" ? { name: body.name } : {}),
         ...(outputLanguagePatch !== undefined ? { outputLanguage: outputLanguagePatch } : {}),
@@ -468,9 +499,34 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         ...(githubPatch !== undefined ? { github: githubPatch } : {}),
         ...(giteePatch !== undefined ? { gitee: giteePatch } : {}),
         ...(verificationPatch !== undefined ? { verification: verificationPatch } : {}),
+        ...(worktreePatch !== undefined ? { worktree: worktreePatch } : {}),
       });
       deps.broadcastUi({ type: "workbench.updated", reason: "project.settings", root: base, at: Date.now() });
       return jsonResponse({ project });
+    }
+
+    if (method === "GET" && pathname === "/api/project/playbook") {
+      if (!isProjectInitialized(base)) {
+        return jsonResponse({ markdown: "", lessons: [], path: `${WORKBENCH_DIR}/playbook.md` });
+      }
+      return jsonResponse(readProjectPlaybook(base));
+    }
+
+    if (method === "POST" && pathname === "/api/project/playbook/lessons") {
+      const body = await readBody(req);
+      const lesson = typeof body.lesson === "string" ? body.lesson : "";
+      const source =
+        body.source === "reject" || body.source === "accept" || body.source === "review_block" || body.source === "manual"
+          ? (body.source as PlaybookLessonSource)
+          : "manual";
+      const requirementId = typeof body.requirementId === "string" ? body.requirementId.trim() : undefined;
+      const result = await appendProjectPlaybookLesson(base, {
+        lesson,
+        source,
+        ...(requirementId ? { requirementId } : {}),
+      });
+      deps.broadcastUi({ type: "workbench.updated", reason: "playbook.updated", root: base, at: Date.now() });
+      return jsonResponse(result, result.added ? 201 : 200);
     }
 
     if (method === "GET" && pathname === "/api/project/sandboxes") {
@@ -844,7 +900,9 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       const goal = typeof body.goal === "string" ? body.goal : "";
       const title = typeof body.title === "string" ? body.title : undefined;
       const track: Track = body.track === "fast_track" ? "fast_track" : "plan_first";
+      const kind: RequirementKind = body.kind === "bug" ? "bug" : "feature";
       const tier: RequirementTier = body.tier === "sota" ? "sota" : "standard";
+      const startImmediately = body.startImmediately === true;
       const snapshot = await observeGitSnapshot(base);
       const attachmentIds = readStringArray(body.attachmentIds);
       let detail = await createRequirement(base, {
@@ -853,6 +911,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         ...(typeof body.parentId === "string" && body.parentId.trim() ? { parentId: body.parentId.trim() } : {}),
         criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : undefined,
         track,
+        kind,
         tier,
         currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         ...(attachmentIds && attachmentIds.length > 0 ? { attachmentIds } : {}),
@@ -872,13 +931,27 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       }
 
       let sandbox = null;
-      if (body.createSandbox === true && snapshot?.head) {
+      const wantsSandbox =
+        body.createSandbox === true ||
+        (startImmediately &&
+          body.createSandbox !== false &&
+          projectMeta?.worktree?.enabled !== false &&
+          Boolean(snapshot?.head));
+      if (wantsSandbox && snapshot?.head) {
         sandbox = await createOrReuseWorktree(base, detail.state.id, {
-          branchPrefix: "feat",
+          branchPrefix: kind === "bug" ? "fix" : "feat",
           ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
             ? { stackedOnReqId: body.stackedOnReqId.trim() }
             : {}),
         });
+      }
+      if (startImmediately) {
+        const codeSnap = await observeGitSnapshot(resolveCodeRoot(base, detail.state.id));
+        detail = await authorizeFastTrack(base, detail.state.id, {
+          baseline: codeSnap,
+          currentCodeSnapshotHash: codeSnap?.fingerprint ?? null,
+        });
+        if (sandbox) syncRequirementMirrorToSandbox(base, detail.state.id, sandbox.worktreePath);
       }
 
       deps.broadcastUi({ type: "workbench.updated", reason: "requirement.created", root: base, id: detail.state.id, at: Date.now() });
@@ -1168,6 +1241,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           anchorIds: Array.isArray(body.anchorIds) ? body.anchorIds.filter((x): x is string => typeof x === "string") : undefined,
           mode: body.mode === "refine" ? "refine" : body.mode === "ask" ? "ask" : undefined,
           useFallback: body.useFallback === true,
+          forceFreshSession: body.forceFreshSession === true,
           resolveConflict: body.resolveConflict === true,
           timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined,
           idleTimeoutMs: typeof body.idleTimeoutMs === "number" ? body.idleTimeoutMs : undefined,
@@ -1183,6 +1257,7 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
             ? { stackedOnReqId: body.stackedOnReqId.trim() }
             : {}),
+          ...(body.ignoreSetupFailure === true ? { ignoreSetupFailure: true } : {}),
         });
         const snapshot = await observeGitSnapshot(sandbox.worktreePath);
         const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
@@ -1190,6 +1265,52 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
         deps.broadcastUi({ type: "hub.updated", reason: "sandbox.created", root: base, id, at: Date.now() });
         return jsonResponse({ sandbox, detail, sandboxDrift }, 201);
+      }
+
+      if (method === "POST" && sub === "sandbox/setup") {
+        const body = await readBody(req);
+        const mode = body.action === "ignore" ? "ignore" : "retry";
+        const sandbox = await retryOrIgnoreSandboxSetup(base, id, mode);
+        const snapshot = await observeGitSnapshot(sandbox.worktreePath);
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.setup", root: base, id, at: Date.now() });
+        return jsonResponse({ sandbox, detail });
+      }
+
+      if (method === "DELETE" && sub === "sandbox") {
+        if (deps.executor.getActiveRuns(base).some((r) => r.requirementId === id)) {
+          throw new WorkbenchError("revision_conflict", `需求 ${id} 当前有正在运行的 Agent 任务，禁止丢弃沙箱`);
+        }
+        const preDetail = getRequirement(base, id);
+        if (preDetail.state.stage === "coding") {
+          throw new WorkbenchError(
+            "invalid_transition",
+            `需求 ${id} 处于 coding 阶段，请先取消需求或退回方案后再丢弃沙箱`,
+          );
+        }
+        const discarded = discardSandboxWorktree(base, id);
+        const snapshot = await observeGitSnapshot(base);
+        const detail = getRequirement(base, id, { currentCodeSnapshotHash: snapshot?.fingerprint ?? null });
+        deps.broadcastUi({ type: "hub.updated", reason: "sandbox.discarded", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "workbench.updated", reason: "sandbox.discarded", root: base, id, at: Date.now() });
+        return jsonResponse({ ...discarded, detail });
+      }
+
+      if (method === "POST" && sub === "merge-local") {
+        const body = await readBody(req);
+        const merged = await mergeSandboxToMain(base, id, {
+          commitMessage: typeof body.commitMessage === "string" ? body.commitMessage : undefined,
+          note: typeof body.note === "string" ? body.note : undefined,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+        });
+        const reloadRes = merged.touchesWeb ? await deps.reloadWebBundle() : { reloaded: false };
+        deps.broadcastUi({ type: "hub.updated", reason: "sandbox.merged_local", root: base, id, at: Date.now() });
+        deps.broadcastUi({ type: "workbench.updated", reason: "delivered", root: base, id, at: Date.now() });
+        return jsonResponse({
+          ...merged,
+          webReloaded: reloadRes.reloaded,
+          restartRecommended: merged.touchesBackend,
+        });
       }
 
       if (method === "POST" && sub === "sync-base") {
@@ -1377,38 +1498,279 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         });
       }
 
+      if (method === "POST" && sub === "manual-check") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const detail = await setManualCriterionCheck(base, id, {
+          criterionId: typeof body.criterionId === "string" ? body.criterionId : "",
+          checked: body.checked !== false,
+          note: typeof body.note === "string" ? body.note : undefined,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        if (codeRoot !== base) syncRequirementMirrorToSandbox(base, id, codeRoot);
+        deps.broadcastUi({ type: "workbench.updated", reason: "manual.checked", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "PATCH" && sub === "decisions") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const selections: DecisionSelectionInput[] = Array.isArray(body.selections)
+          ? body.selections
+              .filter((s): s is Record<string, unknown> => isRecord(s) && typeof s.id === "string")
+              .map((s) => ({
+                id: String(s.id),
+                ...(typeof s.selectedOptionId === "string" || s.selectedOptionId === null
+                  ? { selectedOptionId: s.selectedOptionId }
+                  : {}),
+                ...(typeof s.customAnswer === "string" || s.customAnswer === null
+                  ? { customAnswer: s.customAnswer }
+                  : {}),
+              }))
+          : [];
+        const detail = await saveDecisionSelections(base, id, {
+          selections,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        if (codeRoot !== base) syncRequirementMirrorToSandbox(base, id, codeRoot);
+        deps.broadcastUi({ type: "workbench.updated", reason: "decisions.updated", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "POST" && sub === "decisions/revise") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const selections: DecisionSelectionInput[] | undefined = Array.isArray(body.selections)
+          ? body.selections
+              .filter((s): s is Record<string, unknown> => isRecord(s) && typeof s.id === "string")
+              .map((s) => ({
+                id: String(s.id),
+                ...(typeof s.selectedOptionId === "string" || s.selectedOptionId === null
+                  ? { selectedOptionId: s.selectedOptionId }
+                  : {}),
+                ...(typeof s.customAnswer === "string" || s.customAnswer === null
+                  ? { customAnswer: s.customAnswer }
+                  : {}),
+              }))
+          : undefined;
+        const out = await submitDecisionsAndRevise(base, id, {
+          selections,
+          note: typeof body.note === "string" ? body.note : undefined,
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        if (codeRoot !== base) syncRequirementMirrorToSandbox(base, id, codeRoot);
+        deps.broadcastUi({ type: "workbench.updated", reason: "decisions.revised", root: base, id, at: Date.now() });
+        if (body.dispatchAgent === true) {
+          const started = await deps.executor.startRun({
+            root: base,
+            requirementId: id,
+            action: "design",
+            message: out.feedback,
+            anchorIds: out.unresolvedAnnotationIds,
+            mode: "refine",
+          });
+          return jsonResponse({ ...out, detail: started.detail, run: started.run, target: started.target }, 202);
+        }
+        return jsonResponse(out);
+      }
+
+      if (method === "POST" && sub === "revise-plan") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const detail = await revisePlan(base, id, {
+          reason: typeof body.reason === "string" ? body.reason : "",
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        if (codeRoot !== base) syncRequirementMirrorToSandbox(base, id, codeRoot);
+        deps.broadcastUi({ type: "workbench.updated", reason: "plan.revised", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
       if (method === "POST" && sub === "approve") {
         const body = await readBody(req);
-        if (body.createSandbox === true) {
-          await createOrReuseWorktree(base, id, {
-            branchPrefix: "feat",
+        const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
+        const decisionSelections: DecisionSelectionInput[] | undefined = Array.isArray(body.decisionSelections)
+          ? body.decisionSelections
+              .filter((s): s is Record<string, unknown> => isRecord(s) && typeof s.id === "string")
+              .map((s) => ({
+                id: String(s.id),
+                ...(typeof s.selectedOptionId === "string" || s.selectedOptionId === null
+                  ? { selectedOptionId: s.selectedOptionId }
+                  : {}),
+                ...(typeof s.customAnswer === "string" || s.customAnswer === null
+                  ? { customAnswer: s.customAnswer }
+                  : {}),
+              }))
+          : undefined;
+
+        // Pre-validate stage, CAS revision, design presence, and decision/criteria gates BEFORE creating/resetting sandbox!
+        const preDetail = getRequirement(base, id);
+        if (preDetail.state.stage !== "planning") {
+          throw new WorkbenchError("invalid_transition", `当前阶段（${preDetail.state.stage}）无法执行方案批准`);
+        }
+        if (expectedRevision !== undefined && preDetail.state.revision !== expectedRevision) {
+          throw new WorkbenchError(
+            "revision_conflict",
+            `版本冲突：期望 revision=${expectedRevision}，实际 revision=${preDetail.state.revision}`,
+            { requirementId: id, expectedRevision, currentRevision: preDetail.state.revision },
+          );
+        }
+        if (!preDetail.designMarkdown.trim() || preDetail.state.designHash === "" || preDetail.state.designVersion < 1) {
+          throw new WorkbenchError("approval_required", "尚未提交可批准的技术方案正文（design.md）");
+        }
+        const previewPending =
+          preDetail.state.pendingDecisions && preDetail.state.pendingDecisions.length > 0 && decisionSelections
+            ? applyDecisionSelectionsToItems(preDetail.state.pendingDecisions, decisionSelections, Date.now())
+            : (preDetail.state.pendingDecisions ?? []);
+        const previewDirectCheck = canDirectApproveWithDecisions({
+          ...preDetail.state,
+          ...(previewPending.length > 0 ? { pendingDecisions: previewPending } : {}),
+        });
+        if (!previewDirectCheck.allowed) {
+          const code = preDetail.state.criteria.some((c) => c.required) ? "invalid_input" : "approval_required";
+          throw new WorkbenchError(code, previewDirectCheck.reason ?? "当前不满足直接批准条件，请先修订方案", {
+            ...(previewDirectCheck.reasonKey ? { messageKey: previewDirectCheck.reasonKey } : {}),
+          });
+        }
+
+        const projectMeta = getProjectStatus(base).project;
+        const baseSnap = await observeGitSnapshot(base);
+        const wantsSandbox =
+          body.createSandbox === true ||
+          (body.createSandbox !== false && projectMeta?.worktree?.enabled !== false && Boolean(baseSnap?.head));
+        let sandbox = getSandboxForRequirement(base, id);
+        if (wantsSandbox) {
+          sandbox = await createOrReuseWorktree(base, id, {
+            branchPrefix: preDetail.state.kind === "bug" ? "fix" : "feat",
             ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
               ? { stackedOnReqId: body.stackedOnReqId.trim() }
               : {}),
+            ...(body.ignoreSetupFailure === true ? { ignoreSetupFailure: true } : {}),
           });
+        }
+        if (body.resetSandbox === true && sandbox) {
+          await resetSandboxToBaseHead(base, id);
         }
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await approveDesign(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          expectedRevision,
           baseline: snapshot,
           note: typeof body.note === "string" ? body.note : undefined,
+          ...(decisionSelections ? { decisionSelections } : {}),
+          resetSandbox: body.resetSandbox === true,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
+        if (sandbox) syncRequirementMirrorToSandbox(base, id, sandbox.worktreePath);
         deps.broadcastUi({ type: "workbench.updated", reason: "approved", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
+        return jsonResponse({ detail, ...(sandbox ? { sandbox } : {}) });
       }
 
       if (method === "POST" && sub === "fast-track") {
         const body = await readBody(req);
+        const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : undefined;
+        const preDetail = getRequirement(base, id);
+        if (preDetail.state.stage !== "planning") {
+          throw new WorkbenchError("invalid_transition", `当前阶段（${preDetail.state.stage}）不能启用快速通道`);
+        }
+        if (expectedRevision !== undefined && preDetail.state.revision !== expectedRevision) {
+          throw new WorkbenchError(
+            "revision_conflict",
+            `版本冲突：期望 revision=${expectedRevision}，实际 revision=${preDetail.state.revision}`,
+            { requirementId: id, expectedRevision, currentRevision: preDetail.state.revision },
+          );
+        }
+
+        const projectMeta = getProjectStatus(base).project;
+        const baseSnap = await observeGitSnapshot(base);
+        const wantsSandbox =
+          body.createSandbox === true ||
+          (body.createSandbox !== false && projectMeta?.worktree?.enabled !== false && Boolean(baseSnap?.head));
+        let sandbox = getSandboxForRequirement(base, id);
+        if (wantsSandbox) {
+          sandbox = await createOrReuseWorktree(base, id, {
+            branchPrefix: preDetail.state.kind === "bug" ? "fix" : "feat",
+            ...(typeof body.stackedOnReqId === "string" && body.stackedOnReqId.trim()
+              ? { stackedOnReqId: body.stackedOnReqId.trim() }
+              : {}),
+            ...(body.ignoreSetupFailure === true ? { ignoreSetupFailure: true } : {}),
+          });
+        }
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await authorizeFastTrack(base, id, {
-          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          expectedRevision,
           baseline: snapshot,
           note: typeof body.note === "string" ? body.note : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
+        if (sandbox) syncRequirementMirrorToSandbox(base, id, sandbox.worktreePath);
         deps.broadcastUi({ type: "workbench.updated", reason: "fast_tracked", root: base, id, at: Date.now() });
+        return jsonResponse({ detail, ...(sandbox ? { sandbox } : {}) });
+      }
+
+      if (method === "POST" && sub === "bug-criteria") {
+        const body = await readBody(req);
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const detail = await appendBugRegressionCriteria(base, id, {
+          criteria: Array.isArray(body.criteria) ? (body.criteria as CriterionInput[]) : [],
+          actor: body.actor === "agent" ? "agent" : "human",
+          expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
+          currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+        });
+        if (codeRoot !== base) syncRequirementMirrorToSandbox(base, id, codeRoot);
+        deps.broadcastUi({ type: "workbench.updated", reason: "bug.criteria_appended", root: base, id, at: Date.now() });
         return jsonResponse({ detail });
+      }
+
+      if (method === "POST" && sub === "bug-pause") {
+        const body = await readBody(req);
+        const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+        if (!reason) {
+          throw new WorkbenchError("invalid_input", "请提供 Bug 暂停上报原因");
+        }
+        const preDetail = getRequirement(base, id);
+        if (preDetail.state.kind !== "bug" || preDetail.state.stage !== "coding") {
+          throw new WorkbenchError(
+            "invalid_transition",
+            `仅处于 coding 阶段的 Bug 需求允许执行暂停上报（当前：${preDetail.state.kind ?? "feature"} / ${preDetail.state.stage}）`,
+          );
+        }
+        const codeRoot = resolveCodeRoot(base, id);
+        const snapshot = await observeGitSnapshot(codeRoot);
+        const detail = await setRequirementNeedsHuman(
+          base,
+          id,
+          { source: "bug_pause", reason: reason.slice(0, 1000), at: Date.now() },
+          snapshot?.fingerprint ?? null,
+        );
+        deps.broadcastUi({ type: "workbench.updated", reason: "bug.paused", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "POST" && sub === "design-review") {
+        const body = await readBody(req);
+        const current = getRequirement(base, id);
+        if (current.state.stage !== "planning" || !current.state.designHash) {
+          throw new WorkbenchError("invalid_transition", "仅在方案阶段且已存在技术方案正文时可发起异构方案评审");
+        }
+        const started = await deps.executor.startRun({
+          root: base,
+          requirementId: id,
+          action: "review",
+          ...(typeof body.harness === "string" && body.harness.trim() ? { harness: body.harness.trim() } : {}),
+          ...(typeof body.model === "string" && body.model.trim() ? { model: body.model.trim() } : {}),
+          dispatchReasonOverride: "design_review",
+        });
+        deps.broadcastUi({ type: "workbench.updated", reason: "design_review.started", root: base, id, at: Date.now() });
+        return jsonResponse(started, 202);
       }
 
       if (method === "POST" && sub === "request-changes") {
@@ -1419,6 +1781,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           feedback: typeof body.feedback === "string" ? body.feedback : "",
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
+          rememberLesson: body.rememberLesson === true,
+          lessonText: typeof body.lessonText === "string" ? body.lessonText : undefined,
         });
         if (codeRoot !== base) {
           syncRequirementMirrorToSandbox(base, id, codeRoot);
@@ -1462,6 +1826,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           note: typeof body.note === "string" ? body.note : undefined,
           overrideReason: typeof body.overrideReason === "string" ? body.overrideReason : undefined,
           acceptedRisks: readStringArray(body.acceptedRisks),
+          rememberLesson: body.rememberLesson === true,
+          lessonText: typeof body.lessonText === "string" ? body.lessonText : undefined,
         });
         const projectMeta = getProjectStatus(base).project;
         let githubSyncWarning: string | undefined;
@@ -1749,8 +2115,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
+        const sandboxCleanup = cleanupSandboxOnCancel(base, id, { discard: body.discardSandbox === true });
+        deps.broadcastUi({ type: "hub.updated", reason: "cancelled", root: base, id, at: Date.now() });
         deps.broadcastUi({ type: "workbench.updated", reason: "cancelled", root: base, id, at: Date.now() });
-        return jsonResponse({ detail });
+        return jsonResponse({ detail, sandboxCleanup });
       }
 
       if (method === "POST" && sub === "reopen") {

@@ -39,7 +39,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
-import type { PrivacyMode, RequirementTier, RunBillingMode, Track } from "../../core/types.ts";
+import type { PrivacyMode, RequirementKind, RequirementTier, RunBillingMode, Track } from "../../core/types.ts";
 import type { ModelPriceOverride } from "../../hub/types.ts";
 import { api, setApiProjectScope } from "../api.ts";
 import {
@@ -55,7 +55,9 @@ import {
   submitImportGitHubIssue,
   submitLifecycle,
   submitNewRequirement,
+  submitRevisePlan,
   syncSandboxBaseAction,
+  notifyCascadeSyncResults,
   useDeliveryQuery,
   useGiteeIssuesQuery,
   useGiteeStatusQuery,
@@ -693,6 +695,37 @@ export function Modals() {
                 />
               </div>
               <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground">{t(language, "kind.label")}</span>
+                <SegmentedControl
+                  size="sm"
+                  aria-label={t(language, "kind.label")}
+                  render={
+                    <RadioGroupPrimitive
+                      className="flex items-center"
+                      value={m.reqKind ?? "feature"}
+                      onValueChange={(next) => {
+                        if (next === "feature" || next === "bug") {
+                          setModal((prev) =>
+                            prev?.kind === "new_req" ? { ...prev, reqKind: next as RequirementKind } : prev,
+                          );
+                        }
+                      }}
+                    />
+                  }
+                >
+                  <SegmentedControlItem
+                    render={<RadioPrimitive.Root value="feature" data-testid="new-req-kind-feature" />}
+                  >
+                    {t(language, "kind.feature")}
+                  </SegmentedControlItem>
+                  <SegmentedControlItem
+                    render={<RadioPrimitive.Root value="bug" data-testid="new-req-kind-bug" />}
+                  >
+                    <Icon icon={Bug} size={14} /> {t(language, "kind.bug")}
+                  </SegmentedControlItem>
+                </SegmentedControl>
+              </div>
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground">{t(language, "tier.label")}</span>
                 <SegmentedControl
                   size="sm"
@@ -806,11 +839,17 @@ export function Modals() {
                     false,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
-                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId, tier: m.tier },
+                    {
+                      createSandbox: m.createSandbox,
+                      stackedOnReqId: m.stackedOnReqId,
+                      tier: m.tier,
+                      reqKind: m.reqKind ?? "feature",
+                    },
                   )
                 }
               >
-                <Icon icon={Save} size={14} /> {t(language, "newReq.saveDraft")}
+                <Icon icon={Save} size={14} />{" "}
+                {m.reqKind === "bug" ? t(language, "newReq.saveBugOnly") : t(language, "newReq.saveDraft")}
               </AsyncButton>
               <AsyncButton
                 variant="default"
@@ -823,11 +862,18 @@ export function Modals() {
                     true,
                     isGiteeProject ? false : createIssueChecked,
                     (m.attachments ?? []).map((a) => a.id),
-                    { createSandbox: m.createSandbox, stackedOnReqId: m.stackedOnReqId, tier: m.tier },
+                    {
+                      createSandbox: m.createSandbox,
+                      stackedOnReqId: m.stackedOnReqId,
+                      tier: m.tier,
+                      reqKind: m.reqKind ?? "feature",
+                      startImmediately: m.reqKind === "bug",
+                    },
                   )
                 }
               >
-                <Icon icon={Zap} size={14} /> {t(language, "newReq.createDispatch")}
+                <Icon icon={m.reqKind === "bug" ? Bug : Zap} size={14} />{" "}
+                {m.reqKind === "bug" ? t(language, "newReq.createStartBug") : t(language, "newReq.createDispatch")}
               </AsyncButton>
             </DialogFooter>
           </>
@@ -1635,6 +1681,18 @@ export function Modals() {
               {isDesignStage ? t(language, "feedback.dispatchDesign") : t(language, "feedback.dispatchFix")}
             </span>
           </Label>
+          <Label className="flex items-center gap-2 text-[13px] font-normal">
+            <Checkbox
+              data-testid="feedback-remember-lesson"
+              checked={Boolean(m.rememberLesson)}
+              onCheckedChange={(checked) =>
+                setModal((prev) =>
+                  prev?.kind === "feedback" ? { ...prev, rememberLesson: Boolean(checked) } : prev,
+                )
+              }
+            />
+            <span>{t(language, "playbook.rememberLabel")}</span>
+          </Label>
         </DialogPanel>
         <DialogFooter>
           <Button variant="ghost" type="button" onClick={close}>
@@ -1645,7 +1703,11 @@ export function Modals() {
             type="button"
             data-testid="feedback-submit-btn"
             disabled={busy || runLocked}
-            onAction={() => (detail ? submitFeedback(detail, m.feedback, m.dispatchAgent) : undefined)}
+            onAction={() =>
+              detail
+                ? submitFeedback(detail, m.feedback, m.dispatchAgent, { rememberLesson: Boolean(m.rememberLesson) })
+                : undefined
+            }
           >
             <Icon icon={Send} size={14} />{" "}
             {isDesignStage ? t(language, "feedback.submitDesign") : t(language, "feedback.submitFix")}
@@ -1657,6 +1719,7 @@ export function Modals() {
 
   if (m.kind === "accept_override") {
     const isBlock = m.verdict === "block";
+    const requiresReason = isBlock || m.verdict === "stale";
     const title = isBlock
       ? t(language, "acceptOverride.titleBlock")
       : m.verdict === "concern"
@@ -1672,7 +1735,7 @@ export function Modals() {
         </DialogHeader>
         <DialogPanel className="space-y-3">
           {runLocked && <RunLockNotice />}
-          <Alert variant={isBlock ? "error" : "warning"}>
+          <Alert variant={requiresReason ? "error" : "warning"}>
             <Icon icon={AlertTriangle} size={14} />
             <AlertDescription className="space-y-1.5">
               <div>
@@ -1690,14 +1753,14 @@ export function Modals() {
           </Alert>
           <div>
             <Label className="mb-1 block text-xs text-muted-foreground font-normal">
-              {isBlock ? t(language, "acceptOverride.reasonBlockLabel") : t(language, "acceptOverride.reasonConcernLabel")}
+              {requiresReason ? t(language, "acceptOverride.reasonBlockLabel") : t(language, "acceptOverride.reasonConcernLabel")}
             </Label>
             <Textarea
               data-testid="accept-override-reason"
               autoFocus
               value={m.reason}
               placeholder={
-                isBlock
+                requiresReason
                   ? t(language, "acceptOverride.reasonBlockPlaceholder")
                   : t(language, "acceptOverride.reasonConcernPlaceholder")
               }
@@ -1706,6 +1769,30 @@ export function Modals() {
               }
             />
           </div>
+          <Label className="flex items-center gap-2 text-[13px] font-normal">
+            <Checkbox
+              data-testid="accept-override-remember-lesson"
+              checked={Boolean(m.rememberLesson)}
+              onCheckedChange={(checked) =>
+                setModal((prev) =>
+                  prev?.kind === "accept_override" ? { ...prev, rememberLesson: Boolean(checked) } : prev,
+                )
+              }
+            />
+            <span>{t(language, "playbook.rememberLabel")}</span>
+          </Label>
+          <Label className="flex items-center gap-2 text-[13px] font-normal">
+            <Checkbox
+              data-testid="accept-override-open-deliver"
+              checked={Boolean(m.openDeliverAfter)}
+              onCheckedChange={(checked) =>
+                setModal((prev) =>
+                  prev?.kind === "accept_override" ? { ...prev, openDeliverAfter: Boolean(checked) } : prev,
+                )
+              }
+            />
+            <span>{t(language, "accept.openDeliverAfter")}</span>
+          </Label>
         </DialogPanel>
         <DialogFooter>
           <Button variant="ghost" type="button" onClick={close}>
@@ -1715,12 +1802,69 @@ export function Modals() {
             variant="default"
             type="button"
             data-testid="confirm-accept-override-btn"
-            disabled={busy || runLocked || (isBlock && !m.reason.trim())}
+            disabled={busy || runLocked || (requiresReason && !m.reason.trim())}
             onAction={() =>
-              detail ? submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks) : undefined
+              detail
+                ? submitAcceptOverride(detail, m.verdict, m.reason, m.acceptedRisks, {
+                    rememberLesson: Boolean(m.rememberLesson),
+                    openDeliverAfter: Boolean(m.openDeliverAfter),
+                  })
+                : undefined
             }
           >
             <Icon icon={Check} size={14} /> {t(language, "acceptOverride.confirm")}
+          </AsyncButton>
+        </DialogFooter>
+      </ModalShell>
+    );
+  }
+
+  if (m.kind === "revise_plan") {
+    return (
+      <ModalShell onClose={close} testId="revise-plan-modal" hasExplicitTitle>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Icon icon={RotateCcw} size={20} />
+            <span>{t(language, "revisePlan.title")}</span>
+          </DialogTitle>
+          <DialogDescription>{t(language, "revisePlan.desc")}</DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-3">
+          {runLocked && <RunLockNotice />}
+          <Textarea
+            id="revise-plan-reason"
+            data-testid="revise-plan-reason"
+            autoFocus
+            value={m.reason}
+            placeholder={t(language, "revisePlan.placeholder")}
+            onChange={(e) =>
+              setModal((prev) => (prev?.kind === "revise_plan" ? { ...prev, reason: e.target.value } : prev))
+            }
+          />
+          <Label className="flex items-center gap-2 text-[13px] font-normal">
+            <Checkbox
+              checked={m.dispatchAgent}
+              onCheckedChange={(checked) =>
+                setModal((prev) =>
+                  prev?.kind === "revise_plan" ? { ...prev, dispatchAgent: Boolean(checked) } : prev,
+                )
+              }
+            />
+            <span>{t(language, "revisePlan.dispatchLabel")}</span>
+          </Label>
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="ghost" type="button" onClick={close}>
+            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
+          </Button>
+          <AsyncButton
+            variant="default"
+            type="button"
+            data-testid="confirm-revise-plan-btn"
+            disabled={busy || runLocked || !m.reason.trim()}
+            onAction={() => (detail ? submitRevisePlan(detail, m.reason, m.dispatchAgent) : undefined)}
+          >
+            <Icon icon={Check} size={14} /> {t(language, "revisePlan.confirm")}
           </AsyncButton>
         </DialogFooter>
       </ModalShell>
@@ -1952,13 +2096,22 @@ export function Modals() {
     const candidates = deliveryPreview?.candidates ?? [];
     const selectedSet = new Set(m.selectedFiles);
     const sandboxActive = Boolean(deliveryPreview?.sandboxActive);
-    const createPr = sandboxActive ? true : Boolean(m.createPr);
-    const canSubmitExistingCommits = createPr && candidates.length === 0 && (deliveryPreview?.aheadCommitsCount ?? 0) > 0;
     const isGiteeDelivery = deliveryPreview?.remoteProvider === "gitee" || isGiteeProject;
-    const prPlatformLabel = isGiteeDelivery ? "Gitee" : "GitHub";
     const prAvailable = Boolean(
       deliveryPreview?.canCreatePr || (isGiteeDelivery ? giteeStatus?.ready : githubStatus?.ready),
     );
+    const effectiveMode: "local" | "pr" | "local_merge" = sandboxActive
+      ? (m.deliveryMode === "local_merge" ? "local_merge" : m.deliveryMode === "pr" ? "pr" : m.createPr === false || !prAvailable ? "local_merge" : "pr")
+      : m.createPr
+        ? "pr"
+        : "local";
+    const createPr = effectiveMode === "pr";
+    const isLocalMerge = effectiveMode === "local_merge";
+    const canSubmitExistingCommits =
+      (createPr || isLocalMerge) && candidates.length === 0 && (deliveryPreview?.aheadCommitsCount ?? 0) > 0;
+    const prPlatformLabel = isGiteeDelivery ? "Gitee" : "GitHub";
+    const wipCount = deliveryPreview?.wipCommitCount ?? 0;
+    const treeMismatch = deliveryPreview?.treeMatchesAcceptance === false;
 
     const toggleFile = (filePath: string) => {
       setModal((prev) => {
@@ -1980,12 +2133,39 @@ export function Modals() {
     };
     const submitDeliver = async () => {
       if (guardRequirementRunLock(detail.state.id)) return;
+      const msg = m.commitMessage.trim();
+      if (isLocalMerge) {
+        if (!msg) {
+          showToastKey("deliver.needMessage", undefined, true);
+          return;
+        }
+        const res = await runBusy(() =>
+          api.mergeSandboxLocal(detail.state.id, {
+            commitMessage: msg,
+            expectedRevision: detail.state.revision,
+            note: m.note.trim() || undefined,
+          }),
+        );
+        if (res) {
+          closeSubmitted();
+          await invalidateAllWorkbenchQueries();
+          showToastKey(
+            res.restartRecommended
+              ? "deliver.mergedLocalRestart"
+              : res.webReloaded
+                ? "deliver.mergedLocalReload"
+                : "deliver.mergedLocal",
+            { hash: res.delivery.shortHash, count: res.delivery.files.length },
+          );
+          notifyCascadeSyncResults(res.cascadeResults);
+        }
+        return;
+      }
       const files = m.selectedFiles.filter((f) => candidates.some((c) => c.path === f));
       if (files.length === 0 && !canSubmitExistingCommits) {
         showToastKey("deliver.needFiles", undefined, true);
         return;
       }
-      const msg = m.commitMessage.trim();
       if (files.length > 0 && !msg) {
         showToastKey("deliver.needMessage", undefined, true);
         return;
@@ -2046,12 +2226,47 @@ export function Modals() {
             <DialogTitle className="flex items-center gap-2">
               <Icon icon={createPr ? GitPullRequest : GitCommit} size={20} />
               <span>
-                {createPr
-                  ? t(language, "deliver.titlePrPlatform", { platform: prPlatformLabel })
-                  : t(language, "deliver.titleLocal")}
+                {isLocalMerge
+                  ? t(language, "deliver.titleLocalMerge")
+                  : createPr
+                    ? t(language, "deliver.titlePrPlatform", { platform: prPlatformLabel })
+                    : t(language, "deliver.titleLocal")}
               </span>
             </DialogTitle>
-            {!sandboxActive && (
+            {sandboxActive ? (
+              <SegmentedControl
+                size="sm"
+                aria-label={t(language, "deliver.modeAria")}
+                render={
+                  <RadioGroupPrimitive
+                    className="flex items-center"
+                    value={effectiveMode}
+                    onValueChange={(next) => {
+                      if (next === "local_merge") {
+                        setModal((prev) =>
+                          prev?.kind === "deliver" ? { ...prev, deliveryMode: "local_merge", createPr: false } : prev,
+                        );
+                      } else if (next === "pr" && prAvailable) {
+                        setModal((prev) =>
+                          prev?.kind === "deliver" ? { ...prev, deliveryMode: "pr", createPr: true } : prev,
+                        );
+                      }
+                    }}
+                  />
+                }
+              >
+                <SegmentedControlItem
+                  render={<RadioPrimitive.Root value="local_merge" data-testid="deliver-mode-local-merge" />}
+                >
+                  <Icon icon={GitCommit} size={14} /> {t(language, "deliver.modeLocalMerge")}
+                </SegmentedControlItem>
+                <SegmentedControlItem
+                  render={<RadioPrimitive.Root value="pr" data-testid="deliver-mode-pr" disabled={!prAvailable} />}
+                >
+                  <Icon icon={GitPullRequest} size={14} /> {t(language, "deliver.modePr")}
+                </SegmentedControlItem>
+              </SegmentedControl>
+            ) : (
               <SegmentedControl
                 size="sm"
                 aria-label={t(language, "deliver.modeAria")}
@@ -2088,11 +2303,23 @@ export function Modals() {
             {t(language, "deliver.targetMiddle")}
             <code>{deliveryPreview?.branch ?? "HEAD"}</code>
             {deliveryPreview?.githubRepo ? t(language, "deliver.repo", { repo: deliveryPreview.githubRepo }) : ""}
-            {!createPr && t(language, "deliver.localNote")}
+            {!createPr && !isLocalMerge && t(language, "deliver.localNote")}
           </DialogDescription>
         </DialogHeader>
 
         <DialogPanel className="space-y-3">
+          {treeMismatch && (
+            <Alert variant="error" data-testid="deliver-tree-mismatch-warn">
+              <Icon icon={AlertTriangle} size={14} />
+              <AlertDescription>{deliveryPreview?.treeMismatchReason || t(language, "deliver.treeMismatchWarn")}</AlertDescription>
+            </Alert>
+          )}
+          {sandboxActive && wipCount > 0 && (
+            <Alert variant="info" data-testid="deliver-wip-squash-hint">
+              <Icon icon={Info} size={14} />
+              <AlertDescription>{t(language, "deliver.wipSquashHint", { count: wipCount })}</AlertDescription>
+            </Alert>
+          )}
           {sandboxActive &&
             deliveryPreview?.sandboxDrift &&
             (deliveryPreview.sandboxDrift.behindCount > 0 || deliveryPreview.sandboxDrift.conflictFiles.length > 0) && (
@@ -2143,7 +2370,7 @@ export function Modals() {
               </Alert>
             )}
 
-          {(candidates.length > 0 || !canSubmitExistingCommits) && (
+          {!isLocalMerge && (candidates.length > 0 || !canSubmitExistingCommits) && (
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <strong className="text-[13px]">
@@ -2211,12 +2438,13 @@ export function Modals() {
             </Alert>
           )}
 
-          {(candidates.length > 0 || !canSubmitExistingCommits) && (
+          {(isLocalMerge || candidates.length > 0 || !canSubmitExistingCommits || (sandboxActive && createPr && wipCount > 0)) && (
             <div>
               <Label className="mb-1 block text-xs text-muted-foreground font-normal">
                 {t(language, "deliver.commitLabel")}
               </Label>
-              <Input
+              <Textarea
+                rows={3}
                 data-testid="deliver-commit-message"
                 value={m.commitMessage}
                 onChange={(e) =>
@@ -2335,13 +2563,15 @@ export function Modals() {
             variant="default"
             type="button"
             data-testid="submit-deliver-btn"
-            disabled={busy || runLocked || (!canSubmitExistingCommits && m.selectedFiles.length === 0)}
+            disabled={busy || runLocked || treeMismatch || (!isLocalMerge && !canSubmitExistingCommits && m.selectedFiles.length === 0)}
             onAction={submitDeliver}
           >
             <Icon icon={createPr ? GitPullRequest : GitCommit} size={14} />{" "}
-            {createPr
-              ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
-              : t(language, "deliver.submitLocal")}
+            {isLocalMerge
+              ? t(language, "deliver.submitLocalMerge")
+              : createPr
+                ? t(language, "deliver.submitPrPlatform", { platform: prPlatformLabel })
+                : t(language, "deliver.submitLocal")}
           </AsyncButton>
         </DialogFooter>
       </ModalShell>

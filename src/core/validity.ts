@@ -4,11 +4,13 @@ import type {
   AcceptanceGate,
   AcceptanceSnapshot,
   ActionBanner,
+  AdoptedDecision,
   ApprovalStatus,
   ChangedFile,
   CriteriaCoverage,
   Criterion,
   CriterionCoverageItem,
+  DesignReviewValidity,
   EvaluatedVerification,
   EvidenceContext,
   EvidenceProvenance,
@@ -17,7 +19,18 @@ import type {
   UiMessageParams,
   UiMessageRef,
   ValidityReport,
+  VerificationRecord,
 } from "./types.ts";
+
+/**
+ * Classifies deterministic environment/infrastructure verification failures (missing binary or timeout)
+ * that should NOT trigger blind model auto-heal loops.
+ */
+export function isEnvironmentVerificationFailure(record: VerificationRecord): boolean {
+  if (record.passed) return false;
+  if (record.timedOut) return true;
+  return record.exitCode === 127 || record.exitCode === 126;
+}
 
 const TEST_FILE_PATH_RE = /(?:^|\/)(?:__tests__\/.*|test_[^/]+\.py|.*_test\.go|.*\.(?:test|spec)\.[A-Za-z0-9]+)$/i;
 const TEST_SKIP_LINE_RE = /^\+(?!\+\+)(?:.*\b(?:describe|it|test|suite)\.(?:skip|only)\s*\(|.*\b(?:xit|xtest|xdescribe)\s*\(|.*@pytest\.mark\.skip\b|.*#\[\s*ignore\b|.*\bt\.(?:Skip|Skipf|SkipNow)\s*\()/;
@@ -100,7 +113,11 @@ export interface EvaluateRequirementOptions {
 export function computeSpecHash(specMarkdown: string, criteria: Criterion[]): string {
   const payload = JSON.stringify([
     specMarkdown,
-    criteria.map((c) => [c.id, c.description, c.required, c.command ?? null]),
+    criteria.map((c) =>
+      c.kind || c.steps
+        ? [c.id, c.description, c.required, c.command ?? null, c.kind ?? null, c.steps ?? null]
+        : [c.id, c.description, c.required, c.command ?? null],
+    ),
   ]);
   return createHash("sha256").update(payload, "utf8").digest("hex");
 }
@@ -109,6 +126,60 @@ export function computeSpecHash(specMarkdown: string, criteria: Criterion[]): st
 export function computeDesignHash(designMarkdown: string): string {
   if (!designMarkdown.trim()) return "";
   return createHash("sha256").update(designMarkdown, "utf8").digest("hex");
+}
+
+/** Computes deterministic SHA-256 of adopted human decisions, or empty string when none. */
+export function computeDecisionsHash(decisions: AdoptedDecision[] | undefined): string {
+  if (!decisions || decisions.length === 0) return "";
+  const payload = JSON.stringify(
+    decisions.map((d) => [d.id, d.question, d.answer, d.optionId ?? null, d.optionLabel ?? null]),
+  );
+  return createHash("sha256").update(payload, "utf8").digest("hex");
+}
+
+/**
+ * Checks whether a planning requirement with pending decision cards is eligible for
+ * the direct-approve exit ("采纳选择并直接批准进入编码") per WB-18 / FLOW §1.4:
+ * - Every pending decision must have a valid preset `selectedOptionId` (no unanswered item)
+ * - No item may use a custom freeform `customAnswer` (custom answers require a design revision round)
+ * - Hard invariant ③: at least 1 required acceptance criterion must already exist.
+ */
+export function canDirectApproveWithDecisions(state: RequirementState): {
+  allowed: boolean;
+  reason: string | null;
+  reasonKey?: string;
+} {
+  const pending = state.pendingDecisions ?? [];
+  if (pending.length > 0) {
+    for (const item of pending) {
+      if (item.customAnswer && item.customAnswer.trim().length > 0) {
+        return {
+          allowed: false,
+          reason: `决策 ${item.id} 包含自定义输入，需先提交决策并修订方案后再批准`,
+          reasonKey: "decisions.directBlockedCustom",
+        };
+      }
+      const validPreset =
+        Boolean(item.selectedOptionId) &&
+        item.options.some((opt) => opt.id === item.selectedOptionId);
+      if (!validPreset) {
+        return {
+          allowed: false,
+          reason: `仍有未作答的待拍板决策（${item.id}），请先完成选择`,
+          reasonKey: "decisions.directBlockedUnanswered",
+        };
+      }
+    }
+  }
+  const hasRequiredCriterion = state.criteria.some((c) => c.required);
+  if (!hasRequiredCriterion) {
+    return {
+      allowed: false,
+      reason: "尚未定义必需验收条件，请先修订方案补齐验收条件后再批准",
+      reasonKey: "decisions.directBlockedNoCriteria",
+    };
+  }
+  return { allowed: true, reason: null };
 }
 
 export function evaluateApproval(state: RequirementState): ApprovalStatus {
@@ -123,6 +194,17 @@ export function evaluateApproval(state: RequirementState): ApprovalStatus {
       valid: false,
       reason: "需求规范或验收条件已修改，需要重新确认",
       reasonKey: "core.approval.specChanged",
+    };
+  }
+  const currentDecisionsHash = computeDecisionsHash(state.humanDecisions);
+  if (
+    (approval.decisionsHash !== undefined || currentDecisionsHash !== "") &&
+    (approval.decisionsHash ?? "") !== currentDecisionsHash
+  ) {
+    return {
+      valid: false,
+      reason: "已采纳决策发生变更，需要重新批准",
+      reasonKey: "core.approval.decisionsChanged",
     };
   }
   if (state.track === "plan_first") {
@@ -189,28 +271,59 @@ export function evaluateVerifications(
   });
 }
 
+export function isManualCriterion(criterion: Pick<Criterion, "kind" | "command" | "steps">): boolean {
+  return criterion.kind === "manual" || (!criterion.command?.trim() && Boolean(criterion.steps?.trim()));
+}
+
 export function evaluateCriteriaCoverage(
   state: RequirementState,
   evaluatedVerifications: EvaluatedVerification[],
+  currentCodeSnapshotHash: string | null = null,
 ): CriteriaCoverage {
   const items: CriterionCoverageItem[] = [];
   let requiredTotal = 0;
   let requiredPassed = 0;
   let optionalTotal = 0;
   let optionalPassed = 0;
+  const manualChecksById = new Map((state.manualChecks ?? []).map((mc) => [mc.criterionId, mc]));
 
   for (const criterion of state.criteria) {
-    const matching = evaluatedVerifications.filter((ev) => ev.record.criterionIds.includes(criterion.id));
+    const isManual = isManualCriterion(criterion);
+    const manualCheck = manualChecksById.get(criterion.id);
+
+    const matching = isManual ? [] : evaluatedVerifications.filter((ev) => ev.record.criterionIds.includes(criterion.id));
     const verificationIds = matching.map((ev) => ev.record.id);
     const currentPass = matching.find((ev) => ev.effectiveState === "passed");
     const latest = matching.length > 0 ? matching[matching.length - 1]! : null;
 
     let coverageState: CriterionCoverageItem["state"] = "unverified";
-    let reason: string | null = "尚未运行验证";
-    let reasonKey: string | undefined = "core.coverage.notRun";
+    let reason: string | null = isManual ? "待人工核验并勾选确认" : "尚未运行验证";
+    let reasonKey: string | undefined = isManual ? "core.coverage.manualUnverified" : "core.coverage.notRun";
     let reasonParams: UiMessageParams | undefined;
 
-    if (currentPass) {
+    if (isManual) {
+      if (manualCheck?.checked) {
+        if (
+          manualCheck.specHash === state.specHash &&
+          Boolean(currentCodeSnapshotHash) &&
+          manualCheck.codeSnapshotHash === currentCodeSnapshotHash
+        ) {
+          coverageState = "passed";
+          reason = null;
+          reasonKey = undefined;
+        } else {
+          coverageState = "stale";
+          reason =
+            manualCheck.specHash !== state.specHash
+              ? "需求规范或验收条件已更新，需重新人工核验"
+              : "代码已有新改动，需重新人工核验";
+          reasonKey =
+            manualCheck.specHash !== state.specHash
+              ? "core.coverage.manualStaleSpec"
+              : "core.coverage.manualStaleCode";
+        }
+      }
+    } else if (currentPass) {
       coverageState = "passed";
       reason = null;
       reasonKey = undefined;
@@ -364,13 +477,16 @@ function deriveReadyAcceptanceBanner(
   }
 
   if (reviewValidity.effectiveState === "stale") {
+    const wasBlocking = report?.verdict === "block";
     return {
       needsDecision: true,
-      decisionReason: "审查已过期",
-      decisionReasonKey: "core.decision.reviewStale",
+      decisionReason: wasBlocking ? "阻塞审查已过期" : "审查已过期",
+      decisionReasonKey: wasBlocking ? "core.decision.reviewBlock" : "core.decision.reviewStale",
       banner: {
-        headline: `验证已通过（${coverage.requiredPassed}/${coverage.requiredTotal}），但跨模型审查已过期（${reviewValidity.reason ?? "代码或规范已变化"}）`,
-        headlineKey: "core.banner.review.stale",
+        headline: wasBlocking
+          ? `验证已通过（${coverage.requiredPassed}/${coverage.requiredTotal}），但上轮阻塞级（block）审查已过期，需复审或填理由放行`
+          : `验证已通过（${coverage.requiredPassed}/${coverage.requiredTotal}），但跨模型审查已过期（${reviewValidity.reason ?? "代码或规范已变化"}）`,
+        headlineKey: wasBlocking ? "core.banner.review.staleBlock" : "core.banner.review.stale",
         headlineParams: {
           passed: coverage.requiredPassed,
           total: coverage.requiredTotal,
@@ -378,14 +494,18 @@ function deriveReadyAcceptanceBanner(
             ? { key: reviewValidity.reasonKey }
             : (reviewValidity.reason ?? ""),
         },
-        tone: "warning",
+        tone: wasBlocking ? "danger" : "warning",
         primaryAction: {
           id: "dispatch_review",
           label: "重新跨模型审查",
           labelKey: "core.action.dispatchReview",
         },
         secondaryActions: [
-          { id: "accept", label: "跳过复审直接验收", labelKey: "core.action.skipReReviewAccept" },
+          {
+            id: "accept",
+            label: wasBlocking ? "忽略阻塞并验收…" : "跳过复审直接验收",
+            labelKey: wasBlocking ? "core.action.ignoreBlockAccept" : "core.action.skipReReviewAccept",
+          },
           { id: "request_changes", label: "打回修改…", labelKey: "core.action.sendBack" },
           ...rerunVerify,
         ],
@@ -416,12 +536,57 @@ function deriveReadyAcceptanceBanner(
   };
 }
 
+/**
+ * WB-22 / FLOW §1.3: evaluates independent heterogeneous design review against current specHash + designHash.
+ * Strictly isolated from coding `reviewReport` and never blocks human approval or acceptance.
+ */
+export function evaluateDesignReviewReport(state: RequirementState): DesignReviewValidity {
+  const report = state.designReviewReport;
+  if (!report) {
+    return { effectiveState: "missing", reason: null };
+  }
+  if (report.reviewedSpecHash !== state.specHash) {
+    return {
+      effectiveState: "stale",
+      reason: "需求规范或验收条件在方案评审后已更新",
+      reasonKey: "core.designReview.staleSpec",
+    };
+  }
+  if (!state.designHash || report.reviewedDesignHash !== state.designHash) {
+    return {
+      effectiveState: "stale",
+      reason: "技术方案正文在方案评审后已更新",
+      reasonKey: "core.designReview.staleDesign",
+    };
+  }
+  return { effectiveState: "current", reason: null };
+}
+
+const GENERIC_BASELINE_DESC_RE = /^(?:项目快速基线验证通过|项目自动化验证通过)$/;
+
+/**
+ * WB-23 / FLOW §2.5: honest signal when a `fast_track` item only relies on generic system-injected
+ * project baseline command(s) without any requirement-specific test or manual check.
+ */
+export function isFastTrackBaselineOnly(state: RequirementState): boolean {
+  if (state.track !== "fast_track") return false;
+  const required = state.criteria.filter((c) => c.required);
+  if (required.length === 0) return false;
+  return required.every(
+    (c) =>
+      c.systemInjected === true ||
+      (c.kind !== "manual" && Boolean(c.command) && GENERIC_BASELINE_DESC_RE.test(c.description.trim())),
+  );
+}
+
 export function deriveActionBanner(
   state: RequirementState,
   approval: ApprovalStatus,
   coverage: CriteriaCoverage,
   gate: AcceptanceGate,
   reviewValidity: ReviewValidity = evaluateReviewReport(state, null),
+  verifications: EvaluatedVerification[] = [],
+  currentCodeSnapshotHash: string | null = null,
 ): {
   banner: ActionBanner;
   needsDecision: boolean;
@@ -433,7 +598,33 @@ export function deriveActionBanner(
 
   switch (state.stage) {
     case "planning": {
+      const pendingDecisions = state.pendingDecisions ?? [];
+      if (pendingDecisions.length > 0 && state.designHash !== "" && !state.lastFeedback) {
+        const directCheck = canDirectApproveWithDecisions(state);
+        return {
+          needsDecision: true,
+          decisionReason: "待拍板方案决策",
+          decisionReasonKey: "core.decision.pendingDecisions",
+          banner: {
+            headline: `方案 v${state.designVersion} 存在 ${pendingDecisions.length} 项待拍板决策，请在下方决策卡片完成选择`,
+            headlineKey: "core.banner.awaitApproval.decisions",
+            headlineParams: { version: state.designVersion, count: pendingDecisions.length },
+            tone: "warning",
+            primaryAction: directCheck.allowed
+              ? {
+                  id: "approve_and_implement",
+                  label: "采纳选择并批准实施",
+                  labelKey: "core.action.approveImplement",
+                }
+              : null,
+            secondaryActions: [
+              { id: "request_changes", label: "提出修改意见…", labelKey: "core.action.requestChanges" },
+            ],
+          },
+        };
+      }
       if (state.designHash !== "" && !state.lastFeedback) {
+        const hasRequired = state.criteria.some((c) => c.required);
         return {
           needsDecision: true,
           decisionReason: "方案待批准",
@@ -447,9 +638,15 @@ export function deriveActionBanner(
               id: "approve_and_implement",
               label: "批准方案并开始实施",
               labelKey: "core.action.approveImplement",
+              ...(!hasRequired ? { disabledReason: "至少需要 1 条必需验收条件才能批准进入编码" } : {}),
             },
             secondaryActions: [
-              { id: "approve_only", label: "仅批准方案", labelKey: "core.action.approveOnly" },
+              {
+                id: "approve_only",
+                label: "仅批准方案",
+                labelKey: "core.action.approveOnly",
+                ...(!hasRequired ? { disabledReason: "至少需要 1 条必需验收条件才能批准进入编码" } : {}),
+              },
               { id: "request_changes", label: "提出修改意见…", labelKey: "core.action.requestChanges" },
             ],
           },
@@ -474,6 +671,25 @@ export function deriveActionBanner(
           },
         };
       }
+      if (state.kind === "bug") {
+        return {
+          needsDecision: false,
+          decisionReason: null,
+          banner: {
+            headline: "Bug 已登记，授权后直接进入单段修复（复现定位 + 回归测试 + 修复）",
+            headlineKey: "core.banner.bugDraft",
+            tone: "neutral",
+            primaryAction: {
+              id: "authorize_fast_track",
+              label: "开始修复",
+              labelKey: "core.action.startBugFix",
+            },
+            secondaryActions: [
+              { id: "dispatch_design", label: "转常规方案流程", labelKey: "core.action.convertPlanFirst" },
+            ],
+          },
+        };
+      }
       return {
         needsDecision: false,
         decisionReason: null,
@@ -494,20 +710,170 @@ export function deriveActionBanner(
     }
 
     case "coding": {
+      if (state.needsHuman && state.needsHuman.source === "bug_pause") {
+        return {
+          needsDecision: true,
+          decisionReason: "Bug 修复暂停待人工拍板",
+          decisionReasonKey: "core.decision.bugPaused",
+          banner: {
+            headline: `Bug 修复已主动暂停，需人工介入：${state.needsHuman.reason}`,
+            headlineKey: "core.banner.bugPaused",
+            headlineParams: { reason: state.needsHuman.reason },
+            tone: "warning",
+            primaryAction: {
+              id: "request_changes",
+              label: "补充信息继续修…",
+              labelKey: "core.action.bugSupplyInfo",
+            },
+            secondaryActions: [
+              { id: "revise_plan", label: "转常规方案流程", labelKey: "core.action.convertPlanFirst" },
+              { id: "dispatch_fix", label: "继续让 Agent 修复", labelKey: "core.action.dispatchFix" },
+            ],
+          },
+        };
+      }
       const failedCount = coverage.items.filter((i) => i.state === "failed").length;
       const staleCount = coverage.items.filter((i) => i.state === "stale").length;
+      const latestRun = state.agentRuns && state.agentRuns.length > 0 ? state.agentRuns[state.agentRuns.length - 1] : null;
+      const latestCodingRun = state.agentRuns
+        ? [...state.agentRuns].reverse().find((r) => r.action === "implement" || r.action === "fix") ?? null
+        : null;
+      const stillAtBaseline =
+        Boolean(state.baseline?.fingerprint) &&
+        (!currentCodeSnapshotHash || currentCodeSnapshotHash === state.baseline!.fingerprint);
+      if (
+        latestCodingRun?.action === "implement" &&
+        latestCodingRun.status === "succeeded" &&
+        latestCodingRun.noCodeChange === true &&
+        stillAtBaseline
+      ) {
+        const closeAction =
+          gate.ok
+            ? [{ id: "accept" as const, label: "确认无需改动并验收…", labelKey: "core.action.accept" }]
+            : approval.valid && coverage.requiredTotal > 0
+              ? [{ id: "accept_override" as const, label: "确认无需改动并关闭…", labelKey: "core.action.acceptWithOverride" }]
+              : [];
+        return {
+          needsDecision: true,
+          decisionReason: "未产出代码改动",
+          decisionReasonKey: "core.decision.noCodeChange",
+          banner: {
+            headline: "编码运行已完成，但相对基线未产出任何代码改动，请人工核查",
+            headlineKey: "core.banner.noCodeChange",
+            tone: "warning",
+            primaryAction: {
+              id: "dispatch_implement",
+              label: "继续让 Agent 实施",
+              labelKey: "core.action.continueImplement",
+            },
+            secondaryActions: [
+              ...(hasVerifyCommands && !gate.ok
+                ? [{ id: "run_all_verifications" as const, label: "运行全部验证", labelKey: "core.action.runAll" }]
+                : []),
+              ...closeAction,
+              { id: "request_changes", label: "打回修改…", labelKey: "core.action.requestChanges" },
+            ],
+          },
+        };
+      }
       if (gate.ok) {
-        return deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
+        const ready = deriveReadyAcceptanceBanner(state, coverage, reviewValidity, hasVerifyCommands);
+        if (state.needsHuman && state.reviewReport?.verdict !== "pass") {
+          const escalateBtn =
+            state.tier === "standard"
+              ? [{ id: "escalate_sota" as const, label: "升级 SOTA 主程接管", labelKey: "core.action.escalateSota" }]
+              : [];
+          return {
+            needsDecision: true,
+            decisionReason: "需人工接管",
+            decisionReasonKey: "core.decision.needsHuman",
+            banner: {
+              headline: `自动闭环已达上限，需人工接管：${state.needsHuman.reason}`,
+              headlineKey: "core.banner.needsHuman",
+              headlineParams: { reason: state.needsHuman.reason },
+              tone: "danger",
+              primaryAction:
+                escalateBtn[0] ?? {
+                  id: "revise_plan",
+                  label: "退回修改方案",
+                  labelKey: "core.action.revisePlan",
+                },
+              secondaryActions: [
+                ...(escalateBtn.length > 0
+                  ? [{ id: "revise_plan" as const, label: "退回修改方案", labelKey: "core.action.revisePlan" }]
+                  : []),
+                ...(ready.banner.primaryAction ? [ready.banner.primaryAction] : []),
+                ...ready.banner.secondaryActions.filter((a) => a.id !== "revise_plan"),
+              ],
+            },
+          };
+        }
+        return ready;
       }
       const escalateAction =
         state.tier === "standard"
           ? [{ id: "escalate_sota" as const, label: "升级 SOTA 主程接管", labelKey: "core.action.escalateSota" }]
           : [];
+      const revisePlanAction = [
+        { id: "revise_plan" as const, label: "退回修改方案", labelKey: "core.action.revisePlan" },
+      ];
+      if (state.needsHuman) {
+        const overrideAction =
+          approval.valid && coverage.requiredTotal > 0
+            ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
+            : [];
+        return {
+          needsDecision: true,
+          decisionReason: "需人工接管",
+          decisionReasonKey: "core.decision.needsHuman",
+          banner: {
+            headline: `自动修复已达上限，需人工接管：${state.needsHuman.reason}`,
+            headlineKey: "core.banner.needsHuman",
+            headlineParams: { reason: state.needsHuman.reason },
+            tone: "danger",
+            primaryAction: escalateAction[0] ?? revisePlanAction[0]!,
+            secondaryActions: [
+              ...(escalateAction.length > 0 ? revisePlanAction : []),
+              { id: "dispatch_fix", label: "让 Agent 修复失败项", labelKey: "core.action.dispatchFix" },
+              ...(hasVerifyCommands
+                ? [{ id: "run_all_verifications" as const, label: "重新运行验证", labelKey: "core.action.rerun" }]
+                : []),
+              ...overrideAction,
+            ],
+          },
+        };
+      }
       if (failedCount > 0) {
         const overrideAction =
           approval.valid && coverage.requiredTotal > 0
             ? [{ id: "accept_override" as const, label: "带理由人工验收…", labelKey: "core.action.acceptWithOverride" }]
             : [];
+        const failedVerifications = verifications.filter((ev) => ev.effectiveState === "failed");
+        const isEnvFailureOnly =
+          failedVerifications.length > 0 && failedVerifications.every((ev) => isEnvironmentVerificationFailure(ev.record));
+        if (isEnvFailureOnly) {
+          return {
+            needsDecision: true,
+            decisionReason: "验证环境异常",
+            decisionReasonKey: "core.decision.envFailure",
+            banner: {
+              headline: `有 ${failedCount} 项验证因环境/基础设施故障失败（命令不存在或执行超时），请排查环境后重跑`,
+              headlineKey: "core.banner.envFailure",
+              headlineParams: { count: failedCount },
+              tone: "danger",
+              primaryAction: hasVerifyCommands
+                ? { id: "run_all_verifications", label: "重新运行验证", labelKey: "core.action.rerun" }
+                : { id: "dispatch_fix", label: "让 Agent 修复失败项", labelKey: "core.action.dispatchFix" },
+              secondaryActions: [
+                ...(hasVerifyCommands
+                  ? [{ id: "dispatch_fix" as const, label: "让 Agent 修复失败项", labelKey: "core.action.dispatchFix" }]
+                  : []),
+                ...escalateAction,
+                ...overrideAction,
+              ],
+            },
+          };
+        }
         return {
           needsDecision: false,
           decisionReason: null,
@@ -545,7 +911,6 @@ export function deriveActionBanner(
           },
         };
       }
-      const latestRun = state.agentRuns && state.agentRuns.length > 0 ? state.agentRuns[state.agentRuns.length - 1] : null;
       const lastRunFailed = latestRun?.status === "failed";
       const prefix = state.track === "fast_track" ? "快速通道已开启" : "方案已批准";
       const readyKey =
@@ -819,6 +1184,8 @@ export function evaluateRequirement(
 ): ValidityReport {
   const approval = evaluateApproval(state);
   const reviewValidity = evaluateReviewReport(state, currentCodeSnapshotHash);
+  const designReviewValidity = evaluateDesignReviewReport(state);
+  const baselineOnlyWarning = isFastTrackBaselineOnly(state);
 
   if (state.stage === "done" && state.acceptance) {
     const acc = state.acceptance;
@@ -883,6 +1250,8 @@ export function evaluateRequirement(
         coverage,
         acceptanceGate,
         reviewValidity,
+        designReviewValidity,
+        baselineOnlyWarning,
         banner,
         needsDecision,
         decisionReason,
@@ -951,6 +1320,8 @@ export function evaluateRequirement(
       coverage,
       acceptanceGate,
       reviewValidity,
+      designReviewValidity,
+      baselineOnlyWarning,
       banner,
       needsDecision,
       decisionReason,
@@ -962,7 +1333,7 @@ export function evaluateRequirement(
   }
 
   const verifications = evaluateVerifications(state, currentCodeSnapshotHash);
-  const coverage = evaluateCriteriaCoverage(state, verifications);
+  const coverage = evaluateCriteriaCoverage(state, verifications, currentCodeSnapshotHash);
   const acceptanceGate = evaluateAcceptanceGate(state, approval, coverage);
   const { banner, needsDecision, decisionReason, decisionReasonKey, decisionReasonParams } = deriveActionBanner(
     state,
@@ -970,6 +1341,8 @@ export function evaluateRequirement(
     coverage,
     acceptanceGate,
     reviewValidity,
+    verifications,
+    currentCodeSnapshotHash,
   );
   const evidenceContext: EvidenceContext = "live";
   return {
@@ -978,6 +1351,8 @@ export function evaluateRequirement(
     coverage,
     acceptanceGate,
     reviewValidity,
+    designReviewValidity,
+    baselineOnlyWarning,
     banner,
     needsDecision,
     decisionReason,

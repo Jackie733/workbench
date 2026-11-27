@@ -15,10 +15,12 @@ import type {
   ProjectGitHubConfig,
   ProjectMetadata,
   ProjectVerificationConfig,
+  ProjectWorktreeConfig,
   RequirementDetail,
   RequirementDiffView,
   RequirementGitHubLink,
   RequirementGitHubPrLink,
+  RequirementKind,
   RequirementSummary,
   RequirementTier,
   RunContextSnapshot,
@@ -315,6 +317,7 @@ export const api = {
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
     verification?: ProjectVerificationConfig | null;
+    worktree?: ProjectWorktreeConfig | null;
   }) =>
     requestJson<{ project: ProjectMetadata }>(withProjectParam("/api/project/settings"), {
       method: "PATCH",
@@ -349,6 +352,11 @@ export const api = {
     requestJson<{ sandbox: SandboxRecord; detail: RequirementDetail; sandboxDrift?: SandboxDriftInfo | null }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sandbox`),
       { method: "POST", body: JSON.stringify(input ?? {}) },
+    ),
+  retryOrIgnoreSandboxSetup: (id: string, action: "retry" | "ignore") =>
+    requestJson<{ sandbox: SandboxRecord; detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sandbox/setup`),
+      { method: "POST", body: JSON.stringify({ action }) },
     ),
   syncSandboxBase: (id: string, input?: { fetchRemote?: boolean }) =>
     requestJson<{
@@ -400,7 +408,9 @@ export const api = {
     goal: string;
     title?: string;
     parentId?: string;
+    kind?: RequirementKind;
     tier?: RequirementTier;
+    startImmediately?: boolean;
     createGitHubIssue?: boolean;
     createSandbox?: boolean;
     stackedOnReqId?: string;
@@ -529,6 +539,7 @@ export const api = {
       anchorIds?: string[];
       mode?: "ask" | "refine";
       useFallback?: boolean;
+      forceFreshSession?: boolean;
       resolveConflict?: boolean;
     },
   ) =>
@@ -564,20 +575,121 @@ export const api = {
     ),
   approve: (
     id: string,
-    input: { expectedRevision?: number; note?: string; createSandbox?: boolean; stackedOnReqId?: string },
+    input: {
+      expectedRevision?: number;
+      note?: string;
+      createSandbox?: boolean;
+      stackedOnReqId?: string;
+      resetSandbox?: boolean;
+      decisionSelections?: Array<{ id: string; selectedOptionId?: string | null; customAnswer?: string | null }>;
+    },
   ) =>
-    requestJson<{ detail: RequirementDetail }>(
+    requestJson<{ detail: RequirementDetail; sandbox?: SandboxRecord }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/approve`),
       { method: "POST", body: JSON.stringify(input) },
+    ),
+  setManualCheck: (
+    id: string,
+    input: { criterionId: string; checked: boolean; note?: string; expectedRevision?: number },
+  ) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/manual-check`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  saveDecisions: (
+    id: string,
+    input: {
+      selections: Array<{ id: string; selectedOptionId?: string | null; customAnswer?: string | null }>;
+      expectedRevision?: number;
+    },
+  ) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/decisions`),
+      { method: "PATCH", body: JSON.stringify(input) },
+    ),
+  reviseDecisions: (
+    id: string,
+    input: {
+      selections?: Array<{ id: string; selectedOptionId?: string | null; customAnswer?: string | null }>;
+      note?: string;
+      expectedRevision?: number;
+      dispatchAgent?: boolean;
+    },
+  ) =>
+    requestJson<{
+      detail: RequirementDetail;
+      feedback: string;
+      unresolvedAnnotationIds: string[];
+      run?: AgentRunRecord;
+      target?: ModelTarget;
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/decisions/revise`), {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  revisePlan: (id: string, input: { reason: string; expectedRevision?: number }) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/revise-plan`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  mergeSandboxLocal: (
+    id: string,
+    input: { commitMessage?: string; note?: string; expectedRevision?: number },
+  ) =>
+    requestJson<{
+      detail: RequirementDetail;
+      delivery: DeliveryRecord;
+      squashedCount: number;
+      touchesWeb: boolean;
+      touchesBackend: boolean;
+      webReloaded: boolean;
+      restartRecommended: boolean;
+      cascadeResults?: CascadeSyncItemResult[];
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/merge-local`), {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  discardSandbox: (id: string) =>
+    requestJson<{ discarded: boolean; branch: string | null; detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/sandbox`),
+      { method: "DELETE" },
     ),
   fastTrack: (id: string, input: { expectedRevision?: number; note?: string }) =>
     requestJson<{ detail: RequirementDetail }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/fast-track`),
       { method: "POST", body: JSON.stringify(input) },
     ),
-  requestChanges: (id: string, input: { feedback: string; expectedRevision?: number }) =>
+  requestChanges: (
+    id: string,
+    input: { feedback: string; expectedRevision?: number; rememberLesson?: boolean; lessonText?: string },
+  ) =>
     requestJson<{ detail: RequirementDetail }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/request-changes`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  appendBugCriteria: (id: string, input: { criteria: CriterionInput[]; expectedRevision?: number }) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/bug-criteria`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  reportBugPause: (id: string, input: { reason: string }) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/bug-pause`),
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  triggerDesignReview: (id: string, input?: { harness?: string; model?: string }) =>
+    requestJson<{ run: AgentRunRecord; detail: RequirementDetail; target: ModelTarget }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/design-review`),
+      { method: "POST", body: JSON.stringify(input ?? {}) },
+    ),
+  getProjectPlaybook: () =>
+    requestJson<{ markdown: string; lessons: string[]; path: string }>(withProjectParam("/api/project/playbook")),
+  appendPlaybookLesson: (input: {
+    lesson: string;
+    source?: "reject" | "accept" | "review_block" | "manual";
+    requirementId?: string;
+  }) =>
+    requestJson<{ added: boolean; line: string; totalLessons: number; markdown: string; path: string }>(
+      withProjectParam("/api/project/playbook/lessons"),
       { method: "POST", body: JSON.stringify(input) },
     ),
   verify: (
@@ -588,7 +700,17 @@ export const api = {
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/verify`),
       { method: "POST", body: JSON.stringify(input) },
     ),
-  accept: (id: string, input: { expectedRevision?: number; note?: string; overrideReason?: string; acceptedRisks?: string[] }) =>
+  accept: (
+    id: string,
+    input: {
+      expectedRevision?: number;
+      note?: string;
+      overrideReason?: string;
+      acceptedRisks?: string[];
+      rememberLesson?: boolean;
+      lessonText?: string;
+    },
+  ) =>
     requestJson<{ detail: RequirementDetail; githubSyncWarning?: string; githubSyncWarningRef?: StructuredMessageRef }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/accept`),
       {
@@ -653,8 +775,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input ?? {}),
     }),
-  cancel: (id: string, input: { reason: string; expectedRevision?: number }) =>
-    requestJson<{ detail: RequirementDetail }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/cancel`), {
+  cancel: (id: string, input: { reason: string; expectedRevision?: number; discardSandbox?: boolean }) =>
+    requestJson<{
+      detail: RequirementDetail;
+      sandboxCleanup?: {
+        cleaned: boolean;
+        retained: boolean;
+        aheadCount: number;
+        dirtyFiles: string[];
+        branch: string | null;
+      };
+    }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/cancel`), {
       method: "POST",
       body: JSON.stringify(input),
     }),

@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { withCodeRootLock } from "./code_lock.ts";
 import {
+  buildSuggestedCommitMessage,
   getProjectStatus,
   getRequirement,
   prepareRequirementForConflictSync,
+  recordLocalDelivery,
   recordRequirementGitHubSync,
   syncRequirementBaseline,
 } from "./engine.ts";
@@ -19,7 +22,9 @@ import {
   getGitRemoteUrl,
   inspectMergeTreeConflict,
   observeGitSnapshot,
+  resolveGitCommitEnv,
   resolveTargetMainRef,
+  squashBranchCommitsToSingleCommit,
 } from "./git.ts";
 import { viewGitHubPr, type GitHubCommandDeps } from "./github.ts";
 import {
@@ -38,12 +43,13 @@ import {
   type CascadeSyncItemResult,
   type MergeOrderEntry,
   type MergeOrderRecommendation,
+  type ProjectMetadata,
   type RequirementDetail,
   type SandboxDriftInfo,
   type SandboxDriftStatus,
   type SiblingConflictInfo,
 } from "./types.ts";
-import { assertRequirementId } from "./validate.ts";
+import { assertRequirementId, sanitizeOutput } from "./validate.ts";
 
 function resolveHubDataDir(): string {
   const custom = process.env.WORKBENCH_HUB_DIR?.trim();
@@ -144,6 +150,227 @@ export interface CreateWorktreeOptions {
   branchName?: string;
   stackedOnReqId?: string;
   baseRef?: string;
+  ignoreSetupFailure?: boolean;
+}
+
+const MAX_COPY_FILES = 64;
+const MAX_COPY_FILE_BYTES = 2 * 1024 * 1024;
+const WORKTREE_SETUP_TIMEOUT_MS = 5 * 60_000;
+
+function isGitIgnoredPath(repoDir: string, relPath: string): boolean {
+  try {
+    execFileSync("git", ["-C", repoDir, "check-ignore", "-q", "--", relPath], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureWorktreeLocalExclude(wtDir: string, relPath: string): void {
+  withSandboxLockSync(() => {
+    try {
+      const raw = execFileSync("git", ["-C", wtDir, "rev-parse", "--git-path", "info/exclude"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (!raw) return;
+      const excludeFile = path.isAbsolute(raw) ? raw : path.resolve(wtDir, raw);
+      fs.mkdirSync(path.dirname(excludeFile), { recursive: true });
+      const current = fs.existsSync(excludeFile) ? readBoundedText(excludeFile, 128 * 1024) : "";
+      const entry = `/${relPath.replace(/^\/+/, "")}`;
+      const lines = current.split(/\r?\n/).map((l) => l.trim());
+      if (lines.includes(entry) || lines.includes(relPath)) return;
+      const sep = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
+      atomicWriteFile(excludeFile, `${current}${sep}${entry}\n`);
+    } catch {
+      // Best-effort local exclude guard.
+    }
+  });
+}
+
+function collectIncludeFileSpecs(base: string, projectMeta: ProjectMetadata | null): string[] {
+  const specs: string[] = [];
+  const includeFile = path.join(base, ".worktreeinclude");
+  if (fs.existsSync(includeFile)) {
+    try {
+      const stat = fs.lstatSync(includeFile);
+      if (!stat.isSymbolicLink() && stat.isFile()) {
+        const text = readBoundedText(includeFile, 64 * 1024);
+        for (const rawLine of text.split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith("#")) continue;
+          specs.push(line);
+        }
+      }
+    } catch {
+      // Ignore unreadable .worktreeinclude.
+    }
+  }
+  for (const entry of projectMeta?.worktree?.copyFiles ?? []) {
+    const trimmed = entry.trim();
+    if (trimmed) specs.push(trimmed);
+  }
+  return Array.from(new Set(specs)).slice(0, MAX_COPY_FILES);
+}
+
+function expandCandidateFilesForInclude(base: string, spec: string): string[] {
+  const normalized = spec.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!normalized || normalized.includes("..")) return [];
+  if (
+    normalized === ".git" ||
+    normalized.startsWith(".git/") ||
+    normalized === ".workbench" ||
+    normalized.startsWith(".workbench/") ||
+    normalized === ".omp/workbench" ||
+    normalized.startsWith(".omp/workbench/")
+  ) {
+    return [];
+  }
+  let full: string;
+  try {
+    full = resolveSafePath(base, normalized);
+  } catch {
+    return [];
+  }
+  if (!fs.existsSync(full)) return [];
+  const stat = fs.lstatSync(full);
+  if (stat.isSymbolicLink()) return [];
+  if (stat.isFile()) return [normalized];
+  if (!stat.isDirectory()) return [];
+
+  const out: string[] = [];
+  const walk = (dir: string, relPrefix: string) => {
+    if (out.length >= MAX_COPY_FILES) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (out.length >= MAX_COPY_FILES) break;
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const childFull = path.join(dir, entry.name);
+      const childRel = `${relPrefix}/${entry.name}`;
+      const cstat = fs.lstatSync(childFull);
+      if (cstat.isSymbolicLink()) continue;
+      if (cstat.isFile()) {
+        out.push(childRel);
+      } else if (cstat.isDirectory()) {
+        walk(childFull, childRel);
+      }
+    }
+  };
+  walk(full, normalized);
+  return out;
+}
+
+/**
+ * Copies gitignored local config files listed in `.worktreeinclude` / `project.worktree.copyFiles`
+ * into a new worktree. Strictly verifies each file is gitignored so unignored secrets can never be
+ * swept into automatic WIP commits.
+ */
+function copyGitIgnoredLocalConfigs(base: string, wt: string, projectMeta: ProjectMetadata | null): string[] {
+  const specs = collectIncludeFileSpecs(base, projectMeta);
+  if (specs.length === 0) return [];
+  const copied: string[] = [];
+  const seen = new Set<string>();
+  for (const spec of specs) {
+    for (const rel of expandCandidateFilesForInclude(base, spec)) {
+      if (seen.has(rel) || copied.length >= MAX_COPY_FILES) continue;
+      seen.add(rel);
+      // Security gate: only copy files confirmed gitignored in the main repo.
+      if (!isGitIgnoredPath(base, rel)) continue;
+      try {
+        const src = resolveSafePath(base, rel);
+        const stat = fs.lstatSync(src);
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_COPY_FILE_BYTES) continue;
+        // Double guard inside the worktree so WIP auto-commits can never stage this file.
+        if (!isGitIgnoredPath(wt, rel)) {
+          ensureWorktreeLocalExclude(wt, rel);
+          if (!isGitIgnoredPath(wt, rel)) continue;
+        }
+        const dst = resolveSafePath(wt, rel);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        atomicWriteBuffer(dst, fs.readFileSync(src), stat.mode & 0o777);
+        copied.push(rel);
+      } catch {
+        // Skip unreadable or unsafe path.
+      }
+    }
+  }
+  return copied;
+}
+
+function executeWorktreeSetupScript(
+  worktreePath: string,
+  script: string,
+  timeoutMs = WORKTREE_SETUP_TIMEOUT_MS,
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const isWin = process.platform === "win32";
+    const shell = isWin ? "cmd.exe" : "bash";
+    const shellArgs = isWin ? ["/d", "/s", "/c", script] : ["-lc", script];
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete childEnv.WORKBENCH_ROOT;
+    delete childEnv.WORKBENCH_REQ_ID;
+    delete childEnv.WORKBENCH_RSI_DEPTH;
+    delete childEnv.WORKBENCH_HUB_PID;
+    delete childEnv.WORKBENCH_OUTPUT_LANGUAGE;
+
+    const child = spawn(shell, shellArgs, {
+      cwd: worktreePath,
+      detached: !isWin,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: childEnv,
+    });
+    const chunks: Buffer[] = [];
+    let collected = 0;
+    const maxBytes = 16 * 1024;
+    let timedOut = false;
+    let settled = false;
+
+    const onChunk = (buf: Buffer) => {
+      chunks.push(buf);
+      collected += buf.length;
+      // Keep the tail 16 KB so actual error messages at the end of verbose install logs are never dropped.
+      while (collected > maxBytes && chunks.length > 1) {
+        const dropped = chunks.shift()!;
+        collected -= dropped.length;
+      }
+      if (collected > maxBytes && chunks.length === 1) {
+        chunks[0] = chunks[0]!.subarray(chunks[0]!.length - maxBytes);
+        collected = chunks[0]!.length;
+      }
+    };
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (!isWin && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        // Already exited.
+      }
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: err.message });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!timedOut && code === 0) {
+        resolve({ ok: true });
+        return;
+      }
+      const tail = sanitizeOutput(Buffer.concat(chunks).toString("utf8").trim(), 1200).text;
+      const reason = timedOut
+        ? `setupScript 执行超时（>${Math.round(timeoutMs / 1000)}s）`
+        : tail || `退出码 ${code ?? "未知"}`;
+      resolve({ ok: false, error: reason });
+    });
+  });
 }
 
 export async function createOrReuseWorktree(
@@ -155,6 +382,18 @@ export async function createOrReuseWorktree(
   const base = canonicalRoot(wbRoot);
   const existing = getSandboxForRequirement(base, reqId);
   if (existing) {
+    if (existing.setupStatus === "failed") {
+      if (options.ignoreSetupFailure === true) {
+        const skipped = await retryOrIgnoreSandboxSetup(base, reqId, "ignore");
+        syncRequirementMirrorToSandbox(base, reqId, skipped.worktreePath);
+        return skipped;
+      }
+      throw new WorkbenchError(
+        "execution_failed",
+        `沙箱初始化脚本（setupScript）此前执行失败：${existing.setupError ?? "未知错误"}。请先重试脚本或选择忽略继续。`,
+        { setupFailed: true, sandbox: existing },
+      );
+    }
     syncRequirementMirrorToSandbox(base, reqId, existing.worktreePath);
     return existing;
   }
@@ -164,6 +403,7 @@ export async function createOrReuseWorktree(
     throw new WorkbenchError("execution_failed", "目标仓库尚未初始化 Git 提交，无法创建 Worktree 沙箱");
   }
 
+  const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
   let startPoint = options.baseRef?.trim() || "";
   if (!startPoint && options.stackedOnReqId?.trim()) {
     const parentSb = getSandboxForRequirement(base, options.stackedOnReqId.trim());
@@ -173,7 +413,6 @@ export async function createOrReuseWorktree(
     startPoint = parentSb.branch;
   }
   if (!startPoint) {
-    const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
     const configuredBase = projectMeta?.github?.defaultBaseBranch ?? projectMeta?.gitee?.defaultBaseBranch;
     const targetMain = await resolveTargetMainRef(base, configuredBase);
     startPoint = targetMain?.oid ?? "HEAD";
@@ -205,13 +444,32 @@ export async function createOrReuseWorktree(
     stdio: "pipe",
   });
 
-  const mainNodeModules = path.join(base, "node_modules");
-  const wtNodeModules = path.join(worktreePath, "node_modules");
-  if (fs.existsSync(mainNodeModules) && !fs.existsSync(wtNodeModules)) {
-    fs.symlinkSync(mainNodeModules, wtNodeModules, "dir");
+  const setupScript = projectMeta?.worktree?.setupScript?.trim() || "";
+  if (!setupScript) {
+    const mainNodeModules = path.join(base, "node_modules");
+    const wtNodeModules = path.join(worktreePath, "node_modules");
+    if (fs.existsSync(mainNodeModules) && !fs.existsSync(wtNodeModules)) {
+      fs.symlinkSync(mainNodeModules, wtNodeModules, "dir");
+    }
   }
 
+  const copiedFiles = copyGitIgnoredLocalConfigs(base, worktreePath, projectMeta);
   syncRequirementMirrorToSandbox(base, reqId, worktreePath);
+
+  let setupStatus: SandboxRecord["setupStatus"];
+  let setupError: string | undefined;
+  if (setupScript) {
+    const setupRes = await executeWorktreeSetupScript(worktreePath, setupScript);
+    if (setupRes.ok) {
+      setupStatus = "ok";
+    } else if (options.ignoreSetupFailure === true) {
+      setupStatus = "skipped";
+      setupError = setupRes.error;
+    } else {
+      setupStatus = "failed";
+      setupError = setupRes.error;
+    }
+  }
 
   const record: SandboxRecord = {
     projectRoot: base,
@@ -219,6 +477,9 @@ export async function createOrReuseWorktree(
     worktreePath,
     branch,
     baseHead: baseHeadOid,
+    ...(setupStatus ? { setupStatus } : {}),
+    ...(setupError ? { setupError } : {}),
+    ...(copiedFiles.length > 0 ? { copiedFiles } : {}),
     createdAt: Date.now(),
   };
   withSandboxLockSync(() => {
@@ -226,7 +487,229 @@ export async function createOrReuseWorktree(
     all[sandboxKey(base, reqId)] = record;
     writeSandboxes(all);
   });
+  if (setupStatus === "failed") {
+    throw new WorkbenchError(
+      "execution_failed",
+      `沙箱初始化脚本（setupScript）执行失败：${setupError ?? "未知错误"}。可重试脚本或选择忽略继续。`,
+      { setupFailed: true, sandbox: record },
+    );
+  }
   return record;
+}
+
+/** Retries or ignores a failed project worktree `setupScript` on an existing sandbox. */
+export async function retryOrIgnoreSandboxSetup(
+  wbRoot: string,
+  reqId: string,
+  mode: "retry" | "ignore",
+): Promise<SandboxRecord> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
+  }
+  if (mode === "ignore") {
+    const updated: SandboxRecord = { ...sandbox, setupStatus: "skipped" };
+    delete updated.setupError;
+    withSandboxLockSync(() => {
+      const all = readSandboxes();
+      all[sandboxKey(base, reqId)] = updated;
+      writeSandboxes(all);
+    });
+    return updated;
+  }
+  const projectMeta = isProjectInitialized(base) ? getProjectStatus(base).project : null;
+  const setupScript = projectMeta?.worktree?.setupScript?.trim() || "";
+  if (!setupScript) {
+    const updated: SandboxRecord = { ...sandbox, setupStatus: "ok" };
+    delete updated.setupError;
+    withSandboxLockSync(() => {
+      const all = readSandboxes();
+      all[sandboxKey(base, reqId)] = updated;
+      writeSandboxes(all);
+    });
+    return updated;
+  }
+  return withCodeRootLock(
+    canonicalRoot(sandbox.worktreePath),
+    "write",
+    { kind: "sandbox_setup", requirementId: reqId },
+    async () => {
+      const res = await executeWorktreeSetupScript(sandbox.worktreePath, setupScript);
+      const updated: SandboxRecord = res.ok
+        ? { ...sandbox, setupStatus: "ok" }
+        : { ...sandbox, setupStatus: "failed", setupError: res.error };
+      if (res.ok) delete updated.setupError;
+      withSandboxLockSync(() => {
+        const all = readSandboxes();
+        all[sandboxKey(base, reqId)] = updated;
+        writeSandboxes(all);
+      });
+      if (!res.ok) {
+        throw new WorkbenchError(
+          "execution_failed",
+          `沙箱初始化脚本（setupScript）重试失败：${res.error ?? "未知错误"}`,
+          { setupFailed: true, sandbox: updated },
+        );
+      }
+      return updated;
+    },
+  );
+}
+
+/**
+ * Commits an automatic WIP checkpoint on an isolated sandbox branch whenever dirty code changes exist
+ * (excluding .workbench, .omp/workbench, and node_modules). Skips automatically when running in the main workspace.
+ */
+export async function commitSandboxWipCheckpoint(
+  wbRoot: string,
+  reqId: string,
+  options: { action?: string; runId?: string; status?: string; parentLeaseId?: string } = {},
+): Promise<{ committed: boolean; commitHash: string | null; files: string[] }> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    return { committed: false, commitHash: null, files: [] };
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+  if (hasInProgressMergeOrRebase(wt)) {
+    return { committed: false, commitHash: null, files: [] };
+  }
+
+  return withCodeRootLock(
+    wt,
+    "write",
+    { kind: "wip_commit", requirementId: reqId, runId: options.runId },
+    () => {
+      const readHead = (): string | null => {
+        try {
+          return execFileSync("git", ["-C", wt, "rev-parse", "--verify", "HEAD"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+          }).trim();
+        } catch {
+          return null;
+        }
+      };
+
+      const dirtyPaths = listDirtyPathsExcludingNodeModules(wt);
+      if (dirtyPaths.length === 0) {
+        return { committed: false, commitHash: readHead(), files: [] };
+      }
+
+      for (let i = 0; i < dirtyPaths.length; i += 100) {
+        const chunk = dirtyPaths.slice(i, i + 100);
+        execFileSync("git", ["-C", wt, "--literal-pathspecs", "add", "-A", "--", ...chunk], { stdio: "pipe" });
+      }
+      try {
+        execFileSync("git", ["-C", wt, "reset", "-q", "HEAD", "--", ".workbench", ".omp/workbench", "node_modules"], {
+          stdio: "ignore",
+        });
+      } catch {
+        // Ignore when excluded paths were not staged.
+      }
+
+      const stagedRaw = execFileSync("git", ["-C", wt, "diff", "--cached", "--name-only", "-z"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const stagedFiles = splitNullStrings(stagedRaw).filter(
+        (p) =>
+          p &&
+          p !== "node_modules" &&
+          !p.startsWith("node_modules/") &&
+          p !== ".workbench" &&
+          !p.startsWith(".workbench/") &&
+          p !== ".omp/workbench" &&
+          !p.startsWith(".omp/workbench/"),
+      );
+      if (stagedFiles.length === 0) {
+        return { committed: false, commitHash: readHead(), files: [] };
+      }
+
+      const actionTag = options.action || "coding";
+      const runSuffix = options.runId ? options.runId.slice(-6) : "auto";
+      const statusSuffix = options.status && options.status !== "succeeded" ? `, ${options.status}` : "";
+      const message = `wip(${reqId}): ${actionTag} checkpoint (${runSuffix}${statusSuffix})`;
+      const commitEnv = resolveGitCommitEnv(wt);
+      execFileSync("git", ["-C", wt, "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", message], {
+        stdio: "pipe",
+        env: commitEnv,
+      });
+      return { committed: true, commitHash: readHead(), files: stagedFiles };
+    },
+    { parentLeaseId: options.parentLeaseId },
+  );
+}
+
+/**
+ * Resets an isolated sandbox worktree back to its clean `baseHead` (WB-19 / FLOW §1.5),
+ * preserving `.workbench/`, `.omp/workbench/`, `node_modules/`, and gitignored local configs.
+ */
+export async function resetSandboxToBaseHead(
+  wbRoot: string,
+  reqId: string,
+): Promise<{ reset: boolean; baseHead: string | null }> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    return { reset: false, baseHead: null };
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+  return withCodeRootLock(wt, "write", { kind: "sandbox_reset", requirementId: reqId }, () => {
+    for (const abortCmd of [
+      ["-C", wt, "rebase", "--abort"],
+      ["-C", wt, "merge", "--abort"],
+    ]) {
+      try {
+        execFileSync("git", abortCmd, { stdio: "ignore" });
+      } catch {
+        // Ignore when no rebase/merge is in progress.
+      }
+    }
+    const targetRef = sandbox.baseHead || "HEAD";
+    execFileSync("git", ["-C", wt, "reset", "--hard", targetRef], { stdio: "pipe" });
+    // Note: intentionally omit `-x` so gitignored local configs copied via .worktreeinclude (e.g. .env) stay intact.
+    execFileSync(
+      "git",
+      ["-C", wt, "clean", "-fd", "-e", ".workbench", "-e", ".omp/workbench", "-e", "node_modules"],
+      { stdio: "pipe" },
+    );
+    syncRequirementMirrorToSandbox(base, reqId, wt);
+    return { reset: true, baseHead: targetRef };
+  });
+}
+
+/**
+ * Before the first implement run on an isolated sandbox, safely fast-forwards the branch to latest main
+ * ONLY when the worktree is clean, has zero commits ahead of baseHead, and is an ancestor of main (not stacked).
+ */
+export async function syncCleanSandboxBeforeFirstImplement(
+  wbRoot: string,
+  reqId: string,
+  options: { parentLeaseId?: string } = {},
+): Promise<{ synced: boolean; detail?: RequirementDetail }> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    return { synced: false };
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+  if (hasInProgressMergeOrRebase(wt)) return { synced: false };
+  if (listDirtyPathsExcludingNodeModules(wt).length > 0) return { synced: false };
+  const drift = await inspectSandboxDrift(base, reqId, { includeSiblings: false, fetchRemote: false }).catch(() => null);
+  if (!drift || drift.aheadCount > 0 || drift.behindCount === 0 || !drift.canAutoSync) {
+    return { synced: false };
+  }
+  const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  if (!isGitAncestor(wt, wtHead, drift.mainHead)) {
+    return { synced: false };
+  }
+  const res = await syncSandboxBase(base, reqId, { fetchRemote: false, parentLeaseId: options.parentLeaseId });
+  return { synced: res.synced, detail: res.detail };
 }
 
 function splitNullStrings(buf: Buffer): string[] {
@@ -641,7 +1124,7 @@ export async function inspectSandboxDrift(
 export async function syncSandboxBase(
   wbRoot: string,
   reqId: string,
-  options: { fetchRemote?: boolean } = {},
+  options: { fetchRemote?: boolean; parentLeaseId?: string } = {},
 ): Promise<{
   synced: boolean;
   upToDate: boolean;
@@ -656,118 +1139,130 @@ export async function syncSandboxBase(
     throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
   }
   const wt = canonicalRoot(sandbox.worktreePath);
-  const drift = await inspectSandboxDrift(base, reqId, {
-    includeSiblings: false,
-    fetchRemote: options.fetchRemote !== false,
-  });
-  if (!drift) {
-    throw new WorkbenchError("execution_failed", "无法检查沙箱基线状态");
-  }
-  if (drift.behindCount === 0) {
-    const wtSnap = await observeGitSnapshot(wt);
-    const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
-    return { synced: true, upToDate: true, conflictFiles: [], drift, detail };
-  }
-  if (drift.conflictFiles.length > 0 || !drift.canAutoSync) {
-    const wtSnap = await observeGitSnapshot(wt);
-    const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
-    return { synced: false, upToDate: false, conflictFiles: drift.conflictFiles, drift, detail };
-  }
-
-  const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const dirtyPaths = listDirtyPathsExcludingNodeModules(wt);
-  const wtDirty = dirtyPaths.length > 0;
-
-  if (drift.aheadCount === 0 && drift.overlapFiles.length === 0) {
-    execFileSync("git", ["-C", wt, "read-tree", "-m", "-u", wtHead, drift.mainHead], { stdio: "pipe" });
-    execFileSync("git", ["-C", wt, "reset", "--soft", drift.mainHead], { stdio: "pipe" });
-  } else {
-    let createdStash = false;
-    if (wtDirty) {
-      const beforeStash = readStashTip(wt);
-      execFileSync(
-        "git",
-        ["-C", wt, "stash", "push", "-u", "-m", `wb-sync-wip-${reqId}`, "--", ...dirtyPaths],
-        { stdio: "pipe" },
-      );
-      const afterStash = readStashTip(wt);
-      createdStash = Boolean(afterStash && afterStash !== beforeStash);
+  return withCodeRootLock(
+    wt,
+    "write",
+    { kind: "sandbox_sync", requirementId: reqId },
+    async () => {
+    if (hasInProgressMergeOrRebase(wt)) {
+      throw new WorkbenchError("revision_conflict", "沙箱当前存在未完成的 merge/rebase，请先完成或中止后再同步主干");
+    }
+    const drift = await inspectSandboxDrift(base, reqId, {
+      includeSiblings: false,
+      fetchRemote: options.fetchRemote !== false,
+    });
+    if (!drift) {
+      throw new WorkbenchError("execution_failed", "无法检查沙箱基线状态");
+    }
+    if (drift.behindCount === 0) {
+      const wtSnap = await observeGitSnapshot(wt);
+      const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+      return { synced: true, upToDate: true, conflictFiles: [], drift, detail };
+    }
+    if (drift.conflictFiles.length > 0 || !drift.canAutoSync) {
+      const wtSnap = await observeGitSnapshot(wt);
+      const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+      return { synced: false, upToDate: false, conflictFiles: drift.conflictFiles, drift, detail };
     }
 
-    try {
-      if (drift.aheadCount === 0) {
-        execFileSync("git", ["-C", wt, "merge", "--ff-only", drift.mainHead], { stdio: "pipe" });
-      } else {
-        execFileSync("git", ["-C", wt, "merge", "--no-edit", drift.mainHead], { stdio: "pipe" });
+    const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const dirtyPaths = listDirtyPathsExcludingNodeModules(wt);
+    const wtDirty = dirtyPaths.length > 0;
+    const isLinearFastForward = isGitAncestor(wt, wtHead, drift.mainHead);
+
+    if (drift.aheadCount === 0 && drift.overlapFiles.length === 0 && isLinearFastForward) {
+      execFileSync("git", ["-C", wt, "read-tree", "-m", "-u", wtHead, drift.mainHead], { stdio: "pipe" });
+      execFileSync("git", ["-C", wt, "reset", "--soft", drift.mainHead], { stdio: "pipe" });
+    } else {
+      let createdStash = false;
+      if (wtDirty) {
+        const beforeStash = readStashTip(wt);
+        execFileSync(
+          "git",
+          ["-C", wt, "stash", "push", "-u", "-m", `wb-sync-wip-${reqId}`, "--", ...dirtyPaths],
+          { stdio: "pipe" },
+        );
+        const afterStash = readStashTip(wt);
+        createdStash = Boolean(afterStash && afterStash !== beforeStash);
       }
-    } catch {
+
       try {
-        execFileSync("git", ["-C", wt, "merge", "--abort"], { stdio: "ignore" });
+        if (drift.aheadCount === 0 && isLinearFastForward) {
+          execFileSync("git", ["-C", wt, "merge", "--ff-only", drift.mainHead], { stdio: "pipe" });
+        } else {
+          execFileSync("git", ["-C", wt, "merge", "--no-edit", drift.mainHead], { stdio: "pipe" });
+        }
       } catch {
-        // Ignore abort cleanup error.
+        try {
+          execFileSync("git", ["-C", wt, "merge", "--abort"], { stdio: "ignore" });
+        } catch {
+          // Ignore abort cleanup error.
+        }
+        if (createdStash) {
+          try {
+            execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "ignore" });
+          } catch {
+            // Leave stash intact if pop fails.
+          }
+        }
+        throw new WorkbenchError("revision_conflict", "合并主干时产生 Git 冲突，请派发 Agent 处理冲突");
       }
+
       if (createdStash) {
         try {
-          execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "ignore" });
+          execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "pipe" });
         } catch {
-          // Leave stash intact if pop fails.
+          throw new WorkbenchError("revision_conflict", "主干已合并，但恢复工作区暂存改动时发生冲突，请派发 Agent 处理冲突");
         }
       }
-      throw new WorkbenchError("revision_conflict", "合并主干时产生 Git 冲突，请派发 Agent 处理冲突");
     }
 
-    if (createdStash) {
-      try {
-        execFileSync("git", ["-C", wt, "stash", "pop"], { stdio: "pipe" });
-      } catch {
-        throw new WorkbenchError("revision_conflict", "主干已合并，但恢复工作区暂存改动时发生冲突，请派发 Agent 处理冲突");
+    const preDetail = getRequirement(base, reqId);
+    const isDone = preDetail.state.stage === "done";
+    const snapAfter = await observeGitSnapshot(wt);
+
+    withSandboxLockSync(() => {
+      const all = readSandboxes();
+      const key = sandboxKey(base, reqId);
+      if (all[key]) {
+        all[key] = {
+          ...all[key]!,
+          baseHead: drift.mainHead,
+          ...(isDone && snapAfter?.fingerprint
+            ? { lastCleanSyncFingerprint: snapAfter.fingerprint }
+            : { lastCleanSyncFingerprint: undefined }),
+        };
+        writeSandboxes(all);
       }
-    }
-  }
+    });
 
-  const preDetail = getRequirement(base, reqId);
-  const isDone = preDetail.state.stage === "done";
-  const snapAfter = await observeGitSnapshot(wt);
-
-  withSandboxLockSync(() => {
-    const all = readSandboxes();
-    const key = sandboxKey(base, reqId);
-    if (all[key]) {
-      all[key] = {
-        ...all[key]!,
+    const autoMergeHint = drift.driftStatus === "auto_mergeable" ? "（含同文件自动三路合并）" : "";
+    const detail = await syncRequirementBaseline(base, reqId, {
+      baselineHead: drift.mainHead,
+      baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
+      dirty: snapAfter?.dirty ?? false,
+      preserveStage: isDone,
+      eventKind: "sandbox_synced",
+      summary: isDone
+        ? `已完成需求在无冲突状态下同步主干至 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，可直接交付 PR）`
+        : `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，请复跑验证）`,
+      currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
+    });
+    syncRequirementMirrorToSandbox(base, reqId, wt);
+    const nextDrift =
+      (await inspectSandboxDrift(base, reqId, { includeSiblings: true, fetchRemote: false })) ?? {
+        ...drift,
+        behindCount: 0,
         baseHead: drift.mainHead,
-        ...(isDone && snapAfter?.fingerprint
-          ? { lastCleanSyncFingerprint: snapAfter.fingerprint }
-          : { lastCleanSyncFingerprint: undefined }),
+        driftStatus: "up_to_date" as const,
+        overlapFiles: [],
+        conflictFiles: [],
+        canAutoSync: false,
       };
-      writeSandboxes(all);
-    }
-  });
-
-  const autoMergeHint = drift.driftStatus === "auto_mergeable" ? "（含同文件自动三路合并）" : "";
-  const detail = await syncRequirementBaseline(base, reqId, {
-    baselineHead: drift.mainHead,
-    baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
-    dirty: snapAfter?.dirty ?? false,
-    preserveStage: isDone,
-    eventKind: "sandbox_synced",
-    summary: isDone
-      ? `已完成需求在无冲突状态下同步主干至 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，可直接交付 PR）`
-      : `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，请复跑验证）`,
-    currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
-  });
-  syncRequirementMirrorToSandbox(base, reqId, wt);
-  const nextDrift =
-    (await inspectSandboxDrift(base, reqId, { includeSiblings: true, fetchRemote: false })) ?? {
-      ...drift,
-      behindCount: 0,
-      baseHead: drift.mainHead,
-      driftStatus: "up_to_date" as const,
-      overlapFiles: [],
-      conflictFiles: [],
-      canAutoSync: false,
-    };
-  return { synced: true, upToDate: false, conflictFiles: [], drift: nextDrift, detail };
+    return { synced: true, upToDate: false, conflictFiles: [], drift: nextDrift, detail };
+    },
+    { parentLeaseId: options.parentLeaseId },
+  );
 }
 
 /**
@@ -913,11 +1408,14 @@ export async function recommendSandboxMergeOrder(
 
 /**
  * Automatically cascade-syncs remaining non-conflicting sandboxes after one sandbox is merged/applied to main.
- * Conflicting sandboxes are reported in the returned results without mutating their working trees.
+ * When `options.cleanOnly` is true (FLOW §4.3 post-merge linkage), only clean zero-edit sibling sandboxes
+ * are fast-forwarded automatically; active sandboxes with local commits or dirty edits stay untouched and
+ * are reported with `status: "drifted"` (or `"conflict"`) for gentle drift notification.
  */
 export async function cascadeSyncProjectSandboxes(
   wbRoot: string,
   mergedReqId?: string,
+  options: { cleanOnly?: boolean } = {},
 ): Promise<CascadeSyncItemResult[]> {
   const base = canonicalRoot(wbRoot);
   const siblings = listProjectSandboxes(base).filter((sb) => sb.requirementId !== mergedReqId);
@@ -932,6 +1430,30 @@ export async function cascadeSyncProjectSandboxes(
       if (drift.behindCount === 0) {
         results.push({ requirementId: sb.requirementId, status: "up_to_date", behindCount: 0, driftStatus: drift.driftStatus });
         continue;
+      }
+      if (options.cleanOnly === true) {
+        const wt = fs.existsSync(sb.worktreePath) ? canonicalRoot(sb.worktreePath) : "";
+        const dirtyCount = wt ? listDirtyPathsExcludingNodeModules(wt).length : 0;
+        let isLinearBase = false;
+        if (wt) {
+          try {
+            const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+            isLinearBase = isGitAncestor(wt, wtHead, drift.mainHead);
+          } catch {
+            isLinearBase = false;
+          }
+        }
+        const hasLocalChanges = drift.aheadCount > 0 || dirtyCount > 0 || !isLinearBase;
+        if (hasLocalChanges) {
+          results.push({
+            requirementId: sb.requirementId,
+            status: drift.conflictFiles.length > 0 ? "conflict" : "drifted",
+            behindCount: drift.behindCount,
+            driftStatus: drift.driftStatus,
+            ...(drift.conflictFiles.length > 0 ? { conflictFiles: drift.conflictFiles } : {}),
+          });
+          continue;
+        }
       }
       if (!drift.canAutoSync) {
         results.push({
@@ -1113,7 +1635,7 @@ export async function applySandboxToMain(
   }
 
   cleanupSandboxWorktree(base, reqId, sandbox);
-  const cascadeResults = await cascadeSyncProjectSandboxes(base, reqId);
+  const cascadeResults = await cascadeSyncProjectSandboxes(base, reqId, { cleanOnly: true });
 
   const allTouched = [...appliedFiles, ...deleted];
   const touchesWeb = allTouched.some((f) => f.startsWith("src/web/"));
@@ -1129,6 +1651,11 @@ function cleanupSandboxWorktree(base: string, reqId: string, sandbox: SandboxRec
     execFileSync("git", ["-C", base, "worktree", "remove", "--force", wt], { stdio: "ignore" });
   } catch {
     fs.rmSync(wt, { recursive: true, force: true });
+    try {
+      execFileSync("git", ["-C", base, "worktree", "prune"], { stdio: "ignore" });
+    } catch {
+      // Ignore prune errors.
+    }
   }
   try {
     execFileSync("git", ["-C", base, "branch", "-D", sandbox.branch], { stdio: "ignore" });
@@ -1141,6 +1668,294 @@ function cleanupSandboxWorktree(base: string, reqId: string, sandbox: SandboxRec
     delete all[sandboxKey(base, reqId)];
     writeSandboxes(all);
   });
+}
+
+/**
+ * Inspects whether a sandbox worktree has undelivered unique commits or uncommitted business changes (WB-20 / FLOW §4.3).
+ */
+export function inspectSandboxUnsavedWork(
+  wbRoot: string,
+  reqId: string,
+): { hasSandbox: boolean; hasUnsavedWork: boolean; aheadCount: number; dirtyFiles: string[]; branch: string | null } {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    return { hasSandbox: false, hasUnsavedWork: false, aheadCount: 0, dirtyFiles: [], branch: null };
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+  const dirtyFiles = listDirtyPathsExcludingNodeModules(wt);
+  let aheadCount = 0;
+  let aheadUnknown = false;
+  if (!sandbox.baseHead) {
+    aheadUnknown = true;
+  } else {
+    try {
+      aheadCount =
+        Number(
+          execFileSync("git", ["-C", wt, "rev-list", "--count", `${sandbox.baseHead}..HEAD`], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+          }).trim(),
+        ) || 0;
+    } catch {
+      aheadUnknown = true;
+    }
+  }
+  return {
+    hasSandbox: true,
+    hasUnsavedWork: aheadUnknown || aheadCount > 0 || dirtyFiles.length > 0,
+    aheadCount,
+    dirtyFiles,
+    branch: sandbox.branch,
+  };
+}
+
+/**
+ * Safe sandbox cleanup when cancelling a requirement (WB-20 / FLOW §4.3):
+ * automatically removes clean sandboxes with zero undelivered work, while RETAINING worktree & branch
+ * when unique commits or local edits exist (unless `options.discard === true`).
+ */
+export function cleanupSandboxOnCancel(
+  wbRoot: string,
+  reqId: string,
+  options: { discard?: boolean } = {},
+): { cleaned: boolean; retained: boolean; aheadCount: number; dirtyFiles: string[]; branch: string | null } {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox) {
+    return { cleaned: false, retained: false, aheadCount: 0, dirtyFiles: [], branch: null };
+  }
+  const info = inspectSandboxUnsavedWork(base, reqId);
+  if (info.hasUnsavedWork && options.discard !== true) {
+    return {
+      cleaned: false,
+      retained: true,
+      aheadCount: info.aheadCount,
+      dirtyFiles: info.dirtyFiles,
+      branch: info.branch,
+    };
+  }
+  cleanupSandboxWorktree(base, reqId, sandbox);
+  return {
+    cleaned: true,
+    retained: false,
+    aheadCount: info.aheadCount,
+    dirtyFiles: info.dirtyFiles,
+    branch: info.branch,
+  };
+}
+
+/** Explicitly discards a requirement's worktree sandbox and branch (e.g. after inspecting a cancelled sandbox). */
+export function discardSandboxWorktree(wbRoot: string, reqId: string): { discarded: boolean; branch: string | null } {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox) return { discarded: false, branch: null };
+  const branch = sandbox.branch;
+  cleanupSandboxWorktree(base, reqId, sandbox);
+  return { discarded: true, branch };
+}
+
+/**
+ * One-click local main integration for an accepted sandbox requirement (WB-20 / FLOW §4.2 & §4.3):
+ * 1. Verifies acceptance state and exact content-tree OID match (rejecting stale/altered trees).
+ * 2. Detects drift/conflict against local main (connecting to conflict-resolve flow on true conflicts).
+ * 3. Squashes all WIP checkpoint commits + uncommitted non-workbench edits into 1 clean commit, verifying tree stability.
+ * 4. Fast-forwards or cleanly merges onto local main, confirms the commit landed on main HEAD BEFORE cleaning up sandbox.
+ * 5. Persists `DeliveryRecord`, cleans up sandbox, and cascade-syncs clean sibling sandboxes (reporting dirty siblings as drifted).
+ */
+export async function mergeSandboxToMain(
+  wbRoot: string,
+  reqId: string,
+  options: { commitMessage?: string; note?: string; expectedRevision?: number } = {},
+): Promise<{
+  detail: RequirementDetail;
+  delivery: NonNullable<RequirementDetail["state"]["delivery"]>;
+  squashedCount: number;
+  touchesWeb: boolean;
+  touchesBackend: boolean;
+  cascadeResults: CascadeSyncItemResult[];
+}> {
+  assertRequirementId(reqId);
+  const base = canonicalRoot(wbRoot);
+  const sandbox = getSandboxForRequirement(base, reqId);
+  if (!sandbox || !fs.existsSync(sandbox.worktreePath)) {
+    throw new WorkbenchError("not_found", `未找到需求 ${reqId} 的活跃 Worktree 沙箱`);
+  }
+  const wt = canonicalRoot(sandbox.worktreePath);
+
+  const [firstRoot, secondRoot] = base <= wt ? [base, wt] : [wt, base];
+  return withCodeRootLock(firstRoot, "write", { kind: "deliver_merge", requirementId: reqId }, async () =>
+    withCodeRootLock(secondRoot, "write", { kind: "deliver_merge", requirementId: reqId }, async () => {
+      const wtSnap = await observeGitSnapshot(wt);
+      const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
+      if (options.expectedRevision !== undefined && detail.state.revision !== options.expectedRevision) {
+        throw new WorkbenchError(
+          "revision_conflict",
+          `版本冲突：期望 revision=${options.expectedRevision}，实际 revision=${detail.state.revision}`,
+        );
+      }
+      if (detail.state.stage !== "done" || !detail.state.acceptance) {
+        throw new WorkbenchError(
+          "acceptance_gate_failed",
+          `需求 ${reqId} 尚未完成人工最终验收（当前阶段：${detail.state.stage}），禁止合入主干`,
+        );
+      }
+      const matchesAcceptance = detail.state.acceptance.codeSnapshotHash === wtSnap?.fingerprint;
+      if (!wtSnap || !matchesAcceptance) {
+        throw new WorkbenchError(
+          "acceptance_gate_failed",
+          `需求 ${reqId} 的沙箱代码内容树在验收后发生了变更，请重新验证受影响条件并确认后再合入主干`,
+          { requiresReverify: true },
+        );
+      }
+
+      const drift = await inspectSandboxDrift(base, reqId, { includeSiblings: false, fetchRemote: false });
+      if (drift && drift.conflictFiles.length > 0) {
+        throw new WorkbenchError(
+          "revision_conflict",
+          `沙箱分支与本地主干存在真实合并冲突（${drift.conflictFiles.slice(0, 6).join("、")}），请先同步主干并消解冲突后重新验证`,
+          { conflictFiles: drift.conflictFiles, needsConflictResolve: true },
+        );
+      }
+      if (drift && drift.behindCount > 0) {
+        throw new WorkbenchError(
+          "acceptance_gate_failed",
+          "本地主干基线在验收后已前进，请先同步主干并重新验证确认后再合入主干",
+          { requiresReverify: true, needsSyncBase: true },
+        );
+      }
+      if (drift?.mainDirty) {
+        const mainDirtyPaths = listDirtyPathsExcludingNodeModules(base);
+        const wtFiles = listWorktreeTouchedFiles(wt, drift.baseHead);
+        const overlap = mainDirtyPaths.filter((p) => wtFiles.has(p));
+        if (overlap.length > 0) {
+          throw new WorkbenchError(
+            "revision_conflict",
+            `主仓库存在未提交改动且与当前需求文件重叠（${overlap.slice(0, 6).join("、")}），请先清理主仓库后再合入`,
+            { conflictFiles: overlap },
+          );
+        }
+      }
+
+      const mainHeadBefore = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const mainBranchRaw = execFileSync("git", ["-C", base, "rev-parse", "--abbrev-ref", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const mainBranch = mainBranchRaw && mainBranchRaw !== "HEAD" ? mainBranchRaw : null;
+      if (!mainBranch) {
+        throw new WorkbenchError("invalid_transition", "主仓库当前处于 detached HEAD 状态，请先切回目标分支后再合入");
+      }
+      if (drift?.baseBranch && !drift.baseBranch.includes("/") && mainBranch !== drift.baseBranch) {
+        throw new WorkbenchError(
+          "invalid_transition",
+          `主仓库当前分支为 ${mainBranch}，与目标基线分支 ${drift.baseBranch} 不一致，请切换后再合入`,
+        );
+      }
+      const baseRef = resolveEffectiveSandboxBaseRef(base, wt, sandbox, mainHeadBefore) || sandbox.baseHead || mainHeadBefore;
+
+      const commitMessage =
+        options.commitMessage?.trim() ||
+        buildSuggestedCommitMessage(
+          detail.state.id,
+          detail.state.title,
+          detail.specMarkdown,
+          detail.acceptanceSnapshot?.git.files.map((f) => f.path),
+        );
+
+      // Squash all WIP commits + uncommitted edits into 1 clean commit on sandbox branch.
+      const squashed = await squashBranchCommitsToSingleCommit(wt, baseRef, commitMessage);
+      if (
+        squashed.beforeFingerprint &&
+        squashed.afterFingerprint &&
+        squashed.beforeFingerprint !== squashed.afterFingerprint
+      ) {
+        if (squashed.origHead) {
+          try {
+            execFileSync("git", ["-C", wt, "reset", "--soft", squashed.origHead], { stdio: "ignore" });
+          } catch {
+            // Ignore rollback error.
+          }
+        }
+        throw new WorkbenchError(
+          "acceptance_gate_failed",
+          "压缩提交后文件树与验收快照不一致，已取消合入，请重新验证受影响条件",
+          { requiresReverify: true },
+        );
+      }
+
+      // Integrate squashed commit onto local main checkout.
+      const canFastForward = isGitAncestor(base, mainHeadBefore, squashed.commitHash);
+      const mergeEnv = resolveGitCommitEnv(base);
+      try {
+        if (canFastForward) {
+          execFileSync("git", ["-C", base, "merge", "--ff-only", sandbox.branch], { stdio: "pipe", env: mergeEnv });
+        } else {
+          execFileSync("git", ["-C", base, "merge", "--no-edit", sandbox.branch], { stdio: "pipe", env: mergeEnv });
+        }
+      } catch (err) {
+        try {
+          execFileSync("git", ["-C", base, "merge", "--abort"], { stdio: "ignore" });
+        } catch {
+          // Ignore abort cleanup.
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new WorkbenchError(
+          "revision_conflict",
+          `合入本地主干时发生合并冲突，请先执行「同步主干 / 解决冲突」流程后再合入：${sanitizeOutput(msg, 300).text}`,
+          { needsConflictResolve: true },
+        );
+      }
+
+      // Confirm landed commit is actually reachable on main HEAD before removing the sandbox!
+      const mainHeadAfter = execFileSync("git", ["-C", base, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      if (!isGitAncestor(base, squashed.commitHash, mainHeadAfter)) {
+        throw new WorkbenchError("execution_failed", "未能确认交付提交已落地到主干，已保留沙箱以防改动丢失");
+      }
+      const shortHash = execFileSync("git", ["-C", base, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+      const delivery = {
+        deliveredAt: Date.now(),
+        commitHash: mainHeadAfter,
+        shortHash: shortHash || mainHeadAfter.slice(0, 7),
+        commitMessage,
+        files: squashed.files,
+        branch: mainBranch,
+        ...(options.note?.trim() ? { note: options.note.trim() } : {}),
+      };
+
+      const postSnap = await observeGitSnapshot(base);
+      const updatedDetail = await recordLocalDelivery(base, reqId, {
+        delivery,
+        expectedRevision: options.expectedRevision,
+        currentCodeSnapshotHash: postSnap?.fingerprint ?? null,
+      });
+
+      // Safe cleanup ONLY after delivery is confirmed landed on main & recorded!
+      cleanupSandboxWorktree(base, reqId, sandbox);
+      const cascadeResults = await cascadeSyncProjectSandboxes(base, reqId, { cleanOnly: true });
+
+      const touchesWeb = squashed.files.some((f) => f.startsWith("src/web/"));
+      const touchesBackend = squashed.files.some(
+        (f) =>
+          f.startsWith("src/server/") ||
+          f.startsWith("src/hub/") ||
+          f.startsWith("src/core/") ||
+          f.startsWith("src/cli/") ||
+          f.startsWith("src/mcp/"),
+      );
+
+      return {
+        detail: updatedDetail,
+        delivery,
+        squashedCount: squashed.squashedCount,
+        touchesWeb,
+        touchesBackend,
+        cascadeResults,
+      };
+    }),
+  );
 }
 
 /**
@@ -1198,7 +2013,7 @@ export async function syncSandboxPrAndCleanup(
   let cascadeResults: CascadeSyncItemResult[] | undefined;
   if (isMerged) {
     await fetchRemoteBranch(base, latestPr.baseBranch || "main", "origin");
-    cascadeResults = await cascadeSyncProjectSandboxes(base, reqId);
+    cascadeResults = await cascadeSyncProjectSandboxes(base, reqId, { cleanOnly: true });
   }
 
   const snapAfter = await observeGitSnapshot(cleanedSandbox ? base : (sandbox?.worktreePath ?? base));

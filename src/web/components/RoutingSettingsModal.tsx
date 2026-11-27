@@ -117,6 +117,11 @@ export function RoutingSettingsModal({
   const fullCmdValue = m.fullCmdDraft ?? project?.project?.verification?.fullCommand ?? "";
   const existingAutoScreenshots = project?.project?.verification?.autoScreenshots;
   const autoScreenshotsValue = m.autoScreenshotsDraft ?? existingAutoScreenshots === true;
+  const existingWorktreeEnabled = project?.project?.worktree?.enabled;
+  const worktreeEnabledValue = m.worktreeEnabledDraft ?? existingWorktreeEnabled !== false;
+  const worktreeSetupScriptValue = m.worktreeSetupScriptDraft ?? project?.project?.worktree?.setupScript ?? "";
+  const worktreeCopyFilesValue =
+    m.worktreeCopyFilesDraft ?? (project?.project?.worktree?.copyFiles ?? []).join(", ");
 
   const syncHubStatePatch = async (
     patch: Partial<
@@ -224,6 +229,14 @@ export function RoutingSettingsModal({
           lm.giteeBaseBranchDraft ?? project.project?.gitee?.defaultBaseBranch ?? giteeStatus?.defaultBaseBranch ?? "master";
         const latestFastCmd = lm.fastCmdDraft ?? project.project?.verification?.fastCommand ?? "";
         const latestFullCmd = lm.fullCmdDraft ?? project.project?.verification?.fullCommand ?? "";
+        const latestWtEnabled = lm.worktreeEnabledDraft ?? existingWorktreeEnabled !== false;
+        const latestWtScript = (lm.worktreeSetupScriptDraft ?? project.project?.worktree?.setupScript ?? "").trim();
+        const latestWtFilesRaw =
+          lm.worktreeCopyFilesDraft ?? (project.project?.worktree?.copyFiles ?? []).join(", ");
+        const latestWtFiles = latestWtFilesRaw
+          .split(/[\n,]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
 
         await api.updateProjectSettings({
           outputLanguage: latestProjLang,
@@ -235,6 +248,11 @@ export function RoutingSettingsModal({
               : existingAutoScreenshots !== undefined
                 ? { autoScreenshots: existingAutoScreenshots }
                 : {}),
+          },
+          worktree: {
+            enabled: latestWtEnabled,
+            setupScript: latestWtScript,
+            copyFiles: latestWtFiles,
           },
           ...(latestProjProvider === "gitee"
             ? {
@@ -932,6 +950,58 @@ export function RoutingSettingsModal({
                         onChange={(e) =>
                           setModal((prev) =>
                             prev?.kind === "routing" ? { ...prev, fullCmdDraft: e.target.value } : prev,
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t pt-2.5">
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                    <strong className="text-[13px]">{t(language, "routing.worktreeTitle")}</strong>
+                    <Label className="flex items-center gap-1.5 text-xs font-normal">
+                      <Checkbox
+                        data-testid="project-worktree-enabled"
+                        checked={worktreeEnabledValue}
+                        onCheckedChange={(checked) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, worktreeEnabledDraft: Boolean(checked) } : prev,
+                          )
+                        }
+                      />
+                      <span>{t(language, "routing.worktreeEnabledLabel")}</span>
+                    </Label>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div>
+                      <Label className="mb-1 block text-xs text-muted-foreground font-normal">
+                        {t(language, "routing.worktreeSetupScriptLabel")}
+                      </Label>
+                      <Input
+                        size="sm"
+                        data-testid="project-worktree-setup-script"
+                        value={worktreeSetupScriptValue}
+                        placeholder={t(language, "routing.worktreeSetupScriptPlaceholder")}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, worktreeSetupScriptDraft: e.target.value } : prev,
+                          )
+                        }
+                      />
+                    </div>
+                    <div>
+                      <Label className="mb-1 block text-xs text-muted-foreground font-normal">
+                        {t(language, "routing.worktreeCopyFilesLabel")}
+                      </Label>
+                      <Input
+                        size="sm"
+                        data-testid="project-worktree-copy-files"
+                        value={worktreeCopyFilesValue}
+                        placeholder={t(language, "routing.worktreeCopyFilesPlaceholder")}
+                        onChange={(e) =>
+                          setModal((prev) =>
+                            prev?.kind === "routing" ? { ...prev, worktreeCopyFilesDraft: e.target.value } : prev,
                           )
                         }
                       />

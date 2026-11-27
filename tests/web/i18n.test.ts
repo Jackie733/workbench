@@ -353,7 +353,32 @@ describe("status and error messages", () => {
       ),
     ).toBe("Let the agent fix review findings");
 
-    const stale = deriveActionBanner(state, approval, coverage, gate, {
+    const staleBlock = deriveActionBanner(state, approval, coverage, gate, {
+      effectiveState: "stale",
+      reason: "审查后工作区代码已有新改动，建议复审",
+      reasonKey: "core.review.staleCode",
+    });
+    expect(staleBlock.banner.headlineKey).toBe("core.banner.review.staleBlock");
+    const staleBlockEn = translateRef(
+      "en",
+      staleBlock.banner.headlineKey,
+      staleBlock.banner.headline,
+      staleBlock.banner.headlineParams,
+    );
+    expect(staleBlockEn).toContain("prior blocking review is stale");
+    const staleBlockZh = translateRef(
+      "zh-CN",
+      staleBlock.banner.headlineKey,
+      staleBlock.banner.headline,
+      staleBlock.banner.headlineParams,
+    );
+    expect(staleBlockZh).toContain("阻塞级（block）审查已过期");
+
+    const concernState = {
+      ...state,
+      reviewReport: { ...state.reviewReport!, verdict: "concern" as const },
+    };
+    const stale = deriveActionBanner(concernState, approval, coverage, gate, {
       effectiveState: "stale",
       reason: "审查后工作区代码已有新改动，建议复审",
       reasonKey: "core.review.staleCode",

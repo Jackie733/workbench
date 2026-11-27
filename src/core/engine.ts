@@ -2,10 +2,12 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { extractMessageRef, WorkbenchError, type StructuredMessageRef } from "./errors.ts";
-import { atomicWriteJson, canonicalRoot, resolveSafePath, withProjectWriteLock } from "./fs.ts";
+import { atomicWriteFile, atomicWriteJson, canonicalRoot, resolveSafePath, withProjectWriteLock } from "./fs.ts";
 import {
   commitFilesInGit,
+  computeSelectedFilesContentTreeFingerprint,
   countCommitsBetween,
+  countWipCommitsBetween,
   createFeatureBranchAtHead,
   detectOmittedDiffContent,
   getGitRemoteUrl,
@@ -16,6 +18,7 @@ import {
   observeGitChanges,
   observeGitSnapshot,
   pushBranchToRemote,
+  squashBranchCommitsToSingleCommit,
 } from "./git.ts";
 import {
   buildGiteeReasonMessageDetails,
@@ -39,6 +42,7 @@ import {
   removeAttachment as removeAttachmentFile,
   requirementAttachmentsDir,
 } from "./attachments.ts";
+import { withCodeRootLock } from "./code_lock.ts";
 import { normalizeOutputLanguage } from "./language.ts";
 import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
 import {
@@ -64,6 +68,7 @@ import {
   MAX_ACCEPTANCE_DIFF_BYTES,
   MAX_AGENT_RUNS,
   MAX_DISCUSSIONS,
+  MAX_HANDOFF_BYTES,
   MAX_SNAPSHOT_VERIFICATIONS,
   MAX_TIMELINE,
   REQUIREMENT_TIERS,
@@ -72,28 +77,35 @@ import {
   WORKBENCH_DIR,
   type AcceptanceSnapshot,
   type AcceptanceVerificationEvidence,
+  type AdoptedDecision,
   type AgentRunRecord,
   type AttachmentMeta,
   type BaselineSnapshot,
   type Criterion,
   type CriterionInput,
+  type DecisionItem,
   type DeliveryCandidateFile,
   type DeliveryPreview,
   type DeliveryRecord,
+  type DesignReviewReport,
   type DiscussionEntry,
   type GitObservation,
   type GitRemoteProvider,
+  type ManualCriterionCheck,
+  type NeedsHumanState,
   type OutputLanguage,
   type PrivacyMode,
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
   type ProjectVerificationConfig,
+  type ProjectWorktreeConfig,
   type RequirementDetail,
   type RequirementDiffView,
   type RequirementGitHubIssueLink,
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
+  type RequirementKind,
   type RequirementState,
   type RequirementSummary,
   type RequirementTier,
@@ -117,9 +129,11 @@ import {
 } from "./types.ts";
 import {
   assertRequirementId,
+  clipHeadTailUtf8,
   deriveTitleFromGoal,
   isSafeText,
   normalizeCriteria,
+  normalizeDecisionItems,
   normalizeReason,
   normalizeTitle,
   sanitizeOutput,
@@ -137,11 +151,14 @@ import {
 import {
   BASELINE_SCOPE_NOTE,
   WORKTREE_SCOPE_NOTE,
+  canDirectApproveWithDecisions,
+  computeDecisionsHash,
   computeDesignHash,
   computeSpecHash,
   detectTestTamperingSignals,
   evaluateApproval,
   evaluateRequirement,
+  isManualCriterion,
 } from "./validity.ts";
 
 function makeEvent(
@@ -248,6 +265,7 @@ function toSummary(bundle: RequirementBundle, currentCodeSnapshotHash: string | 
     title: state.title,
     stage: state.stage,
     track: state.track,
+    kind: state.kind ?? "feature",
     tier: state.tier,
     revision: state.revision,
     designVersion: state.designVersion,
@@ -290,6 +308,7 @@ export async function updateProjectConfig(
     github?: ProjectGitHubConfig | null;
     gitee?: ProjectGiteeConfig | null;
     verification?: ProjectVerificationConfig | null;
+    worktree?: ProjectWorktreeConfig | null;
   },
 ): Promise<ProjectMetadata> {
   const base = canonicalRoot(root);
@@ -399,6 +418,33 @@ export async function updateProjectConfig(
         next.verification = mergedVer;
       } else {
         delete next.verification;
+      }
+    }
+
+    if (patch.worktree === null) {
+      delete next.worktree;
+    } else if (patch.worktree !== undefined) {
+      const mergedWt: ProjectWorktreeConfig = { ...(current.worktree ?? {}) };
+      if (patch.worktree.enabled !== undefined) {
+        mergedWt.enabled = Boolean(patch.worktree.enabled);
+      }
+      if (patch.worktree.copyFiles !== undefined) {
+        const cleaned = patch.worktree.copyFiles
+          .map((f) => f.trim())
+          .filter(Boolean)
+          .slice(0, 64);
+        if (cleaned.length > 0) mergedWt.copyFiles = Array.from(new Set(cleaned));
+        else delete mergedWt.copyFiles;
+      }
+      if (patch.worktree.setupScript !== undefined) {
+        const cleanScript = patch.worktree.setupScript.trim();
+        if (cleanScript) mergedWt.setupScript = cleanScript;
+        else delete mergedWt.setupScript;
+      }
+      if (Object.keys(mergedWt).length > 0) {
+        next.worktree = mergedWt;
+      } else {
+        delete next.worktree;
       }
     }
 
@@ -553,14 +599,44 @@ export function extractInlineCriteriaFromDesign(designMarkdown: string): Criteri
       const obj = item as Record<string, unknown>;
       const description = typeof obj.description === "string" ? obj.description.trim() : "";
       if (!description) continue;
+      const kind =
+        obj.kind === "manual" || obj.type === "manual" || obj.manual === true
+          ? ("manual" as const)
+          : obj.kind === "command" || obj.type === "command"
+            ? ("command" as const)
+            : undefined;
       out.push({
         ...(typeof obj.id === "string" && obj.id.trim() ? { id: obj.id.trim() } : {}),
         description,
         required: obj.required === undefined ? true : Boolean(obj.required),
-        ...(typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+        ...(kind ? { kind } : {}),
+        ...(kind !== "manual" && typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+        ...(typeof obj.steps === "string" && obj.steps.trim() ? { steps: obj.steps.trim() } : {}),
       });
     }
     return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extracts optional structured pending decisions from an inline ```workbench-decisions JSON block inside design.md (WB-18).
+ * Returns null if no valid block is present.
+ */
+export function extractInlineDecisionsFromDesign(designMarkdown: string): DecisionItem[] | null {
+  const match = /```workbench-decisions\s*\r?\n([\s\S]*?)```/m.exec(designMarkdown);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]!.trim()) as unknown;
+    const rawList = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { decisions?: unknown }).decisions)
+        ? (parsed as { decisions: unknown[] }).decisions
+        : null;
+    if (!rawList || rawList.length === 0) return null;
+    const normalized = normalizeDecisionItems(rawList).map(({ selectedOptionId: _s, customAnswer: _c, decidedAt: _d, ...rest }) => rest);
+    return normalized.length > 0 ? normalized : null;
   } catch {
     return null;
   }
@@ -580,7 +656,7 @@ export async function setRequirementTier(
     if (state.stage === "done" || state.stage === "cancelled") {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能切换执行档位`);
     }
-    if (state.tier === tier) {
+    if (state.tier === tier && !state.needsHuman) {
       return { state };
     }
     const label = tier === "sota" ? "SOTA 主程" : "标准主程";
@@ -588,6 +664,7 @@ export async function setRequirementTier(
       state: {
         ...state,
         tier,
+        ...(tier === "sota" ? { needsHuman: null } : {}),
         timeline: appendTimeline(
           state.timeline,
           makeEvent(now, "tier_changed", "human", `切换执行档位为：${label}`, options.reason),
@@ -661,6 +738,7 @@ export async function createRequirement(
     parentId?: string;
     criteria?: CriterionInput[];
     track?: Track;
+    kind?: RequirementKind;
     tier?: RequirementTier;
     uiRelated?: boolean;
     currentCodeSnapshotHash?: string | null;
@@ -674,6 +752,7 @@ export async function createRequirement(
   const title = input.title?.trim() ? normalizeTitle(input.title) : deriveTitleFromGoal(specMarkdown);
   const criteria = input.criteria ? normalizeCriteria(input.criteria) : [];
   const track: Track = input.track === "fast_track" ? "fast_track" : "plan_first";
+  const kind: RequirementKind = input.kind === "bug" ? "bug" : "feature";
   const tier: RequirementTier = input.tier === "sota" ? "sota" : "standard";
   const specHash = computeSpecHash(specMarkdown, criteria);
   const parentId = input.parentId?.trim() ? assertRequirementId(input.parentId.trim()) : undefined;
@@ -697,8 +776,10 @@ export async function createRequirement(
       id,
       ...(parentId ? { parentId } : {}),
       title,
+      originalGoal: specMarkdown,
       stage: "planning",
       track,
+      ...(kind === "bug" ? { kind: "bug" as const } : {}),
       tier,
       revision: 1,
       specHash,
@@ -713,7 +794,7 @@ export async function createRequirement(
       ...(input.uiRelated === true ? { uiRelated: true } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       timeline: [
-        makeEvent(now, "created", "human", `创建需求 ${id}：${title}`),
+        makeEvent(now, "created", "human", `${kind === "bug" ? "登记 Bug" : "创建需求"} ${id}：${title}`),
         ...(attachments.length > 0
           ? [makeEvent(now, "attachment_added", "human", `添加 ${attachments.length} 个附件`)]
           : []),
@@ -805,6 +886,94 @@ function isHumanCriteriaAdjustmentPreservingApproval(prev: Criterion[], next: Cr
   return next.every((c) => !c.required || prevIds.has(c.id));
 }
 
+/**
+ * WB-21 / FLOW §1B: strict append-only check for Bug regression criteria during `coding`.
+ * Every prior criterion MUST remain intact (no deletions, no weakening required->optional, no altering commands/steps).
+ */
+export function isStrictAppendOnlyCriteriaUpdate(prev: Criterion[], next: Criterion[]): boolean {
+  const nextById = new Map(next.map((c) => [c.id, c]));
+  for (const c of prev) {
+    const matched = nextById.get(c.id);
+    if (!matched) return false;
+    if (matched.required !== c.required) return false;
+    if (matched.description !== c.description) return false;
+    if ((matched.kind ?? undefined) !== (c.kind ?? undefined)) return false;
+    if ((matched.command ?? undefined) !== (c.command ?? undefined)) return false;
+    if ((matched.steps ?? undefined) !== (c.steps ?? undefined)) return false;
+  }
+  return true;
+}
+
+/**
+ * WB-21 / FLOW §1B: allows `kind: "bug"` in `coding` stage to append regression test criteria
+ * without invalidating launch approval; strictly forbids deleting or weakening existing criteria.
+ */
+export async function appendBugRegressionCriteria(
+  root: string,
+  id: string,
+  input: {
+    criteria: CriterionInput[];
+    actor?: "agent" | "human";
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  if (!Array.isArray(input.criteria) || input.criteria.length === 0) {
+    throw new WorkbenchError("invalid_input", "请提供至少 1 条要追加的回归测试验收条件");
+  }
+  const actor = input.actor ?? "agent";
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.kind !== "bug") {
+      throw new WorkbenchError("invalid_transition", `仅 Bug 类型需求支持编码期只增不删追加回归验收条件`);
+    }
+    if (state.stage !== "coding") {
+      throw new WorkbenchError("invalid_transition", `仅编码阶段允许追加 Bug 回归验收条件（当前：${state.stage}）`);
+    }
+    const existingIds = new Set(state.criteria.map((c) => c.id));
+    let seq = state.criteria.length;
+    const incomingWithIds: CriterionInput[] = input.criteria.map((item) => {
+      const explicitId = typeof item.id === "string" && item.id.trim() ? item.id.trim() : "";
+      if (explicitId && existingIds.has(explicitId)) {
+        throw new WorkbenchError(
+          "invalid_input",
+          `Bug 编码期仅允许只增不删追加新条件，禁止覆盖已有验收条件 ${explicitId}`,
+        );
+      }
+      if (explicitId) {
+        existingIds.add(explicitId);
+        return { ...item, id: explicitId, systemInjected: false };
+      }
+      do {
+        seq += 1;
+      } while (existingIds.has(`AC-${seq}`));
+      const autoId = `AC-${seq}`;
+      existingIds.add(autoId);
+      return { ...item, id: autoId, systemInjected: false };
+    });
+    const merged = normalizeCriteria([...state.criteria, ...incomingWithIds]);
+    if (!isStrictAppendOnlyCriteriaUpdate(state.criteria, merged)) {
+      throw new WorkbenchError("invalid_input", "Bug 编码期验收条件仅允许只增不删，禁止删除或削弱已有条件");
+    }
+    const nextSpecHash = computeSpecHash(current.specMarkdown, merged);
+    const nextApproval = state.approval ? { ...state.approval, specHash: nextSpecHash } : null;
+    const addedIds = merged.slice(state.criteria.length).map((c) => c.id);
+    return {
+      state: {
+        ...state,
+        criteria: merged,
+        specHash: nextSpecHash,
+        approval: nextApproval,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(now, "spec_updated", actor, `Bug 编码期追加回归测试验收条件：${addedIds.join("、")}`),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
 export async function updateSpec(
   root: string,
   id: string,
@@ -840,7 +1009,8 @@ export async function updateSpec(
         if (
           state.stage === "coding" &&
           nextSpec === current.specMarkdown &&
-          isHumanCriteriaAdjustmentPreservingApproval(state.criteria, nextCriteria)
+          (isHumanCriteriaAdjustmentPreservingApproval(state.criteria, nextCriteria) ||
+            (state.kind === "bug" && isStrictAppendOnlyCriteriaUpdate(state.criteria, nextCriteria)))
         ) {
           nextStage = state.stage;
           nextApproval = { ...nextApproval, specHash: nextSpecHash };
@@ -853,12 +1023,14 @@ export async function updateSpec(
       }
     }
 
+    const nextManualChecks = pruneManualChecksForCriteria(state.manualChecks, nextCriteria);
     return {
       specMarkdown: input.specMarkdown !== undefined ? nextSpec : undefined,
       state: {
         ...state,
         title: nextTitle,
         criteria: nextCriteria,
+        ...(nextManualChecks !== undefined ? { manualChecks: nextManualChecks } : {}),
         specHash: nextSpecHash,
         approval: nextApproval,
         stage: nextStage,
@@ -870,6 +1042,15 @@ export async function updateSpec(
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
+function pruneManualChecksForCriteria(
+  manualChecks: ManualCriterionCheck[] | undefined,
+  criteria: Criterion[],
+): ManualCriterionCheck[] | undefined {
+  if (!manualChecks || manualChecks.length === 0) return manualChecks;
+  const manualIds = new Set(criteria.filter((c) => isManualCriterion(c)).map((c) => c.id));
+  return manualChecks.filter((mc) => manualIds.has(mc.criterionId));
+}
+
 function isNonBreakingCriteriaUpdate(prev: Criterion[], next: Criterion[]): boolean {
   const nextById = new Map(next.map((c) => [c.id, c]));
   for (const c of prev) {
@@ -877,9 +1058,110 @@ function isNonBreakingCriteriaUpdate(prev: Criterion[], next: Criterion[]): bool
     const matched = nextById.get(c.id);
     if (!matched || !matched.required) return false;
     if (matched.description !== c.description) return false;
+    const wasManual = isManualCriterion(c);
+    const isNowManual = isManualCriterion(matched);
+    if (wasManual !== isNowManual) return false;
+    if (wasManual && (matched.steps ?? "") !== (c.steps ?? "")) return false;
     if (c.command && matched.command !== c.command) return false;
   }
   return true;
+}
+
+export interface DecisionSelectionInput {
+  id: string;
+  selectedOptionId?: string | null;
+  customAnswer?: string | null;
+}
+
+export function applyDecisionSelectionsToItems(
+  items: DecisionItem[],
+  selections: DecisionSelectionInput[],
+  now: number,
+): DecisionItem[] {
+  const byId = new Map(selections.map((s) => [s.id.trim(), s]));
+  return items.map((item) => {
+    const sel = byId.get(item.id);
+    if (!sel) return item;
+    const rawCustom = typeof sel.customAnswer === "string" ? sel.customAnswer.trim() : "";
+    const customAnswer = rawCustom ? sanitizeOutput(rawCustom, 1000).text.trim() : null;
+    const rawOptId = typeof sel.selectedOptionId === "string" ? sel.selectedOptionId.trim() : "";
+    const validOptId =
+      !customAnswer && rawOptId && item.options.some((opt) => opt.id === rawOptId)
+        ? rawOptId
+        : null;
+    const next: DecisionItem = {
+      id: item.id,
+      question: item.question,
+      ...(item.context ? { context: item.context } : {}),
+      options: item.options,
+      ...(validOptId ? { selectedOptionId: validOptId } : {}),
+      ...(customAnswer ? { customAnswer } : {}),
+      ...(validOptId || customAnswer ? { decidedAt: now } : {}),
+    };
+    return next;
+  });
+}
+
+function mergePendingDecisionsWithPrior(
+  incoming: DecisionItem[],
+  prior: DecisionItem[] | undefined,
+): DecisionItem[] {
+  if (!prior || prior.length === 0) return incoming;
+  const priorById = new Map(prior.map((p) => [p.id, p]));
+  return incoming.map((item) => {
+    const prev = priorById.get(item.id);
+    if (!prev || prev.question !== item.question) return item;
+    const preservedCustom = !item.customAnswer && !item.selectedOptionId && prev.customAnswer ? prev.customAnswer : item.customAnswer;
+    const preservedOpt =
+      !preservedCustom &&
+      !item.selectedOptionId &&
+      prev.selectedOptionId &&
+      item.options.some((opt) => opt.id === prev.selectedOptionId)
+        ? prev.selectedOptionId
+        : !preservedCustom
+          ? item.selectedOptionId
+          : undefined;
+    return {
+      ...item,
+      ...(preservedOpt ? { selectedOptionId: preservedOpt } : {}),
+      ...(preservedCustom ? { customAnswer: preservedCustom } : {}),
+      ...(preservedOpt || preservedCustom ? { decidedAt: item.decidedAt ?? prev.decidedAt ?? null } : {}),
+    };
+  });
+}
+
+function mergeAdoptedDecisions(
+  existing: AdoptedDecision[] | undefined,
+  incoming: AdoptedDecision[],
+): AdoptedDecision[] {
+  const result = [...(existing ?? [])];
+  const byId = new Map<string, number>();
+  result.forEach((d, idx) => byId.set(d.id, idx));
+  const usedIds = new Set(result.map((d) => d.id));
+  for (const ad of incoming) {
+    const existingIdx = byId.get(ad.id);
+    if (existingIdx !== undefined) {
+      if (result[existingIdx]!.question === ad.question) {
+        result[existingIdx] = ad;
+        continue;
+      }
+      let suffix = 2;
+      let nextId = `${ad.id}-${suffix}`;
+      while (usedIds.has(nextId)) {
+        suffix += 1;
+        nextId = `${ad.id}-${suffix}`;
+      }
+      usedIds.add(nextId);
+      const renamed: AdoptedDecision = { ...ad, id: nextId };
+      byId.set(nextId, result.length);
+      result.push(renamed);
+    } else {
+      usedIds.add(ad.id);
+      byId.set(ad.id, result.length);
+      result.push(ad);
+    }
+  }
+  return result;
 }
 
 export async function propose(
@@ -890,6 +1172,7 @@ export async function propose(
     specMarkdown?: string;
     criteria?: CriterionInput[];
     designMarkdown?: string;
+    decisions?: DecisionItem[] | null;
     summary?: string;
     expectedRevision?: number;
     actor?: "agent" | "human";
@@ -905,9 +1188,10 @@ export async function propose(
       input.title === undefined &&
       input.specMarkdown === undefined &&
       input.criteria === undefined &&
-      input.designMarkdown === undefined
+      input.designMarkdown === undefined &&
+      input.decisions === undefined
     ) {
-      throw new WorkbenchError("invalid_input", "propose 至少需要更新 title、spec、criteria 或 design 中的一项");
+      throw new WorkbenchError("invalid_input", "propose 至少需要更新 title、spec、criteria、design 或 decisions 中的一项");
     }
 
     const nextTitle = input.title !== undefined ? normalizeTitle(input.title) : state.title;
@@ -930,6 +1214,23 @@ export async function propose(
           ? normalizeCriteria(inlineCriteria)
           : state.criteria;
 
+    let nextPendingDecisions = state.pendingDecisions;
+    if (input.decisions === null) {
+      nextPendingDecisions = undefined;
+    } else if (input.decisions !== undefined) {
+      const normalized = normalizeDecisionItems(input.decisions);
+      nextPendingDecisions =
+        normalized.length > 0 ? mergePendingDecisionsWithPrior(normalized, state.pendingDecisions) : undefined;
+    } else if (input.designMarkdown !== undefined) {
+      const inlineDecisions = extractInlineDecisionsFromDesign(nextDesign);
+      if (inlineDecisions && inlineDecisions.length > 0) {
+        nextPendingDecisions = mergePendingDecisionsWithPrior(inlineDecisions, state.pendingDecisions);
+      } else if (computeDesignHash(nextDesign) !== state.designHash) {
+        // Revised design resolved all open forks when no workbench-decisions block remains.
+        nextPendingDecisions = undefined;
+      }
+    }
+
     const nextSpecHash = computeSpecHash(nextSpec, nextCriteria);
     const nextDesignHash = computeDesignHash(nextDesign);
     const specChanged = nextSpecHash !== state.specHash;
@@ -946,8 +1247,31 @@ export async function propose(
     let nextStage = state.stage;
     const actor = input.actor ?? "agent";
 
+    if (
+      state.stage === "coding" &&
+      state.kind === "bug" &&
+      actor === "agent" &&
+      (input.criteria !== undefined || inlineCriteria !== null) &&
+      !isStrictAppendOnlyCriteriaUpdate(state.criteria, nextCriteria)
+    ) {
+      throw new WorkbenchError("invalid_input", "Bug 编码期验收条件仅允许「只增不删」追加回归测试，禁止删除或削弱已有条件");
+    }
+
     if (nextApproval !== null && (specChanged || designChanged)) {
       if (
+        state.stage === "coding" &&
+        state.kind === "bug" &&
+        !designChanged &&
+        nextSpec === current.specMarkdown &&
+        nextTitle === state.title &&
+        isStrictAppendOnlyCriteriaUpdate(state.criteria, nextCriteria)
+      ) {
+        nextStage = "coding";
+        nextApproval = {
+          ...nextApproval,
+          specHash: nextSpecHash,
+        };
+      } else if (
         state.track === "fast_track" &&
         state.approval?.track === "fast_track" &&
         actor === "agent" &&
@@ -964,6 +1288,7 @@ export async function propose(
       } else if (
         state.stage === "coding" &&
         actor === "agent" &&
+        !designChanged &&
         nextSpec === current.specMarkdown &&
         nextTitle === state.title &&
         !(state.track === "plan_first" && nextDesignHash === "") &&
@@ -976,6 +1301,11 @@ export async function propose(
           designVersion: nextDesignVersion,
           designHash: nextDesignHash,
         };
+      } else if (state.stage === "coding" && actor === "agent") {
+        throw new WorkbenchError(
+          "invalid_transition",
+          "编码阶段 Agent 无权擅自修改已批准的规范/方案、削弱验收条件或回退至 planning 阶段；请暂停上报并由人类发起 revisePlan",
+        );
       } else {
         nextApproval = null;
         nextStage = "planning";
@@ -986,29 +1316,178 @@ export async function propose(
     const eventSummary =
       input.summary?.trim() ||
       (designChanged && nextDesignHash !== ""
-        ? `提交技术方案 v${nextDesignVersion}`
+        ? `提交技术方案 v${nextDesignVersion}${nextPendingDecisions?.length ? `（含 ${nextPendingDecisions.length} 项待拍板决策）` : ""}`
         : "更新需求规范与验收条件");
+
+    const nextManualChecks = pruneManualChecksForCriteria(state.manualChecks, nextCriteria);
+    const nextState: RequirementState = {
+      ...state,
+      title: nextTitle,
+      criteria: nextCriteria,
+      ...(nextManualChecks !== undefined ? { manualChecks: nextManualChecks } : {}),
+      specHash: nextSpecHash,
+      designVersion: nextDesignVersion,
+      designHash: nextDesignHash,
+      approval: nextApproval,
+      stage: nextStage,
+      lastFeedback: null,
+      timeline: appendTimeline(state.timeline, makeEvent(now, kind, actor, eventSummary)),
+    };
+    if (nextPendingDecisions && nextPendingDecisions.length > 0) {
+      nextState.pendingDecisions = nextPendingDecisions;
+    } else {
+      delete nextState.pendingDecisions;
+    }
 
     return {
       specMarkdown: input.specMarkdown !== undefined ? nextSpec : undefined,
       designMarkdown: input.designMarkdown !== undefined ? nextDesign : undefined,
       snapshotDesignVersion,
-      state: {
-        ...state,
-        title: nextTitle,
-        criteria: nextCriteria,
-        specHash: nextSpecHash,
-        designVersion: nextDesignVersion,
-        designHash: nextDesignHash,
-        approval: nextApproval,
-        stage: nextStage,
-        lastFeedback: null,
-        timeline: appendTimeline(state.timeline, makeEvent(now, kind, actor, eventSummary)),
-      },
+      state: nextState,
     };
   });
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/** Persists asynchronous human selections on inline planning decision cards without leaving `planning` (WB-18). */
+export async function saveDecisionSelections(
+  root: string,
+  id: string,
+  input: {
+    selections: DecisionSelectionInput[];
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage !== "planning") {
+      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法更新方案待拍板决策`);
+    }
+    const pending = state.pendingDecisions ?? [];
+    if (pending.length === 0) {
+      throw new WorkbenchError("invalid_input", "当前方案没有待拍板决策项");
+    }
+    const updated = applyDecisionSelectionsToItems(pending, input.selections ?? [], now);
+    return {
+      state: {
+        ...state,
+        pendingDecisions: updated,
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/**
+ * Exit 2 of the WB-18 inline decision card ("提交决策并修订方案"):
+ * persists human selections + bundles ALL card answers and ALL unresolved `refine` annotations
+ * into a single consolidated feedback packet for one `design` revision run.
+ */
+export async function submitDecisionsAndRevise(
+  root: string,
+  id: string,
+  input: {
+    selections?: DecisionSelectionInput[];
+    note?: string;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  } = {},
+): Promise<{ detail: RequirementDetail; feedback: string; unresolvedAnnotationIds: string[] }> {
+  let consolidatedFeedback = "";
+  let unresolvedIds: string[] = [];
+
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage !== "planning") {
+      throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）无法提交决策并修订方案`);
+    }
+    const updatedPending =
+      state.pendingDecisions && state.pendingDecisions.length > 0 && input.selections
+        ? applyDecisionSelectionsToItems(state.pendingDecisions, input.selections, now)
+        : (state.pendingDecisions ?? []);
+
+    const decisionLines: string[] = [];
+    const adoptedFromCard: AdoptedDecision[] = [];
+    for (const item of updatedPending) {
+      const custom = item.customAnswer?.trim() || "";
+      const presetOpt = item.selectedOptionId
+        ? item.options.find((opt) => opt.id === item.selectedOptionId)
+        : undefined;
+      if (custom) {
+        decisionLines.push(`- [${item.id}] ${item.question} → 自定义结论：${custom}`);
+        adoptedFromCard.push({
+          id: item.id,
+          question: item.question,
+          answer: custom,
+          adoptedAt: now,
+        });
+      } else if (presetOpt) {
+        decisionLines.push(`- [${item.id}] ${item.question} → 选用「${presetOpt.label}」(${presetOpt.id})`);
+        adoptedFromCard.push({
+          id: item.id,
+          question: item.question,
+          answer: presetOpt.label,
+          optionId: presetOpt.id,
+          optionLabel: presetOpt.label,
+          adoptedAt: now,
+        });
+      }
+    }
+
+    const unresolvedNotes = (state.discussions ?? []).filter((d) => d.mode === "refine" && !d.resolved);
+    unresolvedIds = unresolvedNotes.map((d) => d.id);
+    const noteText = input.note?.trim() ? normalizeReason(input.note, "补充意见") : "";
+
+    if (decisionLines.length === 0 && unresolvedNotes.length === 0 && !noteText) {
+      throw new WorkbenchError("invalid_input", "请至少作答 1 项决策、添加批注或填写修订意见");
+    }
+
+    const parts: string[] = ["请结合以下人类决策与批注一次性修订方案并补齐验收条件："];
+    if (decisionLines.length > 0) {
+      parts.push("", "【已拍板决策】", ...decisionLines);
+    }
+    if (unresolvedNotes.length > 0) {
+      parts.push(
+        "",
+        `【未解决行内批注（共 ${unresolvedNotes.length} 条）】`,
+        ...unresolvedNotes.map((d) => `- ${d.anchor ? `[${d.anchor}] ` : ""}${d.message}`),
+      );
+    }
+    if (noteText) {
+      parts.push("", `【补充说明】${noteText}`);
+    }
+    consolidatedFeedback = sanitizeOutput(parts.join("\n"), 7500).text;
+
+    const nextHumanDecisions = mergeAdoptedDecisions(state.humanDecisions, adoptedFromCard);
+
+    const nextState: RequirementState = {
+      ...state,
+      stage: "planning",
+      approval: null,
+      lastFeedback: consolidatedFeedback,
+      ...(updatedPending.length > 0 ? { pendingDecisions: updatedPending } : {}),
+      ...(nextHumanDecisions.length > 0 ? { humanDecisions: nextHumanDecisions } : {}),
+      timeline: appendTimeline(
+        state.timeline,
+        makeEvent(
+          now,
+          "decisions_updated",
+          "human",
+          `提交 ${adoptedFromCard.length} 项决策与 ${unresolvedNotes.length} 条批注，触发方案修订`,
+          consolidatedFeedback.slice(0, 500),
+        ),
+      ),
+    };
+    return { state: nextState };
+  });
+
+  return {
+    detail: toDetail(bundle, input.currentCodeSnapshotHash ?? null),
+    feedback: consolidatedFeedback,
+    unresolvedAnnotationIds: unresolvedIds,
+  };
 }
 
 export async function approveDesign(
@@ -1018,6 +1497,8 @@ export async function approveDesign(
     expectedRevision?: number;
     baseline?: BaselineSnapshot | null;
     note?: string;
+    decisionSelections?: DecisionSelectionInput[];
+    resetSandbox?: boolean;
     currentCodeSnapshotHash?: string | null;
   } = {},
 ): Promise<RequirementDetail> {
@@ -1029,35 +1510,280 @@ export async function approveDesign(
     if (!current.designMarkdown.trim() || state.designHash === "" || state.designVersion < 1) {
       throw new WorkbenchError("approval_required", "尚未提交可批准的技术方案正文（design.md）");
     }
+
+    const updatedPending =
+      state.pendingDecisions && state.pendingDecisions.length > 0 && input.decisionSelections
+        ? applyDecisionSelectionsToItems(state.pendingDecisions, input.decisionSelections, now)
+        : (state.pendingDecisions ?? []);
+
+    const candidateState: RequirementState = {
+      ...state,
+      ...(updatedPending.length > 0 ? { pendingDecisions: updatedPending } : {}),
+    };
+    const directCheck = canDirectApproveWithDecisions(candidateState);
+    if (!directCheck.allowed) {
+      const code = state.criteria.some((c) => c.required) ? "invalid_input" : "approval_required";
+      throw new WorkbenchError(code, directCheck.reason ?? "当前不满足直接批准条件，请先修订方案", {
+        ...(directCheck.reasonKey ? { messageKey: directCheck.reasonKey } : {}),
+      });
+    }
+
+    const adoptedNow: AdoptedDecision[] = updatedPending.map((item) => {
+      const opt = item.options.find((o) => o.id === item.selectedOptionId)!;
+      return {
+        id: item.id,
+        question: item.question,
+        answer: opt.label,
+        optionId: opt.id,
+        optionLabel: opt.label,
+        adoptedAt: now,
+      };
+    });
+    const nextHumanDecisions = mergeAdoptedDecisions(state.humanDecisions, adoptedNow);
+    const decisionsHash = computeDecisionsHash(nextHumanDecisions);
+
     const note = input.note?.trim() ? normalizeReason(input.note, "批准备注") : undefined;
-    const baseline = input.baseline ?? state.baseline;
+    const baseline =
+      state.revisedFromCoding && input.resetSandbox !== true && state.baseline
+        ? state.baseline
+        : (input.baseline ?? state.baseline);
+    const nextState: RequirementState = {
+      ...state,
+      track: "plan_first",
+      stage: "coding",
+      baseline,
+      lastFeedback: null,
+      needsHuman: null,
+      revisedFromCoding: false,
+      ...(nextHumanDecisions.length > 0 ? { humanDecisions: nextHumanDecisions } : {}),
+      approval: {
+        approvedAt: now,
+        track: "plan_first",
+        specHash: state.specHash,
+        designVersion: state.designVersion,
+        designHash: state.designHash,
+        ...(decisionsHash ? { decisionsHash } : {}),
+        baselineHead: baseline?.head ?? null,
+        baselineFingerprint: baseline?.fingerprint ?? null,
+        ...(note ? { note } : {}),
+      },
+      timeline: appendTimeline(
+        state.timeline,
+        makeEvent(
+          now,
+          "approved",
+          "human",
+          updatedPending.length > 0
+            ? `采纳 ${updatedPending.length} 项决策并批准方案 v${state.designVersion}，进入编码阶段`
+            : `批准方案 v${state.designVersion}，进入编码阶段`,
+          note,
+        ),
+      ),
+    };
+    delete nextState.pendingDecisions;
+
     return {
       snapshotSpecRevision: state.revision,
+      state: nextState,
+    };
+  });
+
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+/**
+ * Records or clears a human manual criterion checkoff bound to the current `specHash + codeSnapshotHash` (WB-18 / FLOW §1.2).
+ */
+export async function setManualCriterionCheck(
+  root: string,
+  id: string,
+  input: {
+    criterionId: string;
+    checked: boolean;
+    note?: string;
+    expectedRevision?: number;
+    currentCodeSnapshotHash: string | null;
+  },
+): Promise<RequirementDetail> {
+  if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
+    throw new WorkbenchError("acceptance_gate_failed", "缺少有效的当前代码快照指纹，无法记录人工核验状态");
+  }
+  const snapHash = input.currentCodeSnapshotHash;
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage !== "coding") {
+      throw new WorkbenchError("invalid_transition", `仅编码阶段允许勾选人工验收条件（当前：${state.stage}）`);
+    }
+    const crit = state.criteria.find((c) => c.id === input.criterionId);
+    if (!crit) {
+      throw new WorkbenchError("not_found", `未找到验收条件 ${input.criterionId}`);
+    }
+    if (input.checked && !isManualCriterion(crit)) {
+      throw new WorkbenchError("invalid_input", `验收条件 ${input.criterionId} 为自动化命令验证，请运行命令而非手工勾选`);
+    }
+    const note = input.note?.trim() ? sanitizeOutput(input.note.trim(), 900).text.trim() : undefined;
+    const prev = (state.manualChecks ?? []).filter((mc) => mc.criterionId !== crit.id);
+    const nextChecks: ManualCriterionCheck[] = input.checked
+      ? [
+          ...prev,
+          {
+            criterionId: crit.id,
+            checked: true,
+            checkedAt: now,
+            specHash: state.specHash,
+            codeSnapshotHash: snapHash,
+            ...(note ? { note } : {}),
+          },
+        ]
+      : prev;
+    return {
       state: {
         ...state,
-        track: "plan_first",
-        stage: "coding",
-        baseline,
-        lastFeedback: null,
-        approval: {
-          approvedAt: now,
-          track: "plan_first",
-          specHash: state.specHash,
-          designVersion: state.designVersion,
-          designHash: state.designHash,
-          baselineHead: baseline?.head ?? null,
-          baselineFingerprint: baseline?.fingerprint ?? null,
-          ...(note ? { note } : {}),
-        },
+        manualChecks: nextChecks,
         timeline: appendTimeline(
           state.timeline,
-          makeEvent(now, "approved", "human", `批准方案 v${state.designVersion}，进入编码阶段`, note),
+          makeEvent(
+            now,
+            "manual_checked",
+            "human",
+            input.checked
+              ? `人工核验通过验收条件 ${crit.id}（${crit.description.slice(0, 60)}）`
+              : `取消人工核验勾选 ${crit.id}`,
+            note,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, snapHash);
+}
+
+/**
+ * Human-only domain transition `coding -> planning` (WB-19 / FLOW §1.5):
+ * invalidates approval, snapshots current `git diff` into `handoff.md`, leaves sandbox working tree untouched,
+ * and marks `revisedFromCoding: true` so re-approval can offer optional sandbox reset.
+ */
+export async function revisePlan(
+  root: string,
+  id: string,
+  input: {
+    reason: string;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const base = canonicalRoot(root);
+  const reason = normalizeReason(input.reason, "退回修改方案原因");
+  const codeRoot = resolveCodeRoot(base, id);
+  const preBundle = readRequirementBundle(base, id);
+  const changes = await observeGitChanges(codeRoot, {
+    sinceHead: preBundle.state.baseline?.head ?? null,
+    maxDiffBytes: 24 * 1024,
+  }).catch(() => null);
+
+  const diffSectionLines: string[] = [
+    "",
+    "## 退回修改方案前的代码改动现场（revisePlan）",
+    `- **退回原因**：${reason}`,
+  ];
+  if (changes?.isGitRepo) {
+    diffSectionLines.push(`- **代码目录**：\`${codeRoot}\` · HEAD \`${changes.head || "(unborn)"}\` · 变更文件数 ${changes.files.length}`);
+    if (changes.files.length > 0) {
+      diffSectionLines.push(`- **变更文件**：${changes.files.slice(0, 20).map((f) => `\`${f.path}\``).join("、")}`);
+    }
+    if (changes.diff.trim()) {
+      diffSectionLines.push("```diff", sanitizeOutput(changes.diff.trim(), 16 * 1024).text, "```");
+    } else {
+      diffSectionLines.push("- 当前相对基线暂无代码差异。");
+    }
+  }
+  const diffSection = diffSectionLines.join("\n");
+
+  const bundle = await mutateRequirement(base, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage !== "coding") {
+      throw new WorkbenchError("invalid_transition", `仅编码阶段允许执行退回修改方案（当前：${state.stage}）`);
+    }
+    const existingHandoff = current.handoffMarkdown.trim();
+    const prefixBase = `# ${state.id} · ${state.title}\n`;
+    const budgetForExisting = Math.max(0, MAX_HANDOFF_BYTES - Buffer.byteLength(diffSection, "utf8") - 128);
+    let combinedHandoff = existingHandoff ? `${existingHandoff}\n${diffSection}\n` : `${prefixBase}${diffSection}\n`;
+    if (Buffer.byteLength(combinedHandoff, "utf8") > MAX_HANDOFF_BYTES) {
+      const clippedExisting =
+        budgetForExisting > 256
+          ? clipHeadTailUtf8(existingHandoff, Math.min(2048, Math.floor(budgetForExisting / 4)), Math.floor(budgetForExisting * 0.7)).text
+          : "";
+      combinedHandoff = clippedExisting ? `${clippedExisting}\n${diffSection}\n` : `${prefixBase}${diffSection}\n`;
+      if (Buffer.byteLength(combinedHandoff, "utf8") > MAX_HANDOFF_BYTES) {
+        combinedHandoff = sanitizeOutput(combinedHandoff, MAX_HANDOFF_BYTES - 16).text;
+      }
+    }
+    const mergedHandoff = validateMarkdownContent(combinedHandoff, "handoff", true);
+    const convertedFromBug = state.kind === "bug" && state.track !== "plan_first";
+    return {
+      handoffMarkdown: mergedHandoff,
+      state: {
+        ...state,
+        stage: "planning",
+        ...(state.kind === "bug" ? { track: "plan_first" as const } : {}),
+        approval: null,
+        lastFeedback: reason,
+        needsHuman: null,
+        revisedFromCoding: true,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "plan_revised",
+            "human",
+            convertedFromBug
+              ? "Bug 转常规方案流程（保留 Bug 标签，轨道切为 plan_first，已将当前 Diff 写入 handoff.md）"
+              : "人类退回修改方案（coding → planning，已将当前 Diff 写入 handoff.md）",
+            reason,
+          ),
         ),
       },
     };
   });
 
-  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? changes?.fingerprint ?? null);
+}
+
+/** Records or clears explicit `needs_human` escalation state on a requirement (WB-19 / FLOW §3.1). */
+export async function setRequirementNeedsHuman(
+  root: string,
+  id: string,
+  needsHuman: NeedsHumanState | null,
+  currentCodeSnapshotHash?: string | null,
+): Promise<RequirementDetail> {
+  const sanitizedNeedsHuman = needsHuman
+    ? {
+        ...needsHuman,
+        reason: sanitizeOutput(needsHuman.reason.trim(), 1000).text.trim() || "需人工接管",
+      }
+    : null;
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    if (state.stage === "done" || state.stage === "cancelled") {
+      return { state };
+    }
+    if (!sanitizedNeedsHuman && !state.needsHuman) {
+      return { state };
+    }
+    return {
+      state: {
+        ...state,
+        needsHuman: sanitizedNeedsHuman,
+        timeline: sanitizedNeedsHuman
+          ? appendTimeline(
+              state.timeline,
+              makeEvent(now, "needs_human", "system", `升级为需人工接管：${sanitizeOutput(sanitizedNeedsHuman.reason, 300).text.trim()}`),
+            )
+          : state.timeline,
+      },
+    };
+  });
+  return toDetail(bundle, currentCodeSnapshotHash ?? null);
 }
 
 export async function authorizeFastTrack(
@@ -1088,35 +1814,49 @@ export async function authorizeFastTrack(
               description: "项目快速基线验证通过",
               required: true,
               command: configuredFastCmd,
+              systemInjected: true,
             },
           ]
         : state.criteria;
     const nextSpecHash = autoCriteria !== state.criteria ? computeSpecHash(current.specMarkdown, autoCriteria) : state.specHash;
+    const decisionsHash = computeDecisionsHash(state.humanDecisions);
+    const isBug = state.kind === "bug";
+    const nextState: RequirementState = {
+      ...state,
+      track: "fast_track",
+      stage: "coding",
+      criteria: autoCriteria,
+      specHash: nextSpecHash,
+      baseline,
+      lastFeedback: null,
+      needsHuman: null,
+      revisedFromCoding: false,
+      approval: {
+        approvedAt: now,
+        track: "fast_track",
+        specHash: nextSpecHash,
+        designVersion: state.designVersion,
+        designHash: state.designHash,
+        ...(decisionsHash ? { decisionsHash } : {}),
+        baselineHead: baseline?.head ?? null,
+        baselineFingerprint: baseline?.fingerprint ?? null,
+        ...(note ? { note } : {}),
+      },
+      timeline: appendTimeline(
+        state.timeline,
+        makeEvent(
+          now,
+          "fast_tracked",
+          "human",
+          isBug ? "授权开始修复 Bug，直接进入编码、回归测试与验证" : "启用快速通道，跳过方案审批直接进入编码与验证",
+          note,
+        ),
+      ),
+    };
+    delete nextState.pendingDecisions;
     return {
       snapshotSpecRevision: state.revision,
-      state: {
-        ...state,
-        track: "fast_track",
-        stage: "coding",
-        criteria: autoCriteria,
-        specHash: nextSpecHash,
-        baseline,
-        lastFeedback: null,
-        approval: {
-          approvedAt: now,
-          track: "fast_track",
-          specHash: nextSpecHash,
-          designVersion: state.designVersion,
-          designHash: state.designHash,
-          baselineHead: baseline?.head ?? null,
-          baselineFingerprint: baseline?.fingerprint ?? null,
-          ...(note ? { note } : {}),
-        },
-        timeline: appendTimeline(
-          state.timeline,
-          makeEvent(now, "fast_tracked", "human", "启用快速通道，跳过方案审批直接进入编码与验证", note),
-        ),
-      },
+      state: nextState,
     };
   });
 
@@ -1248,7 +1988,13 @@ export async function spawnSubRequirements(
 export async function requestChanges(
   root: string,
   id: string,
-  input: { feedback: string; expectedRevision?: number; currentCodeSnapshotHash?: string | null },
+  input: {
+    feedback: string;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+    rememberLesson?: boolean;
+    lessonText?: string;
+  },
 ): Promise<RequirementDetail> {
   const feedback = normalizeReason(input.feedback, "修改意见");
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
@@ -1273,12 +2019,20 @@ export async function requestChanges(
           ...state,
           stage: "coding",
           lastFeedback: feedback,
+          needsHuman: null,
           timeline: appendTimeline(state.timeline, makeEvent(now, "rejected", "human", "验收打回修改", feedback)),
         },
       };
     }
     throw new WorkbenchError("invalid_transition", `当前阶段（${state.stage}）不支持退回修改`);
   });
+
+  if (input.rememberLesson === true) {
+    const lesson = (input.lessonText?.trim() || feedback).trim();
+    if (lesson) {
+      await appendProjectPlaybookLesson(root, { lesson, source: "reject", requirementId: id }).catch(() => null);
+    }
+  }
 
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
@@ -1304,10 +2058,14 @@ export async function recordVerification(
         `当前阶段（${state.stage}）不能记录验证证据；必须先获得人类方案批准并进入编码阶段`,
       );
     }
-    const validIds = new Set(state.criteria.map((c) => c.id));
+    const criteriaById = new Map(state.criteria.map((c) => [c.id, c]));
     for (const criterionId of record.criterionIds) {
-      if (!validIds.has(criterionId)) {
+      const criterion = criteriaById.get(criterionId);
+      if (!criterion) {
         throw new WorkbenchError("invalid_input", `验证关联的验收条件 ID 不存在: ${criterionId}`);
+      }
+      if (isManualCriterion(criterion)) {
+        throw new WorkbenchError("invalid_input", `验收条件 ${criterionId} 为人工核验项，必须由人类手动勾选，禁止写入自动化验证记录`);
       }
     }
 
@@ -1539,6 +2297,8 @@ export async function acceptRequirement(
     note?: string;
     overrideReason?: string;
     acceptedRisks?: string[];
+    rememberLesson?: boolean;
+    lessonText?: string;
   },
 ): Promise<RequirementDetail> {
   if (!input.currentCodeSnapshotHash || !/^[a-f0-9]{64}$/.test(input.currentCodeSnapshotHash)) {
@@ -1596,15 +2356,19 @@ export async function acceptRequirement(
     );
   }
   if (
-    preValidity.reviewValidity.effectiveState === "current" &&
+    (preValidity.reviewValidity.effectiveState === "current" || preValidity.reviewValidity.effectiveState === "stale") &&
     preBundle.state.reviewReport?.verdict === "block" &&
     !overrideReason
   ) {
+    const isStaleBlock = preValidity.reviewValidity.effectiveState === "stale";
     throw new WorkbenchError(
       "acceptance_gate_failed",
-      "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
+      isStaleBlock
+        ? "上一份跨模型审查为阻塞级（block）且因代码或规范变动已过期，跳过复审强行验收必须填写说明理由（overrideReason）"
+        : "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
       {
         reviewVerdict: "block",
+        reviewState: preValidity.reviewValidity.effectiveState,
         messageKey: "accept.errReviewBlockRequiresOverride",
       },
     );
@@ -1683,15 +2447,19 @@ export async function acceptRequirement(
       );
     }
     if (
-      validity.reviewValidity.effectiveState === "current" &&
+      (validity.reviewValidity.effectiveState === "current" || validity.reviewValidity.effectiveState === "stale") &&
       state.reviewReport?.verdict === "block" &&
       !overrideReason
     ) {
+      const isStaleBlock = validity.reviewValidity.effectiveState === "stale";
       throw new WorkbenchError(
         "acceptance_gate_failed",
-        "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
+        isStaleBlock
+          ? "上一份跨模型审查为阻塞级（block）且因代码或规范变动已过期，跳过复审强行验收必须填写说明理由（overrideReason）"
+          : "当前存在有效的阻塞级（block）跨模型审查意见，强行验收必须填写说明理由（overrideReason）",
         {
           reviewVerdict: "block",
+          reviewState: validity.reviewValidity.effectiveState,
           messageKey: "accept.errReviewBlockRequiresOverride",
         },
       );
@@ -1803,6 +2571,7 @@ export async function acceptRequirement(
         ...state,
         stage: "done",
         lastFeedback: null,
+        needsHuman: null,
         acceptance: {
           acceptedAt: now,
           specHash: state.specHash,
@@ -1828,12 +2597,81 @@ export async function acceptRequirement(
     };
   });
 
+  if (input.rememberLesson === true) {
+    const lesson = (input.lessonText?.trim() || input.note?.trim() || input.overrideReason?.trim() || "").trim();
+    if (lesson) {
+      await appendProjectPlaybookLesson(base, { lesson, source: "accept", requirementId: id }).catch(() => null);
+    }
+  }
+
   return toDetail(bundle, snapshotHash);
 }
 
-function buildSuggestedCommitMessage(id: string, title: string): string {
+export function buildSuggestedCommitMessage(
+  id: string,
+  title: string,
+  specMarkdown?: string,
+  files?: string[],
+): string {
   const cleanTitle = title.replace(/[\r\n]+/g, " ").trim().slice(0, 72) || "complete requirement";
-  return `feat(${id.toLowerCase()}): ${cleanTitle}`;
+  const subject = `feat(${id.toLowerCase()}): ${cleanTitle}`;
+  if (!specMarkdown?.trim() && (!files || files.length === 0)) {
+    return subject;
+  }
+  const bodyLines: string[] = [];
+  if (specMarkdown?.trim()) {
+    const firstPara = specMarkdown
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0 && !l.startsWith("#") && !l.startsWith(">") && !l.startsWith("```"));
+    if (firstPara && firstPara !== cleanTitle) {
+      bodyLines.push(firstPara.slice(0, 180));
+    }
+  }
+  if (files && files.length > 0) {
+    const previewFiles = files.slice(0, 8).join(", ");
+    const suffix = files.length > 8 ? ` (+${files.length - 8} more)` : "";
+    bodyLines.push(`Changed files (${files.length}): ${previewFiles}${suffix}`);
+  }
+  return bodyLines.length > 0 ? `${subject}\n\n${bodyLines.join("\n")}` : subject;
+}
+
+/** Records a completed local squash-merge delivery on a `done` requirement (WB-20). */
+export async function recordLocalDelivery(
+  root: string,
+  id: string,
+  input: {
+    delivery: DeliveryRecord;
+    summary?: string;
+    expectedRevision?: number;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
+    const { state } = current;
+    if (state.stage !== "done") {
+      throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能记录交付结果（当前：${state.stage}）`);
+    }
+    const firstLine = input.delivery.commitMessage.split(/\r?\n/, 1)[0] ?? input.delivery.commitMessage;
+    return {
+      state: {
+        ...state,
+        delivery: input.delivery,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "delivered",
+            "human",
+            input.summary?.trim() ||
+              `已一键压缩合入本地主干（${input.delivery.shortHash} · ${input.delivery.files.length} 个文件）：${firstLine.slice(0, 120)}`,
+            input.delivery.note,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
 }
 
 function normalizeDeliveryFiles(files: string[]): string[] {
@@ -1951,6 +2789,8 @@ export async function getRequirementDeliveryPreview(
       : null;
   let effectiveAheadCount =
     tree.isGitRepo && aheadRef ? await countCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
+  const wipCommitCount =
+    tree.isGitRepo && sandbox && aheadRef ? await countWipCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
 
   const isFeaturePrefix = /^(?:feat|fix|rsi|chore|hotfix|bugfix|refactor|docs|test)\//i;
   if (
@@ -1972,6 +2812,7 @@ export async function getRequirementDeliveryPreview(
   let reason: string | null = null;
   let canCommit = false;
   let canCreatePr = false;
+  let canMergeLocal = false;
 
   if (state.stage !== "done") {
     reason = "仅已验收完成（done）的需求可执行交付提交";
@@ -1980,14 +2821,17 @@ export async function getRequirementDeliveryPreview(
   } else if (sandboxActive) {
     if (candidates.length === 0 && effectiveAheadCount === 0) {
       reason = "隔离沙箱中暂无可提交或待推送的变更";
-    } else if (!remoteReady) {
-      reason =
-        remoteReason ??
-        (remoteProvider === "gitee"
-          ? "Gitee 环境未就绪，可使用「应用沙箱改动」本地合并"
-          : "GitHub 环境未就绪，可使用「应用沙箱改动」本地合并");
     } else {
-      canCreatePr = true;
+      canMergeLocal = true;
+      if (!remoteReady) {
+        reason =
+          remoteReason ??
+          (remoteProvider === "gitee"
+            ? "Gitee 环境未就绪，可使用「一键合入本地主干」本地合并"
+            : "GitHub 环境未就绪，可使用「一键合入本地主干」本地合并");
+      } else {
+        canCreatePr = true;
+      }
     }
   } else {
     if (candidates.length === 0 && effectiveAheadCount === 0) {
@@ -1995,6 +2839,35 @@ export async function getRequirementDeliveryPreview(
     } else {
       canCommit = candidates.length > 0;
       canCreatePr = remoteReady && (candidates.length > 0 || effectiveAheadCount > 0);
+    }
+  }
+
+  let treeMatchesAcceptance = true;
+  let treeMismatchReason: string | null = null;
+  const currentSnap = tree.isGitRepo ? await observeGitSnapshot(codeRoot) : null;
+  if (state.stage === "done" && state.acceptance && currentSnap?.fingerprint) {
+    let matchesAccepted = currentSnap.fingerprint === state.acceptance.codeSnapshotHash;
+    const matchesCleanSync = Boolean(
+      sandbox?.lastCleanSyncFingerprint && sandbox.lastCleanSyncFingerprint === currentSnap.fingerprint,
+    );
+    if (
+      !matchesAccepted &&
+      !matchesCleanSync &&
+      !sandboxActive &&
+      bundle.acceptanceSnapshot &&
+      bundle.acceptanceSnapshot.git.files.length > 0 &&
+      bundle.acceptanceSnapshot.git.observedHead &&
+      tree.head === bundle.acceptanceSnapshot.git.observedHead
+    ) {
+      const acceptedPaths = bundle.acceptanceSnapshot.git.files.map((f) => f.path);
+      const selectedFp = await computeSelectedFilesContentTreeFingerprint(codeRoot, acceptedPaths);
+      if (selectedFp && selectedFp === state.acceptance.codeSnapshotHash) {
+        matchesAccepted = true;
+      }
+    }
+    if (!matchesAccepted && !matchesCleanSync) {
+      treeMatchesAcceptance = false;
+      treeMismatchReason = "当前代码内容树与验收快照不一致，请重新验证受影响条件后再交付";
     }
   }
 
@@ -2009,6 +2882,14 @@ export async function getRequirementDeliveryPreview(
       ? await inspectRemoteBranchDivergence(codeRoot, suggestedBranch, "origin")
       : { remoteBranchExists: false, behindRemoteCount: 0, diverged: false };
 
+  const previewFiles =
+    candidates.length > 0
+      ? candidates.map((c) => c.path)
+      : bundle.acceptanceSnapshot?.git.files.map((f) => f.path) ?? [];
+  const detailForPreview = toDetail(bundle, currentSnap?.fingerprint ?? null);
+  const suggestedPrTitle = `${state.id}: ${state.title}`.slice(0, 200);
+  const suggestedPrBody = buildRequirementPrBody(detailForPreview);
+
   return {
     requirementId: state.id,
     stage: state.stage,
@@ -2021,14 +2902,20 @@ export async function getRequirementDeliveryPreview(
     aheadCommitsCount: effectiveAheadCount,
     canCommit,
     canCreatePr,
+    canMergeLocal,
+    wipCommitCount,
+    treeMatchesAcceptance,
+    treeMismatchReason,
     remoteProvider,
     baseBranch,
     githubRepo: remoteRepo,
     githubReady: remoteReady,
     githubReason: remoteReason,
     reason,
-    suggestedMessage: buildSuggestedCommitMessage(state.id, state.title),
+    suggestedMessage: buildSuggestedCommitMessage(state.id, state.title, bundle.specMarkdown, previewFiles),
     suggestedBranch,
+    suggestedPrTitle,
+    suggestedPrBody,
     candidates,
     acceptedSnapshotFileCount: acceptedSet.size,
     delivered: state.delivery ?? null,
@@ -2079,57 +2966,90 @@ export async function deliverRequirement(
     }
 
     let recordedDelivery: DeliveryRecord | null = null;
-    const bundle = await mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
-      const { state } = current;
-      if (state.stage !== "done") {
-        throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能执行交付提交（当前：${state.stage}）`);
-      }
-      if (getSandboxForRequirement(base, id)) {
-        throw new WorkbenchError("invalid_transition", "改动仍在隔离沙箱中，请勾选提交 GitHub PR 或先应用沙箱改动到主干");
-      }
-      const tree = await inspectWorkingTreeForDelivery(base);
-      if (!tree.isGitRepo) {
-        throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法创建交付提交");
-      }
-      const dirtySet = new Set(tree.files.map((f) => f.path));
-      const missing = files.filter((f) => !dirtySet.has(f));
-      if (missing.length > 0) {
-        throw new WorkbenchError(
-          "invalid_input",
-          `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
-        );
-      }
+    const bundle = await withCodeRootLock(base, "write", { kind: "deliver", requirementId: id }, () =>
+      mutateRequirement(base, id, input.expectedRevision, async (current, now) => {
+        const { state } = current;
+        if (state.stage !== "done") {
+          throw new WorkbenchError("invalid_transition", `仅已验收完成的需求才能执行交付提交（当前：${state.stage}）`);
+        }
+        if (getSandboxForRequirement(base, id)) {
+          throw new WorkbenchError("invalid_transition", "改动仍在隔离沙箱中，请勾选提交 GitHub PR 或先应用沙箱改动到主干");
+        }
+        const tree = await inspectWorkingTreeForDelivery(base);
+        if (!tree.isGitRepo) {
+          throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法创建交付提交");
+        }
+        const dirtySet = new Set(tree.files.map((f) => f.path));
+        const missing = files.filter((f) => !dirtySet.has(f));
+        if (missing.length > 0) {
+          throw new WorkbenchError(
+            "invalid_input",
+            `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
+          );
+        }
 
-      const committed = await commitFilesInGit(base, files, commitMessage);
-      const delivery: DeliveryRecord = {
-        deliveredAt: now,
-        commitHash: committed.commitHash,
-        shortHash: committed.shortHash,
-        commitMessage,
-        files,
-        branch: committed.branch,
-        ...(note ? { note } : {}),
-      };
-      recordedDelivery = delivery;
+        // WB-20 / FLOW §4.2: verify selected delivery tree matches accepted snapshot before reusing acceptance.
+        if (state.acceptance && current.acceptanceSnapshot && current.acceptanceSnapshot.git.files.length > 0) {
+          const acceptedFiles = current.acceptanceSnapshot.git.files.map((f) => f.path).sort();
+          const selectedSorted = [...files].sort();
+          const scopeChanged =
+            acceptedFiles.length !== selectedSorted.length ||
+            acceptedFiles.some((f, idx) => f !== selectedSorted[idx]);
+          if (scopeChanged) {
+            throw new WorkbenchError(
+              "acceptance_gate_failed",
+              "所选交付文件范围与验收快照不一致，请重新验证受影响条件并确认后再交付",
+              { requiresReverify: true },
+            );
+          }
+          if (current.acceptanceSnapshot.git.observedHead && tree.head !== current.acceptanceSnapshot.git.observedHead) {
+            throw new WorkbenchError(
+              "acceptance_gate_failed",
+              "目标基线在验收后已发生变化，请重新验证受影响条件并确认后再交付",
+              { requiresReverify: true },
+            );
+          }
+          const selectedTreeFp = await computeSelectedFilesContentTreeFingerprint(base, files);
+          if (selectedTreeFp && selectedTreeFp !== state.acceptance.codeSnapshotHash) {
+            throw new WorkbenchError(
+              "acceptance_gate_failed",
+              "待交付文件内容树在验收后已发生变化，请重新验证受影响条件后再交付",
+              { requiresReverify: true },
+            );
+          }
+        }
 
-      const firstLine = commitMessage.split(/\r?\n/, 1)[0] ?? commitMessage;
-      return {
-        state: {
-          ...state,
-          delivery,
-          timeline: appendTimeline(
-            state.timeline,
-            makeEvent(
-              now,
-              "delivered",
-              "human",
-              `已提交代码交付（${committed.shortHash} · ${files.length} 个文件）：${firstLine.slice(0, 140)}`,
-              note,
+        const committed = await commitFilesInGit(base, files, commitMessage);
+        const delivery: DeliveryRecord = {
+          deliveredAt: now,
+          commitHash: committed.commitHash,
+          shortHash: committed.shortHash,
+          commitMessage,
+          files,
+          branch: committed.branch,
+          ...(note ? { note } : {}),
+        };
+        recordedDelivery = delivery;
+
+        const firstLine = commitMessage.split(/\r?\n/, 1)[0] ?? commitMessage;
+        return {
+          state: {
+            ...state,
+            delivery,
+            timeline: appendTimeline(
+              state.timeline,
+              makeEvent(
+                now,
+                "delivered",
+                "human",
+                `已提交代码交付（${committed.shortHash} · ${files.length} 个文件）：${firstLine.slice(0, 140)}`,
+                note,
+              ),
             ),
-          ),
-        },
-      };
-    });
+          },
+        };
+      }),
+    );
 
     const postSnap = await observeGitSnapshot(base);
     const touchesWeb = files.some((f) => f.startsWith("src/web/"));
@@ -2212,74 +3132,195 @@ export async function deliverRequirement(
   }
 
   const requestedBranch = input.branchName?.trim() || "";
-  let targetBranch = sandbox ? sandbox.branch : (tree.branch ?? "");
-  if (
-    !sandbox &&
-    (!targetBranch ||
-      targetBranch === baseBranch ||
-      targetBranch === "main" ||
-      targetBranch === "master" ||
-      targetBranch === "HEAD" ||
-      (requestedBranch && requestedBranch !== targetBranch))
-  ) {
-    targetBranch = await createFeatureBranchAtHead(codeRoot, requestedBranch || `feat/${id.toLowerCase()}`);
-  }
-  targetBranch = validateGitBranchName(targetBranch);
+  let targetBranch = "";
+  let committedFiles: string[] = [];
+  let commitHash = "";
+  let shortHash = "";
+  let effectiveCommitMessage = "";
 
-  const requestedFiles = Array.isArray(input.files) ? input.files.filter((f) => typeof f === "string" && f.trim().length > 0) : [];
-  let committedFiles: string[];
-  let commitHash: string;
-  let shortHash: string;
-  let effectiveCommitMessage: string;
+  await withCodeRootLock(codeRoot, "write", { kind: "deliver_pr", requirementId: id }, async () => {
+    const liveTree = await inspectWorkingTreeForDelivery(codeRoot);
+    if (!liveTree.isGitRepo) {
+      throw new WorkbenchError("execution_failed", "当前目录不是 Git 仓库，无法推送分支或创建 PR");
+    }
+    targetBranch = sandbox ? sandbox.branch : (liveTree.branch ?? "");
+    if (
+      !sandbox &&
+      (!targetBranch ||
+        targetBranch === baseBranch ||
+        targetBranch === "main" ||
+        targetBranch === "master" ||
+        targetBranch === "HEAD" ||
+        (requestedBranch && requestedBranch !== targetBranch))
+    ) {
+      targetBranch = await createFeatureBranchAtHead(codeRoot, requestedBranch || `feat/${id.toLowerCase()}`);
+    }
+    targetBranch = validateGitBranchName(targetBranch);
 
-  if (requestedFiles.length > 0) {
-    const normalizedFiles = normalizeDeliveryFiles(requestedFiles);
-    const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
-    if (!commitMessage || !isSafeText(commitMessage, 4000)) {
-      throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
-    }
-    const dirtySet = new Set(tree.files.map((f) => f.path));
-    const missing = normalizedFiles.filter((f) => !dirtySet.has(f));
-    if (missing.length > 0) {
-      throw new WorkbenchError(
-        "invalid_input",
-        `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
-      );
-    }
-    const committed = await commitFilesInGit(codeRoot, normalizedFiles, commitMessage);
-    commitHash = committed.commitHash;
-    shortHash = committed.shortHash;
-    committedFiles = normalizedFiles;
-    effectiveCommitMessage = commitMessage;
-  } else {
-    const aheadRef = sandbox?.baseHead || baseBranch;
-    const aheadCount = await countCommitsBetween(codeRoot, aheadRef, "HEAD");
-    if (aheadCount <= 0) {
-      throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交", {
-        messageKey: "deliver.errNoFilesOrCommits",
-      });
-    }
-    const headInfo = await getHeadCommitInfo(codeRoot);
-    if (!headInfo) {
-      throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息", {
-        messageKey: "deliver.errNoHeadInfo",
-      });
-    }
-    commitHash = headInfo.commitHash;
-    shortHash = headInfo.shortHash;
-    committedFiles = await listCommittedFilesBetween(codeRoot, aheadRef, "HEAD");
-    effectiveCommitMessage =
-      (typeof input.commitMessage === "string" && input.commitMessage.trim()) ||
-      headInfo.subject ||
-      buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title);
-  }
+    const requestedFiles = Array.isArray(input.files) ? input.files.filter((f) => typeof f === "string" && f.trim().length > 0) : [];
+    const preDeliverySnap = await observeGitSnapshot(codeRoot);
 
-  const allowForceLease =
-    input.forceWithLease === true &&
-    targetBranch !== baseBranch &&
-    targetBranch !== "main" &&
-    targetBranch !== "master";
-  await pushBranchToRemote(codeRoot, targetBranch, "origin", { forceWithLease: allowForceLease });
+    if (requestedFiles.length > 0) {
+      const normalizedFiles = normalizeDeliveryFiles(requestedFiles);
+      const commitMessage = typeof input.commitMessage === "string" ? input.commitMessage.trim() : "";
+      if (!commitMessage || !isSafeText(commitMessage, 4000)) {
+        throw new WorkbenchError("invalid_input", "请填写合法的 Git 提交说明");
+      }
+      const dirtySet = new Set(liveTree.files.map((f) => f.path));
+      const missing = normalizedFiles.filter((f) => !dirtySet.has(f));
+      if (missing.length > 0) {
+        throw new WorkbenchError(
+          "invalid_input",
+          `以下文件当前没有未提交变更，无法纳入提交: ${missing.slice(0, 5).join(", ")}`,
+        );
+      }
+      if (preBundle.acceptanceSnapshot && preBundle.acceptanceSnapshot.git.files.length > 0) {
+        const acceptedPaths = new Set(preBundle.acceptanceSnapshot.git.files.map((f) => f.path));
+        const omitsAccepted = preBundle.acceptanceSnapshot.git.files.some(
+          (f) => dirtySet.has(f.path) && !normalizedFiles.includes(f.path),
+        );
+        const addsUnaccepted = normalizedFiles.some((f) => !acceptedPaths.has(f));
+        if (omitsAccepted || addsUnaccepted) {
+          throw new WorkbenchError(
+            "acceptance_gate_failed",
+            "所选交付文件范围与验收快照不一致，请重新验证受影响条件后再交付",
+            { requiresReverify: true },
+          );
+        }
+      }
+      if (preBundle.state.acceptance) {
+        if (!sandbox) {
+          if (
+            preBundle.acceptanceSnapshot?.git.observedHead &&
+            liveTree.head !== preBundle.acceptanceSnapshot.git.observedHead
+          ) {
+            throw new WorkbenchError(
+              "acceptance_gate_failed",
+              "目标基线在验收后已发生变化，请重新验证受影响条件后再创建 PR",
+              { requiresReverify: true },
+            );
+          }
+          const selectedTreeFp = await computeSelectedFilesContentTreeFingerprint(codeRoot, normalizedFiles);
+          if (selectedTreeFp && selectedTreeFp !== preBundle.state.acceptance.codeSnapshotHash) {
+            throw new WorkbenchError(
+              "acceptance_gate_failed",
+              "待交付文件内容树在验收后已发生变化，请重新验证受影响条件后再创建 PR",
+              { requiresReverify: true },
+            );
+          }
+        } else if (preDeliverySnap?.fingerprint && preDeliverySnap.fingerprint !== preBundle.state.acceptance.codeSnapshotHash) {
+          throw new WorkbenchError(
+            "acceptance_gate_failed",
+            "沙箱代码内容树在验收后已发生变化，请重新验证受影响条件后再创建 PR",
+            { requiresReverify: true },
+          );
+        }
+      }
+      const aheadRefForWip = sandbox?.baseHead || baseBranch;
+      const wipCount = sandbox ? await countWipCommitsBetween(codeRoot, aheadRefForWip, "HEAD") : 0;
+      if (sandbox && wipCount > 0 && normalizedFiles.length === liveTree.files.length) {
+        const squashed = await squashBranchCommitsToSingleCommit(codeRoot, aheadRefForWip, commitMessage);
+        if (
+          squashed.beforeFingerprint &&
+          squashed.afterFingerprint &&
+          squashed.beforeFingerprint !== squashed.afterFingerprint
+        ) {
+          if (squashed.origHead) {
+            try {
+              execFileSync("git", ["-C", codeRoot, "reset", "--soft", squashed.origHead], { stdio: "ignore" });
+            } catch {
+              // Ignore rollback error.
+            }
+          }
+          throw new WorkbenchError(
+            "acceptance_gate_failed",
+            "压缩提交后文件树与验收快照不一致，请重新验证受影响条件后再交付",
+            { requiresReverify: true },
+          );
+        }
+        commitHash = squashed.commitHash;
+        shortHash = squashed.shortHash;
+        committedFiles = squashed.files;
+        effectiveCommitMessage = commitMessage;
+      } else {
+        const committed = await commitFilesInGit(codeRoot, normalizedFiles, commitMessage);
+        commitHash = committed.commitHash;
+        shortHash = committed.shortHash;
+        committedFiles = normalizedFiles;
+        effectiveCommitMessage = commitMessage;
+      }
+    } else {
+      if (
+        preBundle.state.acceptance &&
+        preDeliverySnap?.fingerprint &&
+        preDeliverySnap.fingerprint !== preBundle.state.acceptance.codeSnapshotHash
+      ) {
+        throw new WorkbenchError(
+          "acceptance_gate_failed",
+          "代码内容树在验收后已发生变化，请重新验证受影响条件后再创建 PR",
+          { requiresReverify: true },
+        );
+      }
+      const aheadRef = sandbox?.baseHead || baseBranch;
+      const aheadCount = await countCommitsBetween(codeRoot, aheadRef, "HEAD");
+      if (aheadCount <= 0 && !liveTree.dirty) {
+        throw new WorkbenchError("invalid_input", "请至少选择 1 个要提交的文件，或确保分支已有未推送提交", {
+          messageKey: "deliver.errNoFilesOrCommits",
+        });
+      }
+      const wipCount = sandbox ? await countWipCommitsBetween(codeRoot, aheadRef, "HEAD") : 0;
+      const shouldAutoSquash = Boolean(sandbox && (wipCount > 0 || aheadCount > 1 || liveTree.dirty));
+      if (shouldAutoSquash) {
+        const squashMsg =
+          (typeof input.commitMessage === "string" && input.commitMessage.trim()) ||
+          buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title, preBundle.specMarkdown);
+        const squashed = await squashBranchCommitsToSingleCommit(codeRoot, aheadRef, squashMsg);
+        if (
+          squashed.beforeFingerprint &&
+          squashed.afterFingerprint &&
+          squashed.beforeFingerprint !== squashed.afterFingerprint
+        ) {
+          if (squashed.origHead) {
+            try {
+              execFileSync("git", ["-C", codeRoot, "reset", "--soft", squashed.origHead], { stdio: "ignore" });
+            } catch {
+              // Ignore rollback error.
+            }
+          }
+          throw new WorkbenchError(
+            "acceptance_gate_failed",
+            "压缩提交后文件树与验收快照不一致，请重新验证受影响条件后再交付",
+            { requiresReverify: true },
+          );
+        }
+        commitHash = squashed.commitHash;
+        shortHash = squashed.shortHash;
+        committedFiles = squashed.files;
+        effectiveCommitMessage = squashMsg;
+      } else {
+        const headInfo = await getHeadCommitInfo(codeRoot);
+        if (!headInfo) {
+          throw new WorkbenchError("execution_failed", "无法读取分支最新提交信息", {
+            messageKey: "deliver.errNoHeadInfo",
+          });
+        }
+        commitHash = headInfo.commitHash;
+        shortHash = headInfo.shortHash;
+        committedFiles = await listCommittedFilesBetween(codeRoot, aheadRef, "HEAD");
+        effectiveCommitMessage =
+          (typeof input.commitMessage === "string" && input.commitMessage.trim()) ||
+          headInfo.subject ||
+          buildSuggestedCommitMessage(preBundle.state.id, preBundle.state.title);
+      }
+    }
+
+    const allowForceLease =
+      input.forceWithLease === true &&
+      targetBranch !== baseBranch &&
+      targetBranch !== "main" &&
+      targetBranch !== "master";
+    await pushBranchToRemote(codeRoot, targetBranch, "origin", { forceWithLease: allowForceLease });
+  });
 
   const firstLine = effectiveCommitMessage.split(/\r?\n/, 1)[0] ?? effectiveCommitMessage;
   const prTitle = (input.prTitle?.trim() || `${id}: ${preBundle.state.title}`).slice(0, 200);
@@ -2558,6 +3599,7 @@ export async function reopenRequirement(
         acceptance: null,
         delivery: null,
         cancelReason: null,
+        needsHuman: null,
         timeline: appendTimeline(
           state.timeline,
           makeEvent(
@@ -2720,6 +3762,8 @@ export async function finishAgentRun(
     specChanged?: boolean;
     specHashAfter?: string;
     codeChanged?: boolean;
+    noCodeChange?: boolean;
+    wipCommitHash?: string;
     tracePath?: string;
     contextPath?: string;
     traceTruncated?: boolean;
@@ -2762,6 +3806,8 @@ export async function finishAgentRun(
       ...(patch.specChanged !== undefined ? { specChanged: patch.specChanged } : {}),
       ...(patch.specHashAfter ? { specHashAfter: patch.specHashAfter } : {}),
       ...(patch.codeChanged !== undefined ? { codeChanged: patch.codeChanged } : {}),
+      ...(patch.noCodeChange !== undefined ? { noCodeChange: patch.noCodeChange } : {}),
+      ...(patch.wipCommitHash ? { wipCommitHash: patch.wipCommitHash } : {}),
       ...(patch.tracePath ? { tracePath: patch.tracePath } : {}),
       ...(patch.contextPath ? { contextPath: patch.contextPath } : {}),
       ...(patch.traceTruncated !== undefined ? { traceTruncated: patch.traceTruncated } : {}),
@@ -2805,6 +3851,8 @@ export async function recordReviewReport(
     findings?: ReviewFinding[];
     reviewedSpecHash: string;
     reviewedCodeSnapshotHash: string;
+    reviewedCommit?: string;
+    reviewerSessionId?: string;
   },
 ): Promise<RequirementDetail> {
   if (!REVIEW_VERDICTS.includes(input.verdict)) {
@@ -2813,7 +3861,7 @@ export async function recordReviewReport(
   const cleanFindings =
     Array.isArray(input.findings) && input.findings.length > 0
       ? input.findings.slice(0, 50).map((f, idx) => ({
-          id: typeof f.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(f.id) ? f.id : `F-${idx + 1}`,
+          id: typeof f.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(f.id) ? f.id : `F-${idx + 1}`,
           severity: f.severity === "high" || f.severity === "medium" || f.severity === "low" ? f.severity : "medium",
           title: sanitizeOutput(String(f.title ?? "").trim(), 380).text.trim() || `问题 ${idx + 1}`,
           ...(typeof f.detail === "string" && f.detail.trim()
@@ -2822,7 +3870,7 @@ export async function recordReviewReport(
           ...(Array.isArray(f.criterionIds) && f.criterionIds.length > 0
             ? {
                 criterionIds: f.criterionIds
-                  .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(c))
+                  .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(c))
                   .slice(0, 16),
               }
             : {}),
@@ -2840,6 +3888,8 @@ export async function recordReviewReport(
             : {}),
         }))
       : undefined;
+  const safeSummary = sanitizeOutput(input.summary.trim(), 1800).text.trim() || "已完成独立代码审查";
+  const safeMarkdown = sanitizeOutput(input.markdown.trim(), 60 * 1024).text.trim() || safeSummary;
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
     const report: ReviewReport = {
@@ -2847,11 +3897,17 @@ export async function recordReviewReport(
       reviewerHarness: input.reviewerHarness.trim(),
       reviewerModel: input.reviewerModel.trim(),
       verdict: input.verdict,
-      summary: input.summary.trim().slice(0, 1800) || "已完成独立代码审查",
-      markdown: input.markdown.trim().slice(0, 60 * 1024) || input.summary.trim(),
+      summary: safeSummary,
+      markdown: safeMarkdown,
       ...(cleanFindings && cleanFindings.length > 0 ? { findings: cleanFindings } : {}),
       reviewedSpecHash: input.reviewedSpecHash,
       reviewedCodeSnapshotHash: input.reviewedCodeSnapshotHash,
+      ...(input.reviewedCommit && /^[0-9a-f]{7,64}$/i.test(input.reviewedCommit.trim())
+        ? { reviewedCommit: input.reviewedCommit.trim() }
+        : {}),
+      ...(input.reviewerSessionId?.trim()
+        ? { reviewerSessionId: input.reviewerSessionId.trim().slice(0, 256) }
+        : {}),
       reviewedAt: now,
     };
     const verdictLabel = input.verdict === "pass" ? "建议通过" : input.verdict === "concern" ? "有关注点" : "建议阻塞修复";
@@ -2873,6 +3929,201 @@ export async function recordReviewReport(
     };
   });
   return toDetail(bundle, input.reviewedCodeSnapshotHash);
+}
+
+/**
+ * WB-22 / FLOW §1.3: records an independent heterogeneous design review report bound to specHash + designHash.
+ * Strictly isolated from coding `reviewReport` and never mutates approval or stage.
+ */
+export async function recordDesignReviewReport(
+  root: string,
+  id: string,
+  input: {
+    reviewerHarness: string;
+    reviewerModel: string;
+    verdict: ReviewVerdict;
+    summary: string;
+    markdown: string;
+    findings?: ReviewFinding[];
+    reviewedSpecHash: string;
+    reviewedDesignHash: string;
+    currentCodeSnapshotHash?: string | null;
+  },
+): Promise<RequirementDetail> {
+  if (!REVIEW_VERDICTS.includes(input.verdict)) {
+    throw new WorkbenchError("invalid_input", `无效的方案评审结论: ${String(input.verdict)}`);
+  }
+  const cleanFindings =
+    Array.isArray(input.findings) && input.findings.length > 0
+      ? input.findings.slice(0, 50).map((f, idx) => ({
+          id: typeof f.id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(f.id) ? f.id : `DF-${idx + 1}`,
+          severity: f.severity === "high" || f.severity === "medium" || f.severity === "low" ? f.severity : "medium",
+          title: sanitizeOutput(String(f.title ?? "").trim(), 380).text.trim() || `方案建议 ${idx + 1}`,
+          ...(typeof f.detail === "string" && f.detail.trim()
+            ? { detail: sanitizeOutput(f.detail.trim(), 1800).text.trim() }
+            : {}),
+          ...(Array.isArray(f.criterionIds) && f.criterionIds.length > 0
+            ? {
+                criterionIds: f.criterionIds
+                  .filter((c): c is string => typeof c === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(c))
+                  .slice(0, 16),
+              }
+            : {}),
+          ...(Array.isArray(f.files) && f.files.length > 0
+            ? {
+                files: f.files
+                  .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+                  .map((p) => sanitizeOutput(p.trim(), 480).text.trim())
+                  .filter(Boolean)
+                  .slice(0, 16),
+              }
+            : {}),
+          ...(typeof f.suggestion === "string" && f.suggestion.trim()
+            ? { suggestion: sanitizeOutput(f.suggestion.trim(), 1400).text.trim() }
+            : {}),
+        }))
+      : undefined;
+
+  const safeSummary = sanitizeOutput(input.summary.trim(), 1800).text.trim() || "已完成独立方案评审";
+  const safeMarkdown = sanitizeOutput(input.markdown.trim(), 60 * 1024).text.trim() || safeSummary;
+  const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
+    const { state } = current;
+    const report: DesignReviewReport = {
+      id: `DREV-${now}-${randomUUID().slice(0, 6)}`,
+      reviewerHarness: input.reviewerHarness.trim(),
+      reviewerModel: input.reviewerModel.trim(),
+      verdict: input.verdict,
+      summary: safeSummary,
+      markdown: safeMarkdown,
+      ...(cleanFindings && cleanFindings.length > 0 ? { findings: cleanFindings } : {}),
+      reviewedSpecHash: input.reviewedSpecHash,
+      reviewedDesignHash: input.reviewedDesignHash,
+      reviewedAt: now,
+    };
+    const verdictLabel = input.verdict === "pass" ? "方案通过" : input.verdict === "concern" ? "有关注点" : "建议修改方案";
+    return {
+      state: {
+        ...state,
+        designReviewReport: report,
+        timeline: appendTimeline(
+          state.timeline,
+          makeEvent(
+            now,
+            "design_review_submitted",
+            "agent",
+            `异构方案评审 [${report.reviewerHarness}/${report.reviewerModel}]：${verdictLabel}`,
+            report.summary,
+          ),
+        ),
+      },
+    };
+  });
+  return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+const PLAYBOOK_REL_PATH = `${WORKBENCH_DIR}/playbook.md`;
+const PLAYBOOK_MAX_BYTES = 16 * 1024;
+const PLAYBOOK_HEADER = "# 项目经验法则（Project Playbook）\n\n> 由人工在打回修改、验收备注或审查解决时沉淀，后续 Agent 调度自动读取生效。\n";
+
+export type PlaybookLessonSource = "reject" | "accept" | "review_block" | "manual";
+
+/** WB-24 / FLOW §4.4: reads project-local `.workbench/playbook.md` without touching business code or Git. */
+export function readProjectPlaybook(root: string): { markdown: string; lessons: string[]; path: string } {
+  const base = canonicalRoot(root);
+  const fullPath = resolveSafePath(base, PLAYBOOK_REL_PATH);
+  if (!fs.existsSync(fullPath)) {
+    return { markdown: "", lessons: [], path: PLAYBOOK_REL_PATH };
+  }
+  try {
+    const raw = fs.readFileSync(fullPath, "utf8");
+    const markdown = sanitizeOutput(raw, PLAYBOOK_MAX_BYTES).text;
+    const lessons = markdown
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /^-\s+/.test(l))
+      .map((l) => l.replace(/^-\s+/, "").trim())
+      .filter(Boolean);
+    return { markdown, lessons, path: PLAYBOOK_REL_PATH };
+  } catch {
+    return { markdown: "", lessons: [], path: PLAYBOOK_REL_PATH };
+  }
+}
+
+/**
+ * WB-24 / FLOW §4.4: appends one concise project lesson to `.workbench/playbook.md`
+ * atomically under the project lock. Never modifies source files, Git index, or code snapshot hashes.
+ */
+export async function appendProjectPlaybookLesson(
+  root: string,
+  input: {
+    lesson: string;
+    source?: PlaybookLessonSource;
+    requirementId?: string;
+  },
+): Promise<{ added: boolean; line: string; totalLessons: number; markdown: string; path: string }> {
+  const base = canonicalRoot(root);
+  if (!isProjectInitialized(base)) {
+    throw new WorkbenchError("not_initialized", "项目尚未初始化 .workbench/，无法记录经验法则");
+  }
+  const singleLine = sanitizeOutput(input.lesson.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim(), 480).text.trim();
+  if (!singleLine) {
+    throw new WorkbenchError("invalid_input", "项目经验内容不能为空");
+  }
+  const sourceTag =
+    input.source === "reject"
+      ? "打回沉淀"
+      : input.source === "accept"
+        ? "验收沉淀"
+        : input.source === "review_block"
+          ? "审查沉淀"
+          : "工程规范";
+  const reqIdClean = input.requirementId?.trim();
+  const reqSuffix = reqIdClean ? ` (${assertRequirementId(reqIdClean)})` : "";
+  const formatted = `- [${sourceTag}] ${singleLine}${reqSuffix}`;
+  const normalizedNeedle = singleLine.toLowerCase();
+
+  return withProjectWriteLock(base, () => {
+    const fullPath = resolveSafePath(base, PLAYBOOK_REL_PATH);
+    const existingRaw = fs.existsSync(fullPath) ? fs.readFileSync(fullPath, "utf8") : "";
+    const existingBullets = existingRaw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /^-\s+/.test(l));
+
+    const alreadyExists = existingBullets.some((b) =>
+      b
+        .replace(/^-\s+(?:\[[^\]]+\]\s*)?/, "")
+        .replace(/\s*\(REQ-\d+\)\s*$/i, "")
+        .trim()
+        .toLowerCase() === normalizedNeedle,
+    );
+    if (alreadyExists) {
+      const currentMd = existingRaw.trim() ? existingRaw : `${PLAYBOOK_HEADER}\n${existingBullets.join("\n")}\n`;
+      return {
+        added: false,
+        line: formatted,
+        totalLessons: existingBullets.length,
+        markdown: currentMd,
+        path: PLAYBOOK_REL_PATH,
+      };
+    }
+
+    const nextBullets = [...existingBullets, formatted];
+    // Trim oldest entries first if exceeding 16KB cap so newest lessons always survive.
+    let nextMarkdown = `${PLAYBOOK_HEADER}\n${nextBullets.join("\n")}\n`;
+    while (nextBullets.length > 1 && Buffer.byteLength(nextMarkdown, "utf8") > PLAYBOOK_MAX_BYTES) {
+      nextBullets.shift();
+      nextMarkdown = `${PLAYBOOK_HEADER}\n${nextBullets.join("\n")}\n`;
+    }
+    atomicWriteFile(fullPath, nextMarkdown);
+    return {
+      added: true,
+      line: formatted,
+      totalLessons: nextBullets.length,
+      markdown: nextMarkdown,
+      path: PLAYBOOK_REL_PATH,
+    };
+  });
 }
 
 export async function saveHandoffMarkdown(

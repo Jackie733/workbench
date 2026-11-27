@@ -1,4 +1,11 @@
-import { getProjectStatus, getRequirement, getRequirementDiff, listRequirements, propose } from "../core/engine.ts";
+import {
+  appendBugRegressionCriteria,
+  getProjectStatus,
+  getRequirement,
+  getRequirementDiff,
+  listRequirements,
+  propose,
+} from "../core/engine.ts";
 import { WorkbenchError } from "../core/errors.ts";
 import { canonicalRoot } from "../core/fs.ts";
 import { observeGitSnapshot, resolveProjectRequirementSnapshots } from "../core/git.ts";
@@ -6,7 +13,7 @@ import { checkLanguageMismatchWarning, normalizeOutputLanguage, resolveEffective
 import { runVerification } from "../core/runner.ts";
 import { resolveCodeRoot } from "../core/sandbox.ts";
 import { captureRequirementScreenshots } from "../core/screenshots.ts";
-import { STAGES, type CriterionInput, type Stage } from "../core/types.ts";
+import { STAGES, type CriterionInput, type DecisionItem, type Stage } from "../core/types.ts";
 import { isRecord, sanitizeOutput } from "../core/validate.ts";
 import { readHubConfig } from "../hub/registry.ts";
 
@@ -73,7 +80,7 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
         spec: { type: "string", description: "Updated spec.md Markdown (goal & scope, in configured outputLanguage)." },
         criteria: {
           type: "array",
-          description: "Complete list of acceptance criteria with optional verification commands.",
+          description: "Complete list of acceptance criteria with optional verification commands or manual check steps.",
           items: {
             type: "object",
             additionalProperties: false,
@@ -81,12 +88,18 @@ export const WORKBENCH_TOOL_DEFINITIONS: McpToolDefinition[] = [
             properties: {
               id: { type: "string", description: "Stable ID such as AC-1." },
               description: { type: "string", description: "Human-readable description (in configured outputLanguage)." },
+              kind: { type: "string", enum: ["command", "manual"], description: "Defaults to command when command is set." },
               required: { type: "boolean", description: "Defaults to true." },
               command: { type: "string", description: "Shell command that verifies this criterion." },
+              steps: { type: "string", description: "Manual inspection steps when kind is manual." },
             },
           },
         },
         design: { type: "string", description: "Proposed technical design.md Markdown (in configured outputLanguage)." },
+        decisions: {
+          type: ["array", "null"],
+          description: "Optional structured pending decision cards for human selection, or null to clear.",
+        },
         summary: { type: "string", description: "Short timeline summary of this proposal (in configured outputLanguage)." },
         expectedRevision: { type: "integer", minimum: 1, description: "Optional optimistic lock revision." },
       },
@@ -196,7 +209,9 @@ export async function executeWorkbenchTool(
       });
       const response: Record<string, unknown> = {
         id: detail.state.id,
+        kind: detail.state.kind ?? "feature",
         title: detail.state.title,
+        originalGoal: detail.state.originalGoal ?? detail.specMarkdown,
         stage: detail.state.stage,
         track: detail.state.track,
         tier: detail.state.tier,
@@ -207,8 +222,14 @@ export async function executeWorkbenchTool(
         specMarkdown: detail.specMarkdown,
         designMarkdown: detail.designMarkdown,
         handoffMarkdown: detail.handoffMarkdown,
+        pendingDecisions: detail.state.pendingDecisions ?? [],
+        humanDecisions: detail.state.humanDecisions ?? [],
+        manualChecks: detail.state.manualChecks ?? [],
+        needsHuman: detail.state.needsHuman ?? null,
         discussions: (detail.state.discussions ?? []).slice(-20),
         reviewReport: detail.state.reviewReport ?? null,
+        designReviewReport: detail.state.designReviewReport ?? null,
+        designReviewValidity: detail.validity.designReviewValidity ?? null,
         lastFeedback: detail.state.lastFeedback,
         uiRelated: detail.state.uiRelated ?? false,
         screenshotBatches: detail.state.screenshotBatches ?? [],
@@ -277,7 +298,7 @@ export async function executeWorkbenchTool(
     }
 
     case "wb_propose": {
-      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "summary", "expectedRevision"], name);
+      assertAllowedKeys(args, ["id", "title", "spec", "criteria", "design", "decisions", "summary", "expectedRevision"], name);
       if (typeof args.id !== "string") {
         throw new WorkbenchError("invalid_input", "缺少字符串参数 id");
       }
@@ -287,8 +308,11 @@ export async function executeWorkbenchTool(
         }
         for (const item of args.criteria) {
           if (!isRecord(item)) throw new WorkbenchError("invalid_input", "criteria 元素必须是对象");
-          assertAllowedKeys(item, ["id", "description", "required", "command"], `${name}.criteria`);
+          assertAllowedKeys(item, ["id", "description", "kind", "required", "command", "steps"], `${name}.criteria`);
         }
+      }
+      if (args.decisions !== undefined && args.decisions !== null && !Array.isArray(args.decisions)) {
+        throw new WorkbenchError("invalid_input", "decisions 必须是数组或 null");
       }
       if (args.expectedRevision !== undefined && !Number.isSafeInteger(args.expectedRevision)) {
         throw new WorkbenchError("invalid_input", "expectedRevision 必须是正整数");
@@ -299,6 +323,7 @@ export async function executeWorkbenchTool(
         specMarkdown: typeof args.spec === "string" ? args.spec : undefined,
         criteria: args.criteria as CriterionInput[] | undefined,
         designMarkdown: typeof args.design === "string" ? args.design : undefined,
+        decisions: args.decisions as DecisionItem[] | null | undefined,
         summary: typeof args.summary === "string" ? args.summary : undefined,
         expectedRevision: args.expectedRevision as number | undefined,
         actor: "agent",

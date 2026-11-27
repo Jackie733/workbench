@@ -22,6 +22,7 @@ import {
   MAX_TITLE_CHARS,
   OUTPUT_LANGUAGES,
   REASONING_EFFORTS,
+  REQUIREMENT_KINDS,
   REQUIREMENT_TIERS,
   REVIEW_FINDING_SEVERITIES,
   REVIEW_VERDICTS,
@@ -34,6 +35,7 @@ import {
   type AcceptanceSnapshot,
   type AcceptanceSnapshotReference,
   type AcceptanceVerificationEvidence,
+  type AdoptedDecision,
   type AgentAction,
   type AgentRunRecord,
   type ApprovalRecord,
@@ -44,23 +46,32 @@ import {
   type CriterionCoverageItem,
   type CriterionCoverageState,
   type CriterionInput,
+  type CriterionKind,
+  type DecisionItem,
+  type DecisionOption,
   type DeliveryRecord,
+  type DesignReviewReport,
   type DiffEvidenceStatus,
   type DiffFilesScope,
   type DiscussionEntry,
   type EffectiveVerificationState,
   type GitRemoteProvider,
   type HarnessId,
+  type ManualCriterionCheck,
   type ModelTarget,
+  type NeedsHumanSource,
+  type NeedsHumanState,
   type OutputLanguage,
   type ProjectGiteeConfig,
   type ProjectGitHubConfig,
   type ProjectMetadata,
   type ProjectVerificationConfig,
+  type ProjectWorktreeConfig,
   type ReasoningEffort,
   type RequirementGitHubIssueLink,
   type RequirementGitHubLink,
   type RequirementGitHubPrLink,
+  type RequirementKind,
   type RequirementState,
   type RequirementTier,
   type ReviewDisposition,
@@ -264,11 +275,11 @@ export function normalizeCriteria(inputs: CriterionInput[]): Criterion[] {
   const usedIds = new Set<string>();
   const result: Criterion[] = [];
   for (let i = 0; i < inputs.length; i++) {
-    const raw = inputs[i];
+    const raw = inputs[i] as unknown as Record<string, unknown>;
     if (!isRecord(raw) || !isSafeText(raw.description, 1000)) {
       throw new WorkbenchError("invalid_input", `第 ${i + 1} 条验收条件描述无效`);
     }
-    let id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `AC-${i + 1}`;
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `AC-${i + 1}`;
     if (!TOKEN_ID_RE.test(id)) {
       throw new WorkbenchError("invalid_input", `验收条件 ID 格式无效: ${id}`);
     }
@@ -276,18 +287,108 @@ export function normalizeCriteria(inputs: CriterionInput[]): Criterion[] {
       throw new WorkbenchError("invalid_input", `验收条件 ID 重复: ${id}`);
     }
     usedIds.add(id);
+    const rawKind =
+      raw.kind === "manual" || raw.type === "manual" || raw.manual === true
+        ? "manual"
+        : raw.kind === "command" || raw.type === "command"
+          ? "command"
+          : undefined;
     const item: Criterion = {
       id,
       description: raw.description.trim(),
       required: raw.required === undefined ? true : Boolean(raw.required),
+      ...(rawKind ? { kind: rawKind as CriterionKind } : {}),
     };
-    if (typeof raw.command === "string" && raw.command.trim().length > 0) {
+    if (rawKind !== "manual" && typeof raw.command === "string" && raw.command.trim().length > 0) {
       if (!isSafeText(raw.command, 512)) {
         throw new WorkbenchError("invalid_input", `验收条件 ${id} 的验证命令无效或过长`);
       }
       item.command = raw.command.trim();
     }
+    if (typeof raw.steps === "string" && raw.steps.trim().length > 0) {
+      if (!isSafeText(raw.steps, 1000)) {
+        throw new WorkbenchError("invalid_input", `验收条件 ${id} 的人工检查步骤无效或过长`);
+      }
+      item.steps = raw.steps.trim();
+      if (!item.kind && !item.command) {
+        item.kind = "manual";
+      }
+    }
+    if (raw.systemInjected === true) {
+      item.systemInjected = true;
+    }
     result.push(item);
+  }
+  return result;
+}
+
+const MAX_DECISION_ITEMS = 12;
+
+export function normalizeDecisionItems(inputs: unknown): DecisionItem[] {
+  if (!Array.isArray(inputs) || inputs.length > MAX_DECISION_ITEMS) {
+    throw new WorkbenchError("invalid_input", `待拍板决策数量不能超过 ${MAX_DECISION_ITEMS} 项`);
+  }
+  const usedIds = new Set<string>();
+  const result: DecisionItem[] = [];
+  for (let i = 0; i < inputs.length; i++) {
+    const raw = inputs[i];
+    if (!isRecord(raw) || !isSafeText(raw.question, 600)) {
+      throw new WorkbenchError("invalid_input", `第 ${i + 1} 项决策问题无效`);
+    }
+    const id = typeof raw.id === "string" && raw.id.trim() ? raw.id.trim() : `D-${i + 1}`;
+    if (!TOKEN_ID_RE.test(id)) {
+      throw new WorkbenchError("invalid_input", `决策 ID 格式无效: ${id}`);
+    }
+    if (usedIds.has(id)) {
+      throw new WorkbenchError("invalid_input", `决策 ID 重复: ${id}`);
+    }
+    usedIds.add(id);
+
+    if (!Array.isArray(raw.options) || raw.options.length < 2 || raw.options.length > 4) {
+      throw new WorkbenchError("invalid_input", `决策 ${id} 必须提供 2 到 4 个选项`);
+    }
+    const usedOptIds = new Set<string>();
+    const options: DecisionOption[] = [];
+    for (let j = 0; j < raw.options.length; j++) {
+      const opt = raw.options[j];
+      if (!isRecord(opt) || !isSafeText(opt.label, 300)) {
+        throw new WorkbenchError("invalid_input", `决策 ${id} 第 ${j + 1} 个选项标题无效`);
+      }
+      const optId = typeof opt.id === "string" && opt.id.trim() ? opt.id.trim() : `opt-${j + 1}`;
+      if (!TOKEN_ID_RE.test(optId) || usedOptIds.has(optId)) {
+        throw new WorkbenchError("invalid_input", `决策 ${id} 选项 ID 无效或重复: ${optId}`);
+      }
+      usedOptIds.add(optId);
+      const option: DecisionOption = {
+        id: optId,
+        label: opt.label.trim(),
+        ...(typeof opt.description === "string" && opt.description.trim()
+          ? { description: sanitizeOutput(opt.description.trim(), 500).text.trim() }
+          : {}),
+        ...(opt.recommended === true ? { recommended: true } : {}),
+      };
+      options.push(option);
+    }
+
+    const selectedOptionId =
+      typeof raw.selectedOptionId === "string" && raw.selectedOptionId.trim() && usedOptIds.has(raw.selectedOptionId.trim())
+        ? raw.selectedOptionId.trim()
+        : null;
+    const customAnswer =
+      typeof raw.customAnswer === "string" && raw.customAnswer.trim()
+        ? sanitizeOutput(raw.customAnswer.trim(), 1000).text.trim()
+        : null;
+    result.push({
+      id,
+      question: raw.question.trim(),
+      ...(typeof raw.context === "string" && raw.context.trim()
+        ? { context: sanitizeOutput(raw.context.trim(), 600).text.trim() }
+        : {}),
+      options,
+      ...(selectedOptionId ? { selectedOptionId } : {}),
+      ...(customAnswer ? { customAnswer } : {}),
+      ...(isSafeInt(raw.decidedAt, 0) ? { decidedAt: raw.decidedAt } : {}),
+    });
   }
   return result;
 }
@@ -347,6 +448,28 @@ function validateProjectVerificationConfig(raw: unknown): ProjectVerificationCon
     throw new WorkbenchError("corrupt_record", "project.verification.autoScreenshots 必须是布尔值");
   }
   return raw as unknown as ProjectVerificationConfig;
+}
+
+function validateProjectWorktreeConfig(raw: unknown): ProjectWorktreeConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "project.json worktree 配置必须是对象");
+  assertSafeExtensionKeys(raw, "project.worktree");
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") {
+    throw new WorkbenchError("corrupt_record", "project.worktree.enabled 必须是布尔值");
+  }
+  if (raw.copyFiles !== undefined) {
+    if (
+      !Array.isArray(raw.copyFiles) ||
+      raw.copyFiles.length > 64 ||
+      raw.copyFiles.some((f) => !isSafeText(f, 256))
+    ) {
+      throw new WorkbenchError("corrupt_record", "project.worktree.copyFiles 格式不合法");
+    }
+  }
+  if (raw.setupScript !== undefined && !isSafeText(raw.setupScript, 2048, true)) {
+    throw new WorkbenchError("corrupt_record", "project.worktree.setupScript 格式不合法");
+  }
+  return raw as unknown as ProjectWorktreeConfig;
 }
 
 function validateModelTarget(raw: unknown, label: string): ModelTarget {
@@ -430,6 +553,7 @@ export function validateProjectMetadata(raw: unknown): ProjectMetadata {
   validateProjectGitHubConfig(raw.github);
   validateProjectGiteeConfig(raw.gitee);
   validateProjectVerificationConfig(raw.verification);
+  validateProjectWorktreeConfig(raw.worktree);
   const meta = raw as unknown as ProjectMetadata;
   return routing ? { ...meta, routing } : meta;
 }
@@ -446,6 +570,8 @@ function validateApproval(raw: unknown): ApprovalRecord | null {
     !isSafeInt(raw.designVersion, 0) ||
     typeof raw.designHash !== "string" ||
     (raw.designHash !== "" && !SHA256_RE.test(raw.designHash)) ||
+    (raw.decisionsHash !== undefined &&
+      (typeof raw.decisionsHash !== "string" || (raw.decisionsHash !== "" && !SHA256_RE.test(raw.decisionsHash)))) ||
     (raw.baselineHead !== null && typeof raw.baselineHead !== "string") ||
     (raw.baselineFingerprint !== null && typeof raw.baselineFingerprint !== "string")
   ) {
@@ -592,11 +718,130 @@ function validateCriterionEntry(raw: unknown, label: string): Criterion {
   if (!isRecord(raw) || typeof raw.id !== "string" || !TOKEN_ID_RE.test(raw.id) || !isSafeText(raw.description, 1000) || typeof raw.required !== "boolean") {
     throw new WorkbenchError("corrupt_record", `${label} 中的验收条件损坏`);
   }
+  if (raw.kind !== undefined && raw.kind !== "command" && raw.kind !== "manual") {
+    throw new WorkbenchError("corrupt_record", `${label} 中的验收条件类型损坏`);
+  }
   const command = raw.command;
   if (command !== undefined && (typeof command !== "string" || !isSafeText(command, 512))) {
     throw new WorkbenchError("corrupt_record", `${label} 中的验收条件命令损坏`);
   }
+  const steps = raw.steps;
+  if (steps !== undefined && (typeof steps !== "string" || !isSafeText(steps, 1000, true))) {
+    throw new WorkbenchError("corrupt_record", `${label} 中的验收条件人工检查步骤损坏`);
+  }
+  if (raw.systemInjected !== undefined && typeof raw.systemInjected !== "boolean") {
+    throw new WorkbenchError("corrupt_record", `${label} 中的验收条件标记损坏`);
+  }
   return raw as unknown as Criterion;
+}
+
+const NEEDS_HUMAN_SOURCES: readonly NeedsHumanSource[] = [
+  "auto_heal_exhausted",
+  "review_loop_exhausted",
+  "agent_paused",
+  "bug_pause",
+  "env_failure",
+];
+
+function validateManualChecks(raw: unknown): ManualCriterionCheck[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > MAX_CRITERIA) {
+    throw new WorkbenchError("corrupt_record", "manualChecks 记录损坏");
+  }
+  for (const item of raw) {
+    if (
+      !isRecord(item) ||
+      typeof item.criterionId !== "string" ||
+      !TOKEN_ID_RE.test(item.criterionId) ||
+      typeof item.checked !== "boolean" ||
+      !isSafeInt(item.checkedAt, 0) ||
+      typeof item.specHash !== "string" ||
+      !SHA256_RE.test(item.specHash) ||
+      typeof item.codeSnapshotHash !== "string" ||
+      !SHA256_RE.test(item.codeSnapshotHash) ||
+      (item.note !== undefined && !isSafeText(item.note, 1000, true))
+    ) {
+      throw new WorkbenchError("corrupt_record", "manualChecks 条目损坏");
+    }
+    assertSafeExtensionKeys(item, "manualChecks");
+  }
+  return raw as unknown as ManualCriterionCheck[];
+}
+
+function validatePendingDecisions(raw: unknown): DecisionItem[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > MAX_DECISION_ITEMS) {
+    throw new WorkbenchError("corrupt_record", "pendingDecisions 记录损坏");
+  }
+  for (const item of raw) {
+    if (!isRecord(item) || typeof item.id !== "string" || !TOKEN_ID_RE.test(item.id) || !isSafeText(item.question, 600)) {
+      throw new WorkbenchError("corrupt_record", "pendingDecisions 条目损坏");
+    }
+    assertSafeExtensionKeys(item, "pendingDecisions");
+    if (
+      (item.context !== undefined && !isSafeText(item.context, 800, true)) ||
+      !Array.isArray(item.options) ||
+      item.options.length < 2 ||
+      item.options.length > 4 ||
+      (item.selectedOptionId !== undefined && item.selectedOptionId !== null && (typeof item.selectedOptionId !== "string" || !TOKEN_ID_RE.test(item.selectedOptionId))) ||
+      (item.customAnswer !== undefined && item.customAnswer !== null && !isSafeText(item.customAnswer, 1200, true)) ||
+      (item.decidedAt !== undefined && item.decidedAt !== null && !isSafeInt(item.decidedAt, 0))
+    ) {
+      throw new WorkbenchError("corrupt_record", "pendingDecisions 字段损坏");
+    }
+    for (const opt of item.options) {
+      if (
+        !isRecord(opt) ||
+        typeof opt.id !== "string" ||
+        !TOKEN_ID_RE.test(opt.id) ||
+        !isSafeText(opt.label, 300) ||
+        (opt.description !== undefined && !isSafeText(opt.description, 600, true)) ||
+        (opt.recommended !== undefined && typeof opt.recommended !== "boolean")
+      ) {
+        throw new WorkbenchError("corrupt_record", "pendingDecisions.options 条目损坏");
+      }
+      assertSafeExtensionKeys(opt, "pendingDecisions.options");
+    }
+  }
+  return raw as unknown as DecisionItem[];
+}
+
+function validateAdoptedDecisions(raw: unknown): AdoptedDecision[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > 64) {
+    throw new WorkbenchError("corrupt_record", "humanDecisions 记录损坏");
+  }
+  for (const item of raw) {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== "string" ||
+      !TOKEN_ID_RE.test(item.id) ||
+      !isSafeText(item.question, 600) ||
+      !isSafeText(item.answer, 1200) ||
+      (item.optionId !== undefined && (typeof item.optionId !== "string" || !TOKEN_ID_RE.test(item.optionId))) ||
+      (item.optionLabel !== undefined && !isSafeText(item.optionLabel, 300, true)) ||
+      !isSafeInt(item.adoptedAt, 0)
+    ) {
+      throw new WorkbenchError("corrupt_record", "humanDecisions 条目损坏");
+    }
+    assertSafeExtensionKeys(item, "humanDecisions");
+  }
+  return raw as unknown as AdoptedDecision[];
+}
+
+function validateNeedsHuman(raw: unknown): NeedsHumanState | null | undefined {
+  if (raw === undefined || raw === null) return raw === null ? null : undefined;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "needsHuman 字段无效");
+  assertSafeExtensionKeys(raw, "needsHuman");
+  if (
+    !isSafeText(raw.reason, 1200) ||
+    (raw.reasonKey !== undefined && !isSafeText(raw.reasonKey, 128)) ||
+    !NEEDS_HUMAN_SOURCES.includes(raw.source as NeedsHumanSource) ||
+    !isSafeInt(raw.at, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "needsHuman 记录损坏");
+  }
+  return raw as unknown as NeedsHumanState;
 }
 
 function validateChangedFileEntry(raw: unknown, label: string): ChangedFile {
@@ -845,6 +1090,10 @@ const RUN_DISPATCH_REASONS: readonly RunDispatchReason[] = [
   "auto_fallback",
   "auto_heal",
   "auto_review",
+  "auto_review_fix",
+  "auto_re_review",
+  "auto_design_review",
+  "design_review",
   "sota_escalate",
   "conflict_resolve",
   "refine",
@@ -923,6 +1172,8 @@ export function validateAgentRunRecord(raw: unknown): AgentRunRecord {
     (raw.specChanged !== undefined && typeof raw.specChanged !== "boolean") ||
     (raw.specHashAfter !== undefined && !isSafeText(raw.specHashAfter, 128)) ||
     (raw.codeChanged !== undefined && typeof raw.codeChanged !== "boolean") ||
+    (raw.noCodeChange !== undefined && typeof raw.noCodeChange !== "boolean") ||
+    (raw.wipCommitHash !== undefined && (typeof raw.wipCommitHash !== "string" || !GIT_REF_RE.test(raw.wipCommitHash))) ||
     (raw.tracePath !== undefined && !isSafeText(raw.tracePath, 260, true)) ||
     (raw.contextPath !== undefined && !isSafeText(raw.contextPath, 260, true)) ||
     (raw.traceTruncated !== undefined && typeof raw.traceTruncated !== "boolean") ||
@@ -979,6 +1230,8 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     !SHA256_RE.test(raw.reviewedSpecHash) ||
     typeof raw.reviewedCodeSnapshotHash !== "string" ||
     !SHA256_RE.test(raw.reviewedCodeSnapshotHash) ||
+    (raw.reviewedCommit !== undefined && (typeof raw.reviewedCommit !== "string" || !GIT_REF_RE.test(raw.reviewedCommit))) ||
+    (raw.reviewerSessionId !== undefined && !isSafeText(raw.reviewerSessionId, 256)) ||
     !isSafeInt(raw.reviewedAt, 0)
   ) {
     throw new WorkbenchError("corrupt_record", "reviewReport 记录损坏");
@@ -987,6 +1240,33 @@ function validateReviewReport(raw: unknown): ReviewReport | null {
     for (const f of raw.findings) validateReviewFinding(f);
   }
   return raw as unknown as ReviewReport;
+}
+
+function validateDesignReviewReport(raw: unknown): DesignReviewReport | null {
+  if (raw === null || raw === undefined) return null;
+  if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "designReviewReport 字段无效");
+  assertSafeExtensionKeys(raw, "designReviewReport");
+  if (
+    typeof raw.id !== "string" ||
+    !TOKEN_ID_RE.test(raw.id) ||
+    !isSafeText(raw.reviewerHarness, 64) ||
+    !isSafeText(raw.reviewerModel, 200) ||
+    !REVIEW_VERDICTS.includes(raw.verdict as ReviewVerdict) ||
+    !isSafeText(raw.summary, 2000) ||
+    !isSafeText(raw.markdown, 64 * 1024) ||
+    (raw.findings !== undefined && (!Array.isArray(raw.findings) || raw.findings.length > 50)) ||
+    typeof raw.reviewedSpecHash !== "string" ||
+    !SHA256_RE.test(raw.reviewedSpecHash) ||
+    typeof raw.reviewedDesignHash !== "string" ||
+    !SHA256_RE.test(raw.reviewedDesignHash) ||
+    !isSafeInt(raw.reviewedAt, 0)
+  ) {
+    throw new WorkbenchError("corrupt_record", "designReviewReport 记录损坏");
+  }
+  if (Array.isArray(raw.findings)) {
+    for (const f of raw.findings) validateReviewFinding(f);
+  }
+  return raw as unknown as DesignReviewReport;
 }
 
 function validateRequirementGitHubIssue(raw: unknown): RequirementGitHubIssueLink | null | undefined {
@@ -1060,8 +1340,10 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     (expectedId && raw.id !== expectedId) ||
     (raw.parentId !== undefined && (typeof raw.parentId !== "string" || !REQUIREMENT_ID_RE.test(raw.parentId) || raw.parentId === raw.id)) ||
     !isSafeText(raw.title, 400) ||
+    (raw.originalGoal !== undefined && !isSafeText(raw.originalGoal, MAX_SPEC_BYTES, true)) ||
     !STAGES.includes(raw.stage as Stage) ||
     !TRACKS.includes(raw.track as Track) ||
+    (raw.kind !== undefined && !REQUIREMENT_KINDS.includes(raw.kind as RequirementKind)) ||
     !REQUIREMENT_TIERS.includes(raw.tier as RequirementTier) ||
     !isSafeInt(raw.revision, 1) ||
     typeof raw.specHash !== "string" ||
@@ -1078,27 +1360,25 @@ export function validateRequirementState(raw: unknown, expectedId?: string): Req
     (raw.lastFeedback !== null && !isSafeText(raw.lastFeedback, 8000, true)) ||
     (raw.cancelReason !== undefined && raw.cancelReason !== null && !isSafeText(raw.cancelReason, 8000, true)) ||
     (raw.uiRelated !== undefined && typeof raw.uiRelated !== "boolean") ||
+    (raw.revisedFromCoding !== undefined && typeof raw.revisedFromCoding !== "boolean") ||
     !isSafeInt(raw.createdAt, 0) ||
     !isSafeInt(raw.updatedAt, 0)
   ) {
     throw new WorkbenchError("corrupt_record", "state.json 字段校验失败");
   }
   for (const c of raw.criteria) {
-    if (
-      !isRecord(c) ||
-      typeof c.id !== "string" ||
-      !TOKEN_ID_RE.test(c.id) ||
-      !isSafeText(c.description, 1000) ||
-      typeof c.required !== "boolean"
-    ) {
-      throw new WorkbenchError("corrupt_record", "criteria 记录损坏");
-    }
+    validateCriterionEntry(c, "state.json");
   }
+  validateManualChecks(raw.manualChecks);
+  validatePendingDecisions(raw.pendingDecisions);
+  validateAdoptedDecisions(raw.humanDecisions);
+  validateNeedsHuman(raw.needsHuman);
   validateApproval(raw.approval);
   validateAcceptance(raw.acceptance);
   validateDelivery(raw.delivery);
   validateBaseline(raw.baseline);
   validateReviewReport(raw.reviewReport);
+  validateDesignReviewReport(raw.designReviewReport);
   validateRequirementGitHubLink(raw.github);
   if (raw.screenshotBatches !== undefined) validateScreenshotBatches(raw.screenshotBatches);
   normalizeAttachments(raw.attachments);

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import type { ProjectContextSummary } from "../core/context.ts";
 import {
   extractInlineCriteriaFromDesign,
+  extractInlineDecisionsFromDesign,
   getProjectStatus,
   getRequirement,
   isUiRelatedRequirement,
@@ -15,13 +16,15 @@ import {
   MAX_DESIGN_BYTES,
   MAX_SPEC_BYTES,
   WORKBENCH_DIR,
+  type AgentAction,
   type CriterionInput,
+  type DecisionItem,
   type RequirementDetail,
   type ReviewFinding,
   type ReviewVerdict,
 } from "../core/types.ts";
 import { normalizeCriteria, sanitizeOutput, validateMarkdownContent } from "../core/validate.ts";
-import { computeDesignHash, computeSpecHash } from "../core/validity.ts";
+import { computeDesignHash, computeSpecHash, isEnvironmentVerificationFailure } from "../core/validity.ts";
 
 export interface ParsedReviewOutput {
   verdict: ReviewVerdict;
@@ -124,7 +127,13 @@ function readDiskDesignCandidate(
   latestReq: RequirementDetail,
   preSpecMarkdown: string,
   preDesignMarkdown: string,
-): { specMarkdown: string; designMarkdown: string; criteria?: CriterionInput[]; criteriaPaths: string[] } | null {
+): {
+  specMarkdown: string;
+  designMarkdown: string;
+  criteria?: CriterionInput[];
+  decisions?: DecisionItem[];
+  criteriaPaths: string[];
+} | null {
   const itemRel = `${WORKBENCH_DIR}/items/${id}`;
   const readOpt = (rootDir: string, rel: string, maxBytes: number): string | null => {
     try {
@@ -147,11 +156,14 @@ function readDiskDesignCandidate(
         if (!entry || typeof entry !== "object") continue;
         const obj = entry as Record<string, unknown>;
         if (typeof obj.description !== "string" || !obj.description.trim()) continue;
+        const rawKind = obj.kind === "manual" || obj.type === "manual" || obj.manual === true ? "manual" : undefined;
         valid.push({
           ...(typeof obj.id === "string" && obj.id.trim() ? { id: obj.id.trim() } : {}),
           description: obj.description.trim(),
+          ...(rawKind ? { kind: rawKind } : {}),
           ...(typeof obj.required === "boolean" ? { required: obj.required } : {}),
-          ...(typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+          ...(rawKind !== "manual" && typeof obj.command === "string" && obj.command.trim() ? { command: obj.command.trim() } : {}),
+          ...(typeof obj.steps === "string" && obj.steps.trim() ? { steps: obj.steps.trim() } : {}),
         });
       }
       if (valid.length > 0) {
@@ -187,6 +199,7 @@ function readDiskDesignCandidate(
 
   // Prefer inline ```workbench-criteria block inside design.md, falling back to criteria.json.
   const inlineCriteria = extractInlineCriteriaFromDesign(sanitizedDesign);
+  const inlineDecisions = extractInlineDecisionsFromDesign(sanitizedDesign);
   const resolvedCriteria = inlineCriteria ?? criteria;
 
   // Avoid duplicate propose() if the agent already called `wb propose` and hashes on disk match state.json.
@@ -196,7 +209,8 @@ function readDiskDesignCandidate(
   const hashesAlreadyMatch =
     candidateSpecHash === latestReq.state.specHash &&
     candidateDesignHash === latestReq.state.designHash &&
-    latestReq.state.designVersion > 0;
+    latestReq.state.designVersion > 0 &&
+    Boolean(inlineDecisions?.length) === Boolean(latestReq.state.pendingDecisions?.length);
   if (hashesAlreadyMatch) {
     return null;
   }
@@ -205,6 +219,7 @@ function readDiskDesignCandidate(
     sanitizedSpec !== preSpecMarkdown ||
     sanitizedDesign !== preDesignMarkdown ||
     resolvedCriteria !== undefined ||
+    inlineDecisions !== null ||
     latestReq.state.designHash !== candidateDesignHash;
   if (!changedFromBaseline) {
     return null;
@@ -214,6 +229,7 @@ function readDiskDesignCandidate(
     specMarkdown: sanitizedSpec,
     designMarkdown: sanitizedDesign,
     ...(resolvedCriteria ? { criteria: resolvedCriteria } : {}),
+    ...(inlineDecisions ? { decisions: inlineDecisions } : {}),
     criteriaPaths: [...criteriaPaths],
   };
 }
@@ -249,7 +265,9 @@ export async function syncDesignRunResult(input: {
     );
     if (diskDesign) {
       let criteriaToSet = diskDesign.criteria;
-      if (!criteriaToSet && latestReq.state.criteria.length === 0) {
+      const hasPendingDecisions = Boolean(diskDesign.decisions && diskDesign.decisions.length > 0);
+      // FLOW §1.2 / WB-18: when first design proposes pending decisions without criteria, defer criteria until resolved.
+      if (!criteriaToSet && !hasPendingDecisions && latestReq.state.criteria.length === 0) {
         const fallbackCmd = input.projectContext.fullCommand ?? input.projectContext.fastCommand;
         if (fallbackCmd) {
           criteriaToSet = [
@@ -258,6 +276,7 @@ export async function syncDesignRunResult(input: {
               description: "项目自动化验证通过",
               required: true,
               command: fallbackCmd,
+              systemInjected: true,
             },
           ];
         }
@@ -266,6 +285,7 @@ export async function syncDesignRunResult(input: {
         specMarkdown: diskDesign.specMarkdown,
         designMarkdown: diskDesign.designMarkdown,
         ...(criteriaToSet ? { criteria: criteriaToSet } : {}),
+        ...(diskDesign.decisions ? { decisions: diskDesign.decisions } : {}),
         actor: "agent",
         currentCodeSnapshotHash: input.snapshotFingerprint,
       });
@@ -289,12 +309,15 @@ export async function syncDesignRunResult(input: {
 /**
  * Runs deterministic post-coding verification (fast-before-heavy with failFast) whenever required
  * command criteria are not yet passing on the current snapshot, captures UI screenshots on pass,
- * and signals whether auto-heal should run.
+ * applies zero-change and environment-failure guards, and signals whether auto-heal / auto-review should run.
  */
 export async function runCodingPostGate(input: {
   base: string;
   codeRoot: string;
   id: string;
+  action?: AgentAction;
+  codeChanged?: boolean;
+  lockLeaseId?: string;
   latestReq: RequirementDetail;
   snap: Awaited<ReturnType<typeof observeGitSnapshot>>;
   appendNote: (line: string) => void;
@@ -303,14 +326,33 @@ export async function runCodingPostGate(input: {
   snap: Awaited<ReturnType<typeof observeGitSnapshot>>;
   autoHealPending: boolean;
   readyForReview: boolean;
+  noCodeChange: boolean;
+  environmentFailure: boolean;
 }> {
   let latestReq = input.latestReq;
   let snap = input.snap;
   let autoHealPending = false;
   let readyForReview = false;
+  let noCodeChange = false;
+  let environmentFailure = false;
 
   if (latestReq.state.stage !== "coding" || !latestReq.validity.approval.valid) {
-    return { latestReq, snap, autoHealPending, readyForReview };
+    return { latestReq, snap, autoHealPending, readyForReview, noCodeChange, environmentFailure };
+  }
+
+  // Zero-change hard guard (WB-16 / FLOW §2.4): if an `implement` run produced zero changes relative to baseline,
+  // refuse to auto-mark as ready for acceptance/review and hand back to human inspection.
+  const baselineFp = latestReq.state.baseline?.fingerprint ?? null;
+  if (
+    input.action === "implement" &&
+    baselineFp &&
+    snap?.fingerprint === baselineFp
+  ) {
+    noCodeChange = true;
+    input.appendNote(
+      "\n[workbench] ⚠ 编码运行正常结束，但相对基线未产出任何代码改动，已暂停自动推进待验收/审查，请人工核查（如确认无需改动可直接人工确认关闭）。\n",
+    );
+    return { latestReq, snap, autoHealPending, readyForReview, noCodeChange, environmentFailure };
   }
 
   const requiredCmdItems = latestReq.validity.coverage.items.filter(
@@ -321,7 +363,7 @@ export async function runCodingPostGate(input: {
   try {
     if (hasPendingCmdVerification) {
       input.appendNote("\n[workbench] Agent 已完成修改，正在自动执行必需验收命令...\n");
-      await runAllVerifications(input.base, input.id, { failFast: true });
+      await runAllVerifications(input.base, input.id, { failFast: true, lockLeaseId: input.lockLeaseId });
       snap = await observeGitSnapshot(input.codeRoot);
       latestReq = getRequirement(input.base, input.id, { currentCodeSnapshotHash: snap?.fingerprint ?? null });
     }
@@ -354,14 +396,38 @@ export async function runCodingPostGate(input: {
       }
       input.appendNote("[workbench] 全部必需验收条件已通过，已就绪待审查与人工验收。\n");
     } else if (allCommandCriteriaPassed && !hasFailedCommandVerification) {
+      // FLOW §3.2 / WB-14: trigger heterogeneous review as soon as all automated command criteria pass,
+      // without waiting for human manual checkboxes.
+      readyForReview = true;
       input.appendNote(
-        `[workbench] 全部自动化验收命令通过，待人工确认非命令条件：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+        `[workbench] 全部自动化验收命令通过，已就绪触发审查（待人工核验非命令条件：${latestReq.validity.acceptanceGate.blockers.join("；")}）。\n`,
       );
     } else if (hasFailedCommandVerification) {
-      input.appendNote(
-        `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+      const failedCriterionIds = new Set(
+        updatedRequiredCmdItems.filter((item) => item.state === "failed").map((item) => item.criterion.id),
       );
-      autoHealPending = true;
+      const latestFailedByCriterion = Array.from(failedCriterionIds)
+        .map((cid) =>
+          [...latestReq.validity.verifications]
+            .reverse()
+            .find((v) => v.effectiveState === "failed" && v.record.criterionIds.includes(cid)),
+        )
+        .filter((v): v is NonNullable<typeof v> => Boolean(v));
+      const allEnvFailure =
+        latestFailedByCriterion.length > 0 &&
+        latestFailedByCriterion.every((v) => isEnvironmentVerificationFailure(v.record));
+      if (allEnvFailure) {
+        environmentFailure = true;
+        autoHealPending = false;
+        input.appendNote(
+          "[workbench] ⚠ 检测到验证失败属于环境/基础设施故障（命令不存在或执行超时），已跳过自动修复，请人工排查环境后重跑验证。\n",
+        );
+      } else {
+        input.appendNote(
+          `[workbench] 自动验收未通过：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
+        );
+        autoHealPending = true;
+      }
     } else if (hasPendingCmdVerification) {
       input.appendNote(
         `[workbench] 自动验收未就绪：${latestReq.validity.acceptanceGate.blockers.join("；")}\n`,
@@ -373,5 +439,5 @@ export async function runCodingPostGate(input: {
     );
   }
 
-  return { latestReq, snap, autoHealPending, readyForReview };
+  return { latestReq, snap, autoHealPending, readyForReview, noCodeChange, environmentFailure };
 }

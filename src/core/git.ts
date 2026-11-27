@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,6 +23,31 @@ const GIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_DIFF_BYTES = MAX_ACCEPTANCE_DIFF_BYTES;
 const MAX_HASHED_FILES = 2000;
 const MAX_SINGLE_FILE_HASH_BYTES = 2 * 1024 * 1024;
+/**
+ * Resolves commit environment variables, preserving the repository's configured `user.name` / `user.email`
+ * and only injecting `Workbench <workbench@local>` as fallback when Git identity is unset.
+ */
+export function resolveGitCommitEnv(repoDir: string): NodeJS.ProcessEnv {
+  const readCfg = (key: string): string => {
+    try {
+      return execFileSync("git", ["-C", repoDir, "config", "--get", key], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      return "";
+    }
+  };
+  const cfgName = readCfg("user.name");
+  const cfgEmail = readCfg("user.email");
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (!env.GIT_AUTHOR_NAME && !cfgName) env.GIT_AUTHOR_NAME = "Workbench";
+  if (!env.GIT_COMMITTER_NAME && !cfgName) env.GIT_COMMITTER_NAME = env.GIT_AUTHOR_NAME || "Workbench";
+  if (!env.GIT_AUTHOR_EMAIL && !cfgEmail) env.GIT_AUTHOR_EMAIL = "workbench@local";
+  if (!env.GIT_COMMITTER_EMAIL && !cfgEmail) env.GIT_COMMITTER_EMAIL = env.GIT_AUTHOR_EMAIL || "workbench@local";
+  return env;
+}
+
 const EXCLUDE_PATHSPECS = [":(exclude).workbench", ":(exclude).omp/workbench"];
 
 interface ExecResult {
@@ -211,7 +236,110 @@ function formatUntrackedDiff(base: string, relPath: string): string {
   }
 }
 
-/** Captures a fast, deterministic workspace snapshot excluding .workbench/ metadata. */
+function isExcludedSnapshotPath(relPath: string, excludedPrefixes: string[]): boolean {
+  if (!relPath || relPath.endsWith("/")) return true;
+  if (relPath === "node_modules" || relPath.startsWith("node_modules/")) return true;
+  for (const prefix of excludedPrefixes) {
+    if (relPath === prefix || relPath.startsWith(`${prefix}/`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Computes a deterministic Git content-tree OID for the working tree (HEAD + dirty/untracked edits,
+ * excluding .workbench, .omp/workbench, and node_modules) without mutating the real index.
+ * Identical file contents before and after a WIP commit or history squash produce the exact same tree OID.
+ */
+async function computeWorkingTreeContentTreeOid(
+  base: string,
+  gitRoot: string,
+  head: string,
+  entries: Array<{ xy: string; path: string; origPath?: string }>,
+): Promise<string | null> {
+  const relBase = base !== gitRoot ? path.relative(gitRoot, base).split(path.sep).join("/") : "";
+  const excludedDirs = [
+    ".workbench",
+    ".omp/workbench",
+    "node_modules",
+    ...(relBase && !relBase.startsWith("..") ? [`${relBase}/.workbench`, `${relBase}/.omp/workbench`] : []),
+  ];
+
+  const dirtyPaths: string[] = [];
+  for (const entry of entries) {
+    if (!isExcludedSnapshotPath(entry.path, excludedDirs)) {
+      dirtyPaths.push(entry.path);
+    }
+    if (entry.origPath && !isExcludedSnapshotPath(entry.origPath, excludedDirs)) {
+      dirtyPaths.push(entry.origPath);
+    }
+  }
+  const uniqueDirtyPaths = Array.from(new Set(dirtyPaths));
+
+  // Fast path: clean working tree with valid HEAD and no tracked workbench metadata in HEAD.
+  if (head && uniqueDirtyPaths.length === 0) {
+    const trackedExcluded = await execGit(gitRoot, ["ls-tree", "-d", "--name-only", head, "--", ...excludedDirs]);
+    if (trackedExcluded.code === 0 && trackedExcluded.stdout.toString("utf8").trim().length === 0) {
+      const treeRes = await execGit(gitRoot, ["rev-parse", "--verify", `${head}^{tree}`]);
+      if (treeRes.code === 0) {
+        const oid = treeRes.stdout.toString("utf8").trim();
+        if (/^[0-9a-f]{7,64}$/i.test(oid)) return oid;
+      }
+    }
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-snap-idx-"));
+  const tmpIndex = path.join(tmpDir, "index");
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  try {
+    if (head) {
+      const readRes = await execGit(gitRoot, ["read-tree", head], GIT_TIMEOUT_MS, undefined, env);
+      if (readRes.code !== 0) return null;
+      await execGit(gitRoot, ["rm", "-r", "--cached", "--ignore-unmatch", "--", ...excludedDirs], GIT_TIMEOUT_MS, undefined, env);
+    }
+    for (let i = 0; i < uniqueDirtyPaths.length; i += 100) {
+      const chunk = uniqueDirtyPaths.slice(i, i + 100);
+      const addRes = await execGit(gitRoot, ["--literal-pathspecs", "add", "-A", "--", ...chunk], 30_000, undefined, env);
+      if (addRes.code !== 0) {
+        for (const p of chunk) {
+          const fullP = path.join(gitRoot, p);
+          let existsOnDisk = false;
+          try {
+            fs.lstatSync(fullP);
+            existsOnDisk = true;
+          } catch {
+            existsOnDisk = false;
+          }
+          if (existsOnDisk) {
+            const singleRes = await execGit(gitRoot, ["--literal-pathspecs", "add", "-A", "--", p], 30_000, undefined, env);
+            if (singleRes.code !== 0) {
+              const forceRes = await execGit(gitRoot, ["--literal-pathspecs", "add", "-f", "--", p], 30_000, undefined, env);
+              if (forceRes.code !== 0) return null;
+            }
+          } else {
+            const rmRes = await execGit(
+              gitRoot,
+              ["--literal-pathspecs", "rm", "--cached", "--ignore-unmatch", "--", p],
+              30_000,
+              undefined,
+              env,
+            );
+            if (rmRes.code !== 0) return null;
+          }
+        }
+      }
+    }
+    const writeRes = await execGit(gitRoot, ["write-tree"], GIT_TIMEOUT_MS, undefined, env);
+    if (writeRes.code !== 0) return null;
+    const oid = writeRes.stdout.toString("utf8").trim();
+    return /^[0-9a-f]{7,64}$/i.test(oid) ? oid : null;
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** Captures a fast, deterministic content-tree workspace snapshot excluding .workbench/ metadata. */
 export async function observeGitSnapshot(root: string): Promise<BaselineSnapshot | null> {
   const base = canonicalRoot(root);
   let inside: ExecResult;
@@ -235,22 +363,29 @@ export async function observeGitSnapshot(root: string): Promise<BaselineSnapshot
   const head = headRes.code === 0 ? headRes.stdout.toString("utf8").trim() : "";
   const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
   entries.sort((a, b) => a.path.localeCompare(b.path));
-  const gitRoot = entries.length > 0 ? await resolveGitToplevel(base) : base;
+  const gitRoot = await resolveGitToplevel(base);
 
-  const hash = createHash("sha256");
-  hash.update(`head:${head}\n`);
-  for (let i = 0; i < Math.min(entries.length, MAX_HASHED_FILES); i++) {
-    const entry = entries[i]!;
-    const contentHash = entry.xy[1] === "D" || entry.xy[0] === "D" ? "deleted" : hashWorkingEntry(gitRoot, entry.path);
-    hash.update(`${entry.xy}:${entry.path}:${contentHash}\n`);
-  }
-  if (entries.length > MAX_HASHED_FILES) {
-    hash.update(`truncated:${entries.length}`);
+  const treeOid = await computeWorkingTreeContentTreeOid(base, gitRoot, head, entries);
+  let fingerprint: string;
+  if (treeOid) {
+    fingerprint = createHash("sha256").update(`tree:${treeOid}\n`).digest("hex");
+  } else {
+    const hash = createHash("sha256");
+    hash.update(`head:${head}\n`);
+    for (let i = 0; i < Math.min(entries.length, MAX_HASHED_FILES); i++) {
+      const entry = entries[i]!;
+      const contentHash = entry.xy[1] === "D" || entry.xy[0] === "D" ? "deleted" : hashWorkingEntry(gitRoot, entry.path);
+      hash.update(`${entry.xy}:${entry.path}:${contentHash}\n`);
+    }
+    if (entries.length > MAX_HASHED_FILES) {
+      hash.update(`truncated:${entries.length}`);
+    }
+    fingerprint = hash.digest("hex");
   }
 
   return {
     head,
-    fingerprint: hash.digest("hex"),
+    fingerprint,
     dirty: entries.length > 0,
     capturedAt: Date.now(),
   };
@@ -558,6 +693,175 @@ export async function commitFilesInGit(
   return { commitHash, shortHash, branch };
 }
 
+/**
+ * Computes the exact content-tree fingerprint (same SHA-256 of Git tree OID used by `observeGitSnapshot`)
+ * that would result from committing ONLY `files` on top of current `HEAD` (WB-20 / FLOW §4.2).
+ */
+export async function computeSelectedFilesContentTreeFingerprint(
+  root: string,
+  files: string[],
+): Promise<string | null> {
+  const base = canonicalRoot(root);
+  const headRes = await execGit(base, ["rev-parse", "--verify", "HEAD"]);
+  const headOid = headRes.code === 0 ? headRes.stdout.toString("utf8").trim() : "";
+  const gitRoot = await resolveGitToplevel(base);
+  const relBase = base !== gitRoot ? path.relative(gitRoot, base).split(path.sep).join("/") : "";
+  const excludedDirs = [
+    ".workbench",
+    ".omp/workbench",
+    "node_modules",
+    ...(relBase && !relBase.startsWith("..") ? [`${relBase}/.workbench`, `${relBase}/.omp/workbench`] : []),
+  ];
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-sel-tree-"));
+  const tmpIndex = path.join(tmpDir, "index");
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+  try {
+    if (headOid) {
+      const readRes = await execGit(gitRoot, ["read-tree", headOid], GIT_TIMEOUT_MS, undefined, env);
+      if (readRes.code !== 0) return null;
+    }
+    for (let i = 0; i < files.length; i += 100) {
+      const chunk = files.slice(i, i + 100);
+      const addRes = await execGit(gitRoot, ["--literal-pathspecs", "add", "-A", "--", ...chunk], 30_000, undefined, env);
+      if (addRes.code !== 0) return null;
+    }
+    for (const excl of excludedDirs) {
+      await execGit(gitRoot, ["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", "--", excl], GIT_TIMEOUT_MS, undefined, env);
+    }
+    const treeRes = await execGit(gitRoot, ["write-tree"], GIT_TIMEOUT_MS, undefined, env);
+    if (treeRes.code !== 0) return null;
+    const treeOid = treeRes.stdout.toString("utf8").trim();
+    if (!/^[0-9a-f]{40,64}$/i.test(treeOid)) return null;
+    return createHash("sha256").update(`tree:${treeOid}\n`).digest("hex");
+  } catch {
+    return null;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** Counts automatic WIP checkpoint commits (`wip(...)`) reachable in `baseRef..headRef`. */
+export async function countWipCommitsBetween(root: string, baseRef: string, headRef = "HEAD"): Promise<number> {
+  const base = canonicalRoot(root);
+  if (!baseRef || baseRef.includes("..") || !GIT_REF_RE.test(baseRef)) return 0;
+  try {
+    const res = await execGit(base, ["log", "--format=%s", `${baseRef}..${headRef}`]);
+    if (res.code !== 0) return 0;
+    return res.stdout
+      .toString("utf8")
+      .split(/\r?\n/)
+      .filter((line) => /^wip\(/i.test(line.trim())).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Squashes all commits since `baseRef` plus any non-workbench working-tree edits on a sandbox branch
+ * into a single clean commit with `commitMessage`, verifying that the content-tree fingerprint is unchanged (WB-20).
+ */
+export async function squashBranchCommitsToSingleCommit(
+  wtDir: string,
+  baseRef: string,
+  commitMessage: string,
+): Promise<{
+  commitHash: string;
+  shortHash: string;
+  branch: string | null;
+  files: string[];
+  beforeFingerprint: string | null;
+  afterFingerprint: string | null;
+  squashedCount: number;
+  origHead: string | null;
+}> {
+  const wt = canonicalRoot(wtDir);
+  const beforeSnap = await observeGitSnapshot(wt);
+  const origHead = (await getHeadCommitInfo(wt))?.commitHash ?? null;
+  const aheadBefore = await countCommitsBetween(wt, baseRef, "HEAD");
+  const gitRoot = await resolveGitToplevel(wt);
+
+  const statusRes = await execGit(wt, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
+  const dirtyEntries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
+  const dirtyPaths = Array.from(
+    new Set(
+      dirtyEntries
+        .flatMap((e) => [e.path, e.origPath ?? ""])
+        .filter((p) => p && p !== "node_modules" && !p.startsWith("node_modules/")),
+    ),
+  );
+
+  // Soft-reset branch back to baseRef so all branch commits + dirty edits stage into 1 clean commit.
+  const resetRes = await execGit(wt, ["reset", "--soft", baseRef], 30_000);
+  if (resetRes.code !== 0) {
+    const msg = resetRes.stderr.toString("utf8").trim() || resetRes.stdout.toString("utf8").trim();
+    throw new WorkbenchError("execution_failed", `压缩沙箱提交历史失败: ${msg || "git reset --soft 失败"}`);
+  }
+
+  try {
+    for (let i = 0; i < dirtyPaths.length; i += 100) {
+      const chunk = dirtyPaths.slice(i, i + 100);
+      const addRes = await execGit(gitRoot, ["--literal-pathspecs", "add", "-A", "--", ...chunk], 30_000);
+      if (addRes.code !== 0) {
+        const msg = addRes.stderr.toString("utf8").trim() || addRes.stdout.toString("utf8").trim();
+        throw new WorkbenchError("execution_failed", `暂存压缩提交文件失败: ${msg || "git add 失败"}`);
+      }
+    }
+    // Never include Workbench metadata or node_modules in squashed delivery commits.
+    for (const excl of [".workbench", ".omp/workbench", "node_modules"]) {
+      await execGit(gitRoot, ["reset", "-q", "HEAD", "--", excl], GIT_TIMEOUT_MS).catch(() => null);
+    }
+
+    const stagedRes = await execGit(wt, ["diff", "--cached", "--name-only", "-z"]);
+    const stagedFiles =
+      stagedRes.code === 0
+        ? stagedRes.stdout
+            .toString("utf8")
+            .split("\0")
+            .filter(
+              (p) =>
+                p &&
+                p !== "node_modules" &&
+                !p.startsWith("node_modules/") &&
+                p !== ".workbench" &&
+                !p.startsWith(".workbench/") &&
+                p !== ".omp/workbench" &&
+                !p.startsWith(".omp/workbench/"),
+            )
+        : [];
+    if (stagedFiles.length === 0) {
+      throw new WorkbenchError("invalid_input", "沙箱相对基线没有可压缩交付的代码改动");
+    }
+
+    const commitEnv = resolveGitCommitEnv(wt);
+    const commitRes = await execGit(wt, ["commit", "--no-verify", "-F", "-"], 30_000, commitMessage, commitEnv);
+    if (commitRes.code !== 0) {
+      const msg = commitRes.stderr.toString("utf8").trim() || commitRes.stdout.toString("utf8").trim();
+      throw new WorkbenchError("execution_failed", `创建压缩交付提交失败: ${msg || "git commit 失败"}`);
+    }
+
+    const headInfo = await getHeadCommitInfo(wt);
+    if (!headInfo) {
+      throw new WorkbenchError("execution_failed", "压缩提交已创建但无法读取提交哈希");
+    }
+    const afterSnap = await observeGitSnapshot(wt);
+    return {
+      commitHash: headInfo.commitHash,
+      shortHash: headInfo.shortHash,
+      branch: headInfo.branch,
+      files: stagedFiles,
+      beforeFingerprint: beforeSnap?.fingerprint ?? null,
+      afterFingerprint: afterSnap?.fingerprint ?? null,
+      squashedCount: aheadBefore,
+      origHead,
+    };
+  } catch (err) {
+    if (origHead) {
+      await execGit(wt, ["reset", "--soft", origHead], 30_000).catch(() => null);
+    }
+    throw err;
+  }
+}
+
 /** Reads current HEAD commit hash, short hash, subject, and branch name. */
 export async function getHeadCommitInfo(root: string): Promise<{
   commitHash: string;
@@ -748,14 +1052,91 @@ async function revParseCommit(repoDir: string, ref: string): Promise<string | nu
   }
 }
 
-async function isAncestorCommit(repoDir: string, ancestor: string, descendant: string): Promise<boolean> {
-  if (!ancestor || !descendant) return false;
+export async function isAncestorCommit(repoDir: string, ancestor: string, descendant: string): Promise<boolean> {
+  if (!ancestor || !descendant || ancestor.startsWith("-") || descendant.startsWith("-")) return false;
   try {
     const res = await execGit(repoDir, ["merge-base", "--is-ancestor", ancestor, descendant]);
     return res.code === 0;
   } catch {
     return false;
   }
+}
+
+/** Returns true when merge commits exist in `fromRef..toRef` (e.g. after syncing main into a feature branch). */
+export async function hasMergeCommitsBetween(repoDir: string, fromRef: string, toRef = "HEAD"): Promise<boolean> {
+  if (!fromRef || !toRef || fromRef.includes("..") || toRef.includes("..") || fromRef.startsWith("-") || toRef.startsWith("-") || !GIT_REF_RE.test(fromRef)) {
+    return true;
+  }
+  try {
+    const res = await execGit(repoDir, ["rev-list", "--merges", "--count", `${fromRef}..${toRef}`]);
+    if (res.code !== 0) return true;
+    return Number(res.stdout.toString("utf8").trim()) > 0;
+  } catch {
+    return true;
+  }
+}
+
+/** Captures an exact bounded incremental diff from `fromCommit` to the current working tree (excluding .workbench). */
+export async function observeIncrementalDiff(
+  root: string,
+  fromCommit: string,
+  maxDiffBytes = 48 * 1024,
+): Promise<{ ok: boolean; files: string[]; diff: string; truncated: boolean }> {
+  const base = canonicalRoot(root);
+  if (!fromCommit || !/^[0-9a-f]{7,64}$/i.test(fromCommit)) {
+    return { ok: false, files: [], diff: "", truncated: false };
+  }
+  const verify = await execGit(base, ["rev-parse", "--verify", `${fromCommit}^{commit}`]);
+  if (verify.code !== 0) {
+    return { ok: false, files: [], diff: "", truncated: false };
+  }
+  const incExcludes = [...EXCLUDE_PATHSPECS, ":(exclude)node_modules"];
+  const nameRes = await execGit(base, [
+    "diff",
+    "--name-only",
+    "-z",
+    fromCommit,
+    "--",
+    ".",
+    ...incExcludes,
+  ]);
+  const diffRes = await execGit(base, ["diff", "--no-color", fromCommit, "--", ".", ...incExcludes]);
+  if (diffRes.code !== 0) {
+    return { ok: false, files: [], diff: "", truncated: false };
+  }
+  const files = new Set<string>(
+    nameRes.code === 0
+      ? nameRes.stdout
+          .toString("utf8")
+          .split("\0")
+          .filter((p) => p && p !== "node_modules" && !p.startsWith("node_modules/"))
+      : [],
+  );
+  const chunks: string[] = [];
+  const baseDiff = diffRes.stdout.toString("utf8");
+  if (baseDiff) chunks.push(baseDiff);
+
+  const statusRes = await execGit(base, ["status", "--porcelain=v1", "-z", "-uall", "--", ".", ...EXCLUDE_PATHSPECS]);
+  const entries = statusRes.code === 0 ? parsePorcelainZ(statusRes.stdout) : [];
+  const untracked = entries.filter(
+    (e) => e.xy === "??" && e.path && e.path !== "node_modules" && !e.path.startsWith("node_modules/"),
+  );
+  if (untracked.length > 0) {
+    const gitRoot = await resolveGitToplevel(base);
+    for (const entry of untracked) {
+      files.add(entry.path);
+      const patch = formatUntrackedDiff(gitRoot, entry.path);
+      if (patch) chunks.push(patch);
+    }
+  }
+  const combined = chunks.join(chunks.length > 1 ? "\n" : "");
+  const bounded = truncateUtf8(combined, maxDiffBytes);
+  return {
+    ok: true,
+    files: Array.from(files).sort(),
+    diff: bounded.text,
+    truncated: bounded.truncated,
+  };
 }
 
 export interface TargetMainRefInfo {

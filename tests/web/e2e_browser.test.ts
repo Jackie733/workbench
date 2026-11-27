@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { approveDesign, cancelRequirement, createRequirement, initProject, propose } from "../../src/core/engine.ts";
+import { resolveCodeRoot } from "../../src/core/sandbox.ts";
 import { HubExecutor } from "../../src/hub/executor.ts";
 import { readHubConfig, registerHubProject } from "../../src/hub/registry.ts";
 import { executeWorkbenchTool } from "../../src/mcp/tools.ts";
@@ -165,6 +166,9 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
   }, 90_000);
 
   test("WB-06: completes Plan-First and Fast-Track end-to-end loops with real Agent tools, Git diff, stale gate, and acceptance", async () => {
+    const hubDir = fs.mkdtempSync(path.join(os.tmpdir(), "wb-e2e-wb06-hub-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
     const root = initGitRepo();
     const executor = new HubExecutor({
       initialHarnesses: [
@@ -232,9 +236,10 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
         { timeout: 5000 },
       );
 
-      // Agent implements code and runs verification
+      // Agent implements code inside the active codeRoot (auto-isolated worktree sandbox) and runs verification
+      const req1CodeRoot = resolveCodeRoot(root, "REQ-001");
       fs.writeFileSync(
-        path.join(root, "calc.ts"),
+        path.join(req1CodeRoot, "calc.ts"),
         "export const add = (a: number, b: number) => a + b;\nexport const sub = (a: number, b: number) => a - b;\n",
       );
       await executeWorkbenchTool(root, "wb_verify", {
@@ -330,7 +335,7 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.waitForSelector(".evidence-log", { timeout: 5000 });
 
       // Edit code behind the scenes -> live stale detection disables immediate acceptance!
-      fs.appendFileSync(path.join(root, "calc.ts"), "// post-verify edit\n");
+      fs.appendFileSync(path.join(req1CodeRoot, "calc.ts"), "// post-verify edit\n");
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForFunction(
@@ -360,8 +365,17 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.click('[data-testid="save-draft-btn"]');
       await page.waitForSelector('[data-testid="action-authorize_fast_track"]', { timeout: 5000 });
 
-      // Authorize fast-track with zero criteria -> verify cannot accept (0/0 blocked!)
+      // Authorize fast-track with zero criteria -> wait for initial run to settle, verify cannot accept (0/0 blocked!)
+      const firstRunFinished = new Promise<void>((resolve) => {
+        const unsub = executor.subscribe((ev) => {
+          if (ev.type === "agent.run.finished" && ev.requirementId === "REQ-002") {
+            unsub();
+            resolve();
+          }
+        });
+      });
       await page.click('[data-testid="action-authorize_fast_track"]');
+      await firstRunFinished;
       await page.waitForFunction(
         () =>
           Boolean(document.querySelector('[data-testid="ws-stage-badge"]')?.textContent?.includes("研发中")) &&
@@ -383,7 +397,16 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
       await page.type('[data-criterion-idx="0"] [data-crit-field="command"]', "echo fast-ok");
       await clickReady(page, '[data-testid="save-spec-btn"]');
       await page.waitForFunction(() => !document.querySelector('[data-testid="spec-editor"]'), { timeout: 5000 });
+      const secondRunFinished = new Promise<void>((resolve) => {
+        const unsub = executor.subscribe((ev) => {
+          if (ev.type === "agent.run.finished" && ev.requirementId === "REQ-002") {
+            unsub();
+            resolve();
+          }
+        });
+      });
       await clickReady(page, '[data-testid="action-authorize_fast_track"]');
+      await secondRunFinished;
       await page.waitForFunction(() => !document.querySelector('[data-testid="live-agent-banner"]'), { timeout: 5000 });
       await clickReady(page, '[data-testid="action-run_all_verifications"]');
       await clickReady(page, '[data-testid="action-accept"]');

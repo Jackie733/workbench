@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { withCodeRootLock } from "./code_lock.ts";
 import { getRequirement, recordVerification } from "./engine.ts";
 import { WorkbenchError } from "./errors.ts";
 import { atomicWriteJson, canonicalRoot, readJsonStrict, withNamedAdvisoryLock } from "./fs.ts";
@@ -10,6 +11,7 @@ import { observeGitSnapshot } from "./git.ts";
 import { resolveCodeRoot } from "./sandbox.ts";
 import { MAX_EVIDENCE_BYTES, type RequirementDetail, type VerificationRecord } from "./types.ts";
 import { clipHeadTailUtf8, isSafeText, sanitizeOutput } from "./validate.ts";
+import { isManualCriterion } from "./validity.ts";
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const MIN_TIMEOUT_MS = 500;
@@ -21,6 +23,8 @@ export interface RunVerificationInput {
   command: string;
   criterionIds: string[];
   timeoutMs?: number;
+  /** Optional parent write lease ID when invoked inside an active coding run's post-gate. */
+  lockLeaseId?: string;
 }
 
 export interface RunVerificationResult {
@@ -244,19 +248,18 @@ export async function runVerification(
   if (preDetail.state.stage === "done" || preDetail.state.stage === "cancelled") {
     throw new WorkbenchError("invalid_transition", `终态需求（${preDetail.state.stage}）不能执行验证`);
   }
-  const validCriteria = new Set(preDetail.state.criteria.map((c) => c.id));
+  const criteriaById = new Map(preDetail.state.criteria.map((c) => [c.id, c]));
   for (const cid of criterionIds) {
-    if (!validCriteria.has(cid)) {
+    const criterion = criteriaById.get(cid);
+    if (!criterion) {
       throw new WorkbenchError("invalid_input", `验收条件 ID 不存在: ${cid}`);
+    }
+    if (isManualCriterion(criterion)) {
+      throw new WorkbenchError("invalid_input", `验收条件 ${cid} 为人工核验项，必须由人类在工作台手动勾选，禁止通过自动命令验证`);
     }
   }
 
   const codeRoot = resolveCodeRoot(base, id);
-  const preSnapshot = await observeGitSnapshot(codeRoot);
-  if (!preSnapshot) {
-    throw new WorkbenchError("execution_failed", "项目目录不是 Git 仓库，无法绑定代码快照指纹");
-  }
-
   const rawTimeout = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(rawTimeout) || rawTimeout < MIN_TIMEOUT_MS || rawTimeout > MAX_TIMEOUT_MS) {
     throw new WorkbenchError(
@@ -265,69 +268,82 @@ export async function runVerification(
     );
   }
 
-  const useHeavyLock =
-    process.env.WORKBENCH_DISABLE_VERIFY_LOCK !== "1" &&
-    !isUnderTempRoot(codeRoot) &&
-    isHeavyVerificationCommand(command);
-  const execResult = useHeavyLock
-    ? await withNamedAdvisoryLock(
-        resolveHeavyVerifyLockPath(),
-        () => executeShellCommand(codeRoot, command, Math.floor(rawTimeout)),
-        {
-          waitTimeoutMs: MAX_TIMEOUT_MS,
-          staleMs: MAX_TIMEOUT_MS + 60_000,
-          pollMs: 250,
-          busyMessage: "另一个全量验证正在执行且排队等待超时，请稍后重试",
-        },
-      )
-    : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
-  const postSnapshot = await observeGitSnapshot(codeRoot);
-  if (!postSnapshot) {
-    throw new WorkbenchError("execution_failed", "命令执行后无法读取 Git 代码快照");
-  }
+  return withCodeRootLock(
+    codeRoot,
+    "write",
+    { kind: "verify", requirementId: id },
+    async () => {
+      const preSnapshot = await observeGitSnapshot(codeRoot);
+      if (!preSnapshot) {
+        throw new WorkbenchError("execution_failed", "项目目录不是 Git 仓库，无法绑定代码快照指纹");
+      }
 
-  const fullSanitized = sanitizeOutput(execResult.rawOutput, MAX_EVIDENCE_BYTES);
-  const previewSanitized = clipHeadTailUtf8(fullSanitized.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
-  const verificationId = `V-${execResult.endedAt}-${randomUUID().slice(0, 8)}`;
-  const passed = !execResult.timedOut && execResult.exitCode === 0;
+      const useHeavyLock =
+        process.env.WORKBENCH_DISABLE_VERIFY_LOCK !== "1" &&
+        !isUnderTempRoot(codeRoot) &&
+        isHeavyVerificationCommand(command);
+      const execResult = useHeavyLock
+        ? await withNamedAdvisoryLock(
+            resolveHeavyVerifyLockPath(),
+            () => executeShellCommand(codeRoot, command, Math.floor(rawTimeout)),
+            {
+              waitTimeoutMs: MAX_TIMEOUT_MS,
+              staleMs: MAX_TIMEOUT_MS + 60_000,
+              pollMs: 250,
+              busyMessage: "另一个全量验证正在执行且排队等待超时，请稍后重试",
+            },
+          )
+        : await executeShellCommand(codeRoot, command, Math.floor(rawTimeout));
+      const postSnapshot = await observeGitSnapshot(codeRoot);
+      if (!postSnapshot) {
+        throw new WorkbenchError("execution_failed", "命令执行后无法读取 Git 代码快照");
+      }
 
-  const record: VerificationRecord = {
-    id: verificationId,
-    command,
-    cwd: ".",
-    criterionIds,
-    specHash: preDetail.state.specHash,
-    codeSnapshotHash: postSnapshot.fingerprint,
-    exitCode: execResult.exitCode,
-    timedOut: execResult.timedOut,
-    durationMs: execResult.durationMs,
-    startedAt: execResult.startedAt,
-    endedAt: execResult.endedAt,
-    passed,
-    outputPath: `evidence/verify-${verificationId}.log`,
-    outputPreview: previewSanitized.text,
-    truncated: execResult.truncatedByBuffer || fullSanitized.truncated,
-  };
+      const fullSanitized = sanitizeOutput(execResult.rawOutput, MAX_EVIDENCE_BYTES);
+      const previewSanitized = clipHeadTailUtf8(fullSanitized.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
+      const verificationId = `V-${execResult.endedAt}-${randomUUID().slice(0, 8)}`;
+      const passed = !execResult.timedOut && execResult.exitCode === 0;
 
-  const detail = await recordVerification(base, id, {
-    record,
-    rawLog: fullSanitized.text,
-    currentCodeSnapshotHash: postSnapshot.fingerprint,
-  });
+      const record: VerificationRecord = {
+        id: verificationId,
+        command,
+        cwd: ".",
+        criterionIds,
+        specHash: preDetail.state.specHash,
+        codeSnapshotHash: postSnapshot.fingerprint,
+        exitCode: execResult.exitCode,
+        timedOut: execResult.timedOut,
+        durationMs: execResult.durationMs,
+        startedAt: execResult.startedAt,
+        endedAt: execResult.endedAt,
+        passed,
+        outputPath: `evidence/verify-${verificationId}.log`,
+        outputPreview: previewSanitized.text,
+        truncated: execResult.truncatedByBuffer || fullSanitized.truncated,
+      };
 
-  if (passed && isVerifyCacheEnabled(codeRoot)) {
-    writeVerifyCache({
-      command,
-      codeSnapshotHash: postSnapshot.fingerprint,
-      durationMs: execResult.durationMs,
-      rawLog: fullSanitized.text,
-      outputPreview: previewSanitized.text,
-      truncated: record.truncated,
-      cachedAt: execResult.endedAt,
-    });
-  }
+      const detail = await recordVerification(base, id, {
+        record,
+        rawLog: fullSanitized.text,
+        currentCodeSnapshotHash: postSnapshot.fingerprint,
+      });
 
-  return { detail, record, log: fullSanitized.text };
+      if (passed && isVerifyCacheEnabled(codeRoot)) {
+        writeVerifyCache({
+          command,
+          codeSnapshotHash: postSnapshot.fingerprint,
+          durationMs: execResult.durationMs,
+          rawLog: fullSanitized.text,
+          outputPreview: previewSanitized.text,
+          truncated: record.truncated,
+          cachedAt: execResult.endedAt,
+        });
+      }
+
+      return { detail, record, log: fullSanitized.text };
+    },
+    { parentLeaseId: input.lockLeaseId },
+  );
 }
 
 function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
@@ -346,7 +362,7 @@ function isSubsumedBunTestCommand(cmd: string, codeRoot: string): boolean {
 export async function runAllVerifications(
   root: string,
   id: string,
-  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean; failFast?: boolean } = {},
+  options: { timeoutMs?: number; force?: boolean; includeOptional?: boolean; failFast?: boolean; lockLeaseId?: string } = {},
 ): Promise<{ detail: RequirementDetail; runs: RunVerificationResult[] }> {
   const base = canonicalRoot(root);
   const current = getRequirement(base, id);
@@ -388,78 +404,92 @@ export async function runAllVerifications(
     }
   }
 
-  const preSnapshot = options.force === true ? null : await observeGitSnapshot(codeRoot);
-  const runs: RunVerificationResult[] = [];
-  let latestDetail = current;
   // Run fast commands (typecheck, targeted tests) before heavy full-suite commands so failFast catches errors quickly.
   const orderedGroups = Array.from(groups.entries()).sort(([cmdA], [cmdB]) => {
     const heavyA = isHeavyVerificationCommand(cmdA) ? 1 : 0;
     const heavyB = isHeavyVerificationCommand(cmdB) ? 1 : 0;
     return heavyA - heavyB;
   });
-  for (const [command, criterionIds] of orderedGroups) {
-    if (options.force !== true && preSnapshot) {
-      const existing = [...latestDetail.state.verifications].reverse().find(
-        (v) =>
-          v.passed &&
-          v.command === command &&
-          v.specHash === latestDetail.state.specHash &&
-          v.codeSnapshotHash === preSnapshot.fingerprint &&
-          criterionIds.every((cid) => v.criterionIds.includes(cid)),
-      );
-      if (existing) {
-        runs.push({ detail: latestDetail, record: existing, log: "", reused: true });
-        continue;
-      }
 
-      if (isVerifyCacheEnabled(codeRoot)) {
-        const cached = readVerifyCache(command, preSnapshot.fingerprint);
-        if (cached) {
-          const now = Date.now();
-          const verificationId = `V-${now}-${randomUUID().slice(0, 8)}`;
-          const rawWithNote = sanitizeOutput(
-            `[workbench] 命中同快照跨需求验证缓存 (${preSnapshot.fingerprint.slice(0, 12)})\n${cached.rawLog}`,
-            MAX_EVIDENCE_BYTES,
+  return withCodeRootLock(
+    codeRoot,
+    "write",
+    { kind: "verify_all", requirementId: id },
+    async (lease) => {
+      let currentSnap = options.force === true ? null : await observeGitSnapshot(codeRoot);
+      const runs: RunVerificationResult[] = [];
+      let latestDetail = current;
+
+      for (const [command, criterionIds] of orderedGroups) {
+        if (options.force !== true && currentSnap) {
+          const existing = [...latestDetail.state.verifications].reverse().find(
+            (v) =>
+              v.passed &&
+              v.command === command &&
+              v.specHash === latestDetail.state.specHash &&
+              v.codeSnapshotHash === currentSnap!.fingerprint &&
+              criterionIds.every((cid) => v.criterionIds.includes(cid)),
           );
-          const preview = clipHeadTailUtf8(rawWithNote.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
-          const record: VerificationRecord = {
-            id: verificationId,
-            command,
-            cwd: ".",
-            criterionIds,
-            specHash: latestDetail.state.specHash,
-            codeSnapshotHash: preSnapshot.fingerprint,
-            exitCode: 0,
-            timedOut: false,
-            durationMs: cached.durationMs,
-            startedAt: now,
-            endedAt: now,
-            passed: true,
-            outputPath: `evidence/verify-${verificationId}.log`,
-            outputPreview: preview.text,
-            truncated: cached.truncated || rawWithNote.truncated,
-          };
-          latestDetail = await recordVerification(base, id, {
-            record,
-            rawLog: rawWithNote.text,
-            currentCodeSnapshotHash: preSnapshot.fingerprint,
-          });
-          runs.push({ detail: latestDetail, record, log: rawWithNote.text, reused: true });
-          continue;
+          if (existing) {
+            runs.push({ detail: latestDetail, record: existing, log: "", reused: true });
+            continue;
+          }
+
+          if (isVerifyCacheEnabled(codeRoot)) {
+            const cached = readVerifyCache(command, currentSnap.fingerprint);
+            if (cached) {
+              const now = Date.now();
+              const verificationId = `V-${now}-${randomUUID().slice(0, 8)}`;
+              const rawWithNote = sanitizeOutput(
+                `[workbench] 命中同快照跨需求验证缓存 (${currentSnap.fingerprint.slice(0, 12)})\n${cached.rawLog}`,
+                MAX_EVIDENCE_BYTES,
+              );
+              const preview = clipHeadTailUtf8(rawWithNote.text, PREVIEW_HEAD_BYTES, PREVIEW_TAIL_BYTES);
+              const record: VerificationRecord = {
+                id: verificationId,
+                command,
+                cwd: ".",
+                criterionIds,
+                specHash: latestDetail.state.specHash,
+                codeSnapshotHash: currentSnap.fingerprint,
+                exitCode: 0,
+                timedOut: false,
+                durationMs: cached.durationMs,
+                startedAt: now,
+                endedAt: now,
+                passed: true,
+                outputPath: `evidence/verify-${verificationId}.log`,
+                outputPreview: preview.text,
+                truncated: cached.truncated || rawWithNote.truncated,
+              };
+              latestDetail = await recordVerification(base, id, {
+                record,
+                rawLog: rawWithNote.text,
+                currentCodeSnapshotHash: currentSnap.fingerprint,
+              });
+              runs.push({ detail: latestDetail, record, log: rawWithNote.text, reused: true });
+              continue;
+            }
+          }
+        }
+        const result = await runVerification(base, id, {
+          command,
+          criterionIds,
+          timeoutMs: options.timeoutMs,
+          lockLeaseId: lease.id,
+        });
+        runs.push(result);
+        latestDetail = result.detail;
+        if (options.force !== true) {
+          currentSnap = await observeGitSnapshot(codeRoot);
+        }
+        if (options.failFast === true && !result.record.passed) {
+          break;
         }
       }
-    }
-    const result = await runVerification(base, id, {
-      command,
-      criterionIds,
-      timeoutMs: options.timeoutMs,
-    });
-    runs.push(result);
-    latestDetail = result.detail;
-    if (options.failFast === true && !result.record.passed) {
-      break;
-    }
-  }
 
-  return { detail: latestDetail, runs };
+      return { detail: latestDetail, runs };
+    },
+    { parentLeaseId: options.lockLeaseId },
+  );
 }

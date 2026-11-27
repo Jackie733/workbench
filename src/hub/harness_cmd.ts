@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { atomicWriteFile } from "../core/fs.ts";
-import type { AgentAction } from "../core/types.ts";
+import type { AgentAction, HarnessId } from "../core/types.ts";
 import { resolveHubDir } from "./registry.ts";
 import type { HarnessInfo, ModelTarget } from "./types.ts";
 
@@ -9,6 +9,67 @@ export interface BuiltCommand {
   command: string;
   args: string[];
   displayCommand: string;
+}
+
+export interface HarnessIsolationCapability {
+  harness: HarnessId;
+  supported: boolean;
+  cliFlags: readonly string[];
+  envOverrides: Readonly<Record<string, string>>;
+  note: string;
+}
+
+/**
+ * Explicit per-harness support matrix for isolating unrelated user-global skills/hooks/extensions
+ * during headless Workbench runs while preserving repository instructions and normal read/write tools (WB-17 / FLOW §1.6).
+ */
+export const HARNESS_ISOLATION_MATRIX: Readonly<Record<HarnessId, HarnessIsolationCapability>> = {
+  omp: {
+    harness: "omp",
+    supported: true,
+    cliFlags: ["--no-skills", "--no-extensions"],
+    envOverrides: {},
+    note: "Disables global skills and extension discovery while keeping built-in tools and repo context files.",
+  },
+  agy: {
+    harness: "agy",
+    supported: true,
+    cliFlags: ["--disable-slash-commands"],
+    envOverrides: {},
+    note: "Disables user global slash command and skill expansion in print mode while keeping built-in tools.",
+  },
+  qodercn: {
+    harness: "qodercn",
+    supported: true,
+    cliFlags: ["--setting-sources", "project,local"],
+    envOverrides: {},
+    note: "Loads project and local setting sources only, isolating unrelated user-global skills and hooks.",
+  },
+  opencode: {
+    harness: "opencode",
+    supported: true,
+    cliFlags: [],
+    envOverrides: {
+      OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+    },
+    note: "Disables external Claude Code user-global skill auto-loading via env while preserving OPENCODE_CONFIG_CONTENT tool guards.",
+  },
+  codex: {
+    harness: "codex",
+    supported: false,
+    cliFlags: [],
+    envOverrides: {},
+    note: "codex exec reads auth and provider settings from ~/.codex/config.toml and exposes no standalone skill-isolation flag.",
+  },
+};
+
+export function buildHarnessIsolationEnv(
+  harness: HarnessId,
+  options: { isolateGlobalConfig?: boolean } = {},
+): Record<string, string> {
+  if (options.isolateGlobalConfig === false) return {};
+  const cap = HARNESS_ISOLATION_MATRIX[harness];
+  return cap?.supported ? { ...cap.envOverrides } : {};
 }
 
 export type TimeoutReason = "idle" | "max_duration";
@@ -123,6 +184,8 @@ export function buildHarnessCommand(
     allowResumeOnReview?: boolean;
     harnesses: HarnessInfo[];
     structuredJson?: boolean;
+    /** Defaults to true: inject harness-specific global skill/hook isolation flags where supported (WB-17). */
+    isolateGlobalConfig?: boolean;
   },
 ): BuiltCommand {
   const info = ctx.harnesses.find((h) => h.id === target.harness);
@@ -130,6 +193,8 @@ export function buildHarnessCommand(
   const model = target.model;
   const effort = target.reasoningEffort;
   const structuredJson = ctx.structuredJson !== false;
+  const isolateGlobal = ctx.isolateGlobalConfig !== false;
+  const isolationFlags = isolateGlobal ? [...HARNESS_ISOLATION_MATRIX[target.harness].cliFlags] : [];
   const isReadOnly = ctx.action === "ask" || ctx.action === "review";
   const effectiveSessionId =
     ctx.nativeSessionId && (ctx.action !== "review" || ctx.allowResumeOnReview === true)
@@ -197,6 +262,7 @@ export function buildHarnessCommand(
         ctx.root,
         ...(structuredJson ? ["-o", "stream-json"] : []),
         ...permissionFlags,
+        ...isolationFlags,
         "--append-system-prompt",
         QODER_PRINT_MODE_GUARD,
         ...(model && model !== "default" && model !== "Auto" ? ["-m", model] : []),
@@ -279,6 +345,7 @@ export function buildHarnessCommand(
         ...(structuredJson ? ["--output-format", "stream-json"] : []),
         ...modeFlags,
         ...permissionFlags,
+        ...isolationFlags,
         ...(resolvedModel && resolvedModel !== "default" ? ["--model", resolvedModel] : []),
         ...(resolvedEffort ? ["--effort", resolvedEffort] : []),
         ...(effectiveSessionId ? ["--conversation", effectiveSessionId] : []),
@@ -296,6 +363,7 @@ export function buildHarnessCommand(
         "-p",
         ...(structuredJson ? ["--mode=json"] : []),
         `--cwd=${ctx.root}`,
+        ...isolationFlags,
         ...(model && model !== "default" ? [`--model=${model}`] : []),
         ...(effort ? [`--thinking=${effort}`] : []),
         ...(effectiveSessionId ? [`--resume=${effectiveSessionId}`] : []),
