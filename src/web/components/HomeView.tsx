@@ -465,7 +465,7 @@ export function HomeView() {
               title={t(language, "home.sandboxesRefresh")}
               aria-label={t(language, "home.sandboxesRefresh")}
               onAction={async () => {
-                const fresh = await runBusy(() => api.getProjectSandboxes(true));
+                const fresh = await runBusy(() => api.getProjectSandboxes(activeProjectId, true));
                 if (fresh) {
                   queryClient.setQueryData<ProjectSandboxesResponse>(
                     queryKeys.projectSandboxes(activeProjectId),

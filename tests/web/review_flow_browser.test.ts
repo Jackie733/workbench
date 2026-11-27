@@ -238,6 +238,10 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         { timeout: 5000 },
       );
 
+      const highFinding = '[data-testid="review-findings-list"] label:first-child [data-slot="checkbox"]';
+      await clickReady(page, highFinding);
+      await page.waitForSelector(`${highFinding}[aria-checked="false"]`);
+
       await clickReady(page, '[data-testid="run-review-btn"]');
       const deadline1 = Date.now() + 8000;
       while (Date.now() < deadline1) {
@@ -255,6 +259,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       expect(dispatched[0]?.action).toBe("review");
       expect(dispatched[0]?.harness).toBe("codex");
       expect(dispatched[0]?.model).toBe("codex-auto-review");
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.getAttribute("aria-checked"), highFinding)).toBe("false");
+      await clickReady(page, highFinding);
+      await page.waitForSelector(`${highFinding}[aria-checked="true"]`);
 
       // 5. Clicking review-fix-btn moves awaiting_acceptance -> implementing (preserving approval!) and dispatches "fix" (NOT "design")
       await clickReady(page, '[data-testid="review-fix-btn"]');
@@ -590,7 +597,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     }
   }, 30_000);
 
-  test("Phase 2: displays review round badge, prior round history, and converts remaining findings to follow-up pain points", async () => {
+  test("a replacement review resets selection and defaults to all findings when all are low", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "ReviewRoundsWeb", privacyMode: "local" });
@@ -615,19 +622,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       reviewedSpecHash: specHash,
       reviewedCodeSnapshotHash: snap.fingerprint,
     });
-    fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
-    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    const snap2 = (await observeGitSnapshot(repo))!;
-    await recordReviewReport(repo, "REQ-001", {
-      reviewerHarness: "codex",
-      reviewerModel: "gpt-6.2-sol",
-      verdict: "concern",
-      summary: "第2轮仅剩极端窄屏建议",
-      markdown: "round 2",
-      findings: [{ id: "F-2", severity: "medium", title: "极长模型名在窄抽屉裁切" }],
-      reviewedSpecHash: specHash,
-      reviewedCodeSnapshotHash: snap2.fingerprint,
-    });
 
     const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
     servers.push(server);
@@ -639,6 +633,38 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      const findingCheckboxes = '[data-testid="review-findings-list"] [data-slot="checkbox"]';
+      await page.waitForSelector(`${findingCheckboxes}[aria-checked="true"]`, { timeout: 5000 });
+      await clickReady(page, findingCheckboxes);
+      await page.waitForSelector(`${findingCheckboxes}[aria-checked="false"]`, { timeout: 5000 });
+
+      fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
+      await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+      const snap2 = (await observeGitSnapshot(repo))!;
+      await recordReviewReport(repo, "REQ-001", {
+        reviewerHarness: "codex",
+        reviewerModel: "gpt-6.2-sol",
+        verdict: "concern",
+        summary: "第2轮仅剩极端窄屏建议",
+        markdown: "round 2",
+        findings: [
+          { id: "F-1", severity: "low", title: "按钮收缩建议" },
+          { id: "F-2", severity: "low", title: "极长模型名在窄抽屉裁切" },
+        ],
+        reviewedSpecHash: specHash,
+        reviewedCodeSnapshotHash: snap2.fingerprint,
+      });
+
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("第2轮仅剩极端窄屏建议") === true,
+        { timeout: 5000 },
+      );
+      const checkedFindings = await page.evaluate((selector: string) =>
+        Array.from(document.querySelectorAll(selector), (checkbox) => checkbox.getAttribute("aria-checked")), findingCheckboxes);
+      expect(checkedFindings).toEqual(["true", "true"]);
+      const fixLabel = await page.evaluate(() => document.querySelector('[data-testid="review-fix-btn"]')?.textContent ?? "");
+      expect(fixLabel).toContain("按选中的 2 项修复");
+
       await clickReady(page, '[data-testid="workspace-action-details-btn"]');
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10000 });
 
