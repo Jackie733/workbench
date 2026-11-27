@@ -1320,9 +1320,13 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
     });
     await createRequirement(root, { goal: "普通草稿需求" });
 
-    // Edit 4 files so DiffViewerPanel displays diff-file-search
-    for (const file of ["alpha.ts", "beta.ts", "gamma.ts", "delta.ts"]) {
-      fs.writeFileSync(path.join(root, file), `export const name = "${file}";\n`);
+    // Enough files and code lines to exercise both independent scroll containers.
+    const diffFiles = ["alpha.ts", "beta.ts", "gamma.ts", "delta.ts",
+      ...Array.from({ length: 24 }, (_, i) => `extra-${i}.ts`)];
+    for (const file of diffFiles) {
+      fs.writeFileSync(path.join(root, file), file === "alpha.ts"
+        ? Array.from({ length: 180 }, (_, i) => `export const line${i} = ${i};\n`).join("")
+        : `export const name = "${file}";\n`);
     }
 
     const server = await startWorkbenchServer({ root, port: 0, writeDiscovery: false });
@@ -1406,9 +1410,46 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await clickReady(page, '[data-action="set-scope"][data-value="active"]');
 
       // 3. Multi-file diff filtering, zero-match empty state, and independent drawer filter state
+      const expectIndependentDiffScroll = async (panel: string) => {
+        const layout = await page.evaluate((selector: string) => {
+          const root = document.querySelector(selector)!;
+          const files = root.querySelector(".diff-files") as HTMLElement;
+          const code = root.querySelector(".diff-code") as HTMLElement;
+          const controls = [...root.querySelectorAll('[role="radio"], [data-testid$="refresh-diff-btn"]')];
+          const top = files.getBoundingClientRect().top;
+          code.scrollTop = 100;
+          const codeScroll = code.scrollTop;
+          const filesAfterCode = files.scrollTop;
+          files.scrollTop = 100;
+          const result = {
+            codeScroll, filesAfterCode, fileScroll: files.scrollTop,
+            codeAfterFiles: code.scrollTop, fileTopDelta: files.getBoundingClientRect().top - top,
+            controls: controls.map((el) => ({
+              text: el.textContent?.trim(), label: el.getAttribute("aria-label"),
+              title: el.getAttribute("title"), height: el.getBoundingClientRect().height,
+            })),
+          };
+          code.scrollTop = 0;
+          files.scrollTop = 0;
+          return result;
+        }, panel);
+        expect(layout.codeScroll).toBeGreaterThan(0);
+        expect(layout.filesAfterCode).toBe(0);
+        expect(layout.fileScroll).toBeGreaterThan(0);
+        expect(layout.codeAfterFiles).toBe(layout.codeScroll);
+        expect(layout.fileTopDelta).toBe(0);
+        expect(layout.controls).toHaveLength(3);
+        for (const control of layout.controls) {
+          expect(control.text).toBe("");
+          expect(control.label).toBeTruthy();
+          expect(control.title).toBe(control.label);
+        }
+        expect(layout.controls[2]!.height).toBe(28);
+      };
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await clickReady(page, '[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-file-search"]', { timeout: 5000 });
+      await expectIndependentDiffScroll('[data-testid="diff-viewer-panel"]');
       await page.type('[data-testid="diff-file-search"]', "beta");
       await page.waitForFunction(
         () => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length === 1,
@@ -1425,7 +1466,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       ).toBe(false);
       await clickReady(page, '[data-testid="diff-clear-filter-btn"]');
       await page.waitForFunction(
-        () => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length === 4,
+        () => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length === 28,
         { timeout: 5000 },
       );
 
@@ -1434,6 +1475,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         () => (document.querySelector('[data-testid="drawer-diff-panel"]')?.getBoundingClientRect().width ?? 0) >= 300,
         { timeout: 5000 },
       );
+      await expectIndependentDiffScroll('[data-testid="drawer-diff-panel"]');
       await clickReady(page, '[data-testid="drawer-diff-file-search"]');
       await page.type('[data-testid="drawer-diff-file-search"]', "gamma");
       await page.waitForFunction(
@@ -1442,7 +1484,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       );
       expect(
         await page.evaluate(() => document.querySelectorAll('[data-testid="diff-viewer-panel"] .diff-file-btn').length),
-      ).toBe(4);
+      ).toBe(diffFiles.length);
       await clickReady(page, '[data-testid="toggle-drawer-btn"]');
 
       // 4. Clicking back-home-btn preserves in-progress design editing draft

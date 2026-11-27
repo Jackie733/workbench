@@ -23,9 +23,7 @@ import {
   History,
   Link2,
   Lock,
-  Maximize2,
   MessageSquare,
-  Minimize2,
   PanelRightClose,
   PanelRightOpen,
   Pencil,
@@ -2240,9 +2238,9 @@ function ScreenshotEvidenceSection({ d, runLocked }: { d: RequirementDetail; run
   );
 }
 
-function DiffCode({ lines, expanded }: { lines: string[]; expanded: boolean }) {
+function DiffCode({ lines }: { lines: string[] }) {
   const html = useMemo(() => renderDiffLinesHtml(lines), [lines]);
-  return <div className={`diff-code ${expanded ? "expanded" : ""}`} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div className="diff-code" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail; inDrawer?: boolean }) {
@@ -2250,11 +2248,9 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
   const activeProjectId = useUiStore((s) => s.activeProjectId);
   const storeSelectedDiffFile = useUiStore((s) => s.selectedDiffFile);
   const storeDiffViewMode = useUiStore((s) => s.diffViewMode);
-  const diffExpandedHeight = useUiStore((s) => s.diffExpandedHeight);
   const storeDiffFileQuery = useUiStore((s) => s.diffFileQuery);
   const storeSetSelectedDiffFile = useUiStore((s) => s.setSelectedDiffFile);
   const storeSetDiffViewMode = useUiStore((s) => s.setDiffViewMode);
-  const setDiffExpandedHeight = useUiStore((s) => s.setDiffExpandedHeight);
   const storeSetDiffFileQuery = useUiStore((s) => s.setDiffFileQuery);
   const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
   const setDrawerTab = useUiStore((s) => s.setDrawerTab);
@@ -2321,7 +2317,6 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
   );
 
   const effectiveMode = inDrawer && diffViewMode === "split" && parsedFiles.length <= 1 ? "unified" : diffViewMode;
-  const isExpanded = !inDrawer && diffExpandedHeight;
 
   return (
     <>
@@ -2355,7 +2350,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
             {parsedFiles.length > 0 && (
               <SegmentedControl
                 size="sm"
-                className="h-7 [&_[data-slot=segmented-control-item]]:h-6"
+                className="h-8 sm:h-7 [&_[data-slot=segmented-control-item]]:h-7 sm:[&_[data-slot=segmented-control-item]]:h-6 [&_[data-slot=segmented-control-item]]:w-7 [&_[data-slot=segmented-control-item]]:px-0"
                 data-testid={tid("diff-view-mode-toggle")}
                 render={
                   <RadioGroupPrimitive
@@ -2365,25 +2360,21 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                   />
                 }
               >
-                <SegmentedControlItem render={<RadioPrimitive.Root value="split" />}>
-                  <Icon icon={Columns2} size={14} /> {t(language, "changes.viewMode.split")}
+                <SegmentedControlItem
+                  render={<RadioPrimitive.Root value="split" />}
+                  aria-label={t(language, "changes.viewMode.split")}
+                  title={t(language, "changes.viewMode.split")}
+                >
+                  <Icon icon={Columns2} size={14} />
                 </SegmentedControlItem>
-                <SegmentedControlItem render={<RadioPrimitive.Root value="unified" />}>
-                  <Icon icon={FileText} size={14} /> {t(language, "changes.viewMode.unified")}
+                <SegmentedControlItem
+                  render={<RadioPrimitive.Root value="unified" />}
+                  aria-label={t(language, "changes.viewMode.unified")}
+                  title={t(language, "changes.viewMode.unified")}
+                >
+                  <Icon icon={FileText} size={14} />
                 </SegmentedControlItem>
               </SegmentedControl>
-            )}
-            {!inDrawer && parsedFiles.length > 0 && (
-              <Button
-                size="sm"
-                variant="outline"
-                type="button"
-                data-testid="diff-expand-height-btn"
-                onClick={() => setDiffExpandedHeight(!diffExpandedHeight)}
-              >
-                <Icon icon={diffExpandedHeight ? Minimize2 : Maximize2} size={14} />{" "}
-                {diffExpandedHeight ? t(language, "changes.collapseHeight") : t(language, "changes.expandHeight")}
-              </Button>
             )}
             <Button
               size="sm"
@@ -2418,15 +2409,18 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
               </Button>
             ) : (
               <Button
-                size="xs"
+                size="icon-sm"
                 variant="outline"
                 type="button"
+                aria-label={t(language, "changes.refreshDiff")}
+                title={t(language, "changes.refreshDiff")}
+                data-testid={tid("refresh-diff-btn")}
                 onClick={() => {
                   void queryClient.invalidateQueries({ queryKey: queryKeys.diff(activeProjectId, s.id, false) });
                   showToastKey("changes.refreshedDiff");
                 }}
               >
-                <Icon icon={RefreshCw} size={14} /> {t(language, "changes.refreshDiff")}
+                <Icon icon={RefreshCw} size={14} />
               </Button>
             )}
           </div>
@@ -2488,7 +2482,7 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
             {isDone ? t(language, "changes.emptyDone") : t(language, "changes.emptyLive")}
           </p>
         ) : effectiveMode === "unified" ? (
-          <div className={`diff-unified-list ${isExpanded ? "expanded" : ""}`} data-testid={tid("diff-unified-list")}>
+          <div className="diff-unified-list" data-testid={tid("diff-unified-list")}>
             {parsedFiles.length > 3 && (
               <InputGroup className="mb-1">
                 <InputGroupAddon>
@@ -2507,11 +2501,11 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
             {parsedFiles.length === 0 ? (
               rawDiffHtml ? (
                 <div
-                  className={`diff-code ${isExpanded ? "expanded" : ""}`}
+                  className="diff-code"
                   dangerouslySetInnerHTML={{ __html: rawDiffHtml }}
                 />
               ) : (
-                <div className="diff-files" style={{ maxHeight: "none" }}>
+                <div className="diff-files">
                   {diffObs.files.map((f) => (
                     <div key={f.path} className="diff-file-btn" style={{ cursor: "default" }}>
                       <span>{f.path}</span>
@@ -2541,13 +2535,13 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12.5, fontWeight: 600 }}>{f.path}</span>
                     <span className="muted xs">+{f.additions}/-{f.deletions}</span>
                   </div>
-                  <DiffCode lines={f.lines} expanded={isExpanded} />
+                  <DiffCode lines={f.lines} />
                 </div>
               ))
             )}
           </div>
         ) : (
-          <div className={`diff-split ${isExpanded ? "expanded" : ""} ${inDrawer ? "in-drawer" : ""}`}>
+          <div className={`diff-split ${inDrawer ? "in-drawer" : ""}`}>
             <div className="diff-files">
               {parsedFiles.length > 3 && (
                 <div className="diff-file-search-wrap p-1 border-b">
@@ -2602,9 +2596,9 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
                 </AlertDescription>
               </Alert>
             ) : activeDiffFile ? (
-              <DiffCode lines={activeDiffFile.lines} expanded={isExpanded} />
+              <DiffCode lines={activeDiffFile.lines} />
             ) : (
-              <div className={`diff-code ${isExpanded ? "expanded" : ""}`} dangerouslySetInnerHTML={{ __html: rawDiffHtml }} />
+              <div className="diff-code" dangerouslySetInnerHTML={{ __html: rawDiffHtml }} />
             )}
           </div>
         )}

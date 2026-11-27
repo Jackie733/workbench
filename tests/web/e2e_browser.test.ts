@@ -250,29 +250,27 @@ suite("WB-05 & WB-06 real Chromium E2E flows", () => {
 
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 5000 });
 
-      // Inspect Code Changes tab (split/unified/expand + isolated drawer) and Verify & Shots tab (shortcut + log)
+      // Inspect Code Changes tab (split/unified + isolated drawer) and Verify & Shots tab (shortcut + log)
       await page.click('[data-testid="tab-diff"]');
       await page.waitForSelector('[data-testid="diff-viewer-panel"] .diff-code', { timeout: 5000 });
       const gitDiffText = await page.evaluate(() => document.querySelector('[data-testid="diff-viewer-panel"] .diff-code')?.textContent ?? "");
       expect(gitDiffText).toContain("export const sub");
+      await page.evaluate(() => {
+        document.querySelector('[data-testid="diff-view-mode-toggle"]')?.scrollIntoView({ block: "center" });
+      });
       // REQ-015: 需求详情「更多」按钮与 Diff 工具栏紧凑控件统一为 28px 单行。
       await expectControlsAligned(page, ['[data-testid="more-menu-btn"]'], 28);
       await expectControlsAligned(
         page,
         [
           '[data-testid="diff-view-mode-toggle"]',
-          '[data-testid="diff-expand-height-btn"]',
+          '[data-testid="refresh-diff-btn"]',
           '[data-testid="dock-diff-to-drawer-btn"]',
         ],
         28,
       );
       await clickReady(page, '[data-testid="diff-view-mode-toggle"] [role="radio"]:nth-of-type(2)');
       await page.waitForSelector('[data-testid="diff-unified-list"]', { timeout: 5000 });
-      await clickReady(page, '[data-testid="diff-expand-height-btn"]');
-      expect(
-        await page.evaluate(() => document.querySelector('[data-testid="diff-unified-list"]')?.classList.contains("expanded")),
-      ).toBe(true);
-      await clickReady(page, '[data-testid="diff-expand-height-btn"]');
       await clickReady(page, '[data-testid="diff-view-mode-toggle"] [role="radio"]:nth-of-type(1)');
 
       await clickReady(page, '[data-testid="dock-diff-to-drawer-btn"]');

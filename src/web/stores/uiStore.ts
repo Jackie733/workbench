@@ -101,7 +101,6 @@ export interface UiStoreState {
   inspectedRunId: string | null;
   selectedDiffFile: string | null;
   diffViewMode: DiffViewMode;
-  diffExpandedHeight: boolean;
   diffFileQuery: string;
 
   designViewVersion: number | null;
@@ -144,7 +143,6 @@ export interface UiStoreState {
   setInspectedRunId: (runId: string | null) => void;
   setSelectedDiffFile: (file: string | null) => void;
   setDiffViewMode: (mode: DiffViewMode) => void;
-  setDiffExpandedHeight: (expanded: boolean) => void;
   setDiffFileQuery: (query: string) => void;
   setDesignViewVersion: (v: number | null) => void;
   setDesignComparePrev: (v: boolean) => void;
@@ -192,7 +190,6 @@ export const useUiStore = create<UiStoreState>((set) => ({
   inspectedRunId: null,
   selectedDiffFile: null,
   diffViewMode: "split",
-  diffExpandedHeight: false,
   diffFileQuery: "",
 
   designViewVersion: null,
@@ -259,7 +256,6 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setInspectedRunId: (inspectedRunId) => set({ inspectedRunId }),
   setSelectedDiffFile: (selectedDiffFile) => set({ selectedDiffFile }),
   setDiffViewMode: (diffViewMode) => set({ diffViewMode }),
-  setDiffExpandedHeight: (diffExpandedHeight) => set({ diffExpandedHeight }),
   setDiffFileQuery: (diffFileQuery) => set({ diffFileQuery }),
   setDesignViewVersion: (designViewVersion) => set({ designViewVersion }),
   setDesignComparePrev: (designComparePrev) => set({ designComparePrev }),
