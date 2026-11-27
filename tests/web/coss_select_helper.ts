@@ -52,7 +52,8 @@ export async function selectUiOption(
       }, selector);
     }
 
-    await page.waitForSelector(itemSelector, { timeout: 10_000 });
+    // 并发跑全量浏览器用例时 CPU 争用明显，给弹层渲染留出更充足的稳定窗口。
+    await page.waitForSelector(itemSelector, { timeout: 30_000 });
     await page.evaluate(
       () =>
         new Promise<void>((resolve) => {

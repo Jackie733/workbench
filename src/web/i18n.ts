@@ -720,6 +720,10 @@ const zhCN = {
   "attachment.screenshotNamePrefix": "截图",
   "attachment.deleteAria": "删除附件 {name}",
   "attachment.downloadAria": "下载附件 {name}",
+  "attachment.openAria": "查看图片 {name}",
+  "attachment.previewCounter": "第 {index}/{total} 张 · {size}",
+  "attachment.prev": "上一张",
+  "attachment.next": "下一张",
 
   "runner.manual": "仅生成提示词 (手动复制)",
   "runner.auto": "自动",
@@ -2396,6 +2400,10 @@ const en: Record<MessageKey, string> = {
   "attachment.screenshotNamePrefix": "screenshot",
   "attachment.deleteAria": "Delete attachment {name}",
   "attachment.downloadAria": "Download attachment {name}",
+  "attachment.openAria": "View image {name}",
+  "attachment.previewCounter": "{index} of {total} · {size}",
+  "attachment.prev": "Previous",
+  "attachment.next": "Next",
 
   "runner.manual": "Prompt only (manual copy)",
   "runner.auto": "Auto",

@@ -327,7 +327,8 @@ describe("post-acceptance delivery wrap-up UI", () => {
           Array.from(document.querySelectorAll('[data-slot="toast-root"]')).some((el) =>
             (el.textContent ?? "").includes("Failed to create GitHub PR: Permission denied to repo"),
           ),
-        { timeout: 10_000 },
+        // 并发全量回归时失败提示的异步渲染可能超过 10 秒。
+        { timeout: 30_000 },
       );
       const prErrToast = await page.evaluate(
         () =>

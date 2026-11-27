@@ -85,10 +85,11 @@ describe("icon dependency and bundle contract", () => {
     // to 3.2MB after adding execution observability, run audit inspector, and global InsightsView,
     // to 3.8MB raw / 720KB gzip after replacing hand-drawn SVGs with modular tree-shaken chart.js (+~98KB gzip),
     // and to 4.3MB raw / 820KB gzip after migrating all remaining UI controls to coss UI (@base-ui/react, including Select/Tabs/Checkbox/RadioGroup/AlertDialog/Tooltip),
-    // and to 4.4MB raw / 830KB gzip after FLOW v2 UI additions (worktree settings, setupScript banner, decision/stale-block/delivery controls);
-    // the un-tree-shaken catalog baseline (fixture raw ≈ 1.47MB) remains the real guard (~5.0MB if broken).
-    expect(app.raw).toBeLessThan(4_400_000);
-    expect(app.gzip).toBeLessThan(830_000);
+    // and to 4.4MB raw / 830KB gzip after FLOW v2 UI additions (worktree settings, setupScript banner, decision/stale-block/delivery controls),
+    // and to 4.55MB raw / 850KB gzip after dual-track streaming discuss UI and in-page attachment lightbox (REQ-025);
+    // the un-tree-shaken catalog baseline (fixture raw ≈ 1.52MB) remains the real guard (~5.9MB if broken).
+    expect(app.raw).toBeLessThan(4_550_000);
+    expect(app.gzip).toBeLessThan(850_000);
   });
 
   test("static named imports tree-shake instead of pulling the whole catalog", async () => {

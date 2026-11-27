@@ -1830,7 +1830,20 @@
   overflow: hidden;
   background: var(--surface);
 }
-.attachment-figure a { display: block; }
+.attachment-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: zoom-in;
+  text-align: inherit;
+}
+.attachment-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .attachment-figure img {
   display: block;
   width: 100%;
@@ -1850,6 +1863,51 @@
   right: 6px;
   background: var(--surface);
   border: 1px solid var(--border);
+}
+.attachment-lightbox-title {
+  min-width: 0;
+  max-width: 100%;
+  /* 长文件名（如连续 64 位十六进制）可在任意位置换行，并为右上角关闭按钮预留空间。 */
+  overflow-wrap: anywhere;
+  padding-right: 40px;
+}
+.attachment-lightbox-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+}
+.attachment-lightbox-image {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+@media (max-width: 640px) {
+  .attachment-lightbox-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "image image"
+      "prev next";
+    gap: 8px;
+  }
+  .attachment-lightbox-image {
+    grid-area: image;
+    max-height: 60vh;
+  }
+  .attachment-lightbox-body [data-testid="attachment-lightbox-prev"] {
+    grid-area: prev;
+    justify-self: start;
+  }
+  .attachment-lightbox-body [data-testid="attachment-lightbox-next"] {
+    grid-area: next;
+    justify-self: end;
+  }
 }
 
 /* Execution observability, structured trace, run audit & global insights */

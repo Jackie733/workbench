@@ -385,34 +385,40 @@ suite("REQ-019 loading 状态真实浏览器回归", () => {
             '[data-testid="create-and-dispatch-btn"]',
           ) as HTMLButtonElement | null;
           if (!draft || !dispatch) return false;
-          return (
+          const loading =
             draft.hasAttribute("data-loading") &&
             draft.disabled &&
             draft.getAttribute("aria-busy") === "true" &&
             Boolean(draft.querySelector('[data-slot="button-loading-indicator"]')) &&
             dispatch.disabled &&
             !dispatch.hasAttribute("data-loading") &&
-            !dispatch.querySelector('[data-slot="button-loading-indicator"]')
-          );
+            !dispatch.querySelector('[data-slot="button-loading-indicator"]');
+          if (!loading) return false;
+          // 在观测到 loading 的同一时刻固化计算样式，避免请求快速完成后弹窗关闭导致读取到 null。
+          const w = window as unknown as {
+            __wbLoadingVisuals?: { iconOpacity: string; spinnerOpacity: string; buttonOpacity: string };
+          };
+          const icon = draft.querySelector("svg:not([data-slot='button-loading-indicator'])");
+          const spinner = draft.querySelector('[data-slot="button-loading-indicator"]');
+          w.__wbLoadingVisuals = {
+            iconOpacity: icon ? getComputedStyle(icon).opacity : "",
+            spinnerOpacity: spinner ? getComputedStyle(spinner).opacity : "",
+            buttonOpacity: getComputedStyle(draft).opacity,
+          };
+          return true;
         },
         { timeout: 3_000 },
       );
 
       expect(await reqPostCount(page)).toBe(1);
 
-      const loadingVisuals = await page.evaluate(() => {
-        const draft = document.querySelector('[data-testid="save-draft-btn"]') as HTMLButtonElement;
-        const icon = draft.querySelector("svg:not([data-slot='button-loading-indicator'])");
-        const spinner = draft.querySelector('[data-slot="button-loading-indicator"]');
-        return {
-          iconOpacity: icon ? getComputedStyle(icon).opacity : "",
-          spinnerOpacity: spinner ? getComputedStyle(spinner).opacity : "",
-          buttonOpacity: getComputedStyle(draft).opacity,
-        };
-      });
-      expect(loadingVisuals.iconOpacity).toBe("0");
-      expect(Number(loadingVisuals.spinnerOpacity)).toBeGreaterThan(0);
-      expect(loadingVisuals.buttonOpacity).toBe("1");
+      const loadingVisuals = await page.evaluate(
+        () => (window as unknown as { __wbLoadingVisuals?: Record<string, string> }).__wbLoadingVisuals ?? null,
+      );
+      expect(loadingVisuals).not.toBeNull();
+      expect(loadingVisuals!.iconOpacity).toBe("0");
+      expect(Number(loadingVisuals!.spinnerOpacity)).toBeGreaterThan(0);
+      expect(loadingVisuals!.buttonOpacity).toBe("1");
 
       await page.waitForFunction(
         () => !document.querySelector('[data-testid="new-req-modal"]'),
