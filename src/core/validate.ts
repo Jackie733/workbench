@@ -1063,6 +1063,9 @@ export function validateAcceptanceSnapshot(raw: unknown, expectedRequirementId?:
   return raw as unknown as AcceptanceSnapshot;
 }
 
+const DISCUSSION_KINDS = ["chat", "annotation", "refine_summary"] as const;
+const RUN_HANDOFF_MODES: readonly RunHandoffMode[] = ["first_run", "native_resume", "fresh_handoff"];
+
 function validateDiscussionEntry(raw: unknown): DiscussionEntry {
   if (!isRecord(raw)) throw new WorkbenchError("corrupt_record", "discussion 字段无效");
   assertSafeExtensionKeys(raw, "discussion");
@@ -1072,7 +1075,16 @@ function validateDiscussionEntry(raw: unknown): DiscussionEntry {
     !isSafeInt(raw.at, 0) ||
     (raw.actor !== "human" && raw.actor !== "agent") ||
     (raw.mode !== "ask" && raw.mode !== "refine") ||
-    !isSafeText(raw.message, 32 * 1024)
+    !isSafeText(raw.message, 32 * 1024) ||
+    (raw.kind !== undefined &&
+      (typeof raw.kind !== "string" || !(DISCUSSION_KINDS as readonly string[]).includes(raw.kind))) ||
+    (raw.resolved !== undefined && typeof raw.resolved !== "boolean") ||
+    (raw.adopted !== undefined && typeof raw.adopted !== "boolean") ||
+    (raw.runId !== undefined && (typeof raw.runId !== "string" || raw.runId.length > 80)) ||
+    (raw.durationMs !== undefined && !isFiniteNonNeg(raw.durationMs)) ||
+    (raw.toolCallsCount !== undefined && !isSafeInt(raw.toolCallsCount, 0)) ||
+    (raw.handoffMode !== undefined &&
+      (typeof raw.handoffMode !== "string" || !RUN_HANDOFF_MODES.includes(raw.handoffMode as RunHandoffMode)))
   ) {
     throw new WorkbenchError("corrupt_record", "discussion 记录损坏");
   }
@@ -1081,7 +1093,6 @@ function validateDiscussionEntry(raw: unknown): DiscussionEntry {
 
 const RUN_BILLING_MODES: readonly RunBillingMode[] = ["subscription", "api", "free"];
 const RUN_COST_SOURCES: readonly RunCostSource[] = ["reported", "estimated", "free", "unknown"];
-const RUN_HANDOFF_MODES: readonly RunHandoffMode[] = ["first_run", "native_resume", "fresh_handoff"];
 const RUN_DISPATCH_REASONS: readonly RunDispatchReason[] = [
   "user",
   "route_primary",

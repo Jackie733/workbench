@@ -41,6 +41,10 @@ export interface AdapterLineResult {
   events: PartialTraceEvent[];
   displayText: string;
   replyText: string | null;
+  /** Optional incremental streaming text delta (ephemeral UI streaming, not persisted per-token). */
+  textDelta?: string;
+  /** Optional incremental streaming thinking delta (ephemeral UI streaming). */
+  thinkingDelta?: string;
   sessionId?: string;
   effectiveModel?: string;
   modelFallback?: boolean;
@@ -343,7 +347,8 @@ class QoderStreamAdapter implements HarnessStreamAdapter {
       type !== "system" &&
       type !== "assistant" &&
       type !== "user" &&
-      type !== "result"
+      type !== "result" &&
+      type !== "stream_event"
     ) {
       return {
         events: [{ type: "raw.line", stream: "stdout", text: sanitizeOutput(trimmed, 8192).text }],
@@ -353,6 +358,20 @@ class QoderStreamAdapter implements HarnessStreamAdapter {
     }
 
     const sessionId = typeof evt.session_id === "string" ? evt.session_id : undefined;
+
+    if (type === "stream_event" && evt.event && typeof evt.event === "object") {
+      const inner = evt.event as Record<string, unknown>;
+      if (inner.type === "content_block_delta" && inner.delta && typeof inner.delta === "object") {
+        const dObj = inner.delta as Record<string, unknown>;
+        if (dObj.type === "text_delta" && typeof dObj.text === "string" && dObj.text) {
+          return { events: [], displayText: "", replyText: null, textDelta: dObj.text, sessionId };
+        }
+        if (dObj.type === "thinking_delta" && typeof dObj.thinking === "string" && dObj.thinking) {
+          return { events: [], displayText: "", replyText: null, thinkingDelta: dObj.thinking, sessionId };
+        }
+      }
+      return { events: [], displayText: "", replyText: null, sessionId };
+    }
 
     if (type === "system") {
       if (evt.subtype === "init") {
@@ -1242,6 +1261,17 @@ class AgyStreamAdapter implements HarnessStreamAdapter {
           this.pendingResponseByStep.set(stepIndex, (this.pendingResponseByStep.get(stepIndex) ?? "") + delta);
         }
 
+        if (state !== "DONE" && state !== "ERROR") {
+          return {
+            events: [],
+            displayText: "",
+            replyText: null,
+            ...(delta ? { textDelta: delta } : {}),
+            ...(thinkChunk ? { thinkingDelta: thinkChunk } : {}),
+            sessionId: stepConvId,
+          };
+        }
+
         if (state === "DONE" || state === "ERROR") {
           const turn = this.ensureStepTurn(stepIndex, events);
           const fullThink = (this.pendingThinkingByStep.get(stepIndex) ?? "").trim();
@@ -1968,6 +1998,17 @@ class OmpStreamAdapter implements HarnessStreamAdapter {
         replyText: null,
         sessionId,
       };
+    }
+
+    if (type === "message_update" && evt.assistantMessageEvent && typeof evt.assistantMessageEvent === "object") {
+      const ame = evt.assistantMessageEvent as Record<string, unknown>;
+      if (ame.type === "text_delta" && typeof ame.delta === "string" && ame.delta) {
+        return { events: [], displayText: "", replyText: null, textDelta: ame.delta, sessionId };
+      }
+      if (ame.type === "thinking_delta" && typeof ame.delta === "string" && ame.delta) {
+        return { events: [], displayText: "", replyText: null, thinkingDelta: ame.delta, sessionId };
+      }
+      return { events: [], displayText: "", replyText: null, sessionId };
     }
 
     if (type === "message_end" && evt.message && typeof evt.message === "object") {

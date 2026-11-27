@@ -107,12 +107,14 @@ export function MarkdownView({
   annotatable = false,
   docLabel = "doc",
   onAnnotate,
+  annotationCounts,
   className = "md-body",
 }: {
   markdown: string;
   annotatable?: boolean;
   docLabel?: string;
   onAnnotate?: (anchor: string) => void;
+  annotationCounts?: Record<string, number>;
   className?: string;
 }) {
   const language = useUiStore((s) => s.language);
@@ -130,11 +132,12 @@ export function MarkdownView({
       if (!annotatable) return <Tag>{children}</Tag>;
       const rawText = extractNodeText(children).trim().slice(0, 60);
       const anchor = `${docLabel}#${rawText}`;
+      const count = annotationCounts?.[anchor] ?? 0;
       return (
-        <div className="md-annot-row">
+        <div className="md-annot-row" data-anchor-target={anchor}>
           <Tag>{children}</Tag>
           <Button
-            className="md-annot-btn"
+            className={`md-annot-btn ${count > 0 ? "has-count" : ""}`}
             size="xs"
             type="button"
             variant="ghost"
@@ -148,6 +151,11 @@ export function MarkdownView({
               <Icon icon={MessageSquare} size={14} />
             </span>
             {t(language, "md.annotate")}
+            {count > 0 && (
+              <span className="md-annot-count" data-testid="anchor-annot-count">
+                {count}
+              </span>
+            )}
           </Button>
         </div>
       );
@@ -155,7 +163,11 @@ export function MarkdownView({
   };
 
   return (
-    <div className={className}>
+    <div
+      className={className}
+      data-annotatable-doc={annotatable ? docLabel : undefined}
+      data-anchor-target={annotatable ? docLabel : undefined}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={(url) => (/^(https?:\/\/|\/|#)/i.test(url.trim()) ? url : "")}

@@ -67,6 +67,7 @@ import {
   useProjectQuery,
   useProjectSandboxesQuery,
   useRequirementQuery,
+  useRequirementAskRun,
   useRequirementRunLock,
 } from "../queries.ts";
 import {
@@ -530,6 +531,7 @@ export function Modals() {
   const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
   const modalRequirementId = m?.kind === "link_issue" ? m.requirementId : selectedId;
   const runLock = useRequirementRunLock(modalRequirementId);
+  const askLock = useRequirementAskRun(modalRequirementId);
   const { data: deliveryPreview } = useDeliveryQuery(
     activeProjectId,
     selectedId,
@@ -1550,53 +1552,91 @@ export function Modals() {
   }
 
   if (m.kind === "annotate_anchor") {
+    const askRunning = askLock !== null;
     return (
-      <ModalShell onClose={close} testId="annotate-modal" hasExplicitTitle>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon icon={MessageSquare} size={20} />
+      <div
+        className="annotate-dock-card"
+        role="dialog"
+        aria-modal="false"
+        aria-label={t(language, "annotate.title")}
+        data-testid="annotate-modal"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            close();
+          }
+        }}
+      >
+        <div className="annotate-dock-head">
+          <div className="annotate-dock-title">
+            <Icon icon={MessageSquare} size={16} />
             <span>{t(language, "annotate.title")}</span>
-          </DialogTitle>
-          <DialogDescription>{t(language, "annotate.anchor", { anchor: m.anchor })}</DialogDescription>
-        </DialogHeader>
-        <DialogPanel className="space-y-3">
-          {runLocked && <RunLockNotice />}
-          <Textarea
-            id="annotate-msg"
-            data-testid="annotate-msg"
-            autoFocus
-            value={m.message}
-            placeholder={t(language, "annotate.placeholder")}
-            onChange={(e) =>
-              setModal((prev) =>
-                prev?.kind === "annotate_anchor" ? { ...prev, message: e.target.value } : prev,
-              )
-            }
-          />
-        </DialogPanel>
-        <DialogFooter>
-          <Button variant="ghost" type="button" data-testid="annotate-cancel-btn" onClick={close}>
-            <Icon icon={X} size={14} /> {t(language, "common.cancel")}
+          </div>
+          <Button
+            size="icon-xs"
+            type="button"
+            variant="ghost"
+            aria-label={t(language, "common.close")}
+            onClick={close}
+          >
+            <Icon icon={X} size={14} />
           </Button>
-          <AsyncButton
-            variant="outline"
-            type="button"
-            data-testid="annotate-ask-btn"
-            disabled={runLocked}
-            onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "ask") : undefined)}
-          >
-            <Icon icon={Lightbulb} size={14} /> {t(language, "annotate.ask")}
-          </AsyncButton>
-          <AsyncButton
-            variant="default"
-            type="button"
-            data-testid="annotate-queue-btn"
-            onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "refine") : undefined)}
-          >
-            <Icon icon={Pencil} size={14} /> {t(language, "annotate.queue")}
-          </AsyncButton>
-        </DialogFooter>
-      </ModalShell>
+        </div>
+        <div className="annotate-dock-anchor">
+          {t(language, "annotate.anchor", { anchor: m.anchor })}
+        </div>
+        {askRunning && (
+          <div className="xs muted" style={{ marginBottom: 6 }}>
+            {t(language, "drawer.askLockHint")}
+          </div>
+        )}
+        <Textarea
+          id="annotate-msg"
+          data-testid="annotate-msg"
+          autoFocus
+          rows={3}
+          value={m.message}
+          placeholder={t(language, "annotate.placeholder")}
+          onChange={(e) =>
+            setModal((prev) =>
+              prev?.kind === "annotate_anchor" ? { ...prev, message: e.target.value } : prev,
+            )
+          }
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing && detail) {
+              e.preventDefault();
+              void submitAnnotation(detail.state.id, m.anchor, m.message, "refine");
+            }
+          }}
+        />
+        <div className="annotate-dock-foot" data-slot="dialog-footer">
+          <span className="xs muted">{t(language, "annotate.shortcutHint")}</span>
+          <div className="annotate-dock-actions">
+            <Button variant="ghost" size="xs" type="button" data-testid="annotate-cancel-btn" onClick={close}>
+              <Icon icon={X} size={14} /> {t(language, "common.cancel")}
+            </Button>
+            <AsyncButton
+              variant="outline"
+              size="xs"
+              type="button"
+              data-testid="annotate-ask-btn"
+              disabled={askRunning}
+              onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "ask") : undefined)}
+            >
+              <Icon icon={Lightbulb} size={14} /> {t(language, "annotate.ask")}
+            </AsyncButton>
+            <AsyncButton
+              variant="default"
+              size="xs"
+              type="button"
+              data-testid="annotate-queue-btn"
+              onAction={() => (detail ? submitAnnotation(detail.state.id, m.anchor, m.message, "refine") : undefined)}
+            >
+              <Icon icon={Pencil} size={14} /> {t(language, "annotate.queue")}
+            </AsyncButton>
+          </div>
+        </div>
+      </div>
     );
   }
 

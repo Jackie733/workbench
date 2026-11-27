@@ -2114,4 +2114,274 @@ printf 'done\\n'
     const upgraded = await executor.getHarnesses(false, false);
     expect(upgraded[0]?.models[0]?.source).toBe("detected");
   });
+
+  test("allows concurrent read-only ask alongside active implement run, emits streaming deltas, and supports annotation delete/adopt", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("dual-track-ask");
+    await initProject(repo, { name: "DualTrack", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Verify dual-track ask concurrency and streaming deltas",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Plan\nDual track.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+
+    const releaseFile = path.join(repo, ".release-impl");
+    const deltas: Array<{ channel?: string; delta?: string }> = [];
+    const finishedIds = new Set<string>();
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "agy",
+          label: "AGY",
+          subscription: "Pro",
+          installed: true,
+          executable: "agy",
+          models: [{ id: "gemini-4-argon", tier: "sota", source: "detected" }],
+          defaultModel: "gemini-4-argon",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: (_target, ctx) => {
+        if (ctx.action === "implement") {
+          return {
+            command: process.execPath,
+            args: [
+              "-e",
+              `const fs=require('fs');const p=${JSON.stringify(releaseFile)};const t=setInterval(()=>{if(fs.existsSync(p)){clearInterval(t);console.log('impl done');process.exit(0);}},25);`,
+            ],
+            displayCommand: "mock-impl-hold",
+          };
+        }
+        return {
+          command: process.execPath,
+          args: [
+            "-e",
+            [
+              `console.log(JSON.stringify({event:"step_update",step_update:{conversation_id:"conv-ask-1",step_index:1,state:"ACTIVE",step_type:"agent_response",thinking_delta:"先检查代码"}}));`,
+              `console.log(JSON.stringify({event:"step_update",step_update:{conversation_id:"conv-ask-1",step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"第一段回答，"}}));`,
+              `console.log(JSON.stringify({event:"step_update",step_update:{conversation_id:"conv-ask-1",step_index:1,state:"ACTIVE",step_type:"agent_response",text_delta:"第二段回答。"}}));`,
+              `console.log(JSON.stringify({event:"step_update",step_update:{conversation_id:"conv-ask-1",step_index:1,state:"DONE",step_type:"agent_response",duration_seconds:0.4}}));`,
+            ].join(""),
+          ],
+          displayCommand: "mock-ask-delta",
+        };
+      },
+    });
+    executor.subscribe((ev) => {
+      if (ev.type === "agent.run.delta") {
+        deltas.push({ channel: ev.channel, delta: ev.delta });
+      }
+      if (ev.type === "agent.run.finished") {
+        finishedIds.add(ev.runId);
+      }
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: false, executor });
+    servers.push(server);
+
+    const implStarted = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "implement",
+      harness: "agy",
+      model: "gemini-4-argon",
+    });
+
+    // Second primary run on same requirement is rejected
+    await expect(
+      executor.startRun({
+        root: repo,
+        requirementId: "REQ-001",
+        action: "fix",
+        harness: "agy",
+        model: "gemini-4-argon",
+      }),
+    ).rejects.toThrow(/正在执行的 Agent 任务/);
+
+    // Concurrent read-only ask succeeds while implement holds write lock!
+    const askStarted = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "ask",
+      harness: "agy",
+      model: "gemini-4-argon",
+      message: "为什么采用双轨并发？",
+      anchor: "design.md#Plan",
+    });
+
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !finishedIds.has(askStarted.run.id)) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(finishedIds.has(askStarted.run.id)).toBe(true);
+    expect(finishedIds.has(implStarted.run.id)).toBe(false);
+
+    // Real-time deltas emitted before completion
+    expect(deltas).toEqual([
+      { channel: "thinking", delta: "先检查代码" },
+      { channel: "text", delta: "第一段回答，" },
+      { channel: "text", delta: "第二段回答。" },
+    ]);
+
+    const afterAsk = getRequirement(repo, "REQ-001");
+    const agentReply = (afterAsk.state.discussions ?? []).find(
+      (item) => item.actor === "agent" && item.runId === askStarted.run.id,
+    );
+    expect(agentReply).toBeDefined();
+    expect(agentReply?.message).toBe("第一段回答，第二段回答。");
+    expect(typeof agentReply?.durationMs).toBe("number");
+
+    // Annotation create -> adopt/resolve -> delete API lifecycle
+    const addResp = await fetch(`${server.url}/api/requirements/REQ-001/discussions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "refine", kind: "annotation", anchor: "design.md#Plan", message: "补充边界说明" }),
+    });
+    expect(addResp.status).toBe(201);
+    const added = (await addResp.json()) as { entry: { id: string } };
+
+    const adoptResp = await fetch(`${server.url}/api/requirements/REQ-001/discussions/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [agentReply!.id], adopted: true }),
+    });
+    expect(adoptResp.status).toBe(200);
+    expect(getRequirement(repo, "REQ-001").state.discussions?.find((x) => x.id === agentReply!.id)?.adopted).toBe(true);
+
+    const delResp = await fetch(`${server.url}/api/requirements/REQ-001/discussions/${encodeURIComponent(added.entry.id)}`, {
+      method: "DELETE",
+    });
+    expect(delResp.status).toBe(200);
+    expect(getRequirement(repo, "REQ-001").state.discussions?.some((x) => x.id === added.entry.id)).toBe(false);
+
+    fs.writeFileSync(releaseFile, "go", "utf8");
+    const implDeadline = Date.now() + 8_000;
+    while (Date.now() < implDeadline && !finishedIds.has(implStarted.run.id)) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(finishedIds.has(implStarted.run.id)).toBe(true);
+  });
+
+  test("marks direct refine instructions resolved, applies adoptDiscussionId only on success, and validates DELETE discussion routes", async () => {
+    makeTempHub();
+    const repo = makeGitRepo("refine-adopt-validate");
+    await initProject(repo, { name: "RefineAdopt", privacyMode: "local" });
+    await createRequirement(repo, {
+      goal: "Verify direct refine resolution and adopt lifecycle",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Plan\nInitial.", actor: "agent" });
+
+    const { addDiscussion } = await import("../../src/core/engine.ts");
+    const { entry: agentReply } = await addDiscussion(repo, "REQ-001", {
+      actor: "agent",
+      mode: "ask",
+      kind: "chat",
+      message: "建议补充幂等键校验",
+    });
+
+    const failFlag = path.join(repo, ".fail-next-run");
+    const finished = new Map<string, string>();
+
+    const executor = new HubExecutor({
+      initialHarnesses: [
+        {
+          id: "agy",
+          label: "AGY",
+          subscription: "Pro",
+          installed: true,
+          executable: "agy",
+          models: [{ id: "gemini-4-argon", tier: "sota", source: "detected" }],
+          defaultModel: "gemini-4-argon",
+          detectedAt: Date.now(),
+        },
+      ],
+      commandBuilder: () => ({
+        command: process.execPath,
+        args: [
+          "-e",
+          `const fs=require('fs');if(fs.existsSync(${JSON.stringify(failFlag)})){console.error('forced failure');process.exit(1);}console.log('ok');`,
+        ],
+        displayCommand: "mock-design-refine",
+      }),
+    });
+    executor.subscribe((ev) => {
+      if (ev.type === "agent.run.finished" && ev.status) {
+        finished.set(ev.runId, ev.status);
+      }
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: false, executor });
+    servers.push(server);
+
+    const waitRun = async (runId: string) => {
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && !finished.has(runId)) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return finished.get(runId);
+    };
+
+    // 1. Direct refine without anchorIds must be persisted with resolved: true
+    const directRefine = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      mode: "refine",
+      harness: "agy",
+      model: "gemini-4-argon",
+      message: "请补充重试上限说明",
+    });
+    expect(await waitRun(directRefine.run.id)).toBe("succeeded");
+    const afterDirect = getRequirement(repo, "REQ-001");
+    const directEntry = (afterDirect.state.discussions ?? []).find(
+      (x) => x.actor === "human" && x.message === "请补充重试上限说明",
+    );
+    expect(directEntry?.mode).toBe("refine");
+    expect(directEntry?.kind).toBe("chat");
+    expect(directEntry?.resolved).toBe(true);
+
+    // 2. Failed adopt run must NOT mark target reply as adopted
+    fs.writeFileSync(failFlag, "1", "utf8");
+    const failedAdopt = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      mode: "refine",
+      harness: "agy",
+      model: "gemini-4-argon",
+      adoptDiscussionId: agentReply.id,
+      message: "采纳此结论（失败用例）",
+    });
+    expect(await waitRun(failedAdopt.run.id)).toBe("failed");
+    expect(getRequirement(repo, "REQ-001").state.discussions?.find((x) => x.id === agentReply.id)?.adopted).toBeUndefined();
+
+    // 3. Succeeded adopt run marks target reply as adopted: true
+    fs.unlinkSync(failFlag);
+    const okAdopt = await executor.startRun({
+      root: repo,
+      requirementId: "REQ-001",
+      action: "design",
+      mode: "refine",
+      harness: "agy",
+      model: "gemini-4-argon",
+      adoptDiscussionId: agentReply.id,
+      message: "采纳此结论（成功用例）",
+    });
+    expect(await waitRun(okAdopt.run.id)).toBe("succeeded");
+    expect(getRequirement(repo, "REQ-001").state.discussions?.find((x) => x.id === agentReply.id)?.adopted).toBe(true);
+
+    // 4. DELETE validation: malformed URI -> 400, missing ID -> 404
+    const badUriResp = await fetch(`${server.url}/api/requirements/REQ-001/discussions/%E0%A4%A`, {
+      method: "DELETE",
+    });
+    expect(badUriResp.status).toBe(400);
+
+    const missingResp = await fetch(`${server.url}/api/requirements/REQ-001/discussions/D-nonexistent-999`, {
+      method: "DELETE",
+    });
+    expect(missingResp.status).toBe(404);
+  });
 });

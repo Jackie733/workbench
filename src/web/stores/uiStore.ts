@@ -112,6 +112,7 @@ export interface UiStoreState {
   drawerOpen: boolean;
   drawerWidth: number;
   drawerTab: DrawerTab;
+  highlightedAnchor: { anchor: string; nonce: number } | null;
   moreMenuOpen: boolean;
   modal: ModalState;
   /**
@@ -153,6 +154,8 @@ export interface UiStoreState {
   setDrawerOpen: (open: boolean) => void;
   setDrawerWidth: (width: number) => void;
   setDrawerTab: (tab: DrawerTab) => void;
+  triggerAnchorHighlight: (anchor: string) => void;
+  clearAnchorHighlight: () => void;
   setMoreMenuOpen: (open: boolean) => void;
   setModal: (modal: ModalState | ((prev: ModalState) => ModalState)) => void;
   /** 关闭弹窗；传入实例序号时仅在弹窗未被替换的情况下关闭。 */
@@ -200,6 +203,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   drawerOpen: false,
   drawerWidth: initialDrawerWidth(),
   drawerTab: "discuss",
+  highlightedAnchor: null,
   moreMenuOpen: false,
   modal: null,
   modalInstanceId: 0,
@@ -275,6 +279,12 @@ export const useUiStore = create<UiStoreState>((set) => ({
     set({ drawerWidth: rounded });
   },
   setDrawerTab: (drawerTab) => set({ drawerTab }),
+  triggerAnchorHighlight: (anchor) =>
+    set((s) => ({
+      workspaceTab: "spec",
+      highlightedAnchor: { anchor, nonce: (s.highlightedAnchor?.nonce ?? 0) + 1 },
+    })),
+  clearAnchorHighlight: () => set({ highlightedAnchor: null }),
   setMoreMenuOpen: (moreMenuOpen) => set({ moreMenuOpen }),
   setModal: (modalOrUpdater) =>
     set((s) => {

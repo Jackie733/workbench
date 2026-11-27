@@ -98,6 +98,7 @@ export interface RunExecutorEvent {
   type:
     | "agent.run.started"
     | "agent.run.output"
+    | "agent.run.delta"
     | "agent.run.event"
     | "agent.run.metrics"
     | "agent.run.finished"
@@ -122,6 +123,8 @@ export interface RunExecutorEvent {
   effectiveModel?: string;
   modelFallback?: boolean;
   chunk?: string;
+  channel?: "text" | "thinking";
+  delta?: string;
   event?: RunTraceEvent;
   metrics?: Partial<AgentRunRecord>;
   status?: AgentRunRecord["status"];
@@ -142,6 +145,7 @@ export interface StartRunInput {
   message?: string;
   anchor?: string;
   anchorIds?: string[];
+  adoptDiscussionId?: string;
   mode?: "ask" | "refine";
   useFallback?: boolean;
   autoFallbackAttempt?: number;
@@ -150,6 +154,7 @@ export interface StartRunInput {
   reviewFixCycle?: number;
   forcePlainText?: boolean;
   forceFreshSession?: boolean;
+  isInternalRetry?: boolean;
   reviewFormatRescue?: { sessionId: string; harness: HarnessId; model: string; reasoningEffort?: ModelTarget["reasoningEffort"] };
   dispatchReasonOverride?: RunDispatchReason;
   isAutoReview?: boolean;
@@ -171,6 +176,7 @@ interface ActiveJob {
   dispatchReason: RunDispatchReason;
   handoffMode: RunHandoffMode;
   parentRunId?: string;
+  resumedSessionId?: string;
   contextWindow: number;
   tracePath: string;
   contextPath: string;
@@ -413,11 +419,16 @@ export class HubExecutor {
     const base = canonicalRoot(input.root);
     const id = input.requirementId;
 
+    const isAskTrack = input.action === "ask";
     for (const job of this.activeJobs.values()) {
-      if (job.root === base && job.requirementId === id) {
+      if (job.root !== base || job.requirementId !== id) continue;
+      // 双轨并发：只读探讨（ask）与主任务执行（design/implement/fix/review）互不互斥，仅同轨道内串行。
+      if ((job.action === "ask") === isAskTrack) {
         throw new WorkbenchError(
           "revision_conflict",
-          `${id} 当前已有正在执行的 Agent 任务（${job.target.harness}/${job.target.model}），请等待完成或先终止`,
+          isAskTrack
+            ? `${id} 当前已有正在进行的提问探讨（${job.target.harness}/${job.target.model}），请等待回复完成或先停止`
+            : `${id} 当前已有正在执行的 Agent 任务（${job.target.harness}/${job.target.model}），请等待完成或先终止`,
         );
       }
     }
@@ -430,10 +441,11 @@ export class HubExecutor {
     const observability = prefs?.observability ?? cfg?.observability;
 
     const codeRoot = resolveCodeRoot(base, id);
+    // ask 属于无副作用的轻量只读探讨，不抢占 codeRoot 读写锁，允许在编码/验证等任务运行期间并发提问。
     const lockMode =
       input.action === "implement" || input.action === "fix"
         ? ("write" as const)
-        : input.action === "ask" || input.action === "review"
+        : input.action === "review"
           ? ("read" as const)
           : null;
     const codeRootLockLease = lockMode
@@ -548,16 +560,20 @@ export class HubExecutor {
     if (
       input.message?.trim() &&
       !(input.autoFallbackAttempt && input.autoFallbackAttempt > 0) &&
+      !input.isInternalRetry &&
       !input.forcePlainText &&
-      !input.forceFreshSession &&
       !input.reviewFormatRescue &&
       (input.action === "ask" || input.mode === "refine" || input.action === "design")
     ) {
+      const isAskAction = input.action === "ask";
+      const isBatchRefineSummary = input.mode === "refine" && Boolean(input.anchorIds && input.anchorIds.length > 0);
       await addDiscussion(base, id, {
         actor: "human",
-        mode: input.action === "ask" ? "ask" : "refine",
+        mode: isAskAction ? "ask" : "refine",
+        kind: isAskAction ? "chat" : isBatchRefineSummary ? "refine_summary" : "chat",
         message: input.message.trim(),
         anchor: input.anchor,
+        ...(!isAskAction ? { resolved: true } : {}),
       });
     }
 
@@ -694,9 +710,17 @@ export class HubExecutor {
       incrementalReview,
     });
 
-    // Native session resume within the coding phase (implement <-> fix), post-approval ask -> implement,
-    // same-action retries, and eligible same-harness same-model incremental re-reviews (WB-15).
-    // Design runs and pre-revisePlan runs are NEVER resumed across phases into implement/fix (FLOW §1.5).
+    // 收集同需求当前并发运行中正在占用的原生会话，避免双轨并发时两个子进程同时续接同一 session 文件。
+    const inUseSessionIds = new Set<string>();
+    let hasConcurrentAsk = false;
+    for (const job of this.activeJobs.values()) {
+      if (job.root !== base || job.requirementId !== id) continue;
+      if (job.resumedSessionId) inUseSessionIds.add(job.resumedSessionId);
+      if (job.action === "ask") hasConcurrentAsk = true;
+    }
+
+    // Native session resume within the coding phase (implement <-> fix), completed post-approval ask -> implement
+    // (only when no concurrent ask is running), same-action retries, and eligible incremental re-reviews (WB-15).
     const findLeadCodingRunForResume = (): AgentRunRecord | null => {
       const approvedAt = currentDetail.state.approval?.approvedAt ?? 0;
       const lastPlanRevisedAt = currentDetail.state.timeline.reduce(
@@ -709,12 +733,13 @@ export class HubExecutor {
         if (lastPlanRevisedAt > 0 && r.startedAt < lastPlanRevisedAt) break;
         if (r.action === "implement" || r.action === "fix") return r;
       }
+      if (hasConcurrentAsk) return null;
       const askCutoff = Math.max(approvedAt, lastPlanRevisedAt);
       for (let idx = runsList.length - 1; idx >= 0; idx--) {
         const r = runsList[idx]!;
         if (r.action === "design") break;
         if (r.startedAt < askCutoff) break;
-        if (r.action === "ask") return r;
+        if (r.action === "ask" && r.status === "succeeded") return r;
       }
       return null;
     };
@@ -723,7 +748,7 @@ export class HubExecutor {
         ? prevReviewRun
         : input.action === "implement" || input.action === "fix"
           ? findLeadCodingRunForResume()
-          : ([...runsList].reverse().find((r) => r.action === input.action) ?? null);
+          : ([...runsList].reverse().find((r) => r.action === input.action && r.status !== "running") ?? null);
 
     const canResumeSameHarness = Boolean(
       input.reviewFormatRescue ||
@@ -733,6 +758,7 @@ export class HubExecutor {
           prevLeadRun &&
           prevLeadRun.harness === target.harness &&
           isHealthyForNativeResume(prevLeadRun) &&
+          (!prevLeadRun.nativeSessionId || !inUseSessionIds.has(prevLeadRun.nativeSessionId)) &&
           input.action !== "review"),
     );
 
@@ -1050,6 +1076,7 @@ export class HubExecutor {
       dispatchReason,
       handoffMode,
       ...(parentRunId ? { parentRunId } : {}),
+      ...(resumedSessionId ? { resumedSessionId } : {}),
       contextWindow: modelSpec.contextWindow,
       tracePath: traceRelPath,
       contextPath: contextRelPath,
@@ -1165,6 +1192,30 @@ export class HubExecutor {
       }
       for (const ev of parsed.events) {
         collector.append(ev);
+      }
+      if (parsed.thinkingDelta) {
+        this.emit({
+          type: "agent.run.delta",
+          root: base,
+          requirementId: id,
+          runId,
+          action: input.action,
+          channel: "thinking",
+          delta: parsed.thinkingDelta,
+          at: Date.now(),
+        });
+      }
+      if (parsed.textDelta) {
+        this.emit({
+          type: "agent.run.delta",
+          root: base,
+          requirementId: id,
+          runId,
+          action: input.action,
+          channel: "text",
+          delta: parsed.textDelta,
+          at: Date.now(),
+        });
       }
       if (parsed.replyText) {
         cleanReplyParts.push(parsed.replyText);
@@ -1505,10 +1556,15 @@ export class HubExecutor {
             await addDiscussion(base, id, {
               actor: "agent",
               mode: "ask",
+              kind: "chat",
               anchor: input.anchor,
               harness: target.harness,
               model: target.model,
               message: answerText,
+              runId,
+              durationMs,
+              toolCallsCount: traceSummary.toolCallsCount,
+              handoffMode,
             });
           }
         } else if (status === "succeeded" && input.action === "review" && parsedReview && latestReq) {
@@ -1538,9 +1594,15 @@ export class HubExecutor {
               ...(nativeSessionId ? { reviewerSessionId: nativeSessionId } : {}),
             });
           }
-        } else if (status === "succeeded" && (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0))) {
+        } else if (
+          status === "succeeded" &&
+          (input.mode === "refine" || (input.anchorIds && input.anchorIds.length > 0) || input.adoptDiscussionId)
+        ) {
           if (input.anchorIds && input.anchorIds.length > 0) {
             await resolveDiscussions(base, id, { ids: input.anchorIds, resolved: true });
+          }
+          if (input.adoptDiscussionId) {
+            await resolveDiscussions(base, id, { ids: [input.adoptDiscussionId], adopted: true });
           }
         }
 
@@ -1588,7 +1650,7 @@ export class HubExecutor {
         this.activeJobs.delete(runId);
         globalActiveRunIds.delete(runId);
 
-        if (!this.getActiveRuns(base).some((r) => r.requirementId === id)) {
+        if (!this.getActiveRuns(base).some((r) => r.requirementId === id && r.action !== "ask")) {
           const lastRunObj = (finishedDetail.state.agentRuns ?? []).find((r) => r.id === runId) ?? null;
           await synthesizeHandoffPacket(base, id, {
             action: input.action,
@@ -1725,7 +1787,8 @@ export class HubExecutor {
         at: endedAt,
       });
 
-      const alreadyRunning = () => this.getActiveRuns(base).some((r) => r.requirementId === id);
+      const alreadyRunning = () =>
+        this.getActiveRuns(base).some((r) => r.requirementId === id && (r.action === "ask") === isAskTrack);
 
       if (shouldRetryPlainText && !alreadyRunning()) {
         void this.startRun({
@@ -1734,6 +1797,7 @@ export class HubExecutor {
           model: target.model,
           reasoningEffort: target.reasoningEffort,
           forcePlainText: true,
+          isInternalRetry: true,
         }).catch(() => {});
         return;
       }
@@ -1742,6 +1806,7 @@ export class HubExecutor {
         void this.startRun({
           ...input,
           forceFreshSession: true,
+          isInternalRetry: true,
         }).catch(() => {});
         return;
       }

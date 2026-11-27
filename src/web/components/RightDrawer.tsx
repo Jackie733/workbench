@@ -1,18 +1,43 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { AlertTriangle, Check, FileDiff, FileText, Lightbulb, Loader2, MessageSquare, Pencil, RotateCcw, Square, Terminal, Trash2, X, Zap } from "lucide-react";
-import { api } from "../api.ts";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  BookmarkPlus,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  FileDiff,
+  FileText,
+  Lightbulb,
+  Loader2,
+  MapPin,
+  MessageSquare,
+  Pencil,
+  RotateCcw,
+  Sparkles,
+  Square,
+  Terminal,
+  Trash2,
+  X,
+} from "lucide-react";
 import { formatAgentActionLabel, formatAgentStatusLabel, t } from "../i18n.ts";
+import { copyTextToClipboard } from "../lib/clipboard.ts";
 import { useCollapsePhase } from "../lib/utils.ts";
 import {
   adoptDiscussion,
   cancelRun,
+  deleteAnnotationAction,
   hydrateRunLog,
   hydrateRunTrace,
   openHandoff,
   openRunConsole,
+  resolveAnnotationAction,
   runAskFromDrawer,
   runRefineFromDrawer,
   triggerActiveRun,
+  useRequirementAskError,
+  useRequirementAskRun,
   useRequirementQuery,
   useRequirementRunLock,
 } from "../queries.ts";
@@ -23,13 +48,16 @@ import {
   formatPercent,
   formatTokenCount,
   formatUsd,
+  getPendingRefineAnnotations,
 } from "../state.ts";
 import { useDraftStore } from "../stores/draftStore.ts";
 import { useStreamStore } from "../stores/streamStore.ts";
 import { DEFAULT_DRAWER_WIDTH, MIN_DRAWER_WIDTH, useUiStore } from "../stores/uiStore.ts";
+import { ConsoleMarkdown } from "./ConsoleMarkdown.tsx";
 import { ConsoleOutput } from "./ConsoleOutput.tsx";
+import { DiscussStreamCard } from "./DiscussStreamCard.tsx";
 import { Icon } from "./Icon.tsx";
-import { LiveTimer, MarkdownView, RunnerSelect } from "./Primitives.tsx";
+import { LiveTimer, RunnerSelect } from "./Primitives.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { AsyncButton } from "./ui/async-button.tsx";
 import { Badge } from "./ui/badge.tsx";
@@ -39,6 +67,8 @@ import { SimpleSelect } from "./ui/select.tsx";
 import { Tabs, TabsList, TabsTab } from "./ui/tabs.tsx";
 import { Textarea } from "./ui/textarea.tsx";
 import { DiffViewerPanel } from "./WorkspaceView.tsx";
+
+type DiscussFilter = "all" | "ask" | "refine";
 
 function computeMaxDrawerWidth(workspaceEl: HTMLElement | null): number {
   if (!workspaceEl) return DEFAULT_DRAWER_WIDTH;
@@ -62,23 +92,31 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
   const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
   const setDrawerWidth = useUiStore((s) => s.setDrawerWidth);
   const setDrawerTab = useUiStore((s) => s.setDrawerTab);
+  const setModal = useUiStore((s) => s.setModal);
+  const triggerAnchorHighlight = useUiStore((s) => s.triggerAnchorHighlight);
 
-  const pendingAnnotations = useDraftStore((s) => s.pendingAnnotations);
-  const discussDraft = useDraftStore((s) => s.discussDraft);
-  const discussAnchor = useDraftStore((s) => s.discussAnchor);
+  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
+  const d = reqData?.detail ?? null;
+  const reqId = d?.state.id ?? "";
+
+  // 双轨独立状态：activeTaskRun（主任务，驱动终端与写锁）与 activeAskRun（只读研讨，互不互斥）。
+  const activeTaskRun = useRequirementRunLock(d?.state.id ?? null);
+  const activeAskRun = useRequirementAskRun(d?.state.id ?? null);
+
+  const discussDraft = useDraftStore((s) => (reqId ? s.discussDraftByReq[reqId] ?? "" : ""));
+  const discussAnchor = useDraftStore((s) => (reqId ? s.discussAnchorByReq[reqId] ?? null : null));
+  const discussFreshSession = useDraftStore((s) => (reqId ? Boolean(s.discussFreshSessionByReq[reqId]) : false));
   const setDiscussDraft = useDraftStore((s) => s.setDiscussDraft);
   const setDiscussAnchor = useDraftStore((s) => s.setDiscussAnchor);
-  const removePendingAnnotation = useDraftStore((s) => s.removePendingAnnotation);
-  const clearPendingAnnotations = useDraftStore((s) => s.clearPendingAnnotations);
+  const setDiscussFreshSession = useDraftStore((s) => s.setDiscussFreshSession);
 
   const selectedRunByReq = useStreamStore((s) => s.selectedRunByReq);
   const logHydratedMap = useStreamStore((s) => s.logHydrated);
   const runTraces = useStreamStore((s) => s.runTraces);
   const liveRunMetrics = useStreamStore((s) => s.liveRunMetrics);
-
-  const { data: reqData } = useRequirementQuery(activeProjectId, selectedId);
-  const d = reqData?.detail ?? null;
-  const activeRun = useRequirementRunLock(d?.state.id ?? null);
+  const liveStreamDeltas = useStreamStore((s) => s.liveStreamDeltas);
+  const lastAskError = useRequirementAskError(d?.state.id ?? null);
+  const setLastAskError = useStreamStore((s) => s.setLastAskError);
 
   const phase = useCollapsePhase(drawerOpen, 245, 195);
   const openCls =
@@ -91,9 +129,29 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
           : phase === "closing"
             ? "collapsed closing"
             : "collapsed settled";
+
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const isThreadAtBottomRef = useRef(true);
   const resizerRef = useRef<HTMLDivElement | null>(null);
   const [maxWidth, setMaxWidth] = useState<number>(DEFAULT_DRAWER_WIDTH);
+  const [showJumpBottom, setShowJumpBottom] = useState(false);
+  const [discussFilter, setDiscussFilter] = useState<DiscussFilter>("all");
+  const [queueCollapsed, setQueueCollapsed] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [expandedSummaries, setExpandedSummaries] = useState<Record<string, boolean>>({});
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    isThreadAtBottomRef.current = true;
+    setShowJumpBottom(false);
+    setDiscussFilter("all");
+  }, [reqId]);
 
   const syncDrawerCssWidth = useCallback(
     (preferredWidth: number) => {
@@ -209,35 +267,95 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
     }
   };
 
-  const reqId = d?.state.id ?? "";
   const runs = d ? [...(d.state.agentRuns ?? [])].reverse() : [];
   const explicitSelectedId = reqId ? (selectedRunByReq[reqId] ?? null) : null;
+  const activeRunForConsole = activeTaskRun ?? activeAskRun;
   const validSelectedId =
     explicitSelectedId &&
-    (runs.some((r) => r.id === explicitSelectedId) || (activeRun && activeRun.id === explicitSelectedId))
+    (runs.some((r) => r.id === explicitSelectedId) ||
+      (activeTaskRun && activeTaskRun.id === explicitSelectedId) ||
+      (activeAskRun && activeAskRun.id === explicitSelectedId))
       ? explicitSelectedId
       : null;
-  const currentRunId = validSelectedId ?? activeRun?.id ?? runs[0]?.id ?? null;
+  const currentRunId = validSelectedId ?? activeTaskRun?.id ?? runs[0]?.id ?? activeAskRun?.id ?? null;
   const baseRun =
     currentRunId
-      ? activeRun?.id === currentRunId
-        ? activeRun
-        : runs.find((r) => r.id === currentRunId) ?? null
+      ? activeTaskRun?.id === currentRunId
+        ? activeTaskRun
+        : activeAskRun?.id === currentRunId
+          ? activeAskRun
+          : runs.find((r) => r.id === currentRunId) ?? null
       : null;
   const currentLiveMetrics = currentRunId ? liveRunMetrics[currentRunId] : undefined;
-  const rawBaseRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
+  const currentRun = baseRun ? (currentLiveMetrics ? { ...baseRun, ...currentLiveMetrics } : baseRun) : null;
 
-  const liveText = useStreamStore((s) => (rawBaseRun ? s.liveRunLogs[rawBaseRun.id] ?? "" : ""));
-  const currentRun = rawBaseRun;
+  const liveText = useStreamStore((s) => (currentRun ? s.liveRunLogs[currentRun.id] ?? "" : ""));
   const isLogHydrated = useStreamStore((s) => (currentRun ? Boolean(s.logHydrated[currentRun.id]) : false));
   const traceState = currentRun ? runTraces[currentRun.id] : undefined;
-  const streamText = useStreamStore((s) => (activeRun ? s.liveRunLogs[activeRun.id] ?? "" : ""));
 
-  useEffect(() => {
-    if (drawerOpen && drawerTab === "discuss" && threadRef.current && activeRun) {
-      threadRef.current.scrollTop = threadRef.current.scrollHeight;
+  const askStreamLog = useStreamStore((s) => (activeAskRun ? s.liveRunLogs[activeAskRun.id] ?? "" : ""));
+  const askTraceEvents = activeAskRun ? runTraces[activeAskRun.id]?.events : undefined;
+  const askLiveDelta = activeAskRun ? liveStreamDeltas[activeAskRun.id] : undefined;
+
+  const discussions = d?.state.discussions ?? [];
+  // 单一真相源：从服务端持久化的未解决 refine 批注直接派生，刷新不丢失、跨需求不串台。
+  const pendingAnnotations = useMemo(() => getPendingRefineAnnotations(discussions), [discussions]);
+  const pendingAnnotationIdSet = useMemo(() => new Set(pendingAnnotations.map((a) => a.id)), [pendingAnnotations]);
+
+  // 对话流与顶部待处理批注队列分离：未解决的待提交批注集中在顶部栏，不重复刷屏。
+  const threadItems = useMemo(() => {
+    const base = discussions.filter((item) => !pendingAnnotationIdSet.has(item.id));
+    if (discussFilter === "ask") return base.filter((item) => item.mode === "ask");
+    if (discussFilter === "refine") return base.filter((item) => item.mode === "refine");
+    return base;
+  }, [discussions, pendingAnnotationIdSet, discussFilter]);
+
+  const hasMixedDiscussionTypes = useMemo(() => {
+    const hasAsk = discussions.some((item) => item.mode === "ask");
+    const hasRefine = discussions.some((item) => item.mode === "refine" && !pendingAnnotationIdSet.has(item.id));
+    return hasAsk && hasRefine;
+  }, [discussions, pendingAnnotationIdSet]);
+
+  // 智能贴底滚动：仅当用户已在底部时跟随流式输出，上滑回看时暂停并展示「回到底部」。
+  useLayoutEffect(() => {
+    if (!drawerOpen || drawerTab !== "discuss") return;
+    const el = threadRef.current;
+    if (!el) return;
+    if (isThreadAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setShowJumpBottom(false);
+    } else {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShowJumpBottom(dist > 28 && el.scrollHeight > el.clientHeight + 28);
     }
-  }, [drawerOpen, drawerTab, activeRun, streamText]);
+  }, [
+    drawerOpen,
+    drawerTab,
+    discussions.length,
+    activeAskRun?.id,
+    askTraceEvents?.length,
+    askLiveDelta?.text.length,
+    askLiveDelta?.thinking.length,
+    askStreamLog.length,
+    lastAskError?.runId,
+  ]);
+
+  const handleThreadScroll = () => {
+    const el = threadRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = dist <= 28;
+    isThreadAtBottomRef.current = atBottom;
+    setShowJumpBottom(!atBottom && el.scrollHeight > el.clientHeight + 28);
+  };
+
+  const jumpThreadToBottom = () => {
+    const el = threadRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isThreadAtBottomRef.current = true;
+    setShowJumpBottom(false);
+  };
 
   useEffect(() => {
     if (!drawerOpen || drawerTab !== "console" || !reqId || !currentRun) return;
@@ -249,8 +367,15 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
     }
   }, [drawerOpen, drawerTab, reqId, currentRun?.id, isLogHydrated, traceState?.hydrated]);
 
+  const handleCopyReply = async (id: string, text: string) => {
+    const ok = await copyTextToClipboard(text);
+    if (!ok) return;
+    setCopiedId(id);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopiedId(null), 1800);
+  };
+
   const effectiveWidth = clampDrawerWidth(drawerWidth, maxWidth);
-  const discussions = d?.state.discussions ?? [];
   const stage = d?.state.stage;
   const isImplOrAccept = stage === "coding";
   const isReadonlyStage = stage === "done" || stage === "cancelled";
@@ -306,6 +431,9 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                     >
                       <Icon icon={MessageSquare} size={14} /> {t(language, "drawer.tab.discuss")}
                       {pendingAnnotations.length > 0 ? ` (${pendingAnnotations.length})` : ""}
+                      {activeAskRun && (
+                        <span className="pulse-dot" role="img" aria-label={t(language, "drawer.askRunning")} />
+                      )}
                     </TabsTab>
                     <TabsTab
                       value="console"
@@ -315,7 +443,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       data-testid="drawer-tab-console"
                     >
                       <Icon icon={Terminal} size={14} /> {t(language, "drawer.tab.console")}
-                      {activeRun && (
+                      {activeTaskRun && (
                         <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />
                       )}
                     </TabsTab>
@@ -349,134 +477,433 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                   <DiffViewerPanel d={d} inDrawer />
                 </div>
               ) : drawerTab === "discuss" ? (
-                <div className="drawer-body" data-testid="discuss-pane">
+                <div className="drawer-body discuss-pane-layout" data-testid="discuss-pane">
                   {pendingAnnotations.length > 0 && (
                     <div className="annot-queue" data-testid="pending-annotations">
                       <div className="annot-queue-head">
-                        <strong>{t(language, "drawer.pending", { count: pendingAnnotations.length })}</strong>
-                        <Button
-                          size="xs"
+                        <button
                           type="button"
-                          variant="ghost"
-                          onClick={() => clearPendingAnnotations()}
+                          className="annot-queue-toggle"
+                          aria-expanded={!queueCollapsed}
+                          onClick={() => setQueueCollapsed((v) => !v)}
                         >
-                          <Icon icon={Trash2} size={14} /> {t(language, "common.clear")}
-                        </Button>
-                      </div>
-                      {pendingAnnotations.map((a) => (
-                        <div key={a.id} className="annot-chip">
-                          <div>
-                            <Badge variant="info">{a.anchor}</Badge>
-                            <div className="xs" style={{ marginTop: 4 }}>
-                              {a.message}
-                            </div>
-                          </div>
-                          <Button
-                            size="icon-xs"
-                            type="button"
-                            variant="ghost"
-                            aria-label={t(language, "drawer.removeAnnotation")}
-                            onClick={() => removePendingAnnotation(a.id)}
-                          >
-                            <Icon icon={X} size={14} />
-                          </Button>
+                          <Icon icon={queueCollapsed ? ChevronRight : ChevronDown} size={14} />
+                          <strong>{t(language, "drawer.pending", { count: pendingAnnotations.length })}</strong>
+                        </button>
+                        <div className="annot-queue-actions">
+                          {!isReadonlyStage && (
+                            <AsyncButton
+                              size="xs"
+                              type="button"
+                              variant="default"
+                              data-testid="submit-pending-annotations-btn"
+                              disabled={busy || Boolean(activeTaskRun)}
+                              onAction={() => runRefineFromDrawer(d.state.id, { annotationsOnly: true })}
+                            >
+                              <Icon icon={Pencil} size={14} />{" "}
+                              {t(language, isImplOrAccept ? "drawer.pendingSubmitCode" : "drawer.pendingSubmit", {
+                                count: pendingAnnotations.length,
+                              })}
+                            </AsyncButton>
+                          )}
                         </div>
+                      </div>
+                      {!queueCollapsed && (
+                        <div className="annot-queue-list">
+                          {pendingAnnotations.map((a) => (
+                            <div key={a.id} className="annot-chip" data-testid={`pending-annotation-${a.id}`}>
+                              <div className="annot-chip-main">
+                                {a.anchor && (
+                                  <button
+                                    type="button"
+                                    className="discuss-anchor-pill"
+                                    data-testid="anchor-jump-btn"
+                                    title={t(language, "drawer.jumpToAnchor", { anchor: a.anchor })}
+                                    onClick={() => triggerAnchorHighlight(a.anchor!)}
+                                  >
+                                    <Icon icon={MapPin} size={14} />
+                                    <span>{a.anchor}</span>
+                                  </button>
+                                )}
+                                <div className="annot-chip-text">{a.message}</div>
+                              </div>
+                              <div className="annot-chip-actions">
+                                <Button
+                                  size="icon-xs"
+                                  type="button"
+                                  variant="ghost"
+                                  data-testid={`resolve-annotation-${a.id}`}
+                                  title={t(language, "drawer.resolveAnnotation")}
+                                  aria-label={t(language, "drawer.resolveAnnotation")}
+                                  disabled={busy}
+                                  onClick={() => void resolveAnnotationAction(d.state.id, [a.id], true)}
+                                >
+                                  <Icon icon={Check} size={14} />
+                                </Button>
+                                <Button
+                                  size="icon-xs"
+                                  type="button"
+                                  variant="ghost"
+                                  data-testid={`delete-annotation-${a.id}`}
+                                  title={t(language, "drawer.removeAnnotation")}
+                                  aria-label={t(language, "drawer.removeAnnotation")}
+                                  disabled={busy}
+                                  onClick={() => void deleteAnnotationAction(d.state.id, a.id)}
+                                >
+                                  <Icon icon={Trash2} size={14} />
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasMixedDiscussionTypes && (
+                    <div className="discuss-filter-bar" data-testid="discuss-filter-bar">
+                      {(["all", "ask", "refine"] as const).map((f) => (
+                        <button
+                          key={f}
+                          type="button"
+                          className={`discuss-filter-pill ${discussFilter === f ? "active" : ""}`}
+                          data-testid={`discuss-filter-${f}`}
+                          onClick={() => setDiscussFilter(f)}
+                        >
+                          {t(language, `drawer.filter.${f}`)}
+                        </button>
                       ))}
                     </div>
                   )}
 
-                  <div className="discuss-thread" data-testid="discuss-thread" ref={threadRef}>
-                    {discussions.length === 0 && !activeRun ? (
-                      <Card className="p-4 text-center text-xs text-muted-foreground">
-                        {t(language, "drawer.discussEmpty")}
-                      </Card>
-                    ) : (
-                      discussions.map((item) => (
-                        <div key={item.id} className={`discuss-msg ${item.actor}`}>
-                          <div className="discuss-meta">
-                            <span>
-                              {item.actor === "human"
-                                ? t(language, "drawer.me")
-                                : `${item.harness ?? "Agent"}${item.model ? ` · ${item.model}` : ""}`}
-                            </span>
-                            <Badge variant={item.mode === "ask" ? "info" : "warning"}>
-                              <Icon
-                                icon={item.mode === "ask" ? Lightbulb : item.resolved ? Check : MessageSquare}
-                                size={14}
-                              />{" "}
-                              {item.mode === "ask"
-                                ? t(language, "drawer.mode.ask")
-                                : item.resolved
-                                  ? t(language, "drawer.mode.resolved")
-                                  : t(language, "drawer.mode.annotate")}
-                            </Badge>
-                            <span className="muted xs">{formatDateTime(item.at, language)}</span>
-                          </div>
-                          {item.anchor && (
-                            <div className="xs muted" style={{ marginBottom: 4 }}>
-                              {t(language, "drawer.anchor", { anchor: item.anchor })}
+                  <div className="discuss-thread-shell">
+                    <div
+                      className="discuss-thread"
+                      data-testid="discuss-thread"
+                      ref={threadRef}
+                      onScroll={handleThreadScroll}
+                    >
+                      {threadItems.length === 0 && !activeAskRun && !lastAskError ? (
+                        <Card className="p-4 text-center text-xs text-muted-foreground">
+                          {discussions.length > 0 && discussFilter !== "all"
+                            ? t(language, "drawer.filterEmpty")
+                            : t(language, "drawer.discussEmpty")}
+                        </Card>
+                      ) : (
+                        threadItems.map((item) => {
+                          if (item.kind === "refine_summary") {
+                            const expanded = Boolean(expandedSummaries[item.id]);
+                            const firstLine = item.message.split(/\r?\n/)[0] ?? item.message;
+                            return (
+                              <div key={item.id} className="discuss-system-divider" data-testid="discuss-refine-summary">
+                                <button
+                                  type="button"
+                                  className="discuss-system-toggle"
+                                  aria-expanded={expanded}
+                                  onClick={() =>
+                                    setExpandedSummaries((prev) => ({ ...prev, [item.id]: !prev[item.id] }))
+                                  }
+                                >
+                                  <Icon icon={expanded ? ChevronDown : ChevronRight} size={14} />
+                                  <Icon icon={Pencil} size={14} />
+                                  <span className="discuss-system-title">
+                                    {t(language, "drawer.refineSummaryTitle")}
+                                  </span>
+                                  <span className="discuss-system-preview">{firstLine.slice(0, 72)}</span>
+                                  <span className="muted xs">{formatDateTime(item.at, language)}</span>
+                                </button>
+                                {expanded && (
+                                  <div className="discuss-system-body">
+                                    <ConsoleMarkdown text={item.message} language={language} />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
+
+                          if (item.actor === "human") {
+                            return (
+                              <div key={item.id} className="discuss-msg human">
+                                <div className="discuss-human-bubble">
+                                  <div className="discuss-meta">
+                                    <span className="discuss-author-label">{t(language, "drawer.me")}</span>
+                                    {item.mode === "refine" && (
+                                      <Badge variant={item.resolved ? "success" : "warning"} size="sm">
+                                        <Icon icon={item.resolved ? Check : MessageSquare} size={14} />{" "}
+                                        {item.resolved
+                                          ? t(language, "drawer.mode.resolved")
+                                          : t(language, "drawer.mode.annotate")}
+                                      </Badge>
+                                    )}
+                                    <span className="muted xs">{formatDateTime(item.at, language)}</span>
+                                  </div>
+                                  {item.anchor && (
+                                    <button
+                                      type="button"
+                                      className="discuss-anchor-pill"
+                                      data-testid="anchor-jump-btn"
+                                      title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
+                                      onClick={() => triggerAnchorHighlight(item.anchor!)}
+                                    >
+                                      <Icon icon={MapPin} size={14} />
+                                      <span>{item.anchor}</span>
+                                    </button>
+                                  )}
+                                  <div className="discuss-human-text">
+                                    <ConsoleMarkdown text={item.message} language={language} />
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          const isCopied = copiedId === item.id;
+                          return (
+                            <div key={item.id} className="discuss-msg agent" data-testid="discuss-agent-msg">
+                              <div className="discuss-ai-head">
+                                <div className="discuss-ai-identity">
+                                  <span className="discuss-ai-avatar" aria-hidden="true">
+                                    <Icon icon={Sparkles} size={14} />
+                                  </span>
+                                  <span className="discuss-ai-name">
+                                    {item.harness ?? "Agent"}
+                                    {item.model ? ` · ${item.model}` : ""}
+                                  </span>
+                                  {item.adopted && (
+                                    <Badge variant="success" size="sm">
+                                      <Icon icon={Check} size={14} /> {t(language, "drawer.adopted")}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <span className="muted xs">{formatDateTime(item.at, language)}</span>
+                              </div>
+
+                              {item.anchor && (
+                                <button
+                                  type="button"
+                                  className="discuss-anchor-pill"
+                                  data-testid="anchor-jump-btn"
+                                  title={t(language, "drawer.jumpToAnchor", { anchor: item.anchor })}
+                                  onClick={() => triggerAnchorHighlight(item.anchor!)}
+                                >
+                                  <Icon icon={MapPin} size={14} />
+                                  <span>{item.anchor}</span>
+                                </button>
+                              )}
+
+                              <div className="discuss-ai-body">
+                                <ConsoleMarkdown text={item.message} language={language} />
+                              </div>
+
+                              <div className="discuss-ai-footer">
+                                <div className="discuss-ai-actions">
+                                  <Button
+                                    size="xs"
+                                    type="button"
+                                    variant="ghost"
+                                    data-testid="copy-discussion-btn"
+                                    onClick={() => void handleCopyReply(item.id, item.message)}
+                                  >
+                                    <Icon icon={isCopied ? Check : Copy} size={14} />{" "}
+                                    {t(language, isCopied ? "drawer.copied" : "drawer.copyReply")}
+                                  </Button>
+                                  {!isReadonlyStage && item.mode === "ask" && (
+                                    <>
+                                      <Button
+                                        size="xs"
+                                        type="button"
+                                        variant="ghost"
+                                        data-testid="discussion-to-annotation-btn"
+                                        onClick={() =>
+                                          setModal({
+                                            kind: "annotate_anchor",
+                                            anchor: item.anchor || "design.md",
+                                            message: item.message.slice(0, 600),
+                                            mode: "refine",
+                                          })
+                                        }
+                                      >
+                                        <Icon icon={BookmarkPlus} size={14} /> {t(language, "drawer.toAnnotation")}
+                                      </Button>
+                                      <AsyncButton
+                                        size="xs"
+                                        type="button"
+                                        variant="ghost"
+                                        data-testid="adopt-discussion-btn"
+                                        disabled={Boolean(activeTaskRun)}
+                                        onAction={() => adoptDiscussion(d.state.id, item.id, item.message)}
+                                      >
+                                        <Icon icon={Check} size={14} />{" "}
+                                        {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
+                                      </AsyncButton>
+                                    </>
+                                  )}
+                                </div>
+
+                                {(item.durationMs !== undefined ||
+                                  (item.toolCallsCount !== undefined && item.toolCallsCount > 0) ||
+                                  item.handoffMode ||
+                                  item.runId) && (
+                                  <div className="discuss-ai-meta-strip">
+                                    {item.durationMs !== undefined && (
+                                      <span>
+                                        {t(language, "drawer.replyMeta", {
+                                          duration: formatDurationHuman(item.durationMs),
+                                        })}
+                                      </span>
+                                    )}
+                                    {item.toolCallsCount !== undefined && item.toolCallsCount > 0 && (
+                                      <span>
+                                        {t(language, "drawer.replyMetaTools", { count: item.toolCallsCount })}
+                                      </span>
+                                    )}
+                                    {item.handoffMode === "native_resume" && (
+                                      <span>{t(language, "drawer.replyMetaResumed")}</span>
+                                    )}
+                                    {(item.handoffMode === "first_run" || item.handoffMode === "fresh_handoff") && (
+                                      <span>{t(language, "drawer.replyMetaFresh")}</span>
+                                    )}
+                                    {item.runId && (
+                                      <button
+                                        type="button"
+                                        className="discuss-trace-link"
+                                        onClick={() => void openRunConsole(d.state.id, item.runId!)}
+                                      >
+                                        {t(language, "drawer.inspectTrace")}
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </div>
+                          );
+                        })
+                      )}
+
+                      {activeAskRun && activeAskRun.status === "running" && (
+                        <DiscussStreamCard
+                          run={activeAskRun}
+                          traceEvents={askTraceEvents}
+                          liveDelta={askLiveDelta}
+                          rawLog={askStreamLog}
+                          language={language}
+                          onStop={() => cancelRun(d.state.id, activeAskRun.id)}
+                        />
+                      )}
+
+                      {!activeAskRun && lastAskError && (
+                        <div className="discuss-error-card" data-testid="discuss-ask-error-card">
+                          <div className="discuss-error-head">
+                            <span className="discuss-error-title">
+                              <Icon icon={AlertTriangle} size={14} />
+                              {t(
+                                language,
+                                lastAskError.status === "cancelled"
+                                  ? "drawer.askCancelledTitle"
+                                  : "drawer.askFailedTitle",
+                              )}
+                            </span>
+                            <Button
+                              size="icon-xs"
+                              type="button"
+                              variant="ghost"
+                              aria-label={t(language, "drawer.dismissError")}
+                              onClick={() =>
+                                setLastAskError(d.state.id, null, {
+                                  projectId: lastAskError.projectId,
+                                  root: lastAskError.root,
+                                })
+                              }
+                            >
+                              <Icon icon={X} size={14} />
+                            </Button>
+                          </div>
+                          {lastAskError.errorSummary && (
+                            <div className="discuss-error-detail">{lastAskError.errorSummary}</div>
                           )}
-                          <MarkdownView markdown={item.message} className="md-body xs" />
-                          {item.actor === "agent" && item.mode === "ask" && !isReadonlyStage && (
-                            <div style={{ marginTop: 6 }}>
+                          {lastAskError.message && (
+                            <div className="discuss-error-actions">
                               <AsyncButton
                                 size="xs"
                                 type="button"
-                                variant="ghost"
-                                data-testid="adopt-discussion-btn"
-                                disabled={Boolean(activeRun)}
-                                onAction={() => adoptDiscussion(d.state.id, item.id, item.message)}
+                                variant="outline"
+                                data-testid="retry-ask-btn"
+                                disabled={busy || Boolean(activeAskRun)}
+                                onAction={() =>
+                                  runAskFromDrawer(d.state.id, {
+                                    message: lastAskError.message,
+                                    anchor: lastAskError.anchor,
+                                  })
+                                }
                               >
-                                <Icon icon={Check} size={14} />{" "}
-                                {t(language, isImplOrAccept ? "drawer.adoptFix" : "drawer.adopt")}
+                                <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.retryAsk")}
                               </AsyncButton>
                             </div>
                           )}
                         </div>
-                      ))
-                    )}
+                      )}
+                    </div>
 
-                    {activeRun && activeRun.status === "running" && (
-                      <div className="discuss-msg agent discuss-streaming" data-testid="discuss-stream-card">
-                        <div className="discuss-meta">
-                          <span className="pulse-dot" />
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                            <Icon icon={Zap} size={14} /> {activeRun.harness} · {activeRun.model}
-                          </span>
-                          <Badge variant="info">
-                            {t(language, "drawer.streaming")} · <LiveTimer startedAt={activeRun.startedAt} />
-                          </Badge>
-                        </div>
-                        <pre className="discuss-stream-pre" data-testid="discuss-stream-output">
-                          {streamText.trim() || t(language, "drawer.connecting")}
-                        </pre>
-                      </div>
+                    {showJumpBottom && (
+                      <Button
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                        className="discuss-jump-bottom"
+                        data-testid="discuss-jump-bottom-btn"
+                        onClick={jumpThreadToBottom}
+                      >
+                        <Icon icon={ArrowDown} size={14} /> {t(language, "drawer.jumpBottom")}
+                      </Button>
                     )}
                   </div>
 
                   <div className="drawer-composer">
-                    {activeRun && (
-                      <div className="xs muted" data-testid="drawer-run-lock-hint" style={{ marginBottom: 6 }}>
-                        {t(language, "ws.runLockHint")}
+                    {activeTaskRun && (
+                      <div className="xs muted discuss-lock-hint" data-testid="drawer-run-lock-hint">
+                        {t(language, "drawer.refineLockHint")}
+                      </div>
+                    )}
+                    {activeAskRun && (
+                      <div className="xs muted discuss-lock-hint" data-testid="drawer-ask-lock-hint">
+                        {t(language, "drawer.askLockHint")}
                       </div>
                     )}
                     {discussAnchor && (
-                      <div className="xs muted" style={{ marginBottom: 4 }}>
-                        {t(language, "drawer.anchor", { anchor: discussAnchor })}{" "}
+                      <div className="discuss-composer-anchor">
+                        <button
+                          type="button"
+                          className="discuss-anchor-pill"
+                          title={t(language, "drawer.jumpToAnchor", { anchor: discussAnchor })}
+                          onClick={() => triggerAnchorHighlight(discussAnchor)}
+                        >
+                          <Icon icon={MapPin} size={14} />
+                          <span>{discussAnchor}</span>
+                        </button>
                         <Button
                           size="icon-xs"
                           type="button"
                           variant="ghost"
                           aria-label={t(language, "drawer.clearAnchor")}
-                          onClick={() => setDiscussAnchor(null)}
+                          onClick={() => setDiscussAnchor(d.state.id, null)}
                         >
                           <Icon icon={X} size={14} />
                         </Button>
                       </div>
                     )}
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <div className="discuss-composer-top">
                       <RunnerSelect stageAction="ask" testId="drawer-runner-select" tier={d.state.tier} />
+                      <Button
+                        size="xs"
+                        type="button"
+                        variant={discussFreshSession ? "secondary" : "ghost"}
+                        data-testid="discuss-fresh-topic-btn"
+                        aria-pressed={discussFreshSession}
+                        title={t(language, "drawer.freshTopicTitle")}
+                        onClick={() => setDiscussFreshSession(d.state.id, !discussFreshSession)}
+                      >
+                        <Icon icon={RotateCcw} size={14} /> {t(language, "drawer.freshTopic")}
+                      </Button>
                     </div>
                     <Textarea
                       size="sm"
@@ -485,7 +912,15 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                       rows={3}
                       value={discussDraft}
                       placeholder={t(language, isImplOrAccept ? "drawer.placeholderFix" : "drawer.placeholder")}
-                      onChange={(e) => setDiscussDraft(e.target.value)}
+                      onChange={(e) => setDiscussDraft(d.state.id, e.target.value)}
+                      onKeyDown={(e) => {
+                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing) {
+                          e.preventDefault();
+                          if (!busy && !activeAskRun && discussDraft.trim()) {
+                            void runAskFromDrawer(d.state.id);
+                          }
+                        }
+                      }}
                     />
                     {isReadonlyStage && (
                       <div className="xs muted" style={{ marginTop: 4 }}>
@@ -500,7 +935,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         className="flex-1"
                         data-action="run-ask"
                         data-testid="run-ask-btn"
-                        disabled={busy || Boolean(activeRun)}
+                        disabled={busy || Boolean(activeAskRun)}
                         onAction={() => runAskFromDrawer(d.state.id)}
                       >
                         <Icon icon={Lightbulb} size={14} /> {t(language, "drawer.ask")}
@@ -511,12 +946,13 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                         className="flex-1"
                         data-action="run-refine"
                         data-testid="run-refine-btn"
-                        disabled={busy || Boolean(activeRun) || isReadonlyStage}
+                        disabled={busy || Boolean(activeTaskRun) || isReadonlyStage}
                         onAction={() => runRefineFromDrawer(d.state.id)}
                       >
                         <Icon icon={Pencil} size={14} /> {t(language, isImplOrAccept ? "drawer.refineCode" : "drawer.refine")}
                       </AsyncButton>
                     </div>
+                    <div className="discuss-composer-shortcut muted xs">{t(language, "drawer.shortcutHint")}</div>
                   </div>
                 </div>
               ) : (
@@ -553,7 +989,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
 
                   {currentRun ? (
                     <>
-                      {activeRun && currentRun.id !== activeRun.id && (
+                      {activeRunForConsole && currentRun.id !== activeRunForConsole.id && (
                         <Alert variant="warning" className="console-historical-banner py-2 text-xs" data-testid="historical-run-banner">
                           <AlertDescription className="flex w-full items-center justify-between gap-2 text-foreground">
                             <span>{t(language, "drawer.viewingHistorical", { runId: currentRun.id })}</span>
@@ -562,7 +998,7 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                               type="button"
                               variant="ghost"
                               data-testid="jump-to-live-run-btn"
-                              onClick={() => void openRunConsole(d.state.id, activeRun.id)}
+                              onClick={() => void openRunConsole(d.state.id, activeRunForConsole.id)}
                             >
                               {t(language, "drawer.jumpToLive")}
                             </Button>
@@ -576,19 +1012,19 @@ export function RightDrawer({ workspaceRef }: { workspaceRef?: RefObject<HTMLDiv
                             const badgeVariant = tone === "danger" ? "error" : tone === "neutral" ? "secondary" : tone;
                             return (
                               <Badge variant={badgeVariant}>
-                            <Icon
-                              icon={
-                                currentRun.status === "running"
-                                  ? Loader2
-                                  : currentRun.status === "succeeded"
-                                    ? Check
-                                    : X
-                              }
-                              size={14}
-                              className={currentRun.status === "running" ? "spin" : undefined}
-                            />{" "}
-                            {formatAgentStatusLabel(language, currentRun.status)}
-                          </Badge>
+                                <Icon
+                                  icon={
+                                    currentRun.status === "running"
+                                      ? Loader2
+                                      : currentRun.status === "succeeded"
+                                        ? Check
+                                        : X
+                                  }
+                                  size={14}
+                                  className={currentRun.status === "running" ? "spin" : undefined}
+                                />{" "}
+                                {formatAgentStatusLabel(language, currentRun.status)}
+                              </Badge>
                             );
                           })()}
                           <span className="xs">

@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { AGENT_ACTIONS, type AgentAction } from "../../core/types.ts";
 import { REASONING_EFFORTS, type ReasoningEffort } from "../../hub/types.ts";
 import { readStorageItem, writeStorageItem } from "../i18n.ts";
-import type { CriterionDraft, PendingAnnotation } from "../state.ts";
+import type { CriterionDraft } from "../state.ts";
 
 export interface RunnerOverride {
   key: string;
@@ -69,9 +69,9 @@ export interface DraftStoreState {
   editingDesign: boolean;
   designDraftBody: string;
 
-  discussDraft: string;
-  discussAnchor: string | null;
-  pendingAnnotations: PendingAnnotation[];
+  discussDraftByReq: Record<string, string>;
+  discussAnchorByReq: Record<string, string | null>;
+  discussFreshSessionByReq: Record<string, boolean>;
 
   setProjectScope: (projectId: string | null) => void;
   setSelectedRunnerKey: (key: string, action?: AgentAction) => void;
@@ -87,11 +87,9 @@ export interface DraftStoreState {
   cancelEditDesign: () => void;
   setDesignDraftBody: (body: string) => void;
 
-  setDiscussDraft: (draft: string) => void;
-  setDiscussAnchor: (anchor: string | null) => void;
-  addPendingAnnotation: (item: PendingAnnotation) => void;
-  removePendingAnnotation: (id: string) => void;
-  clearPendingAnnotations: () => void;
+  setDiscussDraft: (reqId: string, draft: string) => void;
+  setDiscussAnchor: (reqId: string, anchor: string | null) => void;
+  setDiscussFreshSession: (reqId: string, fresh: boolean) => void;
 }
 
 export const useDraftStore = create<DraftStoreState>((set) => ({
@@ -108,9 +106,9 @@ export const useDraftStore = create<DraftStoreState>((set) => ({
   editingDesign: false,
   designDraftBody: "",
 
-  discussDraft: "",
-  discussAnchor: null,
-  pendingAnnotations: [],
+  discussDraftByReq: {},
+  discussAnchorByReq: {},
+  discussFreshSessionByReq: {},
 
   setProjectScope: (projectScopeId) =>
     set((s) => {
@@ -120,6 +118,9 @@ export const useDraftStore = create<DraftStoreState>((set) => ({
         runnerOverrides: loadRunnerOverrides(projectScopeId),
         selectedRunnerKey: "",
         selectedEffort: "",
+        discussDraftByReq: {},
+        discussAnchorByReq: {},
+        discussFreshSessionByReq: {},
       };
     }),
   setSelectedRunnerKey: (selectedRunnerKey, action) =>
@@ -181,11 +182,16 @@ export const useDraftStore = create<DraftStoreState>((set) => ({
   cancelEditDesign: () => set({ editingDesign: false }),
   setDesignDraftBody: (designDraftBody) => set({ designDraftBody }),
 
-  setDiscussDraft: (discussDraft) => set({ discussDraft }),
-  setDiscussAnchor: (discussAnchor) => set({ discussAnchor }),
-  addPendingAnnotation: (item) =>
-    set((s) => ({ pendingAnnotations: [...s.pendingAnnotations, item] })),
-  removePendingAnnotation: (id) =>
-    set((s) => ({ pendingAnnotations: s.pendingAnnotations.filter((x) => x.id !== id) })),
-  clearPendingAnnotations: () => set({ pendingAnnotations: [] }),
+  setDiscussDraft: (reqId, draft) =>
+    set((s) => ({
+      discussDraftByReq: { ...s.discussDraftByReq, [reqId]: draft },
+    })),
+  setDiscussAnchor: (reqId, anchor) =>
+    set((s) => ({
+      discussAnchorByReq: { ...s.discussAnchorByReq, [reqId]: anchor },
+    })),
+  setDiscussFreshSession: (reqId, fresh) =>
+    set((s) => ({
+      discussFreshSessionByReq: { ...s.discussFreshSessionByReq, [reqId]: fresh },
+    })),
 }));

@@ -1436,7 +1436,9 @@ export async function submitDecisionsAndRevise(
       }
     }
 
-    const unresolvedNotes = (state.discussions ?? []).filter((d) => d.mode === "refine" && !d.resolved);
+    const unresolvedNotes = (state.discussions ?? []).filter(
+      (d) => d.actor === "human" && d.mode === "refine" && (!d.kind || d.kind === "annotation") && !d.resolved,
+    );
     unresolvedIds = unresolvedNotes.map((d) => d.id);
     const noteText = input.note?.trim() ? normalizeReason(input.note, "补充意见") : "";
 
@@ -3626,11 +3628,17 @@ export async function addDiscussion(
   input: {
     actor: "human" | "agent";
     mode: "ask" | "refine";
+    kind?: DiscussionEntry["kind"];
     message: string;
     anchor?: string;
     harness?: string;
     model?: string;
     resolved?: boolean;
+    adopted?: boolean;
+    runId?: string;
+    durationMs?: number;
+    toolCallsCount?: number;
+    handoffMode?: DiscussionEntry["handoffMode"];
     expectedRevision?: number;
     currentCodeSnapshotHash?: string | null;
   },
@@ -3644,11 +3652,21 @@ export async function addDiscussion(
     at: Date.now(),
     actor: input.actor,
     mode: input.mode,
+    ...(input.kind ? { kind: input.kind } : {}),
     ...(input.anchor?.trim() ? { anchor: input.anchor.trim().slice(0, 120) } : {}),
     ...(input.harness?.trim() ? { harness: input.harness.trim().slice(0, 64) } : {}),
     ...(input.model?.trim() ? { model: input.model.trim().slice(0, 200) } : {}),
     message,
     ...(input.resolved !== undefined ? { resolved: input.resolved } : {}),
+    ...(input.adopted !== undefined ? { adopted: input.adopted } : {}),
+    ...(input.runId?.trim() ? { runId: input.runId.trim().slice(0, 80) } : {}),
+    ...(typeof input.durationMs === "number" && Number.isFinite(input.durationMs) && input.durationMs >= 0
+      ? { durationMs: Math.round(input.durationMs) }
+      : {}),
+    ...(typeof input.toolCallsCount === "number" && Number.isFinite(input.toolCallsCount) && input.toolCallsCount >= 0
+      ? { toolCallsCount: Math.floor(input.toolCallsCount) }
+      : {}),
+    ...(input.handoffMode ? { handoffMode: input.handoffMode } : {}),
   };
 
   const bundle = await mutateRequirement(root, id, input.expectedRevision, (current, now) => {
@@ -3675,15 +3693,21 @@ export async function addDiscussion(
 export async function resolveDiscussions(
   root: string,
   id: string,
-  input: { ids?: string[]; resolved?: boolean; currentCodeSnapshotHash?: string | null } = {},
+  input: { ids?: string[]; resolved?: boolean; adopted?: boolean; currentCodeSnapshotHash?: string | null } = {},
 ): Promise<RequirementDetail> {
-  const targetResolved = input.resolved ?? true;
+  const targetResolved = input.resolved;
+  const targetAdopted = input.adopted;
   const bundle = await mutateRequirement(root, id, undefined, (current) => {
     const { state } = current;
     const idSet = input.ids ? new Set(input.ids) : null;
-    const next = (state.discussions ?? []).map((item) =>
-      idSet === null || idSet.has(item.id) ? { ...item, resolved: targetResolved } : item,
-    );
+    const next = (state.discussions ?? []).map((item) => {
+      if (idSet !== null && !idSet.has(item.id)) return item;
+      return {
+        ...item,
+        ...(targetResolved !== undefined ? { resolved: targetResolved } : targetAdopted === undefined ? { resolved: true } : {}),
+        ...(targetAdopted !== undefined ? { adopted: targetAdopted } : {}),
+      };
+    });
     return {
       state: {
         ...state,
@@ -3692,6 +3716,33 @@ export async function resolveDiscussions(
     };
   });
   return toDetail(bundle, input.currentCodeSnapshotHash ?? null);
+}
+
+export async function deleteDiscussion(
+  root: string,
+  id: string,
+  discId: string,
+  currentCodeSnapshotHash?: string | null,
+): Promise<RequirementDetail> {
+  const cleanId = discId.trim();
+  if (!cleanId) {
+    throw new WorkbenchError("invalid_input", "批注或讨论 ID 不能为空");
+  }
+  const bundle = await mutateRequirement(root, id, undefined, (current) => {
+    const { state } = current;
+    const prev = state.discussions ?? [];
+    if (!prev.some((item) => item.id === cleanId)) {
+      throw new WorkbenchError("not_found", `未找到批注或讨论记录: ${cleanId}`);
+    }
+    const next = prev.filter((item) => item.id !== cleanId);
+    return {
+      state: {
+        ...state,
+        discussions: next,
+      },
+    };
+  });
+  return toDetail(bundle, currentCodeSnapshotHash ?? null);
 }
 
 export async function startAgentRun(

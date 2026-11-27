@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { findLockingRequirementRun, resolveRequirementRunScope } from "../../src/web/state.ts";
+import {
+  findActiveAskRun,
+  findLockingRequirementRun,
+  getPendingRefineAnnotations,
+  matchesRequirementRunScope,
+  resolveRequirementRunScope,
+} from "../../src/web/state.ts";
+import { useDraftStore } from "../../src/web/stores/draftStore.ts";
 import { useStreamStore, type ActiveRunItem } from "../../src/web/stores/streamStore.ts";
 
 function makeRun(overrides: Partial<ActiveRunItem> = {}): ActiveRunItem {
@@ -27,10 +34,18 @@ beforeEach(() => {
     locallyStartedRuns: {},
     lastSnapshotStartedAt: 0,
     liveRunLogs: {},
+    liveStreamDeltas: {},
+    askPromptsByRun: {},
+    lastAskErrorByReq: {},
     logHydrated: {},
     runTraces: {},
     liveRunMetrics: {},
     selectedRunByReq: {},
+  });
+  useDraftStore.setState({
+    discussDraftByReq: {},
+    discussAnchorByReq: {},
+    discussFreshSessionByReq: {},
   });
 });
 
@@ -152,5 +167,117 @@ describe("运行项目归属", () => {
     expect(
       findLockingRequirementRun([makeRun({ id: "RUN-C", root: "/elsewhere" })], "REQ-001", scope),
     ).toBeUndefined();
+  });
+});
+
+describe("双轨并发与流式探讨状态", () => {
+  test("ask 运行不触发主工作区写锁，但可由独立 ask 轨道识别", () => {
+    const scope = { projectId: null, projectRoot: "/repo" };
+    const askRun = makeRun({ id: "RUN-ASK", action: "ask" });
+    const implRun = makeRun({ id: "RUN-IMPL", action: "implement" });
+
+    expect(findLockingRequirementRun([askRun], "REQ-001", scope)).toBeUndefined();
+    expect(findActiveAskRun([askRun], "REQ-001", scope)).toBe(askRun);
+
+    // 双轨并发时各自精确匹配对应轨道
+    expect(findLockingRequirementRun([askRun, implRun], "REQ-001", scope)).toBe(implRun);
+    expect(findActiveAskRun([askRun, implRun], "REQ-001", scope)).toBe(askRun);
+  });
+
+  test("并发 ask 启动不抢占主任务终端选中态，且增量 delta 在完整消息到达后自动清空", () => {
+    const implRun = makeRun({ id: "RUN-IMPL", action: "implement" });
+    const askRun = makeRun({ id: "RUN-ASK", action: "ask" });
+
+    useStreamStore.getState().setRunStarted(implRun);
+    expect(useStreamStore.getState().selectedRunByReq["REQ-001"]).toBe("RUN-IMPL");
+
+    useStreamStore.getState().setRunStarted(askRun);
+    expect(useStreamStore.getState().selectedRunByReq["REQ-001"]).toBe("RUN-IMPL");
+
+    useStreamStore.getState().appendRunDelta("RUN-ASK", "thinking", "分析原因");
+    useStreamStore.getState().appendRunDelta("RUN-ASK", "text", "第一段");
+    useStreamStore.getState().appendRunDelta("RUN-ASK", "text", "第二段");
+    expect(useStreamStore.getState().liveStreamDeltas["RUN-ASK"]).toEqual({
+      thinking: "分析原因",
+      text: "第一段第二段",
+    });
+
+    useStreamStore.getState().pushTraceEvent("RUN-ASK", {
+      seq: 1,
+      ts: Date.now(),
+      type: "assistant.message",
+      turnIndex: 1,
+      text: "第一段第二段",
+    });
+    expect(useStreamStore.getState().liveStreamDeltas["RUN-ASK"]).toEqual({
+      thinking: "分析原因",
+      text: "",
+    });
+
+    useStreamStore.getState().markRunFinished("RUN-ASK");
+    expect(useStreamStore.getState().liveStreamDeltas["RUN-ASK"]).toBeUndefined();
+  });
+
+  test("讨论草稿按需求 ID 隔离，且待提交批注严格由服务端未解决 refine 记录派生", () => {
+    useDraftStore.getState().setDiscussDraft("REQ-001", "REQ-1 问题");
+    useDraftStore.getState().setDiscussAnchor("REQ-001", "design.md#锁");
+    useDraftStore.getState().setDiscussDraft("REQ-002", "REQ-2 问题");
+
+    expect(useDraftStore.getState().discussDraftByReq["REQ-001"]).toBe("REQ-1 问题");
+    expect(useDraftStore.getState().discussDraftByReq["REQ-002"]).toBe("REQ-2 问题");
+    expect(useDraftStore.getState().discussAnchorByReq["REQ-002"]).toBeUndefined();
+
+    const pending = getPendingRefineAnnotations([
+      { id: "D-1", at: 1, actor: "human", mode: "ask", message: "纯探讨" },
+      { id: "D-2", at: 2, actor: "human", mode: "refine", kind: "annotation", anchor: "design.md#A", message: "待改 A" },
+      { id: "D-3", at: 3, actor: "human", mode: "refine", kind: "annotation", message: "已解决", resolved: true },
+      { id: "D-4", at: 4, actor: "human", mode: "refine", kind: "refine_summary", message: "汇总记录" },
+      { id: "D-5", at: 5, actor: "agent", mode: "ask", message: "AI 回复" },
+      { id: "D-6", at: 6, actor: "human", mode: "refine", kind: "chat", message: "直接修订" },
+      { id: "D-7", at: 7, actor: "human", mode: "refine", anchor: "spec.md", message: "旧版批注" },
+    ]);
+    expect(pending.map((item) => item.id)).toEqual(["D-2", "D-7"]);
+  });
+
+  test("ask 错误状态按项目隔离，且 markRunFinished 清理 askPromptsByRun", () => {
+    const store = useStreamStore.getState();
+    store.recordAskPrompt("RUN-A", {
+      reqId: "REQ-001",
+      message: "项目 A 的问题",
+      projectId: "proj-a",
+      root: "/repo-a",
+    });
+    expect(useStreamStore.getState().askPromptsByRun["RUN-A"]).toBeDefined();
+
+    store.markRunFinished("RUN-A");
+    expect(useStreamStore.getState().askPromptsByRun["RUN-A"]).toBeUndefined();
+
+    store.setLastAskError("REQ-001", {
+      reqId: "REQ-001",
+      runId: "RUN-A",
+      status: "failed",
+      message: "项目 A 的问题",
+      projectId: "proj-a",
+      root: "/repo-a",
+      at: 1,
+    });
+    store.setLastAskError("REQ-001", {
+      reqId: "REQ-001",
+      runId: "RUN-B",
+      status: "cancelled",
+      message: "项目 B 的问题",
+      projectId: "proj-b",
+      root: "/repo-b",
+      at: 2,
+    });
+
+    const allErrors = Object.values(useStreamStore.getState().lastAskErrorByReq).filter(Boolean);
+    expect(allErrors.length).toBe(2);
+    expect(allErrors.find((e) => matchesRequirementRunScope(e!, { projectId: "proj-a", projectRoot: "/repo-a" }))?.runId).toBe("RUN-A");
+    expect(allErrors.find((e) => matchesRequirementRunScope(e!, { projectId: "proj-b", projectRoot: "/repo-b" }))?.runId).toBe("RUN-B");
+
+    store.setLastAskError("REQ-001", null, { projectId: "proj-a", root: "/repo-a" });
+    const remaining = Object.values(useStreamStore.getState().lastAskErrorByReq).filter(Boolean);
+    expect(remaining.map((e) => e?.runId)).toEqual(["RUN-B"]);
   });
 });

@@ -11,6 +11,7 @@ import {
   authorizeFastTrack,
   cancelRequirement,
   createRequirement,
+  deleteDiscussion,
   deliverRequirement,
   getAgentRunContext,
   getAgentRunDetail,
@@ -1196,9 +1197,16 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
       if (method === "POST" && sub === "discussions") {
         const body = await readBody(req);
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const kind =
+          body.kind === "annotation" || body.kind === "chat" || body.kind === "refine_summary"
+            ? body.kind
+            : body.mode === "refine"
+              ? "annotation"
+              : "chat";
         const res = await addDiscussion(base, id, {
           actor: "human",
           mode: body.mode === "refine" ? "refine" : "ask",
+          kind,
           anchor: typeof body.anchor === "string" ? body.anchor : undefined,
           message: typeof body.message === "string" ? body.message : "",
           resolved: typeof body.resolved === "boolean" ? body.resolved : undefined,
@@ -1214,10 +1222,24 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
         const detail = await resolveDiscussions(base, id, {
           ids: Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === "string") : undefined,
-          resolved: typeof body.resolved === "boolean" ? body.resolved : true,
+          ...(typeof body.resolved === "boolean" ? { resolved: body.resolved } : {}),
+          ...(typeof body.adopted === "boolean" ? { adopted: body.adopted } : {}),
           currentCodeSnapshotHash: snapshot?.fingerprint ?? null,
         });
         deps.broadcastUi({ type: "workbench.updated", reason: "discussion.resolved", root: base, id, at: Date.now() });
+        return jsonResponse({ detail });
+      }
+
+      if (method === "DELETE" && sub.startsWith("discussions/")) {
+        let discId = "";
+        try {
+          discId = decodeURIComponent(sub.slice("discussions/".length));
+        } catch {
+          throw new WorkbenchError("invalid_input", "批注或讨论 ID 编码无效");
+        }
+        const snapshot = await observeGitSnapshot(resolveCodeRoot(base, id));
+        const detail = await deleteDiscussion(base, id, discId, snapshot?.fingerprint ?? null);
+        deps.broadcastUi({ type: "workbench.updated", reason: "discussion.deleted", root: base, id, at: Date.now() });
         return jsonResponse({ detail });
       }
 
@@ -1239,6 +1261,10 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
           message: typeof body.message === "string" ? body.message : undefined,
           anchor: typeof body.anchor === "string" ? body.anchor : undefined,
           anchorIds: Array.isArray(body.anchorIds) ? body.anchorIds.filter((x): x is string => typeof x === "string") : undefined,
+          adoptDiscussionId:
+            typeof body.adoptDiscussionId === "string" && body.adoptDiscussionId.trim()
+              ? body.adoptDiscussionId.trim()
+              : undefined,
           mode: body.mode === "refine" ? "refine" : body.mode === "ask" ? "ask" : undefined,
           useFallback: body.useFallback === true,
           forceFreshSession: body.forceFreshSession === true,

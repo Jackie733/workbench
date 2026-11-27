@@ -471,7 +471,16 @@ describe("stream_adapters structured JSONL parsing & bounds", () => {
       expect(tErrEnd.output).toContain("TOOL_ERROR: exit code 1");
     }
 
-    // Streaming text_delta chunks coalesced into one assistant.message on DONE
+    // Streaming text_delta & thinking_delta chunks emit real-time UI deltas and coalesce on DONE
+    const dThink = adapter.feedLine(
+      JSON.stringify({
+        event: "step_update",
+        step_update: { conversation_id: "agy-conv-1", step_index: 4, state: "ACTIVE", step_type: "agent_response", thinking_delta: "先核对结果" },
+      }),
+    );
+    expect(dThink.events).toEqual([]);
+    expect(dThink.thinkingDelta).toBe("先核对结果");
+
     const d1 = adapter.feedLine(
       JSON.stringify({
         event: "step_update",
@@ -479,12 +488,14 @@ describe("stream_adapters structured JSONL parsing & bounds", () => {
       }),
     );
     expect(d1.events).toEqual([]);
-    adapter.feedLine(
+    expect(d1.textDelta).toBe("已完成 ");
+    const d2 = adapter.feedLine(
       JSON.stringify({
         event: "step_update",
         step_update: { conversation_id: "agy-conv-1", step_index: 4, state: "ACTIVE", step_type: "agent_response", text_delta: "全部修改。" },
       }),
     );
+    expect(d2.textDelta).toBe("全部修改。");
     const dDone = adapter.feedLine(
       JSON.stringify({
         event: "step_update",

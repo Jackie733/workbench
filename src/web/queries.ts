@@ -25,15 +25,18 @@ import {
 import { resolveWarningParam } from "./i18n.ts";
 import {
   activeRunnerChoice,
+  findActiveAskRun,
   findLockingRequirementRun,
   formatReviewFixFeedback,
   getModelEffortCapability,
+  getPendingRefineAnnotations,
+  matchesRequirementRunScope,
   resolveRequirementRunScope,
   type RequirementRunScope,
   type Scope,
 } from "./state.ts";
 import { useDraftStore } from "./stores/draftStore.ts";
-import { useStreamStore, type ActiveRunItem } from "./stores/streamStore.ts";
+import { useStreamStore, type ActiveRunItem, type LastAskErrorItem } from "./stores/streamStore.ts";
 import { useUiStore } from "./stores/uiStore.ts";
 
 export const queryClient = new QueryClient({
@@ -93,7 +96,21 @@ export function guardRequirementRunLock(requirementId: string): boolean {
   return true;
 }
 
-/** 详情页及其弹窗共用的响应式运行期限制判定。 */
+/** 命令式读取当前需求独立的只读研讨（ask）运行状态。 */
+export function findRequirementAskRun(requirementId: string): ActiveRunItem | null {
+  return (
+    findActiveAskRun(Object.values(useStreamStore.getState().activeRuns), requirementId, resolveRunScope()) ??
+    null
+  );
+}
+
+export function guardRequirementAskLock(requirementId: string): boolean {
+  if (!findRequirementAskRun(requirementId)) return false;
+  useUiStore.getState().showToastKey("toast.askRunning", undefined, true);
+  return true;
+}
+
+/** 详情页及其弹窗共用的响应式运行期限制判定（主任务轨，不含 ask）。 */
 export function useRequirementRunLock(requirementId: string | null): ActiveRunItem | null {
   const activeRuns = useStreamStore((s) => s.activeRuns);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -114,6 +131,56 @@ export function useRequirementRunLock(requirementId: string | null): ActiveRunIt
     if (!requirementId) return null;
     return findLockingRequirementRun(Object.values(activeRuns), requirementId, scope) ?? null;
   }, [activeRuns, requirementId, scope]);
+}
+
+/** 右侧研讨区专用的响应式只读探讨（ask）运行判定，与主任务轨完全独立。 */
+export function useRequirementAskRun(requirementId: string | null): ActiveRunItem | null {
+  const activeRuns = useStreamStore((s) => s.activeRuns);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const { data: hub } = useHubStateQuery();
+  const projectKey = activeProjectId ?? hub?.activeProjectId ?? null;
+  const { data: project } = useProjectQuery(projectKey);
+  const scope = useMemo(
+    () =>
+      resolveRequirementRunScope({
+        activeProjectId,
+        hubActiveProjectId: hub?.activeProjectId,
+        projectRoot: project?.root,
+        projects: hub?.projects,
+      }),
+    [activeProjectId, hub?.activeProjectId, hub?.projects, project?.root],
+  );
+  return useMemo(() => {
+    if (!requirementId) return null;
+    return findActiveAskRun(Object.values(activeRuns), requirementId, scope) ?? null;
+  }, [activeRuns, requirementId, scope]);
+}
+
+/** 右侧研讨区专用的响应式 ask 失败/取消状态，按当前项目作用域严格隔离。 */
+export function useRequirementAskError(requirementId: string | null): LastAskErrorItem | null {
+  const lastAskErrorByReq = useStreamStore((s) => s.lastAskErrorByReq);
+  const activeProjectId = useUiStore((s) => s.activeProjectId);
+  const { data: hub } = useHubStateQuery();
+  const projectKey = activeProjectId ?? hub?.activeProjectId ?? null;
+  const { data: project } = useProjectQuery(projectKey);
+  const scope = useMemo(
+    () =>
+      resolveRequirementRunScope({
+        activeProjectId,
+        hubActiveProjectId: hub?.activeProjectId,
+        projectRoot: project?.root,
+        projects: hub?.projects,
+      }),
+    [activeProjectId, hub?.activeProjectId, hub?.projects, project?.root],
+  );
+  return useMemo(() => {
+    if (!requirementId) return null;
+    for (const item of Object.values(lastAskErrorByReq)) {
+      if (!item || (item.reqId && item.reqId !== requirementId)) continue;
+      if (matchesRequirementRunScope(item, scope)) return item;
+    }
+    return null;
+  }, [lastAskErrorByReq, requirementId, scope]);
 }
 
 export function useAuthStatusQuery() {
@@ -496,6 +563,15 @@ export function useWorkbenchWsSync(enabled = true): void {
           return;
         }
 
+        if (type === "agent.run.delta") {
+          const runId = typeof ev.runId === "string" ? ev.runId : "";
+          const channel = ev.channel === "thinking" ? "thinking" : ev.channel === "text" ? "text" : null;
+          const delta = typeof ev.delta === "string" ? ev.delta : "";
+          if (!runId || !channel || !delta) return;
+          useStreamStore.getState().appendRunDelta(runId, channel, delta);
+          return;
+        }
+
         if (type === "agent.run.event") {
           const runId = typeof ev.runId === "string" ? ev.runId : "";
           const evtObj = ev.event;
@@ -515,8 +591,36 @@ export function useWorkbenchWsSync(enabled = true): void {
         if (type === "agent.run.finished") {
           const runId = typeof ev.runId === "string" ? ev.runId : "";
           if (!runId) return;
-          useStreamStore.getState().markRunFinished(runId);
+          const streamState = useStreamStore.getState();
+          const recordedPrompt = streamState.askPromptsByRun[runId];
+          streamState.markRunFinished(runId);
           const reqId = typeof ev.requirementId === "string" ? ev.requirementId : "";
+          const action = ev.action as AgentAction | undefined;
+          const status = ev.status as AgentRunRecord["status"] | undefined;
+          const evProjectId = typeof ev.projectId === "string" ? ev.projectId : recordedPrompt?.projectId;
+          const evRoot = typeof ev.root === "string" ? ev.root : recordedPrompt?.root;
+          if (action === "ask" && reqId) {
+            if (status === "failed" || status === "cancelled") {
+              useStreamStore.getState().setLastAskError(reqId, {
+                reqId,
+                runId,
+                status,
+                errorSummary: typeof ev.errorSummary === "string" ? ev.errorSummary : undefined,
+                message: recordedPrompt?.message ?? "",
+                anchor: recordedPrompt?.anchor,
+                harness: typeof ev.harness === "string" ? ev.harness : undefined,
+                model: typeof ev.model === "string" ? ev.model : undefined,
+                ...(evProjectId ? { projectId: evProjectId } : {}),
+                ...(evRoot ? { root: evRoot } : {}),
+                at: typeof ev.at === "number" ? ev.at : Date.now(),
+              });
+            } else if (status === "succeeded") {
+              useStreamStore.getState().setLastAskError(reqId, null, {
+                ...(evProjectId ? { projectId: evProjectId } : {}),
+                ...(evRoot ? { root: evRoot } : {}),
+              });
+            }
+          }
           if (reqId) {
             void hydrateRunTrace(reqId, runId, true);
             void hydrateRunLog(reqId, runId, true);
@@ -733,13 +837,15 @@ export async function triggerActiveRun(
     message?: string;
     anchor?: string;
     anchorIds?: string[];
+    adoptDiscussionId?: string;
     mode?: "ask" | "refine";
     useFallback?: boolean;
     forceFreshSession?: boolean;
     runnerActionKey?: AgentAction;
   },
-): Promise<void> {
-  if (guardRequirementRunLock(reqId)) return;
+): Promise<boolean> {
+  const isAsk = action === "ask";
+  if (isAsk ? guardRequirementAskLock(reqId) : guardRequirementRunLock(reqId)) return false;
   const scope = resolveRunScope();
   const hub = queryClient.getQueryData<HubStateResponse>(queryKeys.hubState);
   const project = queryClient.getQueryData<ProjectInfoResponse>(queryKeys.project(scope.projectId));
@@ -771,7 +877,7 @@ export async function triggerActiveRun(
   let requestStartedAt = 0;
   const res = await runBusy(async () => {
     // 产生请求副作用前读取最新运行状态，防住延迟回调与并发入口。
-    if (guardRequirementRunLock(reqId)) return null;
+    if (isAsk ? guardRequirementAskLock(reqId) : guardRequirementRunLock(reqId)) return null;
     requestStartedAt = Date.now();
     return api.startAgentRun(reqId, {
       action,
@@ -781,6 +887,7 @@ export async function triggerActiveRun(
       message: opts?.message,
       anchor: opts?.anchor,
       anchorIds: opts?.anchorIds,
+      adoptDiscussionId: opts?.adoptDiscussionId,
       mode: opts?.mode,
       useFallback: opts?.useFallback,
       forceFreshSession: opts?.forceFreshSession,
@@ -788,15 +895,26 @@ export async function triggerActiveRun(
   });
 
   if (res) {
-    useStreamStore.getState().setRunStarted({
+    const stream = useStreamStore.getState();
+    stream.setRunStarted({
       ...res.run,
       requirementId: reqId,
       // 使用发起请求时的项目作用域，避免响应到达前切换项目导致归属漂移。
       ...(scope.projectId ? { projectId: scope.projectId } : {}),
       ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
     }, requestStartedAt);
+    if (isAsk && opts?.message?.trim()) {
+      stream.recordAskPrompt(res.run.id, {
+        reqId,
+        message: opts.message.trim(),
+        anchor: opts.anchor,
+        forceFreshSession: opts.forceFreshSession,
+        ...(scope.projectId ? { projectId: scope.projectId } : {}),
+        ...(scope.projectRoot ? { root: scope.projectRoot } : {}),
+      });
+    }
     ui.setDrawerOpen(true);
-    ui.setDrawerTab(action === "ask" ? "discuss" : "console");
+    ui.setDrawerTab(isAsk ? "discuss" : "console");
     ui.showToastKey("toast.runStarted", {
       target: `${res.target.harness}/${res.target.model}${res.target.reasoningEffort ? ` [${res.target.reasoningEffort}]` : ""}`,
       action,
@@ -805,7 +923,9 @@ export async function triggerActiveRun(
     // Hub 快照刷新属于请求完成后的后台同步，不应继续占用按钮的局部 loading，
     // 否则网络或远端状态挂起时，已启动运行的操作按钮会长时间保持不可用。
     void queryClient.invalidateQueries({ queryKey: queryKeys.hubState }).catch(() => undefined);
+    return true;
   }
+  return false;
 }
 
 export async function executeVerify(id: string, body: Parameters<typeof api.verify>[1]) {
@@ -1021,7 +1141,6 @@ export async function reviseDecisionsAndDispatch(
     return api.reviseDecisions(id, input);
   });
   if (!res) return false;
-  useDraftStore.getState().clearPendingAnnotations();
   if (res.run && res.target) {
     useStreamStore.getState().setRunStarted(
       {
@@ -1683,23 +1802,25 @@ export async function submitAnnotation(
   const msg = messageRaw.trim();
   const ui = useUiStore.getState();
   const modalInstanceId = ui.modalInstanceId;
-  const draft = useDraftStore.getState();
   if (!msg) {
     ui.showToastKey("toast.needAnnotation", undefined, true);
     return;
   }
   if (mode === "ask") {
-    // 触发现有执行器的同需求调度名额，运行期间暂停并保留弹窗输入。
-    if (guardRequirementRunLock(reqId)) return;
+    // 独立的只读研讨轨道：不受主任务写锁限制，仅在同需求已有 ask 运行时提示。
+    if (guardRequirementAskLock(reqId)) return;
     // 先等待调度请求结束再关闭弹窗，确保当前按钮在缓慢响应期间仍可见并展示 loading。
-    await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
-    ui.closeModal(modalInstanceId);
-    ui.setDrawerOpen(true);
-    ui.setDrawerTab("discuss");
+    const started = await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
+    if (started) {
+      ui.closeModal(modalInstanceId);
+      ui.setDrawerOpen(true);
+      ui.setDrawerTab("discuss");
+    }
   } else {
-    const out = await runBusy(() => api.addDiscussion(reqId, { mode: "refine", anchor, message: msg }));
+    const out = await runBusy(() =>
+      api.addDiscussion(reqId, { mode: "refine", kind: "annotation", anchor, message: msg }),
+    );
     if (out) {
-      draft.addPendingAnnotation({ id: out.entry.id, anchor, message: msg });
       ui.closeModal(modalInstanceId);
       ui.setDrawerOpen(true);
       ui.setDrawerTab("discuss");
@@ -1709,20 +1830,51 @@ export async function submitAnnotation(
   }
 }
 
-export async function runAskFromDrawer(reqId: string): Promise<void> {
+export async function resolveAnnotationAction(reqId: string, ids: string[], resolved = true): Promise<void> {
+  if (ids.length === 0) return;
+  const out = await runBusy(() => api.resolveDiscussions(reqId, { ids, resolved }));
+  if (out) {
+    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+    useUiStore.getState().showToastKey("toast.annotationResolved");
+  }
+}
+
+export async function deleteAnnotationAction(reqId: string, discId: string): Promise<void> {
+  const out = await runBusy(() => api.deleteDiscussion(reqId, discId));
+  if (out) {
+    await queryClient.invalidateQueries({ queryKey: ["requirement"] });
+    useUiStore.getState().showToastKey("toast.annotationDeleted");
+  }
+}
+
+export async function runAskFromDrawer(
+  reqId: string,
+  override?: { message?: string; anchor?: string; forceFreshSession?: boolean },
+): Promise<void> {
   const draft = useDraftStore.getState();
   const ui = useUiStore.getState();
-  const msg = draft.discussDraft.trim();
+  const msg = (override?.message ?? draft.discussDraftByReq[reqId] ?? "").trim();
   if (!msg) {
     ui.showToastKey("toast.needQuestion", undefined, true);
     return;
   }
-  // 先复查运行状态，避免拦截时清空用户草稿。
-  if (guardRequirementRunLock(reqId)) return;
-  const anchor = draft.discussAnchor ?? undefined;
-  draft.setDiscussDraft("");
-  draft.setDiscussAnchor(null);
-  await triggerActiveRun(reqId, "ask", { message: msg, anchor, mode: "ask" });
+  // 独立的只读研讨轨：不检查主任务锁，仅防止同需求并发两个 ask。
+  if (guardRequirementAskLock(reqId)) return;
+  const anchor = override?.anchor ?? draft.discussAnchorByReq[reqId] ?? undefined;
+  const forceFreshSession = override?.forceFreshSession ?? Boolean(draft.discussFreshSessionByReq[reqId]);
+  const started = await triggerActiveRun(reqId, "ask", {
+    message: msg,
+    anchor,
+    mode: "ask",
+    ...(forceFreshSession ? { forceFreshSession: true } : {}),
+  });
+  if (started && !override?.message) {
+    draft.setDiscussDraft(reqId, "");
+    draft.setDiscussAnchor(reqId, null);
+    if (forceFreshSession) {
+      draft.setDiscussFreshSession(reqId, false);
+    }
+  }
 }
 
 function resolveRefineActionForStage(stage?: Stage): "design" | "fix" | "readonly" {
@@ -1735,47 +1887,60 @@ function resolveRefineActionForStage(stage?: Stage): "design" | "fix" | "readonl
   return "design";
 }
 
-function readCachedRequirementStage(reqId: string): Stage | undefined {
+function readCachedRequirementDetail(reqId: string): RequirementDetail | undefined {
   const ui = useUiStore.getState();
   const cached = queryClient.getQueryData<{ detail?: RequirementDetail }>(
     queryKeys.requirement(ui.activeProjectId, reqId),
   );
-  return cached?.detail?.state.stage;
+  return cached?.detail;
 }
 
-export async function runRefineFromDrawer(reqId: string): Promise<void> {
+export async function runRefineFromDrawer(reqId: string, opts?: { annotationsOnly?: boolean }): Promise<void> {
   const draft = useDraftStore.getState();
   const ui = useUiStore.getState();
-  const stage = readCachedRequirementStage(reqId);
+  const detail = readCachedRequirementDetail(reqId);
+  const stage = detail?.state.stage;
   const targetAction = resolveRefineActionForStage(stage);
   if (targetAction === "readonly") {
     ui.showToastKey("drawer.stageReadonly", undefined, true);
     return;
   }
-  const msg = draft.discussDraft.trim();
-  const anchorIds = draft.pendingAnnotations.map((a) => a.id);
-  const summary =
-    msg ||
-    (draft.pendingAnnotations.length > 0
-      ? `请结合以下 ${draft.pendingAnnotations.length} 条批注${targetAction === "fix" ? "修改代码并验证" : "修订技术方案"}：\n${draft.pendingAnnotations
-          .map((a) => `- [${a.anchor}] ${a.message}`)
-          .join("\n")}`
-      : "");
+  const pendingAnnotations = getPendingRefineAnnotations(detail?.state.discussions);
+  const msg = opts?.annotationsOnly ? "" : (draft.discussDraftByReq[reqId] ?? "").trim();
+  const anchorIds = pendingAnnotations.map((a) => a.id);
+  const annotationLines =
+    pendingAnnotations.length > 0
+      ? pendingAnnotations.map((a) => `- ${a.anchor ? `[${a.anchor}] ` : ""}${a.message}`).join("\n")
+      : "";
+  const summary = msg
+    ? annotationLines
+      ? `${msg}\n\n附待处理批注（${pendingAnnotations.length} 条）：\n${annotationLines}`
+      : msg
+    : pendingAnnotations.length > 0
+      ? `请结合以下 ${pendingAnnotations.length} 条批注${targetAction === "fix" ? "修改代码并验证" : "修订技术方案"}：\n${annotationLines}`
+      : "";
   if (!summary) {
     ui.showToastKey("toast.needRefine", undefined, true);
     return;
   }
-  // 先复查运行状态，避免拦截时清空讨论草稿与排队批注。
+  // 先复查主任务运行状态，避免拦截时清空讨论草稿。
   if (guardRequirementRunLock(reqId)) return;
-  draft.setDiscussDraft("");
-  draft.setDiscussAnchor(null);
-  draft.clearPendingAnnotations();
-  await triggerActiveRun(reqId, targetAction, { message: summary, anchorIds, mode: "refine", runnerActionKey: "ask" });
+  const started = await triggerActiveRun(reqId, targetAction, {
+    message: summary,
+    anchorIds,
+    mode: "refine",
+    runnerActionKey: "ask",
+  });
+  if (started && !opts?.annotationsOnly) {
+    draft.setDiscussDraft(reqId, "");
+    draft.setDiscussAnchor(reqId, null);
+  }
 }
 
 export async function adoptDiscussion(reqId: string, discId: string, message: string): Promise<void> {
   const ui = useUiStore.getState();
-  const stage = readCachedRequirementStage(reqId);
+  const detail = readCachedRequirementDetail(reqId);
+  const stage = detail?.state.stage;
   const targetAction = resolveRefineActionForStage(stage);
   if (targetAction === "readonly") {
     ui.showToastKey("drawer.stageReadonly", undefined, true);
@@ -1787,7 +1952,8 @@ export async function adoptDiscussion(reqId: string, discId: string, message: st
       targetAction === "fix"
         ? `请采纳此研讨结论并修改代码、运行验证：\n${message}`
         : `请采纳并落实此研讨结论：\n${message}`,
-    anchorIds: [discId],
+    adoptDiscussionId: discId,
     mode: "refine",
+    runnerActionKey: "ask",
   });
 }

@@ -341,7 +341,9 @@ export async function synthesizeHandoffPacket(
 
   // Highest-priority steering: merge conflict / review findings (non-review actions) / human feedback / unresolved annotations
   const allDiscussions = state.discussions ?? [];
-  const unresolvedRefineNotes = allDiscussions.filter((d) => d.mode === "refine" && !d.resolved);
+  const unresolvedRefineNotes = allDiscussions.filter(
+    (d) => d.actor === "human" && d.mode === "refine" && (!d.kind || d.kind === "annotation") && !d.resolved,
+  );
   const recentAskNotes = allDiscussions.filter((d) => d.mode === "ask").slice(-4);
   const pendingIds = new Set([...unresolvedRefineNotes.slice(-10), ...recentAskNotes].map((d) => d.id));
   const pendingNotes = allDiscussions.filter((d) => pendingIds.has(d.id));

@@ -516,16 +516,27 @@ export const api = {
     ),
   addDiscussion: (
     id: string,
-    input: { mode: "ask" | "refine"; anchor?: string; message: string; resolved?: boolean },
+    input: {
+      mode: "ask" | "refine";
+      kind?: DiscussionEntry["kind"];
+      anchor?: string;
+      message: string;
+      resolved?: boolean;
+    },
   ) =>
     requestJson<{ detail: RequirementDetail; entry: DiscussionEntry }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/discussions`),
       { method: "POST", body: JSON.stringify(input) },
     ),
-  resolveDiscussions: (id: string, input: { ids?: string[]; resolved?: boolean }) =>
+  resolveDiscussions: (id: string, input: { ids?: string[]; resolved?: boolean; adopted?: boolean }) =>
     requestJson<{ detail: RequirementDetail }>(
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/discussions/resolve`),
       { method: "POST", body: JSON.stringify(input) },
+    ),
+  deleteDiscussion: (id: string, discId: string) =>
+    requestJson<{ detail: RequirementDetail }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/discussions/${encodeURIComponent(discId)}`),
+      { method: "DELETE" },
     ),
   startAgentRun: (
     id: string,
@@ -537,6 +548,7 @@ export const api = {
       message?: string;
       anchor?: string;
       anchorIds?: string[];
+      adoptDiscussionId?: string;
       mode?: "ask" | "refine";
       useFallback?: boolean;
       forceFreshSession?: boolean;

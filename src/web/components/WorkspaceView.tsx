@@ -99,8 +99,10 @@ import {
   defaultActionForRequirement,
   describeEvidenceContext,
   EVIDENCE_META,
+  findActiveAskRun,
   findLockingRequirementRun,
   formatDateTime,
+  getPendingRefineAnnotations,
   STAGE_META,
   VERDICT_META,
   type DiffViewMode,
@@ -790,6 +792,20 @@ function SpecDesignTab({
   const setMoreMenuOpen = useUiStore((s) => s.setMoreMenuOpen);
   const setDesignComparePrev = useUiStore((s) => s.setDesignComparePrev);
   const setDesignCompareText = useUiStore((s) => s.setDesignCompareText);
+  const highlightedAnchor = useUiStore((s) => s.highlightedAnchor);
+  const clearAnchorHighlight = useUiStore((s) => s.clearAnchorHighlight);
+  const setDiscussDraft = useDraftStore((s) => s.setDiscussDraft);
+  const setDiscussAnchor = useDraftStore((s) => s.setDiscussAnchor);
+  const specContainerRef = useRef<HTMLDivElement | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightedElRef = useRef<HTMLElement | null>(null);
+  const handledHighlightNonceRef = useRef<number>(0);
+  const [selectionBar, setSelectionBar] = useState<{
+    text: string;
+    anchor: string;
+    top: number;
+    left: number;
+  } | null>(null);
 
   const editingSpec = useDraftStore((s) => s.editingSpec);
   const specDraftTitle = useDraftStore((s) => s.specDraftTitle);
@@ -826,9 +842,107 @@ function SpecDesignTab({
     setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
   };
 
-  const openAnnotate = (anchor: string) => {
-    setModal({ kind: "annotate_anchor", anchor, message: "", mode: "refine" });
+  const openAnnotate = (anchor: string, initialMessage = "") => {
+    setModal({ kind: "annotate_anchor", anchor, message: initialMessage, mode: "refine" });
   };
+
+  const annotationCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of getPendingRefineAnnotations(s.discussions)) {
+      if (!item.anchor) continue;
+      counts[item.anchor] = (counts[item.anchor] ?? 0) + 1;
+    }
+    return counts;
+  }, [s.discussions]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      highlightedElRef.current?.classList.remove("anchor-jump-highlight");
+      clearAnchorHighlight();
+    };
+  }, [clearAnchorHighlight]);
+
+  useEffect(() => {
+    if (!highlightedAnchor) return;
+    if (highlightedAnchor.nonce <= handledHighlightNonceRef.current) return;
+    const container = specContainerRef.current;
+    if (!container) return;
+    const targets = Array.from(container.querySelectorAll<HTMLElement>("[data-anchor-target]"));
+    const targetAnchor = highlightedAnchor.anchor;
+    const matched =
+      targets.find((el) => el.dataset.anchorTarget === targetAnchor) ??
+      targets.find((el) => targetAnchor.startsWith(`${el.dataset.anchorTarget}#`)) ??
+      targets.find((el) => (el.dataset.anchorTarget ?? "").includes(targetAnchor));
+    handledHighlightNonceRef.current = highlightedAnchor.nonce;
+    if (!matched) {
+      clearAnchorHighlight();
+      return;
+    }
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightedElRef.current?.classList.remove("anchor-jump-highlight");
+    matched.scrollIntoView({ behavior: "smooth", block: "center" });
+    matched.classList.remove("anchor-jump-highlight");
+    void matched.offsetWidth;
+    matched.classList.add("anchor-jump-highlight");
+    highlightedElRef.current = matched;
+    highlightTimerRef.current = setTimeout(() => {
+      matched.classList.remove("anchor-jump-highlight");
+      if (highlightedElRef.current === matched) highlightedElRef.current = null;
+      highlightTimerRef.current = null;
+      clearAnchorHighlight();
+    }, 1800);
+  }, [highlightedAnchor, clearAnchorHighlight]);
+
+  useEffect(() => {
+    const dismissSelectionBar = () => setSelectionBar(null);
+    const onSelectionChange = () => {
+      const sel = typeof window !== "undefined" ? window.getSelection() : null;
+      if (!sel || sel.isCollapsed || !sel.rangeCount) {
+        setSelectionBar(null);
+        return;
+      }
+      const text = sel.toString().trim();
+      if (text.length < 4 || text.length > 1200) {
+        setSelectionBar(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const common = range.commonAncestorContainer;
+      const el = common instanceof Element ? common : common.parentElement;
+      const docEl = el?.closest<HTMLElement>("[data-annotatable-doc]");
+      if (!docEl || !specContainerRef.current?.contains(docEl)) {
+        setSelectionBar(null);
+        return;
+      }
+      const docLabel = docEl.dataset.annotatableDoc ?? "design.md";
+      const rows = Array.from(docEl.querySelectorAll<HTMLElement>("[data-anchor-target]"));
+      const rect = range.getBoundingClientRect();
+      let anchor = docLabel;
+      for (const row of rows) {
+        const rRect = row.getBoundingClientRect();
+        if (rRect.top <= rect.top + 8 && row.dataset.anchorTarget) {
+          anchor = row.dataset.anchorTarget;
+        }
+      }
+      setSelectionBar({
+        text,
+        anchor,
+        top: Math.max(56, rect.top - 40),
+        left: Math.min(Math.max(16, rect.left + rect.width / 2), window.innerWidth - 180),
+      });
+    };
+    document.addEventListener("mouseup", onSelectionChange);
+    document.addEventListener("keyup", onSelectionChange);
+    window.addEventListener("scroll", dismissSelectionBar, true);
+    window.addEventListener("resize", dismissSelectionBar);
+    return () => {
+      document.removeEventListener("mouseup", onSelectionChange);
+      document.removeEventListener("keyup", onSelectionChange);
+      window.removeEventListener("scroll", dismissSelectionBar, true);
+      window.removeEventListener("resize", dismissSelectionBar);
+    };
+  }, []);
 
   const canEditAttachments = s.acceptance === null && s.stage !== "done";
   const attachments = s.attachments ?? [];
@@ -925,7 +1039,51 @@ function SpecDesignTab({
   };
 
   return (
-    <>
+    <div ref={specContainerRef}>
+      {selectionBar && (
+        <div
+          className="selection-quick-bar"
+          data-testid="selection-quick-bar"
+          style={{ top: selectionBar.top, left: selectionBar.left }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            className="selection-quick-btn"
+            data-testid="selection-ask-btn"
+            onClick={() => {
+              const quote = `> ${selectionBar.text.replace(/\r?\n+/g, "\n> ")}\n\n`;
+              const existing = useDraftStore.getState().discussDraftByReq[s.id] ?? "";
+              setDiscussAnchor(s.id, selectionBar.anchor);
+              setDiscussDraft(s.id, existing.trim() ? `${existing.trimEnd()}\n\n${quote}` : quote);
+              setDrawerOpen(true);
+              setDrawerTab("discuss");
+              setSelectionBar(null);
+              window.getSelection()?.removeAllRanges();
+              setTimeout(() => {
+                const input = document.getElementById("discuss-input") as HTMLTextAreaElement | null;
+                input?.focus();
+              }, 60);
+            }}
+          >
+            <Icon icon={MessageSquare} size={14} /> {t(language, "selection.askAi")}
+          </button>
+          <span className="selection-quick-sep" aria-hidden="true" />
+          <button
+            type="button"
+            className="selection-quick-btn"
+            data-testid="selection-annotate-btn"
+            onClick={() => {
+              const quote = `「${selectionBar.text.slice(0, 180)}」\n`;
+              openAnnotate(selectionBar.anchor, quote);
+              setSelectionBar(null);
+              window.getSelection()?.removeAllRanges();
+            }}
+          >
+            <Icon icon={Pencil} size={14} /> {t(language, "selection.addAnnotation")}
+          </button>
+        </div>
+      )}
       {review && (
         <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
           <div className="card-head">
@@ -1410,7 +1568,13 @@ function SpecDesignTab({
             </div>
           </div>
         ) : (
-          <MarkdownView markdown={d.specMarkdown} annotatable docLabel="spec.md" onAnnotate={openAnnotate} />
+          <MarkdownView
+            markdown={d.specMarkdown}
+            annotatable
+            docLabel="spec.md"
+            annotationCounts={annotationCounts}
+            onAnnotate={openAnnotate}
+          />
         )}
       </Card>
 
@@ -1488,8 +1652,15 @@ function SpecDesignTab({
         ) : (
           validity.coverage.items.map((item) => {
             const meta = COVERAGE_META[item.state];
+            const critAnchor = t(language, "spec.criterionAnchor", { id: item.criterion.id });
+            const critAnnotCount = annotationCounts[critAnchor] ?? 0;
             return (
-              <div key={item.criterion.id} className="criteria-row" data-testid={`crit-${item.criterion.id}`}>
+              <div
+                key={item.criterion.id}
+                className="criteria-row"
+                data-testid={`crit-${item.criterion.id}`}
+                data-anchor-target={critAnchor}
+              >
                 <Badge variant={mapTone(meta.tone)}>
                   <Icon icon={COVERAGE_ICONS[item.state]} size={14} />
                   {meta.labels[language]}
@@ -1526,16 +1697,17 @@ function SpecDesignTab({
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <Button
-                    size="icon-xs"
+                    size={critAnnotCount > 0 ? "xs" : "icon-xs"}
                     variant="ghost"
                     type="button"
                     data-action="annotate-anchor"
-                    data-anchor={t(language, "spec.criterionAnchor", { id: item.criterion.id })}
+                    data-anchor={critAnchor}
                     title={t(language, "spec.annotateTitle")}
                     aria-label={t(language, "spec.annotateTitle")}
-                    onClick={() => openAnnotate(t(language, "spec.criterionAnchor", { id: item.criterion.id }))}
+                    onClick={() => openAnnotate(critAnchor)}
                   >
                     <Icon icon={MessageSquare} size={14} />
+                    {critAnnotCount > 0 && <span className="md-annot-count">{critAnnotCount}</span>}
                   </Button>
                   {!item.criterion.command && s.stage === "coding" && (
                     <AsyncButton
@@ -1698,7 +1870,13 @@ function SpecDesignTab({
             }}
           />
         ) : d.designMarkdown.trim() ? (
-          <MarkdownView markdown={d.designMarkdown} annotatable docLabel="design.md" onAnnotate={openAnnotate} />
+          <MarkdownView
+            markdown={d.designMarkdown}
+            annotatable
+            docLabel="design.md"
+            annotationCounts={annotationCounts}
+            onAnnotate={openAnnotate}
+          />
         ) : (
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
             {t(language, "spec.designEmpty")}
@@ -1744,7 +1922,7 @@ function SpecDesignTab({
           </div>
         </Card>
       )}
-    </>
+    </div>
   );
 }
 
@@ -2781,12 +2959,14 @@ export function WorkspaceView() {
   const harnesses = hub?.harnesses ?? [];
   const modelOptions = collectModelOptions(harnesses);
   const defaultAct = defaultActionForRequirement(d);
-  const activeRun =
-    findLockingRequirementRun(Object.values(activeRuns), s.id, {
-      projectId: activeProjectId ?? hub?.activeProjectId ?? null,
-      projectRoot: project?.root ?? null,
-      projects: hub?.projects ?? [],
-    }) ?? null;
+  const runScope = {
+    projectId: activeProjectId ?? hub?.activeProjectId ?? null,
+    projectRoot: project?.root ?? null,
+    projects: hub?.projects ?? [],
+  };
+  const activeRun = findLockingRequirementRun(Object.values(activeRuns), s.id, runScope) ?? null;
+  const activeAskRun = findActiveAskRun(Object.values(activeRuns), s.id, runScope) ?? null;
+  const pendingAnnotationsCount = getPendingRefineAnnotations(s.discussions).length;
   const runningThis = Boolean(activeRun);
   const canRunModel = s.stage !== "done" && s.stage !== "cancelled" && modelOptions.length > 0;
   const canReview = modelOptions.length > 0 && s.stage === "coding";
@@ -3104,9 +3284,20 @@ export function WorkspaceView() {
         >
           <span className="drawer-toggle-icon">
             <Icon icon={drawerOpen ? PanelRightClose : PanelRightOpen} size={14} />
-            {runningThis && <span className="pulse-dot" role="img" aria-label={t(language, "drawer.running")} />}
+            {(runningThis || activeAskRun) && (
+              <span
+                className="pulse-dot"
+                role="img"
+                aria-label={t(language, activeAskRun && !runningThis ? "drawer.askRunning" : "drawer.running")}
+              />
+            )}
           </span>
           <span className="header-btn-label">{t(language, "topbar.drawerLabelClosed")}</span>
+          {pendingAnnotationsCount > 0 && (
+            <span className="ws-drawer-annot-badge" data-testid="ws-drawer-annot-badge">
+              {pendingAnnotationsCount}
+            </span>
+          )}
         </Button>
       </div>
 

@@ -615,16 +615,24 @@ export interface RequirementGitHubLink {
   pr?: RequirementGitHubPrLink | null;
 }
 
+export type DiscussionKind = "chat" | "annotation" | "refine_summary";
+
 export interface DiscussionEntry {
   id: string;
   at: number;
   actor: "human" | "agent";
   mode: "ask" | "refine";
+  kind?: DiscussionKind;
   anchor?: string;
   harness?: string;
   model?: string;
   message: string;
   resolved?: boolean;
+  adopted?: boolean;
+  runId?: string;
+  durationMs?: number;
+  toolCallsCount?: number;
+  handoffMode?: RunHandoffMode;
 }
 
 export type RunBillingMode = "subscription" | "api" | "free";

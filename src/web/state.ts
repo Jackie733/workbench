@@ -3,6 +3,7 @@ import type {
   AgentRunRecord,
   AttachmentMeta,
   CriterionCoverageState,
+  DiscussionEntry,
   EffectiveVerificationState,
   GitRemoteProvider,
   OutputLanguage,
@@ -48,12 +49,6 @@ export interface CriterionDraft {
   kind?: "command" | "manual";
   command: string;
   steps?: string;
-}
-
-export interface PendingAnnotation {
-  id: string;
-  anchor: string;
-  message: string;
 }
 
 export type ModalState =
@@ -510,7 +505,7 @@ export function resolveRequirementRunScope(input: RequirementRunScopeInput): Req
 
 export type ScopedRequirementRun = RequirementRunLike & { projectId?: string; root?: string };
 
-function runBelongsToScope(run: ScopedRequirementRun, scope: RequirementRunScope): boolean {
+function runBelongsToScope(run: { projectId?: string; root?: string }, scope: RequirementRunScope): boolean {
   if (scope.projectId === null) {
     // 单项目模式：快照可能已附带 Hub 项目编号，但页面没有项目作用域；按本机当前根目录匹配。
     // 根目录尚未返回时无法判断归属，先等待查询结果，避免误锁其他项目的同号需求。
@@ -529,8 +524,16 @@ function runBelongsToScope(run: ScopedRequirementRun, scope: RequirementRunScope
   return Boolean(owner && owner.id === scope.projectId);
 }
 
+/** 判定带有项目归属标识的状态对象（如运行记录、ask 失败提示）是否属于当前项目作用域。 */
+export function matchesRequirementRunScope(
+  item: { projectId?: string; root?: string },
+  scope: RequirementRunScope,
+): boolean {
+  return runBelongsToScope(item, scope);
+}
+
 /**
- * 需求详情运行期限制的判定入口：`ask` 同样占用同需求调度名额，因此不排除。
+ * 需求详情运行期写锁判定入口：排除只读探讨 `ask`（双轨并发，ask 不锁主工作区）。
  * 首页待决策列表继续使用 {@link findActiveRequirementRun} 的既有语义。
  */
 export function findLockingRequirementRun<T extends ScopedRequirementRun>(
@@ -540,9 +543,36 @@ export function findLockingRequirementRun<T extends ScopedRequirementRun>(
 ): T | undefined {
   for (const run of runs) {
     if (run.requirementId !== requirementId || run.status !== "running") continue;
+    if (run.action === "ask") continue;
     if (runBelongsToScope(run, scope)) return run;
   }
   return undefined;
+}
+
+/** 需求详情独立的只读研讨（`ask`）轨道运行判定入口。 */
+export function findActiveAskRun<T extends ScopedRequirementRun>(
+  runs: Iterable<T>,
+  requirementId: string,
+  scope: RequirementRunScope,
+): T | undefined {
+  for (const run of runs) {
+    if (run.requirementId !== requirementId || run.status !== "running") continue;
+    if (run.action !== "ask") continue;
+    if (runBelongsToScope(run, scope)) return run;
+  }
+  return undefined;
+}
+
+/** 从服务端持久化讨论流中派生当前需求的未解决行内批注列表（单一真相源，防刷新丢失与跨需求串台）。 */
+export function getPendingRefineAnnotations(discussions?: ReadonlyArray<DiscussionEntry>): DiscussionEntry[] {
+  if (!discussions || discussions.length === 0) return [];
+  return discussions.filter(
+    (item) =>
+      item.actor === "human" &&
+      item.mode === "refine" &&
+      (!item.kind || item.kind === "annotation") &&
+      !item.resolved,
+  );
 }
 
 export function partitionPendingDecisions(
