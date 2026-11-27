@@ -378,6 +378,8 @@ describe("Flow Phase 3 real Chromium E2E (WB-21 – WB-24)", () => {
 
       // 2. REQ-002 failed setupScript banner -> ignore dismisses banner
       await page.click('[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('[data-testid="sandbox-status-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="sandbox-status-btn"]');
       await page.waitForSelector('[data-testid="sandbox-setup-failed-banner"]', { timeout: 10_000 });
       await page.click('[data-testid="sandbox-setup-ignore-btn"]');
       await page.waitForFunction(

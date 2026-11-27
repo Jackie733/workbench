@@ -273,6 +273,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       ].join("\n"),
     ).join("\n");
     await createRequirement(repo, {
+      title: "工作台需求详情在切换阶段、执行模型以及打开沙箱雷达时，都应该让下方内容留在原位。".repeat(3),
       goal: "需求详情页需要固定顶部状态区并让 Tabs 内容独立滚动",
       criteria: [{ id: "AC-1", description: "局部滚动布局生效", required: true, command: "echo ok" }],
     });
@@ -295,6 +296,26 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 5000 });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
       await page.waitForSelector('[data-testid="workspace-detail"]', { timeout: 5000 });
+      const longTitle = await page.evaluate(() => document.querySelector<HTMLElement>(".ws-title")!.textContent);
+      await page.waitForFunction(() => {
+        const el = document.querySelector<HTMLElement>(".ws-title");
+        return Boolean(el && el.scrollWidth > el.clientWidth && el.tabIndex === 0 &&
+          getComputedStyle(el).textOverflow === "ellipsis");
+      }, { timeout: 5000 });
+      const titleBox = await page.evaluate(() => {
+        const { x, y, width, height } = document.querySelector(".ws-title")!.getBoundingClientRect();
+        return { x: x + width / 2, y: y + height / 2 };
+      });
+      await page.mouse.move(titleBox.x, titleBox.y);
+      await page.waitForFunction((title: unknown) =>
+        document.querySelector('[role="tooltip"]')?.textContent === title, { timeout: 5000 }, longTitle);
+      await page.mouse.move(0, 0);
+      await page.waitForFunction(() => !document.querySelector('[role="tooltip"]'), { timeout: 5000 });
+      await page.keyboard.press("Tab");
+      await page.evaluate(() => document.querySelector<HTMLElement>(".ws-title")!.focus());
+      await page.waitForFunction((title: unknown) =>
+        document.querySelector('[role="tooltip"]')?.textContent === title, { timeout: 5000 }, longTitle);
+      await page.keyboard.press("Escape");
       await page.waitForFunction(
         () => {
           const el = document.querySelector('[data-testid="workspace-tab-scroll"]');
@@ -328,6 +349,7 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
         });
 
       const before = await readLayout();
+      expect(before.tabsTop - before.pinnedTop).toBeLessThanOrEqual(175);
       expect(before.windowScrollY).toBe(0);
       // 详情页自身不能产生全局垂直滚动条，滚动区域必须位于视口内。
       expect(before.documentScrollHeight).toBeLessThanOrEqual(before.documentClientHeight + 1);
@@ -357,6 +379,13 @@ suite("Web E2E layout, routing picker, and bilingual UI flows", () => {
       expect(afterSwitch.windowScrollY).toBe(0);
       expect(afterSwitch.documentScrollHeight).toBeLessThanOrEqual(afterSwitch.documentClientHeight + 1);
       expect(afterSwitch.tabsTop).toBe(before.tabsTop);
+
+      await page.setViewport({ width: 390, height: 800 });
+      const narrowOverflow = await page.evaluate(() => {
+        const header = document.querySelector('[data-testid="workspace-pinned"]')!;
+        return header.scrollWidth - header.clientWidth;
+      });
+      expect(narrowOverflow).toBeLessThanOrEqual(1);
 
       expect(pageErrors).toEqual([]);
     } finally {

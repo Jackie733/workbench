@@ -313,12 +313,11 @@ describe("Flow Phase 2 real Chromium E2E (WB-18, WB-19, WB-20)", () => {
       await page.goto(server.url, { waitUntil: "networkidle2" });
       await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-001"]');
-      await page.waitForSelector('[data-testid="approve-reset-sandbox-checkbox"]', { timeout: 10_000 });
-
-      // Check reset-sandbox checkbox and approve_only -> sandbox resets back to v = 1!
-      await page.click('[data-testid="approve-reset-sandbox-checkbox"]');
-      await page.waitForSelector('[data-testid="action-approve_only"]', { timeout: 5_000 });
+      await page.waitForSelector('[data-testid="action-approve_only"]', { timeout: 10_000 });
       await page.click('[data-testid="action-approve_only"]');
+      await page.waitForSelector('[data-testid="approve-reset-sandbox-checkbox"]', { timeout: 5_000 });
+      await page.click('[data-testid="approve-reset-sandbox-checkbox"]');
+      await page.click('[data-testid="confirm-workspace-approval-btn"]');
       await page.waitForFunction(
         () => !document.querySelector('[data-testid="approve-reset-sandbox-checkbox"]'),
         { timeout: 10_000 },
@@ -359,6 +358,8 @@ describe("Flow Phase 2 real Chromium E2E (WB-18, WB-19, WB-20)", () => {
       await page.click('[data-action="set-scope"][data-value="all"]');
       await page.waitForSelector('[data-testid="req-row-REQ-002"]', { timeout: 10_000 });
       await page.click('[data-testid="req-row-REQ-002"]');
+      await page.waitForSelector('[data-testid="sandbox-status-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="sandbox-status-btn"]');
       await page.waitForSelector('[data-testid="cancelled-sandbox-callout"]', { timeout: 10_000 });
       await page.click('[data-testid="discard-sandbox-btn"]');
       await page.waitForFunction(

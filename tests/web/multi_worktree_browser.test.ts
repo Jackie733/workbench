@@ -260,8 +260,13 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
 
       // 3. Open REQ-002 -> auto_mergeable callout shows one-click auto-merge button + sibling radar -> click sync!
       await clickReady(page, '[data-testid="req-row-REQ-002"]');
+      const tabsTop = () => page.evaluate(() => document.querySelector('[data-testid="workspace-tabs"]')?.getBoundingClientRect().top);
+      await page.waitForSelector('[data-testid="sandbox-status-btn"]');
+      const beforeRadar = await tabsTop();
+      await clickReady(page, '[data-testid="sandbox-status-btn"]');
       await page.waitForSelector('[data-testid="sandbox-drift-callout"]', { timeout: 5000 });
       await page.waitForSelector('[data-testid="sibling-conflict-radar"]', { timeout: 5000 });
+      expect(await tabsTop()).toBe(beforeRadar);
       await clickReady(page, '[data-testid="sync-sandbox-base-btn"]');
       await page.waitForFunction(
         () => !document.querySelector('[data-testid="sync-sandbox-base-btn"]'),
@@ -285,6 +290,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser multi-worktree merge order, sibling 
       await clickReady(page, '[data-slot="dialog-footer"] [data-slot="button"]:not([data-testid])');
 
       // Click "Let Agent sync main & resolve conflicts" directly from `done` stage!
+      await clickReady(page, '[data-testid="sandbox-status-btn"]');
       await clickReady(page, '[data-testid="agent-sync-sandbox-btn"]');
       const deadline = Date.now() + 8000;
       while (Date.now() < deadline) {

@@ -200,6 +200,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       expect(fixBtnLabel).toContain("按选中的 1 项修复");
 
       // 2. Clicking accept opens override modal requiring reason
+      await clickReady(page, '[data-testid="workspace-action-details-btn"]');
       await clickReady(page, '[data-testid="action-accept"]');
       await page.waitForSelector('[data-testid="accept-override-modal"]', { timeout: 5000 });
       const disabledInitially = await page.evaluate(
@@ -446,6 +447,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         () => (document.querySelector('[data-testid="ws-stage-badge"]')?.textContent ?? "").includes("已完成"),
         { timeout: 5000 },
       );
+      await clickReady(page, '[data-testid="sandbox-status-btn"]');
       const hasDriftCallout = await page.evaluate(() => Boolean(document.querySelector('[data-testid="sandbox-drift-callout"]')));
       const hasResolveBtn = await page.evaluate(() => Boolean(document.querySelector('[data-testid="agent-sync-sandbox-btn"]')));
       expect(hasDriftCallout).toBe(true);
@@ -637,6 +639,7 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await clickReady(page, '[data-testid="workspace-action-details-btn"]');
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10000 });
 
       const primaryBtnText = await page.evaluate(

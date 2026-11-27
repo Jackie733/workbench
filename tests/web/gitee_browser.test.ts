@@ -304,11 +304,14 @@ describe("Gitee Web UI workflow", () => {
       await page.click('[data-testid="gitee-issue-item-I8WEB1"]');
       await page.click('[data-testid="import-issue-draft-btn"]');
 
+      await page.waitForSelector('[data-testid="more-menu-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
       await page.waitForSelector('[data-testid="ws-github-issue-link"]', { timeout: 10_000 });
       const badgeText = await page.evaluate(
         () => document.querySelector('[data-testid="ws-github-issue-link"]')?.textContent ?? "",
       );
       expect(badgeText).toContain("#I8WEB1");
+      await page.keyboard.press("Escape");
 
       // 3. Complete design, verify, accept in backend, then deliver Gitee PR in browser UI.
       await propose(repo, "REQ-001", {
@@ -339,6 +342,8 @@ describe("Gitee Web UI workflow", () => {
         { timeout: 10_000 },
       );
       await page.click('[data-testid="submit-deliver-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="deliver-modal"]'), { timeout: 10_000 });
+      await page.click('[data-testid="more-menu-btn"]');
       await page.waitForSelector('[data-testid="ws-github-pr-link"]', { timeout: 10000 });
 
       const prBadge = await page.evaluate(
