@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   approveDesign,
+  authorizeFastTrack,
   createRequirement,
   getRequirement,
   initProject,
@@ -16,6 +17,7 @@ import { HubExecutor } from "../../src/hub/executor.ts";
 import {
   classifyUnrelatedTimeoutFailure,
   normalizeReviewVerdictForManualCriteria,
+  syncDesignRunResult,
 } from "../../src/hub/post_run.ts";
 import { buildInitialProjectRouting } from "../../src/hub/routing.ts";
 import {
@@ -509,5 +511,57 @@ Expected substring: "active task"
     await Promise.all([first, second]);
     expect(waitEvents.length).toBeGreaterThanOrEqual(1);
     expect(waitEvents[0]?.holder?.requirementId).toBe("REQ-024");
+  });
+
+  test("syncDesignRunResult does not inject fallback criteria for plan_first while fast_track keeps fastCommand baseline", async () => {
+    const repo = makeGitRepo("no-plan-fallback");
+    await initProject(repo);
+    await updateProjectConfig(repo, {
+      verification: {
+        fastCommand: "bun run typecheck",
+        fullCommand: "bun run test",
+      },
+    });
+
+    const req1 = await createRequirement(repo, {
+      goal: "Plan without criteria should stay blocked at approval",
+    });
+    const designPath = path.join(repo, ".workbench", "items", req1.state.id, "design.md");
+    fs.writeFileSync(designPath, "# Plan\n\nImplementation approach without criteria block.\n", "utf8");
+
+    const notes: string[] = [];
+    const synced = await syncDesignRunResult({
+      base: repo,
+      codeRoot: repo,
+      id: req1.state.id,
+      latestReq: getRequirement(repo, req1.state.id),
+      preSpecMarkdown: req1.specMarkdown,
+      preDesignMarkdown: req1.designMarkdown,
+      codeChanged: false,
+      projectContext: {
+        archDocs: [],
+        fastCommand: "bun run typecheck",
+        fullCommand: "bun run test",
+        commandSource: "configured",
+      },
+      snapshotFingerprint: null,
+      appendNote: (line) => notes.push(line),
+    });
+
+    expect(synced.state.designVersion).toBe(1);
+    expect(synced.state.criteria).toEqual([]);
+    expect(notes.some((n) => n.includes("尚未声明验收条件"))).toBe(true);
+    expect(synced.validity.banner.primaryAction?.disabledReason).toBeTruthy();
+    await expect(approveDesign(repo, req1.state.id)).rejects.toThrow(/尚未定义必需验收条件/);
+
+    const req2 = await createRequirement(repo, {
+      goal: "Small fast-track tweak",
+    });
+    const fast = await authorizeFastTrack(repo, req2.state.id, {
+      expectedRevision: req2.state.revision,
+    });
+    expect(fast.state.criteria.length).toBe(1);
+    expect(fast.state.criteria[0]?.command).toBe("bun run typecheck");
+    expect(fast.state.criteria[0]?.systemInjected).toBe(true);
   });
 });

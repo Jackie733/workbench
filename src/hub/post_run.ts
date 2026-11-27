@@ -349,7 +349,7 @@ export async function syncDesignRunResult(input: {
   preSpecMarkdown: string;
   preDesignMarkdown: string;
   codeChanged: boolean;
-  projectContext: ProjectContextSummary;
+  projectContext?: ProjectContextSummary;
   snapshotFingerprint: string | null;
   appendNote: (line: string) => void;
 }): Promise<RequirementDetail> {
@@ -367,27 +367,11 @@ export async function syncDesignRunResult(input: {
       input.preDesignMarkdown,
     );
     if (diskDesign) {
-      let criteriaToSet = diskDesign.criteria;
       const hasPendingDecisions = Boolean(diskDesign.decisions && diskDesign.decisions.length > 0);
-      // FLOW §1.2 / WB-18: when first design proposes pending decisions without criteria, defer criteria until resolved.
-      if (!criteriaToSet && !hasPendingDecisions && latestReq.state.criteria.length === 0) {
-        const fallbackCmd = input.projectContext.fullCommand ?? input.projectContext.fastCommand;
-        if (fallbackCmd) {
-          criteriaToSet = [
-            {
-              id: "AC-1",
-              description: "项目自动化验证通过",
-              required: true,
-              command: fallbackCmd,
-              systemInjected: true,
-            },
-          ];
-        }
-      }
       latestReq = await propose(input.base, input.id, {
         specMarkdown: diskDesign.specMarkdown,
         designMarkdown: diskDesign.designMarkdown,
-        ...(criteriaToSet ? { criteria: criteriaToSet } : {}),
+        ...(diskDesign.criteria ? { criteria: diskDesign.criteria } : {}),
         ...(diskDesign.decisions ? { decisions: diskDesign.decisions } : {}),
         actor: "agent",
         currentCodeSnapshotHash: input.snapshotFingerprint,
@@ -399,7 +383,13 @@ export async function syncDesignRunResult(input: {
           // Ignore cleanup failure for consumed criteria.json.
         }
       }
-      input.appendNote("[workbench] 已自动同步磁盘规范/方案文件并提交人类审阅。\n");
+      if (!hasPendingDecisions && latestReq.state.criteria.length === 0) {
+        input.appendNote(
+          "[workbench] 已自动同步磁盘规范/方案文件并提交人类审阅（⚠ 尚未声明验收条件，需补齐必需验收条件后方可批准进入编码）。\n",
+        );
+      } else {
+        input.appendNote("[workbench] 已自动同步磁盘规范/方案文件并提交人类审阅。\n");
+      }
     }
   } catch (err) {
     input.appendNote(
