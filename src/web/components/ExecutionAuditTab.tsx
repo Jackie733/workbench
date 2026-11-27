@@ -58,6 +58,7 @@ import {
   StepPayloadChart,
   type ContextTurnPoint,
   type DonutSegment,
+  type StackedBarDatum,
   type StepPayloadPoint,
 } from "./Charts.tsx";
 import { Icon } from "./Icon.tsx";
@@ -247,6 +248,13 @@ function RunInspectorSection({
     }
   }, [reqId, inspectedRun.id, isLogHydrated, traceState?.hydrated]);
 
+  const runContext = ctxData?.context;
+  const handoffSeed = runContext?.handoffMarkdown || d.handoffMarkdown || d.designMarkdown || d.specMarkdown || "";
+  const handoffTotalBytes = runContext?.handoffTotalBytes;
+  const handoffEstTokens = runContext?.handoffEstTokens;
+  const handoffSectionsCount = runContext?.sections?.length;
+  const usage = inspectedRun.usage;
+
   const analytics = useMemo(() => {
     const rawEvents = traceState?.events ?? [];
     const hasRawRichTrace = rawEvents.some(
@@ -279,13 +287,12 @@ function RunInspectorSection({
       toolMap.set(key, cur);
     };
 
-    const handoffSeed = ctxData?.context?.handoffMarkdown || d.handoffMarkdown || d.designMarkdown || d.specMarkdown || "";
     const weights: Record<ContextCategoryKey, { bytes: number; tokens: number; count: number }> = {
       system: { bytes: 0, tokens: 0, count: 0 },
       handoff: {
-        bytes: ctxData?.context?.handoffTotalBytes ?? byteLen(handoffSeed),
-        tokens: ctxData?.context?.handoffEstTokens ?? approxTokens(handoffSeed),
-        count: ctxData?.context?.sections?.length ?? (handoffSeed ? 1 : 0),
+        bytes: handoffTotalBytes ?? byteLen(handoffSeed),
+        tokens: handoffEstTokens ?? approxTokens(handoffSeed),
+        count: handoffSectionsCount ?? (handoffSeed ? 1 : 0),
       },
       files: { bytes: 0, tokens: 0, count: 0 },
       commands: { bytes: 0, tokens: 0, count: 0 },
@@ -523,48 +530,6 @@ function RunInspectorSection({
     const totalCapturedBytes = categories.reduce((acc, c) => acc + c.bytes, 0);
     const totalCapturedTokens = categories.reduce((acc, c) => acc + c.tokens, 0);
 
-    // Exact usage segments when API / Codex reported usage is available
-    const runUsage = inspectedRun.usage;
-    const exactTokenSegments: DonutSegment[] = runUsage && runUsage.totalTokens > 0
-      ? [
-          {
-            key: "cacheRead",
-            label: t(language, "audit.tok.cacheRead"),
-            value: runUsage.cacheReadTokens,
-            color: "#10b981",
-            hint: formatTokenCount(runUsage.cacheReadTokens),
-          },
-          {
-            key: "uncachedInput",
-            label: t(language, "audit.tok.uncachedIn"),
-            value: runUsage.uncachedInputTokens,
-            color: "var(--accent)",
-            hint: formatTokenCount(runUsage.uncachedInputTokens),
-          },
-          {
-            key: "cacheWrite",
-            label: t(language, "audit.tok.cacheWrite"),
-            value: runUsage.cacheWriteTokens,
-            color: "#06b6d4",
-            hint: formatTokenCount(runUsage.cacheWriteTokens),
-          },
-          {
-            key: "output",
-            label: t(language, "audit.tok.output"),
-            value: runUsage.outputTokens,
-            color: "#ec4899",
-            hint: formatTokenCount(runUsage.outputTokens),
-          },
-          {
-            key: "reasoning",
-            label: t(language, "audit.tok.reasoning"),
-            value: runUsage.reasoningTokens,
-            color: "#8b5cf6",
-            hint: formatTokenCount(runUsage.reasoningTokens),
-          },
-        ].filter((s) => s.value > 0)
-      : [];
-
     const files = Array.from(fileMap.values()).sort((a, b) => b.total - a.total || a.path.localeCompare(b.path));
     const toolDist = Array.from(toolMap.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
@@ -572,7 +537,6 @@ function RunInspectorSection({
       categories,
       totalCapturedBytes,
       totalCapturedTokens,
-      exactTokenSegments,
       realTurns,
       compactions,
       logSteps,
@@ -580,7 +544,95 @@ function RunInspectorSection({
       toolDist,
       commands: cmdList,
     };
-  }, [traceState?.events, rawLog, ctxData?.context, d, inspectedRun, language]);
+  }, [traceState?.events, rawLog, handoffSeed, handoffTotalBytes, handoffEstTokens, handoffSectionsCount, language]);
+
+  // Reported usage is independent of captured trace/log activity.
+  const exactTokenSegments = useMemo<DonutSegment[]>(() => {
+    if (!usage || usage.totalTokens <= 0) return [];
+    return [
+      {
+        key: "cacheRead",
+        label: t(language, "audit.tok.cacheRead"),
+        value: usage.cacheReadTokens,
+        color: "#10b981",
+        hint: formatTokenCount(usage.cacheReadTokens),
+      },
+      {
+        key: "uncachedInput",
+        label: t(language, "audit.tok.uncachedIn"),
+        value: usage.uncachedInputTokens,
+        color: "var(--accent)",
+        hint: formatTokenCount(usage.uncachedInputTokens),
+      },
+      {
+        key: "cacheWrite",
+        label: t(language, "audit.tok.cacheWrite"),
+        value: usage.cacheWriteTokens,
+        color: "#06b6d4",
+        hint: formatTokenCount(usage.cacheWriteTokens),
+      },
+      {
+        key: "output",
+        label: t(language, "audit.tok.output"),
+        value: usage.outputTokens,
+        color: "#ec4899",
+        hint: formatTokenCount(usage.outputTokens),
+      },
+      {
+        key: "reasoning",
+        label: t(language, "audit.tok.reasoning"),
+        value: usage.reasoningTokens,
+        color: "#8b5cf6",
+        hint: formatTokenCount(usage.reasoningTokens),
+      },
+    ].filter((s) => s.value > 0);
+  }, [usage, language]);
+
+  const donutSegments = useMemo<DonutSegment[]>(() => {
+    if (exactTokenSegments.length > 0) return exactTokenSegments;
+    return analytics.categories.map((c) => ({
+      key: c.key,
+      label: c.label,
+      value: c.bytes,
+      color: c.color,
+      hint: `${formatBytes(c.bytes)} · ~${formatTokenCount(c.tokens)}`,
+    }));
+  }, [exactTokenSegments, analytics.categories]);
+
+  const turnBars = useMemo<StackedBarDatum[]>(() => {
+    if (chartMode !== "bars") return [];
+    return analytics.realTurns.map((pt) => ({
+      key: String(pt.turnIndex),
+      label: `#${pt.turnIndex}`,
+      tooltip: pt.toolsSummary ? `Turn #${pt.turnIndex} · ${pt.toolsSummary}` : `Turn #${pt.turnIndex}`,
+      segments: [
+        {
+          key: "cacheRead",
+          label: t(language, "audit.tok.cacheRead"),
+          value: pt.cacheReadTokens ?? 0,
+          color: "#10b981",
+        },
+        {
+          key: "uncachedInput",
+          label: t(language, "audit.tok.uncachedIn"),
+          value: pt.uncachedInputTokens ?? Math.max(0, pt.contextTokens - (pt.cacheReadTokens ?? 0)),
+          color: "var(--accent)",
+        },
+        {
+          key: "output",
+          label: t(language, "audit.tok.output"),
+          value: pt.outputTokens ?? 0,
+          color: "#ec4899",
+        },
+        {
+          key: "reasoning",
+          label: t(language, "audit.tok.reasoning"),
+          value: pt.reasoningTokens ?? 0,
+          color: "#8b5cf6",
+        },
+      ],
+    }));
+  }, [analytics.realTurns, chartMode, language]);
 
   const synthesizedContext = useMemo<RunContextSnapshot | null>(() => {
     if (ctxData?.hasContext && ctxData.context) return ctxData.context;
@@ -662,29 +714,19 @@ function RunInspectorSection({
     return analytics.commands.filter((c) => c.isError);
   }, [analytics.commands, cmdFilter]);
 
-  const usage = inspectedRun.usage;
   const cost = inspectedRun.cost;
   const ctxWindow = inspectedRun.contextWindow ?? 200_000;
   const hasRealPeak = typeof inspectedRun.peakContextTokens === "number" && inspectedRun.peakContextTokens > 0;
   const pressureTokens = hasRealPeak ? inspectedRun.peakContextTokens! : 0;
   const pressureRatio = ctxWindow > 0 ? Math.min(1, pressureTokens / ctxWindow) : 0;
   const pressureTone = pressureRatio >= 0.85 ? "tone-danger" : pressureRatio >= 0.65 ? "tone-warning" : "";
-  const hasExactBreakdown = analytics.exactTokenSegments.length > 0;
+  const hasExactBreakdown = exactTokenSegments.length > 0;
   const usageSourceKey: MessageKey =
     analytics.realTurns.length > 0 || cost?.costSource === "reported"
       ? "audit.source.apiExact"
       : cost?.costSource === "estimated"
         ? "audit.source.estimated"
         : "audit.source.reported";
-  const donutSegments: DonutSegment[] = hasExactBreakdown
-    ? analytics.exactTokenSegments
-    : analytics.categories.map((c) => ({
-        key: c.key,
-        label: c.label,
-        value: c.bytes,
-        color: c.color,
-        hint: `${formatBytes(c.bytes)} · ~${formatTokenCount(c.tokens)}`,
-      }));
 
   return (
     <Card className="audit-inspector-card p-4" data-testid="run-inspector-panel">
@@ -920,38 +962,8 @@ function RunInspectorSection({
                   />
                 ) : (
                   <StackedBarChart
-                    data={analytics.realTurns.map((pt) => ({
-                      key: String(pt.turnIndex),
-                      label: `#${pt.turnIndex}`,
-                      tooltip: pt.toolsSummary ? `Turn #${pt.turnIndex} · ${pt.toolsSummary}` : `Turn #${pt.turnIndex}`,
-                      segments: [
-                        {
-                          key: "cacheRead",
-                          label: t(language, "audit.tok.cacheRead"),
-                          value: pt.cacheReadTokens ?? 0,
-                          color: "#10b981",
-                        },
-                        {
-                          key: "uncachedInput",
-                          label: t(language, "audit.tok.uncachedIn"),
-                          value: pt.uncachedInputTokens ?? Math.max(0, pt.contextTokens - (pt.cacheReadTokens ?? 0)),
-                          color: "var(--accent)",
-                        },
-                        {
-                          key: "output",
-                          label: t(language, "audit.tok.output"),
-                          value: pt.outputTokens ?? 0,
-                          color: "#ec4899",
-                        },
-                        {
-                          key: "reasoning",
-                          label: t(language, "audit.tok.reasoning"),
-                          value: pt.reasoningTokens ?? 0,
-                          color: "#8b5cf6",
-                        },
-                      ],
-                    }))}
-                    formatValue={(v) => formatTokenCount(v)}
+                    data={turnBars}
+                    formatValue={formatTokenCount}
                     emptyText={t(language, "audit.noTurnMetrics")}
                   />
                 )}

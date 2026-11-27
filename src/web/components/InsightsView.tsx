@@ -25,7 +25,7 @@ import {
 } from "../queries.ts";
 import { formatDurationHuman, formatPercent, formatTokenCount, formatUsd } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
-import { ActivityHeatmap, DonutRingChart, StackedBarChart, type StackedBarDatum } from "./Charts.tsx";
+import { ActivityHeatmap, DonutRingChart, StackedBarChart, type DonutSegment, type StackedBarDatum } from "./Charts.tsx";
 import { Icon } from "./Icon.tsx";
 import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { Badge } from "./ui/badge.tsx";
@@ -95,8 +95,7 @@ export function InsightsView() {
   const { data: insights, isLoading } = useHubInsightsQuery(filter, true);
 
   const stackedData: StackedBarDatum[] = useMemo(() => {
-    if (!insights) return [];
-    return insights.dailySeries.map((day) => {
+    return insights?.dailySeries.map((day) => {
       const label = day.date.slice(5);
       if (metricMode === "runs") {
         return {
@@ -134,8 +133,30 @@ export function InsightsView() {
           color: ACTION_COLORS[act],
         })),
       };
-    });
-  }, [insights, metricMode, language]);
+    }) ?? [];
+  }, [insights?.dailySeries, metricMode, language]);
+
+  const quotaPoolSegments = useMemo<DonutSegment[]>(
+    () => insights?.byQuotaPool.map((p, idx) => ({
+      key: p.quotaPool,
+      label: `${p.label} (${t(language, `insights.billing.${p.billingMode}` as MessageKey)})`,
+      value: p.equivalentCostUsd > 0 ? p.equivalentCostUsd : Math.max(1, p.tokens),
+      color: POOL_COLORS[idx % POOL_COLORS.length]!,
+      hint: `${p.runs} runs · ${formatTokenCount(p.tokens)} · ${formatUsd(p.equivalentCostUsd)}`,
+    })) ?? [],
+    [insights?.byQuotaPool, language],
+  );
+
+  const actionSegments = useMemo<DonutSegment[]>(
+    () => insights?.byAction.map((a) => ({
+      key: a.action,
+      label: formatAgentActionLabel(language, a.action),
+      value: a.runs,
+      color: ACTION_COLORS[a.action] ?? "var(--accent)",
+      hint: `${a.runs} runs · ${formatTokenCount(a.tokens)} · ${formatUsd(a.equivalentCostUsd)}`,
+    })) ?? [],
+    [insights?.byAction, language],
+  );
 
   const sortedModels = useMemo(() => {
     const list = [...(insights?.byModel ?? [])];
@@ -396,13 +417,7 @@ export function InsightsView() {
               </div>
               <StackedBarChart
                 data={stackedData}
-                formatValue={(v) =>
-                  metricMode === "cost"
-                    ? formatUsd(v)
-                    : metricMode === "tokens"
-                      ? formatTokenCount(v)
-                      : String(Math.round(v))
-                }
+                formatValue={metricMode === "cost" ? formatUsd : metricMode === "tokens" ? formatTokenCount : undefined}
               />
             </Card>
 
@@ -425,13 +440,7 @@ export function InsightsView() {
               <DonutRingChart
                 centerValue={formatUsd(kpi.equivalentCostUsd)}
                 centerLabel={t(language, "audit.equivShort")}
-                segments={insights.byQuotaPool.map((p, idx) => ({
-                  key: p.quotaPool,
-                  label: `${p.label} (${t(language, `insights.billing.${p.billingMode}` as MessageKey)})`,
-                  value: p.equivalentCostUsd > 0 ? p.equivalentCostUsd : Math.max(1, p.tokens),
-                  color: POOL_COLORS[idx % POOL_COLORS.length]!,
-                  hint: `${p.runs} runs · ${formatTokenCount(p.tokens)} · ${formatUsd(p.equivalentCostUsd)}`,
-                }))}
+                segments={quotaPoolSegments}
               />
               <div className="audit-section-table" style={{ marginTop: 10 }}>
                 {insights.byQuotaPool.map((p) => (
@@ -458,13 +467,7 @@ export function InsightsView() {
               <DonutRingChart
                 centerValue={String(kpi.totalRuns)}
                 centerLabel="runs"
-                segments={insights.byAction.map((a) => ({
-                  key: a.action,
-                  label: formatAgentActionLabel(language, a.action),
-                  value: a.runs,
-                  color: ACTION_COLORS[a.action] ?? "var(--accent)",
-                  hint: `${a.runs} runs · ${formatTokenCount(a.tokens)} · ${formatUsd(a.equivalentCostUsd)}`,
-                }))}
+                segments={actionSegments}
               />
             </Card>
           </div>

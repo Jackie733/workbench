@@ -194,7 +194,7 @@ export function useAuthStatusQuery() {
 export function useGitHubStatusQuery(activeProjectId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.githubStatus(activeProjectId),
-    queryFn: () => api.getGitHubStatus(),
+    queryFn: ({ queryKey: [, , projectId] }) => api.getGitHubStatus(projectId),
     enabled,
   });
 }
@@ -202,7 +202,7 @@ export function useGitHubStatusQuery(activeProjectId: string | null, enabled: bo
 export function useGiteeStatusQuery(activeProjectId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.giteeStatus(activeProjectId),
-    queryFn: () => api.getGiteeStatus(),
+    queryFn: ({ queryKey: [, , projectId] }) => api.getGiteeStatus(projectId),
     enabled,
   });
 }
@@ -217,7 +217,7 @@ export function useGiteeIssuesQuery(
 ) {
   return useQuery({
     queryKey: queryKeys.giteeIssues(activeProjectId, params.filter, "all", params.q),
-    queryFn: () => api.listGiteeIssues({ filter: params.filter, state: "all", q: params.q }),
+    queryFn: ({ queryKey: [, , projectId] }) => api.listGiteeIssues(projectId, { filter: params.filter, state: "all", q: params.q }),
     enabled,
   });
 }
@@ -225,9 +225,9 @@ export function useGiteeIssuesQuery(
 export function useRequirementRunsQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.requirementRuns(activeProjectId, id),
-    queryFn: async () => {
-      if (!id) return [];
-      const res = await api.listRequirementRuns(id);
+    queryFn: async ({ queryKey: [, , projectId, requirementId] }) => {
+      if (!requirementId) return [];
+      const res = await api.listRequirementRuns(projectId, requirementId);
       return res.runs;
     },
     enabled: Boolean(id) && enabled,
@@ -242,7 +242,10 @@ export function useRunContextQuery(
 ) {
   return useQuery({
     queryKey: queryKeys.runContext(activeProjectId, id, runId),
-    queryFn: () => (id && runId ? api.getAgentRunContext(id, runId) : Promise.resolve({ runId: "", hasContext: false, context: null })),
+    queryFn: ({ queryKey: [, , projectId, requirementId, contextRunId] }) =>
+      requirementId && contextRunId
+        ? api.getAgentRunContext(projectId, requirementId, contextRunId)
+        : Promise.resolve({ runId: "", hasContext: false, context: null }),
     enabled: Boolean(id && runId) && enabled,
     staleTime: 15_000,
   });
@@ -378,15 +381,16 @@ export function useHubStateQuery(enabled = true) {
 
 export function useProjectQuery(activeProjectId: string | null) {
   const { data: hub } = useHubStateQuery();
-  const activeProj = hub?.projects.find((p) => p.id === (activeProjectId ?? hub.activeProjectId)) ?? hub?.projects[0];
+  const projectId = activeProjectId ?? (hub?.hubMode ? hub.activeProjectId ?? hub.projects[0]?.id ?? null : null);
+  const activeProj = hub?.projects.find((p) => p.id === projectId);
   const nodeOffline = Boolean(hub?.hubMode && activeProj && activeProj.nodeOnline === false);
   const enabled = hub !== undefined && (!hub.hubMode || hub.projects.length > 0) && !nodeOffline;
   return useQuery({
-    queryKey: queryKeys.project(activeProjectId),
-    queryFn: async () => {
-      const proj = await api.getProject();
+    queryKey: queryKeys.project(projectId),
+    queryFn: async ({ queryKey: [, requestProjectId] }) => {
+      const proj = await api.getProject(requestProjectId);
       const ui = useUiStore.getState();
-      if (!proj.initialized && !ui.initName) {
+      if (ui.activeProjectId === requestProjectId && !proj.initialized && !ui.initName) {
         ui.setInitName(proj.root.split("/").pop() || "workbench");
       }
       return proj;
@@ -398,7 +402,7 @@ export function useProjectQuery(activeProjectId: string | null) {
 export function useProjectSandboxesQuery(activeProjectId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.projectSandboxes(activeProjectId),
-    queryFn: () => api.getProjectSandboxes(false),
+    queryFn: ({ queryKey: [, , projectId] }) => api.getProjectSandboxes(projectId),
     enabled,
   });
 }
@@ -407,7 +411,7 @@ export function useRequirementsQuery(activeProjectId: string | null, scope: Scop
   const fetchScope = scope === "decisions" || scope === "sandboxes" ? "all" : scope;
   return useQuery({
     queryKey: queryKeys.requirements(activeProjectId, fetchScope),
-    queryFn: () => api.listRequirements(fetchScope),
+    queryFn: ({ queryKey: [, projectId] }) => api.listRequirements(projectId, fetchScope),
     enabled,
   });
 }
@@ -419,7 +423,7 @@ export function isRequirementNotFoundError(error: unknown): boolean {
 export function useRequirementQuery(activeProjectId: string | null, id: string | null) {
   return useQuery({
     queryKey: queryKeys.requirement(activeProjectId, id),
-    queryFn: () => api.getRequirement(id!),
+    queryFn: ({ queryKey: [, projectId, requirementId] }) => api.getRequirement(projectId, requirementId!),
     enabled: Boolean(id),
   });
 }
@@ -427,7 +431,8 @@ export function useRequirementQuery(activeProjectId: string | null, id: string |
 export function useDiffQuery(activeProjectId: string | null, id: string | null, enabled: boolean, live = false) {
   return useQuery({
     queryKey: queryKeys.diff(activeProjectId, id, live),
-    queryFn: () => api.getDiff(id!, { live }),
+    queryFn: ({ queryKey: [, projectId, requirementId, mode] }) =>
+      api.getDiff(projectId, requirementId!, { live: mode === "live" }),
     enabled: Boolean(id && enabled),
   });
 }
@@ -435,7 +440,7 @@ export function useDiffQuery(activeProjectId: string | null, id: string | null, 
 export function useDeliveryQuery(activeProjectId: string | null, id: string | null, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.delivery(activeProjectId, id),
-    queryFn: () => api.getDelivery(id!),
+    queryFn: ({ queryKey: [, projectId, requirementId] }) => api.getDelivery(projectId, requirementId!),
     enabled: Boolean(id && enabled),
   });
 }
@@ -1223,7 +1228,7 @@ export async function openDeliverModal(
 ): Promise<void> {
   if (guardRequirementRunLock(reqId)) return;
   const ui = useUiStore.getState();
-  const preview = await runBusy(() => api.getDelivery(reqId));
+  const preview = await runBusy(() => api.getDelivery(ui.activeProjectId, reqId));
   if (!preview) return;
   const candidates = preview.candidates ?? [];
   const matched = candidates.filter((c) => c.inAcceptedSnapshot).map((c) => c.path);

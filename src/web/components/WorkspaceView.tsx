@@ -48,6 +48,7 @@ import type {
   BannerAction,
   DecisionItem,
   RequirementDetail,
+  ReviewReport,
   ScreenshotSkipReasonCode,
   Stage,
 } from "../../core/types.ts";
@@ -1028,11 +1029,214 @@ function InlineDecisionCard({
   );
 }
 
+function SpecReviewCard({
+  d,
+  review,
+  runLocked,
+}: {
+  d: RequirementDetail;
+  review: ReviewReport;
+  runLocked: boolean;
+}) {
+  const language = useUiStore((s) => s.language);
+  const busy = useUiStore((s) => s.busy);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
+  const { state: s, validity } = d;
+  const revValid = validity.reviewValidity;
+  const isReviewCurrent = revValid.effectiveState === "current";
+  const findings = review.findings ?? [];
+  const [selectedFindingIds, setSelectedFindingIds] = useState(() => {
+    const nonLowFindings = findings.filter((finding) => finding.severity !== "low");
+    return (nonLowFindings.length > 0 ? nonLowFindings : findings).map((finding) => finding.id);
+  });
+
+  const toggleFinding = (fid: string) => {
+    setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
+  };
+
+  return (
+    <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
+      <div className="card-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <h3>{t(language, "review.title")}</h3>
+          <Badge variant={mapTone(VERDICT_META[review.verdict].tone)}>
+            <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
+            {VERDICT_META[review.verdict].labels[language]}
+          </Badge>
+          <Badge variant={revValid.effectiveState === "current" ? "info" : "warning"}>
+            {revValid.effectiveState === "current"
+              ? t(language, "review.currentValid")
+              : translateRef(language, revValid.reasonKey, t(language, "review.stale"))}
+          </Badge>
+          <span className="muted xs">
+            {review.reviewerHarness} · {review.reviewerModel}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {s.stage !== "done" && s.stage !== "cancelled" && review.verdict !== "pass" && (
+            <>
+              <AsyncButton
+                size="xs"
+                variant={isReviewCurrent ? "default" : "outline"}
+                type="button"
+                data-testid="review-fix-btn"
+                disabled={busy || runLocked}
+                onAction={() =>
+                  dispatchFixFromReview(d, {
+                    selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
+                  })
+                }
+              >
+                <Icon icon={Wrench} size={14} />{" "}
+                {isReviewCurrent
+                  ? findings.length > 0 && selectedFindingIds.length > 0
+                    ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
+                    : t(language, "core.action.fixPerReview")
+                  : t(language, "review.fixStale")}
+              </AsyncButton>
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="review-reject-btn"
+                disabled={busy || runLocked}
+                onAction={() => handleBannerAction(d, "request_changes")}
+              >
+                <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
+              </AsyncButton>
+              {isReviewCurrent && validity.acceptanceGate.ok && (
+                <AsyncButton
+                  size="xs"
+                  variant="outline"
+                  type="button"
+                  data-testid="review-override-accept-btn"
+                  disabled={busy || runLocked}
+                  onAction={() => handleBannerAction(d, "accept")}
+                >
+                  <Icon icon={Check} size={14} />{" "}
+                  {review.verdict === "block"
+                    ? t(language, "core.action.ignoreBlockAccept")
+                    : t(language, "core.action.acceptRisk")}
+                </AsyncButton>
+              )}
+            </>
+          )}
+          <AsyncButton
+            size="xs"
+            variant={!isReviewCurrent ? "default" : "outline"}
+            type="button"
+            data-testid="review-rerun-btn"
+            disabled={busy || runLocked}
+            onAction={() => triggerActiveRun(s.id, "review")}
+          >
+            <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
+          </AsyncButton>
+          <AsyncButton
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-fresh-rerun-btn"
+            disabled={busy || runLocked}
+            onAction={() => triggerActiveRun(s.id, "review", { forceFreshSession: true })}
+          >
+            <Icon icon={Search} size={14} /> {t(language, "review.freshRerun")}
+          </AsyncButton>
+          <Button
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-compare-diff-btn"
+            onClick={() => {
+              setDrawerOpen(true);
+              setDrawerTab("diff");
+            }}
+          >
+            <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
+          </Button>
+        </div>
+      </div>
+      <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
+
+      {findings.length > 0 && (
+        <div className="review-findings-list" data-testid="review-findings-list">
+          {findings.map((f) => {
+            const checked = selectedFindingIds.includes(f.id);
+            const sevTone = f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary";
+            const sevLabel =
+              f.severity === "high"
+                ? t(language, "review.severity.high")
+                : f.severity === "medium"
+                  ? t(language, "review.severity.medium")
+                  : t(language, "review.severity.low");
+            return (
+              <Label key={f.id} className="review-finding-item w-full font-normal items-start">
+                {s.stage !== "done" && review.verdict !== "pass" && (
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={checked}
+                    onCheckedChange={() => toggleFinding(f.id)}
+                  />
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <Badge variant={sevTone}>{sevLabel}</Badge>
+                    <code className="xs">{f.id}</code>
+                    <strong style={{ fontSize: 13 }}>{f.title}</strong>
+                    {f.criterionIds && f.criterionIds.length > 0 && (
+                      <Badge variant="info">{f.criterionIds.join(", ")}</Badge>
+                    )}
+                  </div>
+                  {f.files && f.files.length > 0 && (
+                    <div className="muted xs" style={{ marginTop: 2 }}>
+                      {t(language, "review.filesLabel")}
+                      {f.files.join(" · ")}
+                    </div>
+                  )}
+                  {f.suggestion && (
+                    <div className="muted xs" style={{ marginTop: 2 }}>
+                      {t(language, "review.suggestionLabel")}
+                      {f.suggestion}
+                    </div>
+                  )}
+                </div>
+              </Label>
+            );
+          })}
+        </div>
+      )}
+
+      <details open={review.verdict !== "pass" && revValid.effectiveState === "current"}>
+        <summary className="xs muted" style={{ cursor: "pointer" }}>
+          {t(language, "review.expand")}
+        </summary>
+        <MarkdownView markdown={review.markdown} className="md-body xs" />
+      </details>
+      {review.verdict === "block" && (
+        <div className="mt-2 pt-2 border-t flex justify-end">
+          <AsyncButton
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-remember-lesson-btn"
+            disabled={busy}
+            onAction={() => rememberProjectLesson(review.summary, "review_block", s.id)}
+          >
+            <Icon icon={Save} size={14} /> {t(language, "playbook.rememberReviewBtn")}
+          </AsyncButton>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SpecDesignTab({
+  activeProjectId,
   d,
   runLocked,
   confirmApproval,
 }: {
+  activeProjectId: string | null;
   d: RequirementDetail;
   runLocked: boolean;
   confirmApproval: ConfirmApproval;
@@ -1084,21 +1288,6 @@ function SpecDesignTab({
   const historyVers = d.designHistoryVersions;
   const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
-  const revValid = validity.reviewValidity;
-  const isReviewCurrent = revValid.effectiveState === "current";
-  const findings = review?.findings ?? [];
-
-  const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>(() =>
-    findings.filter((f) => f.severity !== "low").map((f) => f.id),
-  );
-  useEffect(() => {
-    const next = (review?.findings ?? []).filter((f) => f.severity !== "low").map((f) => f.id);
-    setSelectedFindingIds(next.length > 0 ? next : (review?.findings ?? []).map((f) => f.id));
-  }, [review?.id]);
-
-  const toggleFinding = (fid: string) => {
-    setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
-  };
 
   const openAnnotate = (anchor: string, initialMessage = "") => {
     setModal({ kind: "annotate_anchor", anchor, message: initialMessage, mode: "refine" });
@@ -1343,177 +1532,12 @@ function SpecDesignTab({
         </div>
       )}
       {review && (
-        <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
-          <div className="card-head">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <h3>{t(language, "review.title")}</h3>
-              <Badge variant={mapTone(VERDICT_META[review.verdict].tone)}>
-                <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
-                {VERDICT_META[review.verdict].labels[language]}
-              </Badge>
-              <Badge variant={revValid.effectiveState === "current" ? "info" : "warning"}>
-                {revValid.effectiveState === "current"
-                  ? t(language, "review.currentValid")
-                  : translateRef(language, revValid.reasonKey, t(language, "review.stale"))}
-              </Badge>
-              <span className="muted xs">
-                {review.reviewerHarness} · {review.reviewerModel}
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {s.stage !== "done" && s.stage !== "cancelled" && review.verdict !== "pass" && (
-                <>
-                  <AsyncButton
-                    size="xs"
-                    variant={isReviewCurrent ? "default" : "outline"}
-                    type="button"
-                    data-testid="review-fix-btn"
-                    disabled={busy || runLocked}
-                    onAction={() =>
-                      dispatchFixFromReview(d, {
-                        selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
-                      })
-                    }
-                  >
-                    <Icon icon={Wrench} size={14} />{" "}
-                    {isReviewCurrent
-                      ? findings.length > 0 && selectedFindingIds.length > 0
-                        ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
-                        : t(language, "core.action.fixPerReview")
-                      : t(language, "review.fixStale")}
-                  </AsyncButton>
-                  <AsyncButton
-                    size="xs"
-                    variant="outline"
-                    type="button"
-                    data-testid="review-reject-btn"
-                    disabled={busy || runLocked}
-                    onAction={() => handleBannerAction(d, "request_changes")}
-                  >
-                    <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
-                  </AsyncButton>
-                  {isReviewCurrent && validity.acceptanceGate.ok && (
-                    <AsyncButton
-                      size="xs"
-                      variant="outline"
-                      type="button"
-                      data-testid="review-override-accept-btn"
-                      disabled={busy || runLocked}
-                      onAction={() => handleBannerAction(d, "accept")}
-                    >
-                      <Icon icon={Check} size={14} />{" "}
-                      {review.verdict === "block"
-                        ? t(language, "core.action.ignoreBlockAccept")
-                        : t(language, "core.action.acceptRisk")}
-                    </AsyncButton>
-                  )}
-                </>
-              )}
-              <AsyncButton
-                size="xs"
-                variant={!isReviewCurrent ? "default" : "outline"}
-                type="button"
-                data-testid="review-rerun-btn"
-                disabled={busy || runLocked}
-                onAction={() => triggerActiveRun(s.id, "review")}
-              >
-                <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
-              </AsyncButton>
-              <AsyncButton
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-fresh-rerun-btn"
-                disabled={busy || runLocked}
-                onAction={() => triggerActiveRun(s.id, "review", { forceFreshSession: true })}
-              >
-                <Icon icon={Search} size={14} /> {t(language, "review.freshRerun")}
-              </AsyncButton>
-              <Button
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-compare-diff-btn"
-                onClick={() => {
-                  setDrawerOpen(true);
-                  setDrawerTab("diff");
-                }}
-              >
-                <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
-              </Button>
-            </div>
-          </div>
-          <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
-
-          {findings.length > 0 && (
-            <div className="review-findings-list" data-testid="review-findings-list">
-              {findings.map((f) => {
-                const checked = selectedFindingIds.includes(f.id);
-                const sevTone = f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary";
-                const sevLabel =
-                  f.severity === "high"
-                    ? t(language, "review.severity.high")
-                    : f.severity === "medium"
-                      ? t(language, "review.severity.medium")
-                      : t(language, "review.severity.low");
-                return (
-                  <Label key={f.id} className="review-finding-item w-full font-normal items-start">
-                    {s.stage !== "done" && review.verdict !== "pass" && (
-                      <Checkbox
-                        className="mt-0.5"
-                        checked={checked}
-                        onCheckedChange={() => toggleFinding(f.id)}
-                      />
-                    )}
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <Badge variant={sevTone}>{sevLabel}</Badge>
-                        <code className="xs">{f.id}</code>
-                        <strong style={{ fontSize: 13 }}>{f.title}</strong>
-                        {f.criterionIds && f.criterionIds.length > 0 && (
-                          <Badge variant="info">{f.criterionIds.join(", ")}</Badge>
-                        )}
-                      </div>
-                      {f.files && f.files.length > 0 && (
-                        <div className="muted xs" style={{ marginTop: 2 }}>
-                          {t(language, "review.filesLabel")}
-                          {f.files.join(" · ")}
-                        </div>
-                      )}
-                      {f.suggestion && (
-                        <div className="muted xs" style={{ marginTop: 2 }}>
-                          {t(language, "review.suggestionLabel")}
-                          {f.suggestion}
-                        </div>
-                      )}
-                    </div>
-                  </Label>
-                );
-              })}
-            </div>
-          )}
-
-          <details open={review.verdict !== "pass" && revValid.effectiveState === "current"}>
-            <summary className="xs muted" style={{ cursor: "pointer" }}>
-              {t(language, "review.expand")}
-            </summary>
-            <MarkdownView markdown={review.markdown} className="md-body xs" />
-          </details>
-          {review.verdict === "block" && (
-            <div className="mt-2 pt-2 border-t flex justify-end">
-              <AsyncButton
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-remember-lesson-btn"
-                disabled={busy}
-                onAction={() => rememberProjectLesson(review.summary, "review_block", s.id)}
-              >
-                <Icon icon={Save} size={14} /> {t(language, "playbook.rememberReviewBtn")}
-              </AsyncButton>
-            </div>
-          )}
-        </Card>
+        <SpecReviewCard
+          key={JSON.stringify([activeProjectId, s.id, review.id])}
+          d={d}
+          review={review}
+          runLocked={runLocked}
+        />
       )}
 
       {s.stage === "planning" && Boolean(s.designHash) && (
@@ -3747,7 +3771,12 @@ export function WorkspaceView() {
                 onOpenDiff={() => setWorkspaceTab("diff")}
               />
             )}
-            <SpecDesignTab d={d} runLocked={runningThis} confirmApproval={confirmApproval} />
+            <SpecDesignTab
+              activeProjectId={activeProjectId}
+              d={d}
+              runLocked={runningThis}
+              confirmApproval={confirmApproval}
+            />
           </>
         ) : workspaceTab === "diff" ? (
           <DiffViewerPanel d={d} />
