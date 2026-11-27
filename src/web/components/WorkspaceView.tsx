@@ -49,6 +49,7 @@ import type {
   BannerAction,
   DecisionItem,
   RequirementDetail,
+  ReviewReport,
   ScreenshotBatch,
   ScreenshotPhase,
   ScreenshotShot,
@@ -107,6 +108,7 @@ import {
   findLockingRequirementRun,
   formatDateTime,
   getPendingRefineAnnotations,
+  isManualChecklistCriterion,
   STAGE_META,
   VERDICT_META,
   type DiffViewMode,
@@ -395,6 +397,156 @@ function buildSpawnDrafts(d: RequirementDetail): Array<{ title: string; goal: st
   return out.length > 0 ? out.slice(0, 12) : [{ title: "", goal: "" }];
 }
 
+function ManualChecksChecklistCard({
+  d,
+  runLocked,
+  testId = "manual-checks-card",
+  compact = false,
+}: {
+  d: RequirementDetail;
+  runLocked: boolean;
+  testId?: string;
+  compact?: boolean;
+}) {
+  const language = useUiStore((st) => st.language);
+  const busy = useUiStore((st) => st.busy);
+  const showToastKey = useUiStore((st) => st.showToastKey);
+  const s = d.state;
+  const items = d.validity.coverage.items.filter((item) => isManualChecklistCriterion(item.criterion));
+  const latestShotBatch =
+    s.screenshotBatches && s.screenshotBatches.length > 0
+      ? s.screenshotBatches[s.screenshotBatches.length - 1]
+      : null;
+  if (items.length === 0) return null;
+
+  return (
+    <Card
+      className={compact ? "p-3 border-border/70 bg-background/50" : "p-4 mb-3.5"}
+      data-testid={testId}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2 mb-2.5">
+        <div className="min-w-0">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
+            <Icon icon={BANNER_ACTION_ICONS.focus_manual_checks} size={14} />{" "}
+            {t(language, "accept.manualChecksTitle")}
+          </h3>
+          <p className="text-xs text-muted-foreground mt-1 mb-0">{t(language, "accept.manualChecksHint")}</p>
+        </div>
+        {latestShotBatch && latestShotBatch.shots.length > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            {t(language, "accept.manualChecksViewScreenshots")} ·{" "}
+            {t(language, "accept.screenshotsCount", { count: latestShotBatch.shots.length })}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        {items.map((item) => {
+          const passed = item.state === "passed";
+          const stateLabel = passed
+            ? t(language, "spec.manualVerified")
+            : item.state === "stale"
+              ? t(language, "accept.manualStateStale")
+              : item.state === "unverified"
+                ? t(language, "accept.manualStateUnverified")
+                : COVERAGE_META[item.state].labels[language];
+          const stateTone =
+            passed
+              ? "success"
+              : item.state === "stale" || item.state === "unavailable"
+                ? "warning"
+                : item.state === "failed"
+                  ? "error"
+                  : "secondary";
+          return (
+            <div
+              key={item.criterion.id}
+              className="rounded-lg border border-border/70 bg-card/60 p-2.5"
+              data-testid={`${testId}-row-${item.criterion.id}`}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs font-medium">
+                    <span className="req-id">{item.criterion.id}</span>
+                    <Badge variant="secondary" size="sm">
+                      {item.criterion.required ? t(language, "common.required") : t(language, "common.reference")}
+                    </Badge>
+                    <Badge variant={stateTone} size="sm">
+                      <Icon icon={COVERAGE_ICONS[item.state]} size={14} /> {stateLabel}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1 [overflow-wrap:anywhere]">
+                    {item.criterion.description}
+                  </div>
+                  {item.criterion.steps?.trim() && (
+                    <div className="text-xs mt-1.5 [overflow-wrap:anywhere]">
+                      <strong>{t(language, "spec.manualStepsLabel")}</strong>
+                      <span className="whitespace-pre-wrap">{item.criterion.steps}</span>
+                    </div>
+                  )}
+                  {(item.reason || item.reasonKey) && (
+                    <div className="text-[11px] text-warning mt-1 [overflow-wrap:anywhere]">
+                      {translateRef(language, item.reasonKey, item.reason ?? "", item.reasonParams)}
+                    </div>
+                  )}
+                </div>
+                {s.stage === "coding" && (
+                  <AsyncButton
+                    size="xs"
+                    variant={passed ? "default" : "outline"}
+                    type="button"
+                    data-testid={`${testId}-toggle-${item.criterion.id}`}
+                    aria-pressed={passed}
+                    disabled={busy || runLocked}
+                    onAction={async () => {
+                      if (guardRequirementRunLock(s.id)) return;
+                      const out = await runBusy(() =>
+                        api.setManualCheck(s.id, {
+                          criterionId: item.criterion.id,
+                          checked: !passed,
+                          expectedRevision: s.revision,
+                        }),
+                      );
+                      if (out) {
+                        await invalidateAllWorkbenchQueries();
+                        showToastKey("spec.manualCheckSaved");
+                      }
+                    }}
+                  >
+                    <Icon icon={Check} size={14} />{" "}
+                    {passed ? t(language, "spec.manualVerified") : t(language, "spec.manualMarkVerified")}
+                  </AsyncButton>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {latestShotBatch && latestShotBatch.shots.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-2.5">
+          {latestShotBatch.shots.slice(0, 4).map((shot) => (
+            <a
+              key={shot.id}
+              href={screenshotUrl(s.id, shot.id)}
+              target="_blank"
+              rel="noreferrer"
+              className="block"
+              title={shot.label}
+            >
+              <img
+                src={screenshotUrl(s.id, shot.id)}
+                alt={shot.label}
+                className="h-14 w-24 rounded border object-cover"
+              />
+            </a>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function AcceptanceSummaryPanel({
   d,
   busy,
@@ -428,6 +580,14 @@ function AcceptanceSummaryPanel({
       ? s.screenshotBatches[s.screenshotBatches.length - 1]
       : null);
   const showScreenshots = Boolean(s.uiRelated || (latestShotBatch && latestShotBatch.shots.length > 0));
+  const manualItems = cov.items.filter((item) => isManualChecklistCriterion(item.criterion));
+  const manualPending = d.validity.manualCheckPending ?? null;
+  const manualPendingHint = manualPending
+    ? t(language, "accept.manualChecksPendingHint", {
+        count: manualPending.pendingItems.length,
+        ids: manualPending.pendingIds.join(", "),
+      })
+    : null;
 
   const reviewLabel =
     rev && revState === "current"
@@ -561,6 +721,17 @@ function AcceptanceSummaryPanel({
         )}
       </div>
 
+      {manualItems.length > 0 && (
+        <div className="mt-2.5">
+          <ManualChecksChecklistCard
+            d={d}
+            runLocked={runLocked}
+            testId="acceptance-manual-checks-card"
+            compact
+          />
+        </div>
+      )}
+
       <div className="mt-2.5 pt-2.5 border-t space-y-2" data-testid="acceptance-exit-actions">
         <div className="flex flex-wrap items-center gap-3">
           <Input
@@ -593,12 +764,18 @@ function AcceptanceSummaryPanel({
             {t(language, "accept.rememberEmptyHint")}
           </div>
         )}
+        {manualPendingHint && (
+          <div className="text-[11px] text-warning" data-testid="acceptance-manual-pending-hint">
+            {manualPendingHint}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <AsyncButton
             size="sm"
             type="button"
             data-testid="acceptance-exit-accept-btn"
-            disabled={busy || runLocked || !d.validity.acceptanceGate.ok}
+            disabled={busy || runLocked || !d.validity.acceptanceGate.ok || Boolean(manualPending)}
+            title={manualPendingHint ?? undefined}
             onAction={() =>
               handleBannerAction(d, "accept", {
                 openDeliverAfter,
@@ -901,11 +1078,214 @@ function InlineDecisionCard({
   );
 }
 
+function SpecReviewCard({
+  d,
+  review,
+  runLocked,
+}: {
+  d: RequirementDetail;
+  review: ReviewReport;
+  runLocked: boolean;
+}) {
+  const language = useUiStore((s) => s.language);
+  const busy = useUiStore((s) => s.busy);
+  const setDrawerOpen = useUiStore((s) => s.setDrawerOpen);
+  const setDrawerTab = useUiStore((s) => s.setDrawerTab);
+  const { state: s, validity } = d;
+  const revValid = validity.reviewValidity;
+  const isReviewCurrent = revValid.effectiveState === "current";
+  const findings = review.findings ?? [];
+  const [selectedFindingIds, setSelectedFindingIds] = useState(() => {
+    const nonLowFindings = findings.filter((finding) => finding.severity !== "low");
+    return (nonLowFindings.length > 0 ? nonLowFindings : findings).map((finding) => finding.id);
+  });
+
+  const toggleFinding = (fid: string) => {
+    setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
+  };
+
+  return (
+    <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
+      <div className="card-head">
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <h3>{t(language, "review.title")}</h3>
+          <Badge variant={mapTone(VERDICT_META[review.verdict].tone)}>
+            <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
+            {VERDICT_META[review.verdict].labels[language]}
+          </Badge>
+          <Badge variant={revValid.effectiveState === "current" ? "info" : "warning"}>
+            {revValid.effectiveState === "current"
+              ? t(language, "review.currentValid")
+              : translateRef(language, revValid.reasonKey, t(language, "review.stale"))}
+          </Badge>
+          <span className="muted xs">
+            {review.reviewerHarness} · {review.reviewerModel}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {s.stage !== "done" && s.stage !== "cancelled" && review.verdict !== "pass" && (
+            <>
+              <AsyncButton
+                size="xs"
+                variant={isReviewCurrent ? "default" : "outline"}
+                type="button"
+                data-testid="review-fix-btn"
+                disabled={busy || runLocked}
+                onAction={() =>
+                  dispatchFixFromReview(d, {
+                    selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
+                  })
+                }
+              >
+                <Icon icon={Wrench} size={14} />{" "}
+                {isReviewCurrent
+                  ? findings.length > 0 && selectedFindingIds.length > 0
+                    ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
+                    : t(language, "core.action.fixPerReview")
+                  : t(language, "review.fixStale")}
+              </AsyncButton>
+              <AsyncButton
+                size="xs"
+                variant="outline"
+                type="button"
+                data-testid="review-reject-btn"
+                disabled={busy || runLocked}
+                onAction={() => handleBannerAction(d, "request_changes")}
+              >
+                <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
+              </AsyncButton>
+              {isReviewCurrent && validity.acceptanceGate.ok && (
+                <AsyncButton
+                  size="xs"
+                  variant="outline"
+                  type="button"
+                  data-testid="review-override-accept-btn"
+                  disabled={busy || runLocked}
+                  onAction={() => handleBannerAction(d, "accept")}
+                >
+                  <Icon icon={Check} size={14} />{" "}
+                  {review.verdict === "block"
+                    ? t(language, "core.action.ignoreBlockAccept")
+                    : t(language, "core.action.acceptRisk")}
+                </AsyncButton>
+              )}
+            </>
+          )}
+          <AsyncButton
+            size="xs"
+            variant={!isReviewCurrent ? "default" : "outline"}
+            type="button"
+            data-testid="review-rerun-btn"
+            disabled={busy || runLocked}
+            onAction={() => triggerActiveRun(s.id, "review")}
+          >
+            <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
+          </AsyncButton>
+          <AsyncButton
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-fresh-rerun-btn"
+            disabled={busy || runLocked}
+            onAction={() => triggerActiveRun(s.id, "review", { forceFreshSession: true })}
+          >
+            <Icon icon={Search} size={14} /> {t(language, "review.freshRerun")}
+          </AsyncButton>
+          <Button
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-compare-diff-btn"
+            onClick={() => {
+              setDrawerOpen(true);
+              setDrawerTab("diff");
+            }}
+          >
+            <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
+          </Button>
+        </div>
+      </div>
+      <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
+
+      {findings.length > 0 && (
+        <div className="review-findings-list" data-testid="review-findings-list">
+          {findings.map((f) => {
+            const checked = selectedFindingIds.includes(f.id);
+            const sevTone = f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary";
+            const sevLabel =
+              f.severity === "high"
+                ? t(language, "review.severity.high")
+                : f.severity === "medium"
+                  ? t(language, "review.severity.medium")
+                  : t(language, "review.severity.low");
+            return (
+              <Label key={f.id} className="review-finding-item w-full font-normal items-start">
+                {s.stage !== "done" && review.verdict !== "pass" && (
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={checked}
+                    onCheckedChange={() => toggleFinding(f.id)}
+                  />
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <Badge variant={sevTone}>{sevLabel}</Badge>
+                    <code className="xs">{f.id}</code>
+                    <strong style={{ fontSize: 13 }}>{f.title}</strong>
+                    {f.criterionIds && f.criterionIds.length > 0 && (
+                      <Badge variant="info">{f.criterionIds.join(", ")}</Badge>
+                    )}
+                  </div>
+                  {f.files && f.files.length > 0 && (
+                    <div className="muted xs" style={{ marginTop: 2 }}>
+                      {t(language, "review.filesLabel")}
+                      {f.files.join(" · ")}
+                    </div>
+                  )}
+                  {f.suggestion && (
+                    <div className="muted xs" style={{ marginTop: 2 }}>
+                      {t(language, "review.suggestionLabel")}
+                      {f.suggestion}
+                    </div>
+                  )}
+                </div>
+              </Label>
+            );
+          })}
+        </div>
+      )}
+
+      <details open={review.verdict !== "pass" && revValid.effectiveState === "current"}>
+        <summary className="xs muted" style={{ cursor: "pointer" }}>
+          {t(language, "review.expand")}
+        </summary>
+        <MarkdownView markdown={review.markdown} className="md-body xs" />
+      </details>
+      {review.verdict === "block" && (
+        <div className="mt-2 pt-2 border-t flex justify-end">
+          <AsyncButton
+            size="xs"
+            variant="outline"
+            type="button"
+            data-testid="review-remember-lesson-btn"
+            disabled={busy}
+            onAction={() => rememberProjectLesson(review.summary, "review_block", s.id)}
+          >
+            <Icon icon={Save} size={14} /> {t(language, "playbook.rememberReviewBtn")}
+          </AsyncButton>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SpecDesignTab({
+  activeProjectId,
   d,
   runLocked,
   confirmApproval,
 }: {
+  activeProjectId: string | null;
   d: RequirementDetail;
   runLocked: boolean;
   confirmApproval: ConfirmApproval;
@@ -957,21 +1337,6 @@ function SpecDesignTab({
   const historyVers = d.designHistoryVersions;
   const activeVer = designViewVersion ?? s.designVersion;
   const review = s.reviewReport;
-  const revValid = validity.reviewValidity;
-  const isReviewCurrent = revValid.effectiveState === "current";
-  const findings = review?.findings ?? [];
-
-  const [selectedFindingIds, setSelectedFindingIds] = useState<string[]>(() =>
-    findings.filter((f) => f.severity !== "low").map((f) => f.id),
-  );
-  useEffect(() => {
-    const next = (review?.findings ?? []).filter((f) => f.severity !== "low").map((f) => f.id);
-    setSelectedFindingIds(next.length > 0 ? next : (review?.findings ?? []).map((f) => f.id));
-  }, [review?.id]);
-
-  const toggleFinding = (fid: string) => {
-    setSelectedFindingIds((prev) => (prev.includes(fid) ? prev.filter((x) => x !== fid) : [...prev, fid]));
-  };
 
   const openAnnotate = (anchor: string, initialMessage = "") => {
     setModal({ kind: "annotate_anchor", anchor, message: initialMessage, mode: "refine" });
@@ -1216,177 +1581,12 @@ function SpecDesignTab({
         </div>
       )}
       {review && (
-        <Card className={`review-card p-4 mb-3.5 ${VERDICT_META[review.verdict].tone}`} data-testid="review-report-card">
-          <div className="card-head">
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <h3>{t(language, "review.title")}</h3>
-              <Badge variant={mapTone(VERDICT_META[review.verdict].tone)}>
-                <Icon icon={VERDICT_ICONS[review.verdict]} size={14} />{" "}
-                {VERDICT_META[review.verdict].labels[language]}
-              </Badge>
-              <Badge variant={revValid.effectiveState === "current" ? "info" : "warning"}>
-                {revValid.effectiveState === "current"
-                  ? t(language, "review.currentValid")
-                  : translateRef(language, revValid.reasonKey, t(language, "review.stale"))}
-              </Badge>
-              <span className="muted xs">
-                {review.reviewerHarness} · {review.reviewerModel}
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {s.stage !== "done" && s.stage !== "cancelled" && review.verdict !== "pass" && (
-                <>
-                  <AsyncButton
-                    size="xs"
-                    variant={isReviewCurrent ? "default" : "outline"}
-                    type="button"
-                    data-testid="review-fix-btn"
-                    disabled={busy || runLocked}
-                    onAction={() =>
-                      dispatchFixFromReview(d, {
-                        selectedFindingIds: findings.length > 0 ? selectedFindingIds : undefined,
-                      })
-                    }
-                  >
-                    <Icon icon={Wrench} size={14} />{" "}
-                    {isReviewCurrent
-                      ? findings.length > 0 && selectedFindingIds.length > 0
-                        ? t(language, "review.fixSelected", { count: selectedFindingIds.length })
-                        : t(language, "core.action.fixPerReview")
-                      : t(language, "review.fixStale")}
-                  </AsyncButton>
-                  <AsyncButton
-                    size="xs"
-                    variant="outline"
-                    type="button"
-                    data-testid="review-reject-btn"
-                    disabled={busy || runLocked}
-                    onAction={() => handleBannerAction(d, "request_changes")}
-                  >
-                    <Icon icon={Undo2} size={14} /> {t(language, "core.action.sendBack")}
-                  </AsyncButton>
-                  {isReviewCurrent && validity.acceptanceGate.ok && (
-                    <AsyncButton
-                      size="xs"
-                      variant="outline"
-                      type="button"
-                      data-testid="review-override-accept-btn"
-                      disabled={busy || runLocked}
-                      onAction={() => handleBannerAction(d, "accept")}
-                    >
-                      <Icon icon={Check} size={14} />{" "}
-                      {review.verdict === "block"
-                        ? t(language, "core.action.ignoreBlockAccept")
-                        : t(language, "core.action.acceptRisk")}
-                    </AsyncButton>
-                  )}
-                </>
-              )}
-              <AsyncButton
-                size="xs"
-                variant={!isReviewCurrent ? "default" : "outline"}
-                type="button"
-                data-testid="review-rerun-btn"
-                disabled={busy || runLocked}
-                onAction={() => triggerActiveRun(s.id, "review")}
-              >
-                <Icon icon={Search} size={14} /> {t(language, "review.rerun")}
-              </AsyncButton>
-              <AsyncButton
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-fresh-rerun-btn"
-                disabled={busy || runLocked}
-                onAction={() => triggerActiveRun(s.id, "review", { forceFreshSession: true })}
-              >
-                <Icon icon={Search} size={14} /> {t(language, "review.freshRerun")}
-              </AsyncButton>
-              <Button
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-compare-diff-btn"
-                onClick={() => {
-                  setDrawerOpen(true);
-                  setDrawerTab("diff");
-                }}
-              >
-                <Icon icon={PanelRightOpen} size={14} /> {t(language, "changes.dockToDrawer")}
-              </Button>
-            </div>
-          </div>
-          <div style={{ fontWeight: 500, marginBottom: 8 }}>{review.summary}</div>
-
-          {findings.length > 0 && (
-            <div className="review-findings-list" data-testid="review-findings-list">
-              {findings.map((f) => {
-                const checked = selectedFindingIds.includes(f.id);
-                const sevTone = f.severity === "high" ? "error" : f.severity === "medium" ? "warning" : "secondary";
-                const sevLabel =
-                  f.severity === "high"
-                    ? t(language, "review.severity.high")
-                    : f.severity === "medium"
-                      ? t(language, "review.severity.medium")
-                      : t(language, "review.severity.low");
-                return (
-                  <Label key={f.id} className="review-finding-item w-full font-normal items-start">
-                    {s.stage !== "done" && review.verdict !== "pass" && (
-                      <Checkbox
-                        className="mt-0.5"
-                        checked={checked}
-                        onCheckedChange={() => toggleFinding(f.id)}
-                      />
-                    )}
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <Badge variant={sevTone}>{sevLabel}</Badge>
-                        <code className="xs">{f.id}</code>
-                        <strong style={{ fontSize: 13 }}>{f.title}</strong>
-                        {f.criterionIds && f.criterionIds.length > 0 && (
-                          <Badge variant="info">{f.criterionIds.join(", ")}</Badge>
-                        )}
-                      </div>
-                      {f.files && f.files.length > 0 && (
-                        <div className="muted xs" style={{ marginTop: 2 }}>
-                          {t(language, "review.filesLabel")}
-                          {f.files.join(" · ")}
-                        </div>
-                      )}
-                      {f.suggestion && (
-                        <div className="muted xs" style={{ marginTop: 2 }}>
-                          {t(language, "review.suggestionLabel")}
-                          {f.suggestion}
-                        </div>
-                      )}
-                    </div>
-                  </Label>
-                );
-              })}
-            </div>
-          )}
-
-          <details open={review.verdict !== "pass" && revValid.effectiveState === "current"}>
-            <summary className="xs muted" style={{ cursor: "pointer" }}>
-              {t(language, "review.expand")}
-            </summary>
-            <MarkdownView markdown={review.markdown} className="md-body xs" />
-          </details>
-          {review.verdict === "block" && (
-            <div className="mt-2 pt-2 border-t flex justify-end">
-              <AsyncButton
-                size="xs"
-                variant="outline"
-                type="button"
-                data-testid="review-remember-lesson-btn"
-                disabled={busy}
-                onAction={() => rememberProjectLesson(review.summary, "review_block", s.id)}
-              >
-                <Icon icon={Save} size={14} /> {t(language, "playbook.rememberReviewBtn")}
-              </AsyncButton>
-            </div>
-          )}
-        </Card>
+        <SpecReviewCard
+          key={JSON.stringify([activeProjectId, s.id, review.id])}
+          d={d}
+          review={review}
+          runLocked={runLocked}
+        />
       )}
 
       {s.stage === "planning" && Boolean(s.designHash) && (
@@ -2838,9 +3038,11 @@ export function DiffViewerPanel({ d, inDrawer = false }: { d: RequirementDetail;
 function ChangesVerifyTab({
   d,
   runLocked,
+  hideManualChecks = false,
 }: {
   d: RequirementDetail;
   runLocked: boolean;
+  hideManualChecks?: boolean;
 }) {
   const language = useUiStore((s) => s.language);
   const activeProjectId = useUiStore((s) => s.activeProjectId);
@@ -3053,6 +3255,12 @@ function ChangesVerifyTab({
         )}
       </Card>
 
+      {/* REQ-028 F-4: when the acceptance overview is pinned above, its embedded
+          manual checklist is authoritative; avoid rendering a duplicate list here. */}
+      {!hideManualChecks && (
+        <ManualChecksChecklistCard d={d} runLocked={runLocked} testId="changes-manual-checks-card" />
+      )}
+
       <ScreenshotEvidenceSection d={d} runLocked={runLocked} />
 
       <Card className="p-4 mb-3.5" data-testid="verify-diff-shortcut-card">
@@ -3166,9 +3374,16 @@ export function WorkspaceView() {
       ? { label: t(language, "ws.derived.awaitingApproval"), tone: "warning" as const }
       : s.stage === "coding" && hasFailedVerify
         ? { label: t(language, "ws.derived.verifyFailed"), tone: "error" as const }
-        : s.stage === "coding" && validity.acceptanceGate.ok
-          ? { label: t(language, "ws.derived.readyAccept"), tone: "success" as const }
-          : null;
+        : s.stage === "coding" && validity.manualCheckPending
+          ? { label: t(language, "ws.derived.manualCheckPending"), tone: "warning" as const }
+          : s.stage === "coding" && validity.acceptanceGate.ok
+            ? { label: t(language, "ws.derived.readyAccept"), tone: "success" as const }
+            : null;
+  const showAcceptancePanel =
+    s.stage === "coding" &&
+    (validity.acceptanceGate.ok ||
+      Boolean(validity.baselineOnlyWarning && validity.coverage.requiredPassed > 0) ||
+      Boolean(validity.manualCheckPending));
 
   const isGiteeProject =
     project?.remoteProvider === "gitee" ||
@@ -3272,6 +3487,22 @@ export function WorkspaceView() {
         title={action.disabledReason ?? label}
         onAction={() => {
           const run = (resetSandbox: boolean) => handleBannerAction(d, action.id, { resetSandbox });
+          if (action.id === "focus_manual_checks") {
+            if (inDetails) setActionDetailsOpen(false);
+            // REQ-028 F-3: both spec and changes already render the checklist, so stay put
+            // there; only switch back to spec from unrelated tabs.
+            if (workspaceTab !== "spec" && workspaceTab !== "changes") setWorkspaceTab("spec");
+            if (typeof window !== "undefined") {
+              window.setTimeout(() => {
+                const target = document.querySelector('[data-testid="acceptance-manual-checks-card"]');
+                if (!target) return;
+                target.scrollIntoView({ behavior: "smooth", block: "center" });
+                target.classList.add("manual-checks-flash");
+                window.setTimeout(() => target.classList.remove("manual-checks-flash"), 1800);
+              }, 80);
+            }
+            return;
+          }
           if (action.id === "approve_only" || action.id === "approve_and_implement") {
             if (inDetails) setActionDetailsOpen(false);
             return confirmApproval(label, run);
@@ -3780,23 +4011,37 @@ export function WorkspaceView() {
       <div className="workspace-tab-scroll" data-testid="workspace-tab-scroll">
         {workspaceTab === "spec" ? (
           <>
-            {s.stage === "coding" &&
-              (d.validity.acceptanceGate.ok ||
-                (d.validity.baselineOnlyWarning && d.validity.coverage.requiredPassed > 0)) && (
-                <AcceptanceSummaryPanel
-                  key={s.id}
-                  d={d}
-                  busy={busy}
-                  runLocked={runningThis}
-                  onOpenDiff={() => setWorkspaceTab("diff")}
-                />
-              )}
-            <SpecDesignTab d={d} runLocked={runningThis} confirmApproval={confirmApproval} />
+            {showAcceptancePanel && (
+              <AcceptanceSummaryPanel
+                key={s.id}
+                d={d}
+                busy={busy}
+                runLocked={runningThis}
+                onOpenDiff={() => setWorkspaceTab("diff")}
+              />
+            )}
+            <SpecDesignTab
+              activeProjectId={activeProjectId}
+              d={d}
+              runLocked={runningThis}
+              confirmApproval={confirmApproval}
+            />
           </>
         ) : workspaceTab === "diff" ? (
           <DiffViewerPanel d={d} />
         ) : workspaceTab === "changes" ? (
-          <ChangesVerifyTab d={d} runLocked={runningThis} />
+          <>
+            {showAcceptancePanel && (
+              <AcceptanceSummaryPanel
+                key={`${s.id}:changes`}
+                d={d}
+                busy={busy}
+                runLocked={runningThis}
+                onOpenDiff={() => setWorkspaceTab("diff")}
+              />
+            )}
+            <ChangesVerifyTab d={d} runLocked={runningThis} hideManualChecks={showAcceptancePanel} />
+          </>
         ) : workspaceTab === "audit" ? (
           <ExecutionAuditTab d={d} />
         ) : (

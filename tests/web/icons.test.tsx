@@ -351,6 +351,7 @@ describe("exhaustive status icon maps", () => {
       "dispatch_implement",
       "dispatch_review",
       "escalate_sota",
+      "focus_manual_checks",
       "reopen",
       "request_changes",
       "revise_plan",

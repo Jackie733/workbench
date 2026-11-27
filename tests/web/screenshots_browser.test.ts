@@ -345,10 +345,13 @@ suite("REQ-011 real browser screenshot evidence", () => {
           ),
         { timeout: 8000 },
       );
-      const toastText = await page.evaluate(
-        () => document.querySelector('[data-slot="toast-root"]')?.textContent ?? "",
+      await page.waitForSelector('[data-slot="toast-root"]', { timeout: 5000 });
+      const uploadedBatch = readRequirementBundle(root, id).state.screenshotBatches?.find((batch) =>
+        batch.shots.some((shot) => shot.label === "uploaded-after"),
       );
-      expect(toastText).toContain("已保存 1 张需求场景截图");
+      expect(uploadedBatch?.source).toBe("scenario");
+      const uploadedShot = uploadedBatch!.shots.find((shot) => shot.label === "uploaded-after")!;
+      expect(fs.readFileSync(path.join(root, ".workbench", "items", id, uploadedShot.path))).toEqual(PNG_BYTES);
     } finally {
       await page.close();
     }

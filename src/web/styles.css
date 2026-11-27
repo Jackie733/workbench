@@ -512,6 +512,32 @@
   scrollbar-gutter: stable;
 }
 
+/* REQ-028: 横幅「去完成人工核验」平滑定位后的短暂高亮，跟随主题语义色。 */
+.manual-checks-flash {
+  animation: manual-checks-pulse 1.8s ease-out;
+}
+
+@keyframes manual-checks-pulse {
+  0%,
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+  20%,
+  60% {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manual-checks-flash {
+    animation: none;
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
 /* 洞察页没有 workspace-tab-scroll，detail-mode 的固定高度会把长页面裁掉；
    让 shell 自身承担垂直滚动，顶栏与侧栏保持不动。 */
 .app-shell.insights-mode .shell {

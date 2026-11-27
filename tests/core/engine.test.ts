@@ -26,12 +26,20 @@ import {
   updateProjectConfig,
   updateSpec,
 } from "../../src/core/engine.ts";
-import { detectTestTamperingSignals } from "../../src/core/validity.ts";
+import {
+  deriveActionBanner,
+  deriveManualCheckPendingState,
+  detectTestTamperingSignals,
+  evaluateAcceptanceGate,
+  evaluateCriteriaCoverage,
+  evaluateVerifications,
+  isManualCriterion,
+} from "../../src/core/validity.ts";
 import { discoverProjectContext } from "../../src/core/context.ts";
 import { WorkbenchError } from "../../src/core/errors.ts";
 import { resolveSafePath } from "../../src/core/fs.ts";
 import { sanitizeOutput } from "../../src/core/validate.ts";
-import type { VerificationRecord } from "../../src/core/types.ts";
+import type { ApprovalStatus, RequirementState, VerificationRecord } from "../../src/core/types.ts";
 
 const tempDirs: string[] = [];
 
@@ -763,5 +771,289 @@ describe("WB-01 core store and domain engine", () => {
     fs.writeFileSync(path.join(repo, "tests/app.test.ts"), "test.skip('works', () => { expect(1).toBe(1); });\n");
     const diffView = await getRequirementDiff(repo, "REQ-001");
     expect(diffView.testTamperingSignals?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("REQ-028 待人工核验状态派生", () => {
+  const approval: ApprovalStatus = { valid: true, reason: null };
+  const specHash = "req028-spec-hash";
+  const currentSnapshot = "req028-current-snapshot";
+
+  function makeManualState(overrides: Record<string, unknown> = {}): RequirementState {
+    return {
+      schemaVersion: 6,
+      id: "REQ-900",
+      title: "人工核验状态派生",
+      stage: "coding",
+      track: "plan_first",
+      tier: "standard",
+      revision: 1,
+      specHash,
+      designVersion: 1,
+      designHash: "req028-design-hash",
+      criteria: [
+        { id: "AC-1", description: "自动化命令通过", required: true, command: "echo ok" },
+        { id: "AC-2", description: "人工对照截图核验", required: true, kind: "manual", steps: "打开页面并对照截图" },
+      ],
+      manualChecks: [],
+      approval: {
+        approvedAt: 1,
+        track: "plan_first",
+        specHash,
+        designVersion: 1,
+        designHash: "req028-design-hash",
+        baselineHead: null,
+        baselineFingerprint: currentSnapshot,
+      },
+      acceptance: null,
+      baseline: { head: "head-1", branch: "main", fingerprint: currentSnapshot, capturedAt: 1 },
+      verifications: [makeVerification("V-028", specHash, currentSnapshot, ["AC-1"], true)],
+      timeline: [],
+      lastFeedback: null,
+      reviewReport: null,
+      agentRuns: [
+        {
+          id: "R-028",
+          action: "implement",
+          harness: "codex",
+          model: "gpt-6.2-sol",
+          status: "succeeded",
+          startedAt: 1,
+          endedAt: 2,
+          exitCode: 0,
+          durationMs: 1,
+          logPath: "logs/R-028.log",
+        },
+      ],
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    } as unknown as RequirementState;
+  }
+
+  function derive(state: RequirementState) {
+    const evaluated = evaluateVerifications(state, currentSnapshot);
+    const coverage = evaluateCriteriaCoverage(state, evaluated, currentSnapshot);
+    const gate = evaluateAcceptanceGate(state, approval, coverage);
+    return { evaluated, coverage, gate };
+  }
+
+  test("自动化命令全过且仅剩必需人工项时进入待人工核验，并给出稳定横幅与主操作", () => {
+    const state = makeManualState();
+    const { evaluated, coverage, gate } = derive(state);
+    expect(gate.ok).toBe(false);
+
+    const pending = deriveManualCheckPendingState(state, approval, coverage, currentSnapshot);
+    expect(pending?.pendingIds).toEqual(["AC-2"]);
+    expect(pending?.staleIds).toEqual([]);
+
+    const derived = deriveActionBanner(
+      state,
+      approval,
+      coverage,
+      gate,
+      { effectiveState: "current", reason: null },
+      evaluated,
+      currentSnapshot,
+    );
+    expect(derived.needsDecision).toBe(true);
+    expect(derived.decisionReasonKey).toBe("core.decision.manualCheckPending");
+    expect(derived.banner.headlineKey).toBe("core.banner.manualCheckPending.verifyPassed");
+    expect(derived.banner.headline).toContain("AC-2");
+    expect(derived.banner.primaryAction?.id).toBe("focus_manual_checks");
+    expect(derived.banner.secondaryActions.some((action) => action.id === "dispatch_implement")).toBe(false);
+  });
+
+  test("仅人工项因代码变更过期时仍进入待人工核验，而不是要求重跑已绿的自动化命令", () => {
+    const state = makeManualState({
+      manualChecks: [
+        {
+          criterionId: "AC-2",
+          checked: true,
+          checkedAt: 1,
+          specHash,
+          codeSnapshotHash: "req028-old-snapshot",
+        },
+      ],
+    });
+    const { evaluated, coverage, gate } = derive(state);
+    expect(coverage.items.find((item) => item.criterion.id === "AC-2")?.state).toBe("stale");
+
+    const pending = deriveManualCheckPendingState(state, approval, coverage, currentSnapshot);
+    expect(pending?.pendingIds).toEqual(["AC-2"]);
+    expect(pending?.staleIds).toEqual(["AC-2"]);
+
+    const derived = deriveActionBanner(
+      state,
+      approval,
+      coverage,
+      gate,
+      { effectiveState: "current", reason: null },
+      evaluated,
+      currentSnapshot,
+    );
+    expect(derived.banner.primaryAction?.id).toBe("focus_manual_checks");
+    expect(derived.banner.primaryAction?.id).not.toBe("run_all_verifications");
+    expect(derived.banner.headlineKey).toBe("core.banner.manualCheckPending.verifyPassed");
+  });
+
+  test("当前审查 block / concern 优先保留风险提示，同时注明剩余人工核验", () => {
+    const blockState = makeManualState({
+      reviewReport: {
+        id: "RV-028",
+        reviewerHarness: "codex",
+        reviewerModel: "gpt-6.2-sol",
+        verdict: "block",
+        summary: "存在阻塞缺陷",
+        markdown: "block",
+        findings: [{ id: "F-1", severity: "high", title: "阻塞项" }],
+        reviewedSpecHash: specHash,
+        reviewedCodeSnapshotHash: currentSnapshot,
+        reviewedAt: 1,
+      },
+    });
+    const blockDerived = derive(blockState);
+    const blockBanner = deriveActionBanner(
+      blockState,
+      approval,
+      blockDerived.coverage,
+      blockDerived.gate,
+      { effectiveState: "current", reason: null },
+      blockDerived.evaluated,
+      currentSnapshot,
+    );
+    expect(blockBanner.decisionReasonKey).toBe("core.decision.reviewBlock");
+    expect(blockBanner.banner.headlineKey).toBe("core.banner.manualCheckPending.block");
+    expect(blockBanner.banner.tone).toBe("danger");
+    expect(blockBanner.banner.primaryAction?.id).toBe("dispatch_fix_review");
+    expect(blockBanner.banner.secondaryActions.some((action) => action.id === "focus_manual_checks")).toBe(true);
+    expect(blockBanner.banner.headline).toContain("AC-2");
+
+    const concernState = makeManualState({
+      reviewReport: {
+        id: "RV-029",
+        reviewerHarness: "codex",
+        reviewerModel: "gpt-6.2-sol",
+        verdict: "concern",
+        summary: "存在非阻塞关注点",
+        markdown: "concern",
+        reviewedSpecHash: specHash,
+        reviewedCodeSnapshotHash: currentSnapshot,
+        reviewedAt: 1,
+      },
+    });
+    const concernDerived = derive(concernState);
+    const concernBanner = deriveActionBanner(
+      concernState,
+      approval,
+      concernDerived.coverage,
+      concernDerived.gate,
+      { effectiveState: "current", reason: null },
+      concernDerived.evaluated,
+      currentSnapshot,
+    );
+    expect(concernBanner.decisionReasonKey).toBe("core.decision.reviewConcern");
+    expect(concernBanner.banner.headlineKey).toBe("core.banner.manualCheckPending.concern");
+    expect(concernBanner.banner.tone).toBe("warning");
+    expect(concernBanner.banner.primaryAction?.id).toBe("dispatch_fix_review");
+
+    const staleBlockState = makeManualState({
+      reviewReport: {
+        id: "RV-030",
+        reviewerHarness: "codex",
+        reviewerModel: "gpt-6.2-sol",
+        verdict: "block",
+        summary: "上轮阻塞项",
+        markdown: "stale block",
+        findings: [{ id: "F-2", severity: "high", title: "旧阻塞项" }],
+        reviewedSpecHash: specHash,
+        reviewedCodeSnapshotHash: "req028-old-snapshot",
+        reviewedAt: 1,
+      },
+    });
+    const staleBlockDerived = derive(staleBlockState);
+    const staleBlockBanner = deriveActionBanner(
+      staleBlockState,
+      approval,
+      staleBlockDerived.coverage,
+      staleBlockDerived.gate,
+      { effectiveState: "stale", reason: "审查后代码已有改动", reasonKey: "core.review.staleCode" },
+      staleBlockDerived.evaluated,
+      currentSnapshot,
+    );
+    expect(staleBlockBanner.decisionReasonKey).toBe("core.decision.reviewBlock");
+    expect(staleBlockBanner.banner.headlineKey).toBe("core.banner.manualCheckPending.staleBlock");
+    expect(staleBlockBanner.banner.tone).toBe("danger");
+    expect(staleBlockBanner.banner.primaryAction?.id).toBe("dispatch_review");
+  });
+
+  test("纯人工条件在尚未产生编码进展时不提前提示，成功编码后才进入待人工核验", () => {
+    const pureManual = makeManualState({
+      criteria: [{ id: "AC-2", description: "人工对照截图核验", required: true, kind: "manual", steps: "检查页面" }],
+      verifications: [],
+      agentRuns: [],
+      baseline: { head: "head-1", branch: "main", fingerprint: currentSnapshot, capturedAt: 1 },
+    });
+    const initial = derive(pureManual);
+    expect(deriveManualCheckPendingState(pureManual, approval, initial.coverage, currentSnapshot)).toBeNull();
+    const initialBanner = deriveActionBanner(
+      pureManual,
+      approval,
+      initial.coverage,
+      initial.gate,
+      { effectiveState: "missing", reason: null },
+      initial.evaluated,
+      currentSnapshot,
+    );
+    expect(initialBanner.decisionReasonKey).not.toBe("core.decision.manualCheckPending");
+
+    const progressed = makeManualState({
+      criteria: [{ id: "AC-2", description: "人工对照截图核验", required: true, kind: "manual", steps: "检查页面" }],
+      verifications: [],
+    });
+    const afterCoding = derive(progressed);
+    const pending = deriveManualCheckPendingState(progressed, approval, afterCoding.coverage, currentSnapshot);
+    expect(pending?.pendingIds).toEqual(["AC-2"]);
+    const banner = deriveActionBanner(
+      progressed,
+      approval,
+      afterCoding.coverage,
+      afterCoding.gate,
+      { effectiveState: "missing", reason: null },
+      afterCoding.evaluated,
+      currentSnapshot,
+    );
+    expect(banner.decisionReasonKey).toBe("core.decision.manualCheckPending");
+    expect(banner.banner.primaryAction?.id).toBe("focus_manual_checks");
+  });
+
+  test("无命令且无人工步骤的非人工条件不会被误判为待人工核验", () => {
+    // REQ-028 F-2 回归：这类条件既没有可执行命令，也没有人工检查步骤，
+    // 不属于 manual 条件；若被判为待人工核验，前端会渲染勾选按钮并请求 setManualCheck 返回 400。
+    const state = makeManualState({
+      criteria: [
+        { id: "AC-1", description: "自动化命令通过", required: true, command: "echo ok" },
+        { id: "AC-2", description: "尚未运行且无命令的必需条件", required: true, kind: "command" },
+      ],
+      manualChecks: [],
+    });
+    const { evaluated, coverage, gate } = derive(state);
+    const nonManualItem = coverage.items.find((item) => item.criterion.id === "AC-2");
+    expect(nonManualItem?.state).toBe("unverified");
+    expect(isManualCriterion(nonManualItem!.criterion)).toBe(false);
+
+    expect(deriveManualCheckPendingState(state, approval, coverage, currentSnapshot)).toBeNull();
+
+    const derived = deriveActionBanner(
+      state,
+      approval,
+      coverage,
+      gate,
+      { effectiveState: "missing", reason: null },
+      evaluated,
+      currentSnapshot,
+    );
+    expect(derived.decisionReasonKey).not.toBe("core.decision.manualCheckPending");
+    expect(derived.banner.primaryAction?.id).not.toBe("focus_manual_checks");
   });
 });

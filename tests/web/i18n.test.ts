@@ -422,6 +422,29 @@ describe("status and error messages", () => {
     expect(staleZh).toContain("审查后工作区代码已有新改动");
   });
 
+  test("REQ-028 待人工核验横幅与动作保持双语且参数完整", () => {
+    const params = { count: 1, ids: "AC-5", summary: "concern", counts: "(high 1 / medium 0)" };
+    for (const key of [
+      "core.banner.manualCheckPending.reviewPassed",
+      "core.banner.manualCheckPending.verifyPassed",
+      "core.banner.manualCheckPending.block",
+      "core.banner.manualCheckPending.concern",
+      "core.banner.manualCheckPending.staleBlock",
+    ] as const) {
+      const zh = t("zh-CN", key, params);
+      const en = t("en", key, params);
+      expect(zh).toContain("AC-5");
+      expect(en).toContain("AC-5");
+      expect(/[\u4e00-\u9fff]/.test(en)).toBe(false);
+    }
+    expect(t("zh-CN", "core.decision.manualCheckPending")).toBe("待人工核验");
+    expect(t("en", "core.decision.manualCheckPending")).toBe("Manual check pending");
+    expect(t("zh-CN", "core.action.focusManualChecks")).toBe("去完成人工核验");
+    expect(t("en", "core.action.focusManualChecks")).toBe("Go complete manual checks");
+    expect(t("zh-CN", "accept.manualChecksPendingHint", { count: 1, ids: "AC-5" })).toContain("AC-5");
+    expect(t("en", "accept.manualChecksPendingHint", { count: 1, ids: "AC-5" })).toContain("AC-5");
+  });
+
   test("legacy evidence without message refs stays readable in English", () => {
     const diffView = {
       context: "legacy-unavailable",

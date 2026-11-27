@@ -1,5 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRequirement, initProject } from "../../src/core/engine.ts";
+import { registerHubProject } from "../../src/hub/registry.ts";
 import { startWorkbenchServer, type WorkbenchServerHandle } from "../../src/server/index.ts";
 import {
   browserEnv,
@@ -38,16 +42,16 @@ async function startProjectServer(): Promise<WorkbenchServerHandle> {
 /** 拦截需求详情 GET 请求：支持挂起放行、或首轮返回 500 后重试恢复。 */
 async function installDetailFetchInterceptor(
   page: BrowserPage,
-  mode: { kind: "hold" } | { kind: "failOnce"; errorMessage: string },
+  mode: { kind: "hold"; projectId?: string } | { kind: "failOnce"; errorMessage: string },
 ): Promise<void> {
-  await page.evaluateOnNewDocument((cfg: { kind: "hold" } | { kind: "failOnce"; errorMessage: string }) => {
+  await page.evaluateOnNewDocument((cfg: typeof mode) => {
     const w = window as unknown as {
       fetch: typeof fetch;
       __wbDetailCalls: number;
-      __wbReleaseDetail: () => void;
+      __wbReleaseDetail: () => Promise<void>;
     };
     const nativeFetch = w.fetch.bind(window);
-    const pendingReleases: Array<() => void> = [];
+    const pendingReleases: Array<() => Promise<void>> = [];
     let released = false;
     w.__wbDetailCalls = 0;
 
@@ -57,11 +61,11 @@ async function installDetailFetchInterceptor(
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
       if (method === "GET" && /^\/api\/requirements\/REQ-\d+$/.test(url.pathname)) {
         w.__wbDetailCalls += 1;
-        if (cfg.kind === "hold" && !released) {
+        if (cfg.kind === "hold" && !released && (!cfg.projectId || url.searchParams.get("project") === cfg.projectId)) {
           const pending = nativeFetch(input as RequestInfo, init);
-          return new Promise<Response>((resolve, reject) => {
-            pendingReleases.push(() => pending.then(resolve, reject));
-          });
+          const { promise, resolve, reject } = Promise.withResolvers<Response>();
+          pendingReleases.push(() => pending.then(resolve, reject));
+          return promise;
         }
         if (cfg.kind === "failOnce" && w.__wbDetailCalls === 1) {
           return Promise.resolve(
@@ -80,9 +84,9 @@ async function installDetailFetchInterceptor(
       return nativeFetch(input as RequestInfo, init);
     }) as typeof fetch;
 
-    w.__wbReleaseDetail = () => {
+    w.__wbReleaseDetail = async () => {
       released = true;
-      for (const release of pendingReleases.splice(0)) release();
+      await Promise.all(pendingReleases.splice(0).map((release) => release()));
     };
   }, mode);
 }
@@ -176,7 +180,8 @@ describe.skipIf(!HAS_BROWSER)("workspace detail loading state browser E2E", () =
 
       // Release detail response and confirm smooth switch to real detail view.
       await page.evaluate(() => {
-        (window as unknown as { __wbReleaseDetail: () => void }).__wbReleaseDetail();
+        const testWindow = window as unknown as { __wbReleaseDetail: () => Promise<void> };
+        return testWindow.__wbReleaseDetail();
       });
       await page.waitForSelector('[data-testid="workspace-detail"]', { timeout: 10_000 });
       const afterLoaded = await page.evaluate(() => ({
@@ -184,6 +189,54 @@ describe.skipIf(!HAS_BROWSER)("workspace detail loading state browser E2E", () =
         hasDetail: Boolean(document.querySelector('[data-testid="workspace-detail"]')),
       }));
       expect(afterLoaded).toEqual({ hasLoading: false, hasDetail: true });
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
+  test("keeps overlapping requirement IDs separate when a previous project's detail arrives late", async () => {
+    const hubDir = mkdtempSync(join(tmpdir(), "wb-query-scope-"));
+    tempDirs.push(hubDir);
+    process.env.WORKBENCH_HUB_DIR = hubDir;
+    const alphaRoot = initGitRepoIn(tempDirs);
+    const betaRoot = initGitRepoIn(tempDirs);
+    await initProject(alphaRoot, { name: "Alpha", privacyMode: "local" });
+    await initProject(betaRoot, { name: "Beta", privacyMode: "local" });
+    await createRequirement(alphaRoot, { goal: "Alpha requirement detail" });
+    await createRequirement(betaRoot, { goal: "Beta requirement detail" });
+    const alpha = registerHubProject(alphaRoot).project;
+    const beta = registerHubProject(betaRoot, { activate: false }).project;
+    const server = await startWorkbenchServer({ root: alphaRoot, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1280, height: 800 });
+      await installDetailFetchInterceptor(page, { kind: "hold", projectId: alpha.id });
+      await page.goto(server.url, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector('[data-testid="workspace-loading-id"]', { timeout: 5000 });
+
+      const waitForTitle = (title: string) => page.waitForFunction(
+        (expected: unknown) => document.querySelector(".ws-title")?.textContent === expected,
+        { timeout: 5000 },
+        title,
+      );
+      await clickReady(page, `[data-testid="hub-project-${beta.id}"]`);
+      await waitForTitle("Beta requirement detail");
+      const titleAfterLateResponse = await page.evaluate(async () => {
+        const testWindow = window as unknown as { __wbReleaseDetail: () => Promise<void> };
+        await testWindow.__wbReleaseDetail();
+        const { promise, resolve } = Promise.withResolvers<void>();
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        await promise;
+        return document.querySelector(".ws-title")?.textContent;
+      });
+      expect(titleAfterLateResponse).toBe("Beta requirement detail");
+
+      await clickReady(page, `[data-testid="hub-project-${alpha.id}"]`);
+      await waitForTitle("Alpha requirement detail");
+      await clickReady(page, `[data-testid="hub-project-${beta.id}"]`);
+      await waitForTitle("Beta requirement detail");
     } finally {
       await page.close();
     }

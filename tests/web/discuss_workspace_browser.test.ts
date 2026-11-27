@@ -129,10 +129,13 @@ suite("Discussion & Annotation Workspace Browser E2E (P0/P1/P2)", () => {
       await page.type('#discuss-input', '双轨并发的优势是什么？');
       await clickReady(page, '[data-testid="run-ask-btn"]');
 
-      // Live streaming card shows rich Markdown delta while still running (NO raw <pre>, NO LiveAgentBanner!)
+      // The first stream chunk can arrive before the dispatch response clears the composer.
       await page.waitForFunction(
-        () =>
-          Boolean(document.querySelector('[data-testid="discuss-stream-output"]')?.textContent?.includes("第一部分")),
+        () => {
+          const composer = document.querySelector("#discuss-input");
+          return composer instanceof HTMLTextAreaElement && composer.value === "" &&
+            Boolean(document.querySelector('[data-testid="discuss-stream-output"]')?.textContent?.includes("第一部分"));
+        },
         { timeout: 8000 },
       );
 

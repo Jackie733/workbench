@@ -238,6 +238,10 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
         { timeout: 5000 },
       );
 
+      const highFinding = '[data-testid="review-findings-list"] label:first-child [data-slot="checkbox"]';
+      await clickReady(page, highFinding);
+      await page.waitForSelector(`${highFinding}[aria-checked="false"]`);
+
       await clickReady(page, '[data-testid="run-review-btn"]');
       const deadline1 = Date.now() + 8000;
       while (Date.now() < deadline1) {
@@ -255,6 +259,9 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       expect(dispatched[0]?.action).toBe("review");
       expect(dispatched[0]?.harness).toBe("codex");
       expect(dispatched[0]?.model).toBe("codex-auto-review");
+      expect(await page.evaluate((selector: string) => document.querySelector(selector)?.getAttribute("aria-checked"), highFinding)).toBe("false");
+      await clickReady(page, highFinding);
+      await page.waitForSelector(`${highFinding}[aria-checked="true"]`);
 
       // 5. Clicking review-fix-btn moves awaiting_acceptance -> implementing (preserving approval!) and dispatches "fix" (NOT "design")
       await clickReady(page, '[data-testid="review-fix-btn"]');
@@ -590,7 +597,188 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
     }
   }, 30_000);
 
-  test("Phase 2: displays review round badge, prior round history, and converts remaining findings to follow-up pain points", async () => {
+  test("REQ-028 仅剩人工核验时横幅、左栏提醒、验收总览与验证页均可就地勾选并即时解锁验收", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "ManualCheckPendingWeb", privacyMode: "local" });
+    registerHubProject(repo);
+
+    await createRequirement(repo, {
+      goal: "仅剩人工核验时前置展示并可直接勾选",
+      criteria: [
+        { id: "AC-1", description: "自动化命令通过", required: true, command: "echo ok" },
+        {
+          id: "AC-2",
+          description: "人工对照截图确认布局",
+          required: true,
+          kind: "manual",
+          steps: "打开页面，对照截图确认中英文与亮暗色布局均无溢出",
+        },
+      ],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nManual checklist.", actor: "agent" });
+    await approveDesign(repo, "REQ-001", { baseline: await observeGitSnapshot(repo) });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = (await observeGitSnapshot(repo))!;
+    await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "pass",
+      summary: "自动化与代码审查均通过",
+      markdown: "pass",
+      reviewedSpecHash: getRequirement(repo, "REQ-001").state.specHash,
+      reviewedCodeSnapshotHash: snap.fingerprint,
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+
+      // 1. 左栏提醒：待人工核验角标与待处理标记。
+      await page.waitForSelector('[data-testid="req-decision-badge-REQ-001"]', { timeout: 10_000 });
+      const sidebarState = await page.evaluate(() => ({
+        badge: document.querySelector('[data-testid="req-decision-badge-REQ-001"]')?.textContent ?? "",
+        pending: document.querySelector('[data-testid="req-row-REQ-001"]')?.getAttribute("data-pending-decision"),
+      }));
+      expect(sidebarState.badge).toContain("待人工核验");
+      expect(sidebarState.pending).toBe("true");
+
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+
+      // 2. 顶部横幅准确提示剩余人工项，不再误导为“待完成开发”。
+      await page.waitForSelector('[data-testid="action-banner"]', { timeout: 10_000 });
+      await page.waitForSelector('[data-testid="action-focus_manual_checks"]', { timeout: 5_000 });
+      const bannerText = await page.evaluate(
+        () => document.querySelector('[data-testid="action-banner"]')?.textContent ?? "",
+      );
+      expect(bannerText).toContain("人工核验");
+      expect(bannerText).toContain("AC-2");
+      expect(bannerText).not.toContain("待完成开发并运行验证");
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="action-dispatch_implement"]')))).toBe(false);
+
+      // 3. 规范与方案页顶部即可看到验收总览与人工核验清单，验收按钮明确禁用。
+      await page.waitForSelector('[data-testid="acceptance-summary-panel"]', { timeout: 5_000 });
+      await page.waitForSelector('[data-testid="acceptance-manual-checks-card-toggle-AC-2"]', { timeout: 5_000 });
+      expect(
+        await page.evaluate(
+          () => (document.querySelector('[data-testid="acceptance-exit-accept-btn"]') as HTMLButtonElement).disabled,
+        ),
+      ).toBe(true);
+      expect(
+        await page.evaluate(
+          () => document.querySelector('[data-testid="acceptance-manual-pending-hint"]')?.textContent ?? "",
+        ),
+      ).toContain("AC-2");
+
+      // 4. 验证与截图页签：验收总览前置且内嵌人工核验清单，避免重复清单（F-4）。
+      await clickReady(page, '[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="acceptance-summary-panel"]', { timeout: 5_000 });
+      await page.waitForSelector('[data-testid="acceptance-manual-checks-card-toggle-AC-2"]', { timeout: 5_000 });
+      expect(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="changes-manual-checks-card"]'))),
+      ).toBe(false);
+
+      // 5. F-3：在验证页签点击「去完成人工核验」不应被强行切回规范页签。
+      await clickReady(page, '[data-testid="action-focus_manual_checks"]');
+      await page.waitForFunction(() => Boolean(document.querySelector("#manual-verify-cmd")), { timeout: 5_000 });
+      expect(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="acceptance-manual-checks-card"]'))),
+      ).toBe(true);
+
+      // 6. F-1：在验证页签就地勾选最后一项人工核验，验收总览不消失且验收按钮即时解锁。
+      await clickReady(page, '[data-testid="acceptance-manual-checks-card-toggle-AC-2"]');
+      await page.waitForFunction(
+        () => !(document.querySelector('[data-testid="acceptance-exit-accept-btn"]') as HTMLButtonElement | null)?.disabled,
+        { timeout: 5_000 },
+      );
+      expect(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="acceptance-summary-panel"]'))),
+      ).toBe(true);
+      expect(getRequirement(repo, "REQ-001").state.manualChecks?.find((c) => c.criterionId === "AC-2")?.checked).toBe(true);
+      expect(await page.evaluate(() => Boolean(document.querySelector('[data-testid="acceptance-manual-pending-hint"]')))).toBe(false);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 45_000);
+
+  test("REQ-028 操作详情中点击「去完成人工核验」会关闭弹层且停留在验证页签", async () => {
+    makeTempHub();
+    const repo = makeGitRepo();
+    await initProject(repo, { name: "ManualFocusDetailsWeb", privacyMode: "local" });
+    registerHubProject(repo);
+
+    await createRequirement(repo, {
+      goal: "阻塞审查与人工核验并存时的详情弹层交互",
+      criteria: [
+        { id: "AC-1", description: "自动化命令通过", required: true, command: "echo ok" },
+        {
+          id: "AC-2",
+          description: "人工对照截图确认布局",
+          required: true,
+          kind: "manual",
+          steps: "打开页面并对照截图检查布局",
+        },
+      ],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nManual details.", actor: "agent" });
+    await approveDesign(repo, "REQ-001", { baseline: await observeGitSnapshot(repo) });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap = (await observeGitSnapshot(repo))!;
+    await recordReviewReport(repo, "REQ-001", {
+      reviewerHarness: "codex",
+      reviewerModel: "gpt-6.2-sol",
+      verdict: "block",
+      summary: "存在阻塞缺陷",
+      markdown: "block",
+      findings: [{ id: "F-1", severity: "high", title: "阻塞项" }],
+      reviewedSpecHash: getRequirement(repo, "REQ-001").state.specHash,
+      reviewedCodeSnapshotHash: snap.fingerprint,
+    });
+
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
+    servers.push(server);
+    const page = await browser!.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err: Error) => pageErrors.push(err.message));
+
+    try {
+      await page.setViewport({ width: 1360, height: 900 });
+      await page.goto(server.url, { waitUntil: "networkidle0" });
+      await page.waitForSelector('[data-testid="req-row-REQ-001"]', { timeout: 10_000 });
+      await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      await page.waitForSelector('[data-testid="action-dispatch_fix_review"]', { timeout: 10_000 });
+
+      await clickReady(page, '[data-testid="tab-changes"]');
+      await page.waitForSelector('[data-testid="acceptance-summary-panel"]', { timeout: 5_000 });
+
+      await clickReady(page, '[data-testid="workspace-action-details-btn"]');
+      await page.waitForSelector('[data-testid="workspace-action-details"]', { timeout: 5_000 });
+      await clickReady(page, '[data-testid="workspace-action-details"] [data-testid="action-focus_manual_checks"]');
+
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('[data-testid="workspace-action-details"]') &&
+          Boolean(document.querySelector("#manual-verify-cmd")),
+        { timeout: 5_000 },
+      );
+      expect(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="acceptance-manual-checks-card"]'))),
+      ).toBe(true);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 45_000);
+
+  test("a replacement review resets selection and defaults to all findings when all are low", async () => {
     makeTempHub();
     const repo = makeGitRepo();
     await initProject(repo, { name: "ReviewRoundsWeb", privacyMode: "local" });
@@ -615,19 +803,6 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       reviewedSpecHash: specHash,
       reviewedCodeSnapshotHash: snap.fingerprint,
     });
-    fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
-    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
-    const snap2 = (await observeGitSnapshot(repo))!;
-    await recordReviewReport(repo, "REQ-001", {
-      reviewerHarness: "codex",
-      reviewerModel: "gpt-6.2-sol",
-      verdict: "concern",
-      summary: "第2轮仅剩极端窄屏建议",
-      markdown: "round 2",
-      findings: [{ id: "F-2", severity: "medium", title: "极长模型名在窄抽屉裁切" }],
-      reviewedSpecHash: specHash,
-      reviewedCodeSnapshotHash: snap2.fingerprint,
-    });
 
     const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, hubMode: true });
     servers.push(server);
@@ -639,6 +814,38 @@ describe.skipIf(!HAS_BROWSER)("Real browser review triage, fix dispatch, overrid
       await page.setViewport({ width: 1360, height: 900 });
       await page.goto(server.url, { waitUntil: "networkidle0" });
       await clickReady(page, '[data-testid="req-row-REQ-001"]');
+      const findingCheckboxes = '[data-testid="review-findings-list"] [data-slot="checkbox"]';
+      await page.waitForSelector(`${findingCheckboxes}[aria-checked="true"]`, { timeout: 5000 });
+      await clickReady(page, findingCheckboxes);
+      await page.waitForSelector(`${findingCheckboxes}[aria-checked="false"]`, { timeout: 5000 });
+
+      fs.writeFileSync(path.join(repo, "app.ts"), "export const fixed = 2;\n", "utf8");
+      await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+      const snap2 = (await observeGitSnapshot(repo))!;
+      await recordReviewReport(repo, "REQ-001", {
+        reviewerHarness: "codex",
+        reviewerModel: "gpt-6.2-sol",
+        verdict: "concern",
+        summary: "第2轮仅剩极端窄屏建议",
+        markdown: "round 2",
+        findings: [
+          { id: "F-1", severity: "low", title: "按钮收缩建议" },
+          { id: "F-2", severity: "low", title: "极长模型名在窄抽屉裁切" },
+        ],
+        reviewedSpecHash: specHash,
+        reviewedCodeSnapshotHash: snap2.fingerprint,
+      });
+
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="review-report-card"]')?.textContent?.includes("第2轮仅剩极端窄屏建议") === true,
+        { timeout: 5000 },
+      );
+      const checkedFindings = await page.evaluate((selector: string) =>
+        Array.from(document.querySelectorAll(selector), (checkbox) => checkbox.getAttribute("aria-checked")), findingCheckboxes);
+      expect(checkedFindings).toEqual(["true", "true"]);
+      const fixLabel = await page.evaluate(() => document.querySelector('[data-testid="review-fix-btn"]')?.textContent ?? "");
+      expect(fixLabel).toContain("按选中的 2 项修复");
+
       await clickReady(page, '[data-testid="workspace-action-details-btn"]');
       await page.waitForSelector('[data-testid="action-accept"]', { timeout: 10000 });
 

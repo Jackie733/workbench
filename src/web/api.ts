@@ -305,7 +305,7 @@ export const api = {
     }),
   reloadWebBundle: () => requestJson<{ ok: boolean; reloaded: boolean }>("/api/hub/reload-web", { method: "POST" }),
 
-  getProject: () => requestJson<ProjectInfoResponse>(withProjectParam("/api/project")),
+  getProject: (projectId: string | null) => requestJson<ProjectInfoResponse>(withProjectParam("/api/project", projectId)),
   initProject: (input: { name?: string; privacyMode: PrivacyMode; outputLanguage?: OutputLanguage }) =>
     requestJson<{ initialized: boolean; project: ProjectMetadata }>(withProjectParam("/api/project/init"), {
       method: "POST",
@@ -324,9 +324,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
-  getGitHubStatus: () => requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status")),
-  getGiteeStatus: () => requestJson<GiteeEnvironmentStatus>(withProjectParam("/api/gitee/status")),
-  listGiteeIssues: (params?: {
+  getGitHubStatus: (projectId: string | null) =>
+    requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status", projectId)),
+  getGiteeStatus: (projectId: string | null) =>
+    requestJson<GiteeEnvironmentStatus>(withProjectParam("/api/gitee/status", projectId)),
+  listGiteeIssues: (projectId: string | null, params?: {
     filter?: GiteeIssueFilter;
     state?: "active" | "open" | "progressing" | "closed" | "all";
     q?: string;
@@ -339,12 +341,12 @@ export const api = {
     if (params?.enterprise?.trim()) qs.set("enterprise", params.enterprise.trim());
     const suffix = qs.toString();
     return requestJson<{ account: string; enterprise: string | null; items: GiteeIssueListItem[] }>(
-      withProjectParam(suffix ? `/api/gitee/issues?${suffix}` : "/api/gitee/issues"),
+      withProjectParam(suffix ? `/api/gitee/issues?${suffix}` : "/api/gitee/issues", projectId),
     );
   },
-  getProjectSandboxes: (fetchRemote = false) =>
+  getProjectSandboxes: (projectId: string | null, fetchRemote = false) =>
     requestJson<ProjectSandboxesResponse>(
-      withProjectParam(fetchRemote ? "/api/project/sandboxes?fetch=1" : "/api/project/sandboxes"),
+      withProjectParam(fetchRemote ? "/api/project/sandboxes?fetch=1" : "/api/project/sandboxes", projectId),
     ),
   createRequirementSandbox: (
     id: string,
@@ -401,9 +403,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  listRequirements: (scope: "active" | "done" | "cancelled" | "all") =>
+  listRequirements: (projectId: string | null, scope: "active" | "done" | "cancelled" | "all") =>
     requestJson<{ items: RequirementSummary[]; codeSnapshotHash: string | null }>(
-      withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`),
+      withProjectParam(`/api/requirements?scope=${encodeURIComponent(scope)}`, projectId),
     ),
   createRequirement: (input: {
     goal: string;
@@ -452,18 +454,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  getRequirement: (id: string) =>
+  getRequirement: (projectId: string | null, id: string) =>
     requestJson<{
       detail: RequirementDetail;
       codeSnapshotHash: string | null;
       sandbox?: SandboxRecord | null;
       sandboxDrift?: SandboxDriftInfo | null;
     }>(
-      withProjectParam(`/api/requirements/${encodeURIComponent(id)}`),
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}`, projectId),
     ),
-  getDiff: (id: string, options: { live?: boolean } = {}) =>
+  getDiff: (projectId: string | null, id: string, options: { live?: boolean } = {}) =>
     requestJson<RequirementDiffView & { changes: GitObservation | null }>(
-      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/diff${options.live ? "?live=1" : ""}`),
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/diff${options.live ? "?live=1" : ""}`, projectId),
     ),
   getDesignHistory: (id: string, version: number) =>
     requestJson<{ version: number; markdown: string }>(
@@ -582,17 +584,19 @@ export const api = {
       withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/cancel`),
       { method: "POST" },
     ),
-  listRequirementRuns: (id: string) =>
-    requestJson<{ runs: AgentRunRecord[] }>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs`)),
+  listRequirementRuns: (projectId: string | null, id: string) =>
+    requestJson<{ runs: AgentRunRecord[] }>(
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs`, projectId),
+    ),
   getAgentRunTrace: (id: string, runId: string, afterSeq = 0, limit = 2000) =>
     requestJson<RunTraceResponse>(
       withProjectParam(
         `/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/trace?afterSeq=${afterSeq}&limit=${limit}`,
       ),
     ),
-  getAgentRunContext: (id: string, runId: string) =>
+  getAgentRunContext: (projectId: string | null, id: string, runId: string) =>
     requestJson<RunContextResponse>(
-      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/context`),
+      withProjectParam(`/api/requirements/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/context`, projectId),
     ),
   pruneProjectRunTraces: (retentionDays?: number) =>
     requestJson<{ result: PruneTracesResult }>(withProjectParam("/api/project/runs/prune"), {
@@ -748,8 +752,8 @@ export const api = {
         body: JSON.stringify(input),
       },
     ),
-  getDelivery: (id: string) =>
-    requestJson<DeliveryPreview>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/delivery`)),
+  getDelivery: (projectId: string | null, id: string) =>
+    requestJson<DeliveryPreview>(withProjectParam(`/api/requirements/${encodeURIComponent(id)}/delivery`, projectId)),
   deliver: (
     id: string,
     input: {

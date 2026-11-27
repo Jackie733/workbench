@@ -3,6 +3,7 @@ import type {
   AgentAction,
   AgentRunRecord,
   AttachmentMeta,
+  Criterion,
   CriterionCoverageState,
   DiscussionEntry,
   EffectiveVerificationState,
@@ -771,6 +772,18 @@ export function progressDetail(item: RequirementSummary, language: UiLanguage = 
     case "cancelled":
       return "";
   }
+}
+
+/**
+ * REQ-028 F-2: UI mirror of core `isManualCriterion` (kept in sync deliberately to
+ * avoid bundling `node:crypto` into the browser). Command-less criteria without
+ * manual `steps` stay non-manual so the checklist never offers a toggle that the
+ * backend rejects with 400.
+ */
+export function isManualChecklistCriterion(
+  criterion: Pick<Criterion, "kind" | "command" | "steps">,
+): boolean {
+  return criterion.kind === "manual" || (!criterion.command?.trim() && Boolean(criterion.steps?.trim()));
 }
 
 export function defaultActionForRequirement(d: RequirementDetail): AgentAction {
