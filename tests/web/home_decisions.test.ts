@@ -3,6 +3,7 @@ import type { RequirementSummary } from "../../src/core/types.ts";
 import {
   findActiveRequirementRun,
   groupHubProjects,
+  isManualChecklistCriterion,
   orderUnifiedRequirements,
   partitionPendingDecisions,
   pickDefaultRequirementId,
@@ -214,5 +215,47 @@ describe("IDE 默认需求选中、项目排序与分类", () => {
       activeSandboxes: [{ requirementId: "REQ-001" }, { requirementId: "REQ-004" }],
     });
     expect(sandboxRes.items.map((i) => i.id)).toEqual(["REQ-001", "REQ-004"]);
+  });
+
+  test("待人工核验需求进入待处理队列，排序位于阻塞项之后、普通活跃项之前", () => {
+    const manual = summary("REQ-010", {
+      stage: "coding",
+      needsDecision: true,
+      decisionReasonKey: "core.decision.manualCheckPending",
+      decisionReason: "待人工核验",
+      updatedAt: 100,
+    });
+    const ordinary = summary("REQ-011", {
+      stage: "coding",
+      needsDecision: false,
+      decisionReason: null,
+      decisionReasonKey: undefined,
+      updatedAt: 900,
+    });
+    const blocked = summary("REQ-012", {
+      stage: "coding",
+      needsDecision: true,
+      decisionReasonKey: "core.decision.reviewBlock",
+      updatedAt: 50,
+    });
+    const res = orderUnifiedRequirements({
+      allItems: [ordinary, manual, blocked],
+      scope: "active",
+      runs: [],
+      projectId: "proj-a",
+    });
+    expect(res.items.map((i) => i.id)).toEqual(["REQ-012", "REQ-010", "REQ-011"]);
+    expect(Array.from(res.pendingIdSet).sort()).toEqual(["REQ-010", "REQ-012"]);
+    expect(res.pendingDecisions.map((i) => i.id)).toEqual(["REQ-012", "REQ-010"]);
+  });
+});
+
+describe("REQ-028 前端人工核验判定", () => {
+  test("无命令且无人工步骤的非人工条件不会被判为人工核验项", () => {
+    expect(isManualChecklistCriterion({ kind: "manual" })).toBe(true);
+    expect(isManualChecklistCriterion({ command: "   ", steps: "打开页面并对照截图" })).toBe(true);
+    expect(isManualChecklistCriterion({ kind: "command" })).toBe(false);
+    expect(isManualChecklistCriterion({ command: "echo ok" })).toBe(false);
+    expect(isManualChecklistCriterion({ command: "echo ok", steps: "命令项附带说明" })).toBe(false);
   });
 });

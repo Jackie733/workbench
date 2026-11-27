@@ -14,6 +14,7 @@ import type {
   EvaluatedVerification,
   EvidenceContext,
   EvidenceProvenance,
+  ManualCheckPendingState,
   RequirementState,
   ReviewValidity,
   UiMessageParams,
@@ -353,6 +354,51 @@ export function evaluateCriteriaCoverage(
   }
 
   return { items, requiredTotal, requiredPassed, optionalTotal, optionalPassed };
+}
+
+/**
+ * REQ-028: detect the narrow state where automated verification is fully green and
+ * the only remaining required blockers are manual checks. A pure-manual requirement
+ * is not surfaced until at least one coding run succeeded or code moved past baseline,
+ * so a freshly approved design never prompts for manual verification too early.
+ */
+export function deriveManualCheckPendingState(
+  state: RequirementState,
+  approval: ApprovalStatus,
+  coverage: CriteriaCoverage,
+  currentCodeSnapshotHash: string | null = null,
+): ManualCheckPendingState | null {
+  if (state.stage !== "coding" || !approval.valid) return null;
+  if (coverage.requiredTotal === 0 || coverage.requiredPassed >= coverage.requiredTotal) return null;
+
+  const requiredItems = coverage.items.filter((item) => item.criterion.required);
+  // REQ-028 F-2: reuse the canonical manual predicate. A required criterion without a
+  // command but also without manual `steps` is NOT a manual check; treating it as one
+  // made the banner claim actionable pending items while `setManualCheck` returned 400.
+  const requiredCommandItems = requiredItems.filter((item) => !isManualCriterion(item.criterion));
+  if (!requiredCommandItems.every((item) => item.state === "passed")) return null;
+
+  const pendingItems = requiredItems.filter(
+    (item) => isManualCriterion(item.criterion) && item.state !== "passed",
+  );
+  if (pendingItems.length === 0) return null;
+
+  if (requiredCommandItems.length === 0) {
+    const hasSucceededCodingRun = (state.agentRuns ?? []).some(
+      (run) => (run.action === "implement" || run.action === "fix") && run.status === "succeeded",
+    );
+    const movedPastBaseline =
+      Boolean(state.baseline?.fingerprint) &&
+      Boolean(currentCodeSnapshotHash) &&
+      currentCodeSnapshotHash !== state.baseline!.fingerprint;
+    if (!hasSucceededCodingRun && !movedPastBaseline) return null;
+  }
+
+  return {
+    pendingItems,
+    pendingIds: pendingItems.map((item) => item.criterion.id),
+    staleIds: pendingItems.filter((item) => item.state === "stale").map((item) => item.criterion.id),
+  };
 }
 
 export function evaluateAcceptanceGate(
@@ -839,6 +885,142 @@ export function deriveActionBanner(
                 ? [{ id: "run_all_verifications" as const, label: "重新运行验证", labelKey: "core.action.rerun" }]
                 : []),
               ...overrideAction,
+            ],
+          },
+        };
+      }
+      const manualPending = deriveManualCheckPendingState(
+        state,
+        approval,
+        coverage,
+        currentCodeSnapshotHash,
+      );
+      if (manualPending) {
+        const pendingCount = manualPending.pendingItems.length;
+        const pendingIds = manualPending.pendingIds.join(", ");
+        const baseParams: UiMessageParams = { count: pendingCount, ids: pendingIds };
+        const requestChangesAction = {
+          id: "request_changes" as const,
+          label: "打回修改…",
+          labelKey: "core.action.sendBack",
+        };
+        const focusManualAction = {
+          id: "focus_manual_checks" as const,
+          label: "去完成人工核验",
+          labelKey: "core.action.focusManualChecks",
+        };
+        const reviewReport = state.reviewReport;
+        if (reviewValidity.effectiveState === "current" && reviewReport) {
+          if (reviewReport.verdict === "block") {
+            const highCnt = (reviewReport.findings ?? []).filter((f) => f.severity === "high").length;
+            const medCnt = (reviewReport.findings ?? []).filter((f) => f.severity === "medium").length;
+            const countTag = highCnt > 0 || medCnt > 0 ? `（高 ${highCnt} / 中 ${medCnt}）` : "";
+            return {
+              needsDecision: true,
+              decisionReason: "审查建议阻塞",
+              decisionReasonKey: "core.decision.reviewBlock",
+              banner: {
+                headline: `跨模型审查建议阻塞${countTag}：${reviewReport.summary}；另有 ${pendingCount} 项人工核验待确认（${pendingIds}）`,
+                headlineKey: "core.banner.manualCheckPending.block",
+                headlineParams: {
+                  counts:
+                    highCnt > 0 || medCnt > 0
+                      ? { key: "core.review.counts", params: { high: highCnt, medium: medCnt } }
+                      : "",
+                  summary: reviewReport.summary,
+                  ...baseParams,
+                },
+                tone: "danger",
+                primaryAction: {
+                  id: "dispatch_fix_review",
+                  label: "让 Agent 按审查意见修复",
+                  labelKey: "core.action.dispatchFixReview",
+                },
+                secondaryActions: [
+                  focusManualAction,
+                  { id: "dispatch_review", label: "重新审查", labelKey: "core.action.dispatchReview" },
+                  requestChangesAction,
+                ],
+              },
+            };
+          }
+          if (reviewReport.verdict === "concern") {
+            return {
+              needsDecision: true,
+              decisionReason: "审查有关注点",
+              decisionReasonKey: "core.decision.reviewConcern",
+              banner: {
+                headline: `跨模型审查存在关注点：${reviewReport.summary}；另有 ${pendingCount} 项人工核验待确认（${pendingIds}）`,
+                headlineKey: "core.banner.manualCheckPending.concern",
+                headlineParams: {
+                  summary: reviewReport.summary,
+                  ...baseParams,
+                },
+                tone: "warning",
+                primaryAction: {
+                  id: "dispatch_fix_review",
+                  label: "按审查意见修复",
+                  labelKey: "core.action.fixPerReview",
+                },
+                secondaryActions: [
+                  focusManualAction,
+                  { id: "dispatch_review", label: "重新审查", labelKey: "core.action.dispatchReview" },
+                  requestChangesAction,
+                ],
+              },
+            };
+          }
+          return {
+            needsDecision: true,
+            decisionReason: "待人工核验",
+            decisionReasonKey: "core.decision.manualCheckPending",
+            banner: {
+              headline: `自动化验证与跨模型审查均已通过，剩余 ${pendingCount} 项人工核验待确认（${pendingIds}）`,
+              headlineKey: "core.banner.manualCheckPending.reviewPassed",
+              headlineParams: baseParams,
+              tone: "warning",
+              primaryAction: focusManualAction,
+              secondaryActions: [requestChangesAction],
+            },
+          };
+        }
+        const reviewMissing = reviewValidity.effectiveState === "missing";
+        if (!reviewMissing && state.reviewReport?.verdict === "block") {
+          return {
+            needsDecision: true,
+            decisionReason: "阻塞审查已过期",
+            decisionReasonKey: "core.decision.reviewBlock",
+            banner: {
+              headline: `自动化验证已通过，但上轮阻塞级（block）审查已过期；剩余 ${pendingCount} 项人工核验待确认（${pendingIds}），需复审或填理由放行`,
+              headlineKey: "core.banner.manualCheckPending.staleBlock",
+              headlineParams: baseParams,
+              tone: "danger",
+              primaryAction: {
+                id: "dispatch_review",
+                label: "重新跨模型审查",
+                labelKey: "core.action.dispatchReview",
+              },
+              secondaryActions: [focusManualAction, requestChangesAction],
+            },
+          };
+        }
+        return {
+          needsDecision: true,
+          decisionReason: "待人工核验",
+          decisionReasonKey: "core.decision.manualCheckPending",
+          banner: {
+            headline: `自动化验证已通过，剩余 ${pendingCount} 项人工核验待确认（${pendingIds}）`,
+            headlineKey: "core.banner.manualCheckPending.verifyPassed",
+            headlineParams: baseParams,
+            tone: "warning",
+            primaryAction: focusManualAction,
+            secondaryActions: [
+              {
+                id: "dispatch_review",
+                label: reviewMissing ? "发起跨模型审查" : "重新跨模型审查",
+                labelKey: reviewMissing ? "core.action.dispatchReviewStart" : "core.action.dispatchReview",
+              },
+              requestChangesAction,
             ],
           },
         };
@@ -1353,6 +1535,12 @@ export function evaluateRequirement(
     reviewValidity,
     designReviewValidity,
     baselineOnlyWarning,
+    manualCheckPending: deriveManualCheckPendingState(
+      state,
+      approval,
+      coverage,
+      currentCodeSnapshotHash,
+    ),
     banner,
     needsDecision,
     decisionReason,

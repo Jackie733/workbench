@@ -1104,6 +1104,17 @@ export interface CriteriaCoverage {
   optionalPassed: number;
 }
 
+/**
+ * Derived view state when every required automated command already passed and
+ * only required manual checks remain before the acceptance gate can open (REQ-028).
+ */
+export interface ManualCheckPendingState {
+  pendingItems: CriterionCoverageItem[];
+  pendingIds: string[];
+  /** Subset of pending IDs whose previous manual check went stale after code/spec changes. */
+  staleIds: string[];
+}
+
 export interface ApprovalStatus {
   valid: boolean;
   reason: string | null;
@@ -1188,6 +1199,7 @@ export type ActionId =
   | "dispatch_review"
   | "dispatch_design_review"
   | "dispatch_fix_review"
+  | "focus_manual_checks"
   | "sync_base"
   | "accept"
   | "accept_override"
@@ -1232,6 +1244,8 @@ export interface ValidityReport {
   designReviewValidity?: DesignReviewValidity;
   /** Honest signal when fast_track only passed system-injected generic baseline checks with no dedicated tests (WB-23). */
   baselineOnlyWarning?: boolean;
+  /** Present only when automated checks all passed and required manual checks still block acceptance (REQ-028). */
+  manualCheckPending?: ManualCheckPendingState | null;
   banner: ActionBanner;
   needsDecision: boolean;
   decisionReason: string | null;
