@@ -44,7 +44,7 @@ import {
 } from "./attachments.ts";
 import { withCodeRootLock } from "./code_lock.ts";
 import { normalizeOutputLanguage } from "./language.ts";
-import { getSandboxForRequirement, resolveCodeRoot } from "./sandbox.ts";
+import { getSandboxForRequirement, matchesAcceptedOrCleanSyncSnapshot, resolveCodeRoot } from "./sandbox.ts";
 import {
   createRequirementFiles,
   isProjectInitialized,
@@ -2848,13 +2848,14 @@ export async function getRequirementDeliveryPreview(
   let treeMismatchReason: string | null = null;
   const currentSnap = tree.isGitRepo ? await observeGitSnapshot(codeRoot) : null;
   if (state.stage === "done" && state.acceptance && currentSnap?.fingerprint) {
-    let matchesAccepted = currentSnap.fingerprint === state.acceptance.codeSnapshotHash;
-    const matchesCleanSync = Boolean(
-      sandbox?.lastCleanSyncFingerprint && sandbox.lastCleanSyncFingerprint === currentSnap.fingerprint,
+    const snapshotMatch = matchesAcceptedOrCleanSyncSnapshot(
+      currentSnap.fingerprint,
+      state.acceptance.codeSnapshotHash,
+      sandbox,
     );
+    let matchesAccepted = snapshotMatch.matched;
     if (
       !matchesAccepted &&
-      !matchesCleanSync &&
       !sandboxActive &&
       bundle.acceptanceSnapshot &&
       bundle.acceptanceSnapshot.git.files.length > 0 &&
@@ -2867,7 +2868,7 @@ export async function getRequirementDeliveryPreview(
         matchesAccepted = true;
       }
     }
-    if (!matchesAccepted && !matchesCleanSync) {
+    if (!matchesAccepted) {
       treeMatchesAcceptance = false;
       treeMismatchReason = "当前代码内容树与验收快照不一致，请重新验证受影响条件后再交付";
     }
@@ -3210,7 +3211,14 @@ export async function deliverRequirement(
               { requiresReverify: true },
             );
           }
-        } else if (preDeliverySnap?.fingerprint && preDeliverySnap.fingerprint !== preBundle.state.acceptance.codeSnapshotHash) {
+        } else if (
+          preDeliverySnap?.fingerprint &&
+          !matchesAcceptedOrCleanSyncSnapshot(
+            preDeliverySnap.fingerprint,
+            preBundle.state.acceptance.codeSnapshotHash,
+            sandbox,
+          ).matched
+        ) {
           throw new WorkbenchError(
             "acceptance_gate_failed",
             "沙箱代码内容树在验收后已发生变化，请重新验证受影响条件后再创建 PR",
@@ -3255,7 +3263,11 @@ export async function deliverRequirement(
       if (
         preBundle.state.acceptance &&
         preDeliverySnap?.fingerprint &&
-        preDeliverySnap.fingerprint !== preBundle.state.acceptance.codeSnapshotHash
+        !matchesAcceptedOrCleanSyncSnapshot(
+          preDeliverySnap.fingerprint,
+          preBundle.state.acceptance.codeSnapshotHash,
+          sandbox,
+        ).matched
       ) {
         throw new WorkbenchError(
           "acceptance_gate_failed",
@@ -4200,6 +4212,7 @@ export async function syncRequirementBaseline(
     baselineFingerprint: string;
     dirty: boolean;
     preserveStage?: boolean;
+    reopenToCoding?: boolean;
     eventKind?: TimelineEventKind;
     summary?: string;
     currentCodeSnapshotHash?: string | null;
@@ -4207,12 +4220,16 @@ export async function syncRequirementBaseline(
 ): Promise<RequirementDetail> {
   const bundle = await mutateRequirement(root, id, undefined, (current, now) => {
     const { state } = current;
-    if (state.stage === "cancelled" || (state.stage === "done" && !input.preserveStage)) {
+    const reopenDone = state.stage === "done" && input.reopenToCoding === true;
+    if (state.stage === "cancelled" || (state.stage === "done" && !input.preserveStage && !reopenDone)) {
       throw new WorkbenchError("invalid_transition", `终态需求（${state.stage}）不能刷新基线`);
     }
+    const nextStage = reopenDone ? (evaluateApproval(state).valid ? "coding" : "planning") : state.stage;
     return {
       state: {
         ...state,
+        stage: nextStage,
+        ...(reopenDone ? { acceptance: null, delivery: null } : {}),
         baseline: {
           head: input.baselineHead,
           fingerprint: input.baselineFingerprint,

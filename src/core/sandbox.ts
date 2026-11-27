@@ -11,8 +11,10 @@ export interface SandboxRecord {
   worktreePath: string;
   branch: string;
   baseHead?: string;
-  /** Latest codeSnapshotHash recorded right after a clean main-baseline sync in `done` stage. */
+  /** Latest codeSnapshotHash recorded right after a clean, non-overlapping main-baseline sync in `done` stage. */
   lastCleanSyncFingerprint?: string;
+  /** Acceptance codeSnapshotHash bound to `lastCleanSyncFingerprint` so stale clean-sync tokens cannot span re-acceptances. */
+  lastCleanSyncAcceptedHash?: string;
   /** Status of optional project worktree setupScript execution. */
   setupStatus?: "ok" | "failed" | "skipped";
   setupError?: string;
@@ -66,6 +68,9 @@ export function readSandboxes(): Record<string, SandboxRecord> {
           ...(typeof rec.baseHead === "string" ? { baseHead: rec.baseHead } : {}),
           ...(typeof rec.lastCleanSyncFingerprint === "string"
             ? { lastCleanSyncFingerprint: rec.lastCleanSyncFingerprint }
+            : {}),
+          ...(typeof rec.lastCleanSyncAcceptedHash === "string"
+            ? { lastCleanSyncAcceptedHash: rec.lastCleanSyncAcceptedHash }
             : {}),
           ...(rec.setupStatus === "ok" || rec.setupStatus === "failed" || rec.setupStatus === "skipped"
             ? { setupStatus: rec.setupStatus }
@@ -155,4 +160,29 @@ export function resolveCodeRoot(projectRoot: string, requirementId?: string): st
   if (!requirementId) return base;
   const sandbox = getSandboxForRequirement(base, requirementId);
   return sandbox ? sandbox.worktreePath : base;
+}
+
+/**
+ * Single source of truth for checking whether a worktree/workspace content tree matches
+ * either the exact accepted snapshot or a clean non-overlapping main sync recorded in `done` stage.
+ */
+export function matchesAcceptedOrCleanSyncSnapshot(
+  currentFingerprint: string | null | undefined,
+  acceptedCodeSnapshotHash: string | null | undefined,
+  sandbox?: Pick<SandboxRecord, "lastCleanSyncFingerprint" | "lastCleanSyncAcceptedHash"> | null,
+): { matched: boolean; viaCleanSync: boolean } {
+  if (!currentFingerprint) return { matched: false, viaCleanSync: false };
+  if (acceptedCodeSnapshotHash && currentFingerprint === acceptedCodeSnapshotHash) {
+    return { matched: true, viaCleanSync: false };
+  }
+  if (
+    sandbox?.lastCleanSyncFingerprint &&
+    currentFingerprint === sandbox.lastCleanSyncFingerprint &&
+    (!sandbox.lastCleanSyncAcceptedHash ||
+      !acceptedCodeSnapshotHash ||
+      sandbox.lastCleanSyncAcceptedHash === acceptedCodeSnapshotHash)
+  ) {
+    return { matched: true, viaCleanSync: true };
+  }
+  return { matched: false, viaCleanSync: false };
 }

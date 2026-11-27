@@ -1026,7 +1026,16 @@ export async function syncSandboxBaseAction(
     return true;
   }
   if (res.synced) {
-    ui.showToastKey("toast.sandboxSynced", { id: reqId });
+    if (res.reopenedForReverify) {
+      if (useUiStore.getState().modal?.kind === "deliver") {
+        useUiStore.getState().closeModal();
+      }
+      ui.showToastKey("toast.sandboxSyncedReverify", { id: reqId });
+    } else if (res.detail.state.stage === "done") {
+      ui.showToastKey("toast.sandboxSyncedReady", { id: reqId });
+    } else {
+      ui.showToastKey("toast.sandboxSynced", { id: reqId });
+    }
     return true;
   }
   ui.showToastKey("toast.sandboxConflicts", { count: res.conflictFiles.length }, true);

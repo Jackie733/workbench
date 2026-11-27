@@ -364,6 +364,7 @@ export const api = {
     requestJson<{
       synced: boolean;
       upToDate: boolean;
+      reopenedForReverify?: boolean;
       conflictFiles: string[];
       drift: SandboxDriftInfo;
       detail: RequirementDetail;

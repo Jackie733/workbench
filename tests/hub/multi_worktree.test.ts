@@ -18,11 +18,13 @@ import {
 import { observeGitSnapshot } from "../../src/core/git.ts";
 import type { GitHubCommandDeps } from "../../src/core/github.ts";
 import { runVerification } from "../../src/core/runner.ts";
+import { getSandboxForRequirement, matchesAcceptedOrCleanSyncSnapshot } from "../../src/core/sandbox.ts";
 import {
   applySandboxToMain,
   cascadeSyncProjectSandboxes,
   createOrReuseWorktree,
   inspectSandboxDrift,
+  mergeSandboxToMain,
   prepareSandboxConflictResolution,
   recommendSandboxMergeOrder,
   syncSandboxBase,
@@ -408,4 +410,218 @@ describe("Multi-Worktree collaboration, merge-tree conflict detection, and lifec
     expect(fs.readFileSync(path.join(sb1.worktreePath, "leaf.ts"), "utf8")).toBe("export const leaf = 333;\n");
     expect(fs.readFileSync(path.join(sb2.worktreePath, "leaf.ts"), "utf8")).toBe("export const leaf = 333;\n");
   }, 20_000);
+
+  test("Plan A: done clean_behind sync allows both PR delivery and mergeSandboxToMain while blocking post-sync tampering", async () => {
+    makeTempHub();
+    const repo = makeMultiLineRepo("plan-a-clean");
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "wb-plan-a-bare-"));
+    tempDirs.push(bare);
+    execFileSync("git", ["init", "--bare"], { cwd: bare, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    await initProject(repo, { name: "PlanAClean", privacyMode: "local" });
+    await updateProjectConfig(repo, { github: { repo: "owner/repo", defaultBaseBranch: "main" } });
+
+    const mockGh: GitHubCommandDeps = {
+      whichGh: () => "/usr/local/bin/gh",
+      resolveDefaultBaseBranch: async () => "main",
+      getRemoteUrl: async () => "https://github.com/owner/repo.git",
+      runGh: async (_bin, args) => {
+        const [group, sub] = args;
+        if (group === "auth" && sub === "status") {
+          return { code: 0, stdout: "github.com\n  ✓ Logged in", stderr: "" };
+        }
+        if (group === "repo" && sub === "view") {
+          return { code: 0, stdout: JSON.stringify({ defaultBranchRef: { name: "main" } }), stderr: "" };
+        }
+        if (group === "pr" && sub === "list") return { code: 0, stdout: "[]", stderr: "" };
+        if (group === "pr" && sub === "create") {
+          return { code: 0, stdout: "https://github.com/owner/repo/pull/101\n", stderr: "" };
+        }
+        return { code: 0, stdout: "{}", stderr: "" };
+      },
+    };
+
+    // REQ-001: test PR delivery after clean_behind sync in done stage
+    await createRequirement(repo, {
+      goal: "Clean leaf feature for PR delivery",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nLeaf PR.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    const sb1 = await createOrReuseWorktree(repo, "REQ-001", { branchPrefix: "feat" });
+    fs.writeFileSync(path.join(sb1.worktreePath, "leaf.ts"), "export const leaf = 101;\n");
+    execFileSync("git", ["add", "leaf.ts"], { cwd: sb1.worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "wip(REQ-001): implement checkpoint"], { cwd: sb1.worktreePath, stdio: "ignore" });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap1 = (await observeGitSnapshot(sb1.worktreePath))!;
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap1.fingerprint });
+
+    // Main advances on a completely unrelated file -> clean_behind
+    fs.writeFileSync(path.join(repo, "unrelated_a.ts"), "export const a = 1;\n");
+    execFileSync("git", ["add", "unrelated_a.ts"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main unrelated a"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["push", "origin", "main"], { cwd: repo, stdio: "ignore" });
+
+    const sync1 = await syncSandboxBase(repo, "REQ-001", { fetchRemote: false });
+    expect(sync1.synced).toBe(true);
+    expect(sync1.reopenedForReverify).toBeUndefined();
+    expect(sync1.detail.state.stage).toBe("done");
+    const sb1Rec = getSandboxForRequirement(repo, "REQ-001");
+    expect(sb1Rec?.lastCleanSyncFingerprint).toBeTruthy();
+    expect(sb1Rec?.lastCleanSyncAcceptedHash).toBe(snap1.fingerprint);
+
+    const preview1 = await getRequirementDeliveryPreview(repo, "REQ-001", mockGh);
+    expect(preview1.treeMatchesAcceptance).toBe(true);
+
+    // PR creation succeeds directly without acceptance_gate_failed!
+    const deliveredPr = await deliverRequirement(
+      repo,
+      "REQ-001",
+      { files: [], commitMessage: "feat(req-001): clean sync PR", createPr: true },
+      mockGh,
+    );
+    expect(deliveredPr.pr?.number).toBe(101);
+
+    // Tampering after clean sync must still be rejected by both preview and delivery
+    fs.writeFileSync(path.join(sb1.worktreePath, "leaf.ts"), "export const leaf = 999;\n");
+    const tamperedPreview = await getRequirementDeliveryPreview(repo, "REQ-001", mockGh);
+    expect(tamperedPreview.treeMatchesAcceptance).toBe(false);
+    await expect(
+      deliverRequirement(
+        repo,
+        "REQ-001",
+        { files: ["leaf.ts"], commitMessage: "feat(req-001): tampered", createPr: true },
+        mockGh,
+      ),
+    ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
+    await expect(
+      mergeSandboxToMain(repo, "REQ-001", { commitMessage: "feat(req-001): tampered merge" }),
+    ).rejects.toMatchObject({ code: "acceptance_gate_failed" });
+
+    // REQ-002: test consecutive clean_behind syncs + 1-click mergeSandboxToMain
+    await createRequirement(repo, {
+      goal: "Clean leaf feature for local merge",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-002", { designMarkdown: "# Design\nLeaf merge.", actor: "agent" });
+    await approveDesign(repo, "REQ-002");
+    const sb2 = await createOrReuseWorktree(repo, "REQ-002", { branchPrefix: "feat" });
+    fs.writeFileSync(path.join(sb2.worktreePath, "feature_two.ts"), "export const two = 2;\n");
+    execFileSync("git", ["add", "feature_two.ts"], { cwd: sb2.worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "wip(REQ-002): implement checkpoint"], { cwd: sb2.worktreePath, stdio: "ignore" });
+    await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap2 = (await observeGitSnapshot(sb2.worktreePath))!;
+    await acceptRequirement(repo, "REQ-002", { currentCodeSnapshotHash: snap2.fingerprint });
+
+    // Advance main twice on unrelated files and sync twice consecutively
+    for (const suffix of ["b", "c"]) {
+      fs.writeFileSync(path.join(repo, `unrelated_${suffix}.ts`), `export const ${suffix} = 1;\n`);
+      execFileSync("git", ["add", `unrelated_${suffix}.ts`], { cwd: repo, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", `main unrelated ${suffix}`], { cwd: repo, stdio: "ignore" });
+      const syncRes = await syncSandboxBase(repo, "REQ-002", { fetchRemote: false });
+      expect(syncRes.synced).toBe(true);
+      expect(syncRes.reopenedForReverify).toBeUndefined();
+      expect(syncRes.detail.state.stage).toBe("done");
+    }
+
+    const merged = await mergeSandboxToMain(repo, "REQ-002", {
+      commitMessage: "feat(req-002): clean sync local merge",
+    });
+    expect(merged.delivery.files).toContain("feature_two.ts");
+    expect(fs.readFileSync(path.join(repo, "feature_two.ts"), "utf8")).toBe("export const two = 2;\n");
+    expect(getSandboxForRequirement(repo, "REQ-002")).toBeNull();
+  }, 25_000);
+
+  test("Plan A: done auto_mergeable (same-file 3-way merge) and pre-sync drift reopen to coding preserving approval", async () => {
+    makeTempHub();
+    const repo = makeMultiLineRepo("plan-a-reverify");
+    await initProject(repo, { name: "PlanAReverify", privacyMode: "local" });
+
+    // Case 1: REQ-001 edits top of shared.ts, main edits bottom of shared.ts -> auto_mergeable
+    await createRequirement(repo, {
+      goal: "Update line1 of shared.ts",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-001", { designMarkdown: "# Design\nShared top.", actor: "agent" });
+    await approveDesign(repo, "REQ-001");
+    const sb1 = await createOrReuseWorktree(repo, "REQ-001", { branchPrefix: "feat" });
+    fs.writeFileSync(
+      path.join(sb1.worktreePath, "shared.ts"),
+      fs.readFileSync(path.join(sb1.worktreePath, "shared.ts"), "utf8").replace("export const line1 = 1;", "export const line1 = 100;"),
+    );
+    execFileSync("git", ["add", "shared.ts"], { cwd: sb1.worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: line1=100"], { cwd: sb1.worktreePath, stdio: "ignore" });
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap1 = (await observeGitSnapshot(sb1.worktreePath))!;
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snap1.fingerprint });
+
+    // Main edits line20 of shared.ts (same file, non-conflicting 3-way merge!)
+    fs.writeFileSync(
+      path.join(repo, "shared.ts"),
+      fs.readFileSync(path.join(repo, "shared.ts"), "utf8").replace("export const line20 = 20;", "export const line20 = 200;"),
+    );
+    execFileSync("git", ["add", "shared.ts"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main: line20=200"], { cwd: repo, stdio: "ignore" });
+
+    const syncOverlap = await syncSandboxBase(repo, "REQ-001", { fetchRemote: false });
+    expect(syncOverlap.synced).toBe(true);
+    expect(syncOverlap.reopenedForReverify).toBe(true);
+    expect(syncOverlap.detail.state.stage).toBe("coding");
+    expect(syncOverlap.detail.state.approval).not.toBeNull();
+    expect(syncOverlap.detail.state.acceptance).toBeNull();
+    expect(getSandboxForRequirement(repo, "REQ-001")?.lastCleanSyncFingerprint).toBeUndefined();
+
+    // User can immediately re-verify, re-accept, and merge to main without getting stuck in `done`!
+    await runVerification(repo, "REQ-001", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snapAfterReverify = (await observeGitSnapshot(sb1.worktreePath))!;
+    await acceptRequirement(repo, "REQ-001", { currentCodeSnapshotHash: snapAfterReverify.fingerprint });
+    const merged1 = await mergeSandboxToMain(repo, "REQ-001", { commitMessage: "feat(req-001): reverified merge" });
+    expect(merged1.delivery.files).toContain("shared.ts");
+    const mainShared = fs.readFileSync(path.join(repo, "shared.ts"), "utf8");
+    expect(mainShared).toContain("export const line1 = 100;");
+    expect(mainShared).toContain("export const line20 = 200;");
+
+    // Case 2: Pre-sync tampering on done sandbox must NOT be laundered by a clean_behind sync
+    await createRequirement(repo, {
+      goal: "Update leaf.ts",
+      criteria: [{ id: "AC-1", description: "ok", required: true, command: "echo ok" }],
+    });
+    await propose(repo, "REQ-002", { designMarkdown: "# Design\nLeaf.", actor: "agent" });
+    await approveDesign(repo, "REQ-002");
+    const sb2 = await createOrReuseWorktree(repo, "REQ-002", { branchPrefix: "feat" });
+    fs.writeFileSync(path.join(sb2.worktreePath, "leaf.ts"), "export const leaf = 2;\n");
+    execFileSync("git", ["add", "leaf.ts"], { cwd: sb2.worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: leaf=2"], { cwd: sb2.worktreePath, stdio: "ignore" });
+    await runVerification(repo, "REQ-002", { command: "echo ok", criterionIds: ["AC-1"] });
+    const snap2 = (await observeGitSnapshot(sb2.worktreePath))!;
+    await acceptRequirement(repo, "REQ-002", { currentCodeSnapshotHash: snap2.fingerprint });
+
+    // Tamper sandbox BEFORE syncing main
+    fs.writeFileSync(path.join(sb2.worktreePath, "leaf.ts"), "export const leaf = 2222;\n");
+    fs.writeFileSync(path.join(repo, "unrelated_guard.ts"), "export const g = 1;\n");
+    execFileSync("git", ["add", "unrelated_guard.ts"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main unrelated guard"], { cwd: repo, stdio: "ignore" });
+
+    const syncTampered = await syncSandboxBase(repo, "REQ-002", { fetchRemote: false });
+    expect(syncTampered.synced).toBe(true);
+    expect(syncTampered.reopenedForReverify).toBe(true);
+    expect(syncTampered.detail.state.stage).toBe("coding");
+    expect(getSandboxForRequirement(repo, "REQ-002")?.lastCleanSyncFingerprint).toBeUndefined();
+
+    // Case 3: Cross-acceptance stale lastCleanSyncFingerprint cannot match a newer acceptance hash
+    expect(
+      matchesAcceptedOrCleanSyncSnapshot("fp-synced-old", "fp-accepted-new", {
+        lastCleanSyncFingerprint: "fp-synced-old",
+        lastCleanSyncAcceptedHash: "fp-accepted-old",
+      }).matched,
+    ).toBe(false);
+    expect(
+      matchesAcceptedOrCleanSyncSnapshot("fp-synced-cur", "fp-accepted-cur", {
+        lastCleanSyncFingerprint: "fp-synced-cur",
+        lastCleanSyncAcceptedHash: "fp-accepted-cur",
+      }),
+    ).toEqual({ matched: true, viaCleanSync: true });
+  }, 25_000);
 });

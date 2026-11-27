@@ -30,6 +30,7 @@ import { viewGitHubPr, type GitHubCommandDeps } from "./github.ts";
 import {
   getSandboxForRequirement,
   listProjectSandboxes,
+  matchesAcceptedOrCleanSyncSnapshot,
   readSandboxes,
   sandboxKey,
   withSandboxLockSync,
@@ -1128,6 +1129,7 @@ export async function syncSandboxBase(
 ): Promise<{
   synced: boolean;
   upToDate: boolean;
+  reopenedForReverify?: boolean;
   conflictFiles: string[];
   drift: SandboxDriftInfo;
   detail: RequirementDetail;
@@ -1164,6 +1166,17 @@ export async function syncSandboxBase(
       const detail = getRequirement(base, reqId, { currentCodeSnapshotHash: wtSnap?.fingerprint ?? null });
       return { synced: false, upToDate: false, conflictFiles: drift.conflictFiles, drift, detail };
     }
+
+    const preDetail = getRequirement(base, reqId);
+    const isDone = preDetail.state.stage === "done";
+    const preSnap = isDone ? await observeGitSnapshot(wt) : null;
+    const preMatchedAcceptance =
+      isDone &&
+      matchesAcceptedOrCleanSyncSnapshot(
+        preSnap?.fingerprint,
+        preDetail.state.acceptance?.codeSnapshotHash,
+        sandbox,
+      ).matched;
 
     const wtHead = execFileSync("git", ["-C", wt, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const dirtyPaths = listDirtyPathsExcludingNodeModules(wt);
@@ -1217,9 +1230,14 @@ export async function syncSandboxBase(
       }
     }
 
-    const preDetail = getRequirement(base, reqId);
-    const isDone = preDetail.state.stage === "done";
     const snapAfter = await observeGitSnapshot(wt);
+    const keepDoneCleanSync =
+      isDone &&
+      preMatchedAcceptance &&
+      drift.driftStatus === "clean_behind" &&
+      drift.overlapFiles.length === 0 &&
+      Boolean(snapAfter?.fingerprint);
+    const reopenedForReverify = isDone && !keepDoneCleanSync;
 
     withSandboxLockSync(() => {
       const all = readSandboxes();
@@ -1228,24 +1246,36 @@ export async function syncSandboxBase(
         all[key] = {
           ...all[key]!,
           baseHead: drift.mainHead,
-          ...(isDone && snapAfter?.fingerprint
-            ? { lastCleanSyncFingerprint: snapAfter.fingerprint }
-            : { lastCleanSyncFingerprint: undefined }),
+          ...(keepDoneCleanSync && snapAfter?.fingerprint
+            ? {
+                lastCleanSyncFingerprint: snapAfter.fingerprint,
+                ...(preDetail.state.acceptance?.codeSnapshotHash
+                  ? { lastCleanSyncAcceptedHash: preDetail.state.acceptance.codeSnapshotHash }
+                  : {}),
+              }
+            : { lastCleanSyncFingerprint: undefined, lastCleanSyncAcceptedHash: undefined }),
         };
         writeSandboxes(all);
       }
     });
 
+    const overlapSummary =
+      drift.overlapFiles.length > 0
+        ? `（涉及同文件自动三路合并：${drift.overlapFiles.slice(0, 5).join("、")}）`
+        : "（同步前代码已偏离验收快照）";
     const autoMergeHint = drift.driftStatus === "auto_mergeable" ? "（含同文件自动三路合并）" : "";
     const detail = await syncRequirementBaseline(base, reqId, {
       baselineHead: drift.mainHead,
       baselineFingerprint: snapAfter?.fingerprint ?? "0".repeat(64),
       dirty: snapAfter?.dirty ?? false,
-      preserveStage: isDone,
+      preserveStage: keepDoneCleanSync,
+      reopenToCoding: reopenedForReverify,
       eventKind: "sandbox_synced",
-      summary: isDone
-        ? `已完成需求在无冲突状态下同步主干至 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，可直接交付 PR）`
-        : `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，请复跑验证）`,
+      summary: keepDoneCleanSync
+        ? `已完成需求在无文件重叠状态下同步主干至 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并，可直接交付 PR 或合入主干）`
+        : reopenedForReverify
+          ? `已完成需求同步主干至 ${drift.mainHead.slice(0, 7)}${overlapSummary}，已退回编码阶段（保留方案批准），请复跑验证并重新验收`
+          : `沙箱基线已自动同步至主干 ${drift.mainHead.slice(0, 7)}（落后 ${drift.behindCount} 个提交已合并${autoMergeHint}，请复跑验证）`,
       currentCodeSnapshotHash: snapAfter?.fingerprint ?? null,
     });
     syncRequirementMirrorToSandbox(base, reqId, wt);
@@ -1259,7 +1289,14 @@ export async function syncSandboxBase(
         conflictFiles: [],
         canAutoSync: false,
       };
-    return { synced: true, upToDate: false, conflictFiles: [], drift: nextDrift, detail };
+    return {
+      synced: true,
+      upToDate: false,
+      ...(reopenedForReverify ? { reopenedForReverify: true } : {}),
+      conflictFiles: [],
+      drift: nextDrift,
+      detail,
+    };
     },
     { parentLeaseId: options.parentLeaseId },
   );
@@ -1530,11 +1567,12 @@ export async function applySandboxToMain(
       `需求 ${reqId} 尚未完成人工最终验收（当前阶段：${detail.state.stage}），禁止应用沙箱改动`,
     );
   }
-  const matchesAcceptance = detail.state.acceptance.codeSnapshotHash === wtSnap?.fingerprint;
-  const matchesCleanSync = Boolean(
-    sandbox.lastCleanSyncFingerprint && sandbox.lastCleanSyncFingerprint === wtSnap?.fingerprint,
+  const snapshotMatch = matchesAcceptedOrCleanSyncSnapshot(
+    wtSnap?.fingerprint,
+    detail.state.acceptance.codeSnapshotHash,
+    sandbox,
   );
-  if (!wtSnap || (!matchesAcceptance && !matchesCleanSync)) {
+  if (!wtSnap || !snapshotMatch.matched) {
     throw new WorkbenchError(
       "acceptance_gate_failed",
       `需求 ${reqId} 的沙箱代码在验收后发生了变更，请重新打开需求验证并验收后再应用`,
@@ -1803,8 +1841,12 @@ export async function mergeSandboxToMain(
           `需求 ${reqId} 尚未完成人工最终验收（当前阶段：${detail.state.stage}），禁止合入主干`,
         );
       }
-      const matchesAcceptance = detail.state.acceptance.codeSnapshotHash === wtSnap?.fingerprint;
-      if (!wtSnap || !matchesAcceptance) {
+      const snapshotMatch = matchesAcceptedOrCleanSyncSnapshot(
+        wtSnap?.fingerprint,
+        detail.state.acceptance.codeSnapshotHash,
+        sandbox,
+      );
+      if (!wtSnap || !snapshotMatch.matched) {
         throw new WorkbenchError(
           "acceptance_gate_failed",
           `需求 ${reqId} 的沙箱代码内容树在验收后发生了变更，请重新验证受影响条件并确认后再合入主干`,
