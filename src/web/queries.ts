@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { QueryClient, useQuery } from "@tanstack/react-query";
-import type { GiteeIssueItem } from "../core/gitee.ts";
+import type { GiteeIssueFilter, GiteeIssueItem } from "../core/gitee.ts";
 import type {
   AgentAction,
   AgentRunRecord,
@@ -210,7 +210,7 @@ export function useGiteeStatusQuery(activeProjectId: string | null, enabled: boo
 export function useGiteeIssuesQuery(
   activeProjectId: string | null,
   params: {
-    filter: "collaborator" | "assigned" | "created" | "all";
+    filter: GiteeIssueFilter;
     q: string;
   },
   enabled: boolean,

@@ -243,6 +243,19 @@ describe("Gitee Server & Remote Node Bridge API", () => {
     };
     expect(listAgain.items[0]?.importedRequirementId).toBe("REQ-001");
 
+    // Legacy clients sending the removed collaborator scope fall back to assigned-or-created.
+    const callsBeforeLegacy = calls.length;
+    const legacyResp = await fetch(
+      `${server.url}/api/gitee/issues?project=${encodeURIComponent(pid)}&filter=collaborator&state=all`,
+    );
+    expect(legacyResp.status).toBe(200);
+    const legacyCalls = calls.slice(callsBeforeLegacy).map((call) => new URL(call.url));
+    const legacyIssueCalls = legacyCalls.filter((url) => url.pathname.endsWith("/issues"));
+    expect(legacyIssueCalls.some((url) => url.pathname === "/api/v5/user/issues" && url.searchParams.get("filter") === "all")).toBe(true);
+    expect(legacyIssueCalls.every((url) => !url.searchParams.has("collaborator"))).toBe(true);
+    expect(legacyIssueCalls.some((url) => url.pathname === "/api/v5/enterprises/openstring/issues" && url.searchParams.get("assignee") === "jackie")).toBe(true);
+    expect(legacyIssueCalls.some((url) => url.pathname === "/api/v5/enterprises/openstring/issues" && url.searchParams.get("creator") === "jackie")).toBe(true);
+
     const dupImportResp = await fetch(`${server.url}/api/requirements/import-issue?project=${encodeURIComponent(pid)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

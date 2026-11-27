@@ -28,6 +28,7 @@ interface BrowserPage {
   click(sel: string): Promise<void>;
   select(sel: string, ...values: string[]): Promise<string[]>;
   type(sel: string, text: string): Promise<void>;
+  keyboard: { press(key: string): Promise<void> };
   evaluate<T>(fn: (...args: any[]) => T, ...args: any[]): Promise<T>;
   close(): Promise<void>;
 }
@@ -68,6 +69,7 @@ function makeTempHub(): string {
 
 function createMockGiteeDeps() {
   const prs = new Map<number, { number: number; title: string; body: string }>();
+  const issueCalls: string[] = [];
   let nextPr = 31;
 
   const giteeDeps: GiteeApiDeps = {
@@ -89,9 +91,11 @@ function createMockGiteeDeps() {
         return new Response(JSON.stringify({ login: "jackie", name: "Jackie" }), { status: 200 });
       }
       if (method === "GET" && p === "/api/v5/user/issues") {
+        issueCalls.push(url);
         return new Response(JSON.stringify([]), { status: 200 });
       }
       if (method === "GET" && p === "/api/v5/enterprises/openstring/issues") {
+        issueCalls.push(url);
         const webIssue1 = {
           number: "I8WEB1",
           html_url: "https://e.gitee.com/openstring/issues/list?issue=I8WEB1",
@@ -119,13 +123,18 @@ function createMockGiteeDeps() {
           updated_at: "2026-11-17T10:00:00+08:00",
         };
         const stateParam = u.searchParams.get("state");
-        if (stateParam === "all") {
-          return new Response(JSON.stringify([webIssue1, webIssue2]), { status: 200 });
+        // Mirror Gitee v5: assignee and creator are separate filters; there is no collaborator role.
+        const assignedItems = stateParam === "open" || stateParam === "all" ? [webIssue1] : [];
+        const createdItems = stateParam === "closed" || stateParam === "all" ? [webIssue2] : [];
+        const wantsAssigned = u.searchParams.has("assignee");
+        const wantsCreated = u.searchParams.has("creator");
+        if (wantsAssigned && !wantsCreated) {
+          return new Response(JSON.stringify(assignedItems), { status: 200 });
         }
-        if (stateParam === "open") {
-          return new Response(JSON.stringify([webIssue1]), { status: 200 });
+        if (wantsCreated && !wantsAssigned) {
+          return new Response(JSON.stringify(createdItems), { status: 200 });
         }
-        return new Response(JSON.stringify([]), { status: 200 });
+        return new Response(JSON.stringify([...assignedItems, ...createdItems]), { status: 200 });
       }
       if (method === "GET" && p === "/api/v5/repos/openstring/deepmdt-frontend-pc/pulls") {
         return new Response(JSON.stringify([]), { status: 200 });
@@ -149,7 +158,7 @@ function createMockGiteeDeps() {
     },
   };
 
-  return { giteeDeps, prs };
+  return { giteeDeps, prs, issueCalls };
 }
 
 beforeAll(async () => {
@@ -186,7 +195,7 @@ describe("Gitee Web UI workflow", () => {
       gitee: { repo: "openstring/deepmdt-frontend-pc", enterprise: "openstring", defaultBaseBranch: "master" },
     });
 
-    const { giteeDeps, prs } = createMockGiteeDeps();
+    const { giteeDeps, prs, issueCalls } = createMockGiteeDeps();
     const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, giteeDeps });
     servers.push(server);
 
@@ -222,12 +231,46 @@ describe("Gitee Web UI workflow", () => {
       expect(itemText).toContain("PC工作台筛选栏优化");
       expect(itemText).toContain("未绑定仓库");
 
-      // 2.1 Collaborator is the default ownership scope; both enterprise work items are listed.
+      // 2.1 Ownership is a single-select dropdown defaulting to "assigned or created".
       await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB2"]', { timeout: 10_000 });
+      await page.waitForSelector('[data-testid="gitee-owner-filter"]', { timeout: 10_000 });
+      const defaultOwnerText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-owner-filter"]')?.textContent ?? "",
+      );
+      expect(defaultOwnerText).toContain("负责或创建");
       const initialCount = await page.evaluate(
         () => document.querySelector('[data-testid="gitee-result-count"]')?.textContent ?? "",
       );
       expect(initialCount).toContain("2");
+
+      // 2.1.1 Selecting "created by me" narrows the list and sends creator only (never collaborator).
+      const callsBeforeOwnerSwitch = issueCalls.length;
+      await selectUiOption(page, '[data-testid="gitee-owner-filter"]', "created");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB1"]'),
+        { timeout: 10_000 },
+      );
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB2"]', { timeout: 10_000 });
+      const createdOwnerText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-owner-filter"]')?.textContent ?? "",
+      );
+      expect(createdOwnerText).toContain("我创建的");
+      const ownerSwitchCalls = issueCalls.slice(callsBeforeOwnerSwitch).map((url) => new URL(url));
+      const createdUserRequests = ownerSwitchCalls.filter(
+        (url) => url.pathname === "/api/v5/user/issues" && url.searchParams.get("filter") === "created",
+      );
+      expect(createdUserRequests.length).toBeGreaterThan(0);
+      const createdEnterpriseRequests = ownerSwitchCalls.filter(
+        (url) =>
+          url.pathname === "/api/v5/enterprises/openstring/issues" &&
+          url.searchParams.get("creator") === "jackie" &&
+          !url.searchParams.has("assignee"),
+      );
+      expect(createdEnterpriseRequests.length).toBeGreaterThan(0);
+      expect(issueCalls.every((url) => !new URL(url).searchParams.has("collaborator"))).toBe(true);
+
+      await selectUiOption(page, '[data-testid="gitee-owner-filter"]', "all");
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 10_000 });
 
       // 2.2 Status multi-select narrows the list, and the chips row clears it.
       await page.click('[data-testid="gitee-status-filter"]');
@@ -307,6 +350,221 @@ describe("Gitee Web UI workflow", () => {
       await page.close();
     }
   }, { timeout: 30_000 });
+
+  test("remembers owner, status, and project filters per repository across close, reload, and reopen", async () => {
+    makeTempHub();
+    const { repo } = makeGiteeGitRepo();
+    await initProject(repo, { name: "deepmdt-frontend-pc", privacyMode: "local" });
+    await updateProjectConfig(repo, {
+      gitee: { repo: "openstring/deepmdt-frontend-pc", enterprise: "openstring", defaultBaseBranch: "master" },
+    });
+
+    const { giteeDeps } = createMockGiteeDeps();
+    let server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, giteeDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-project"]');
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
+      await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
+
+      const openImport = async () => {
+        await page.click('[data-testid="new-req-btn"]');
+        await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
+        await page.click('[data-testid="new-req-mode-import"]');
+        await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 10_000 });
+      };
+
+      const expectRememberedFilters = async () => {
+        await page.waitForSelector('[data-testid="gitee-owner-filter"]', { timeout: 10_000 });
+        const ownerText = await page.evaluate(
+          () => document.querySelector('[data-testid="gitee-owner-filter"]')?.textContent ?? "",
+        );
+        expect(ownerText).toContain("我负责的");
+        const statusText = await page.evaluate(
+          () => document.querySelector('[data-testid="gitee-status-filter"]')?.textContent ?? "",
+        );
+        expect(statusText).toContain("开发中");
+        const projectText = await page.evaluate(
+          () => document.querySelector('[data-testid="gitee-project-filter"]')?.textContent ?? "",
+        );
+        expect(projectText).toContain("DeepMDT 3.0");
+        const chipsText = await page.evaluate(
+          () => document.querySelector('[data-testid="gitee-active-filters"]')?.textContent ?? "",
+        );
+        expect(chipsText).toContain("开发中");
+        expect(chipsText).toContain("DeepMDT 3.0");
+        const countText = await page.evaluate(
+          () => document.querySelector('[data-testid="gitee-result-count"]')?.textContent ?? "",
+        );
+        expect(countText).toContain("1");
+      };
+
+      await openImport();
+      await selectUiOption(page, '[data-testid="gitee-owner-filter"]', "assigned");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB2"]'),
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="gitee-status-filter"]');
+      await page.waitForSelector('[data-testid="gitee-status-filter-option"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-status-filter-option"][data-value="开发中"]');
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB2"]'),
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="gitee-status-filter"]');
+
+      await page.click('[data-testid="gitee-project-filter"]');
+      await page.waitForSelector('[data-testid="gitee-project-filter-option"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-project-filter-option"][data-value="DeepMDT 3.0"]');
+      await page.click('[data-testid="gitee-project-filter"]');
+      await expectRememberedFilters();
+
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), {
+        timeout: 10_000,
+      });
+      await openImport();
+      await expectRememberedFilters();
+
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 10_000 });
+      await openImport();
+      await expectRememberedFilters();
+
+      // 模拟“停止后在同一访问地址重新启动”：localStorage 的 origin 保持不变，筛选应恢复。
+      const restartPort = server.port;
+      server.stop();
+      servers.splice(servers.indexOf(server), 1);
+      server = await startWorkbenchServer({ root: repo, port: restartPort, writeDiscovery: false, giteeDeps });
+      servers.push(server);
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+      await page.waitForSelector('[data-testid="new-req-btn"]', { timeout: 10_000 });
+      await openImport();
+      await expectRememberedFilters();
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 60_000 });
+
+  test("discards older remembered filters when a later write fails, falling back to defaults", async () => {
+    makeTempHub();
+    const { repo } = makeGiteeGitRepo();
+    await initProject(repo, { name: "deepmdt-frontend-pc", privacyMode: "local" });
+    await updateProjectConfig(repo, {
+      gitee: { repo: "openstring/deepmdt-frontend-pc", enterprise: "openstring", defaultBaseBranch: "master" },
+    });
+
+    const { giteeDeps } = createMockGiteeDeps();
+    const server = await startWorkbenchServer({ root: repo, port: 0, writeDiscovery: false, giteeDeps });
+    servers.push(server);
+
+    expect(HAS_BROWSER).toBe(true);
+    const page = await browser!.newPage();
+    try {
+      await page.setViewport({ width: 1360, height: 860 });
+      await page.goto(server.url, { waitUntil: "networkidle2" });
+
+      await page.waitForSelector('[data-testid="open-routing-btn"]', { timeout: 10_000 });
+      await page.click('[data-testid="open-routing-btn"]');
+      await page.waitForSelector('[data-testid="settings-tab-project"]', { timeout: 10_000 });
+      await page.click('[data-testid="settings-tab-project"]');
+      await page.waitForSelector('[data-testid="hub-gitee-token-input"]', { timeout: 10_000 });
+      await page.type('[data-testid="hub-gitee-token-input"]', "web-gitee-token");
+      await page.click('[data-testid="save-project-btn"]');
+      await page.waitForFunction(() => !document.querySelector('[data-testid="routing-modal"]'), { timeout: 10_000 });
+
+      const openImport = async () => {
+        await page.click('[data-testid="new-req-btn"]');
+        await page.waitForSelector('[data-testid="new-req-mode-import"]', { timeout: 10_000 });
+        await page.click('[data-testid="new-req-mode-import"]');
+        await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB1"]', { timeout: 10_000 });
+      };
+
+      // 先成功保存一组非默认筛选。
+      await openImport();
+      await selectUiOption(page, '[data-testid="gitee-owner-filter"]', "assigned");
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="gitee-issue-item-I8WEB2"]'),
+        { timeout: 10_000 },
+      );
+      await page.click('[data-testid="gitee-status-filter"]');
+      await page.waitForSelector('[data-testid="gitee-status-filter-option"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-status-filter-option"][data-value="开发中"]');
+      await page.click('[data-testid="gitee-status-filter"]');
+      const savedKeys = await page.evaluate(() =>
+        Object.keys(localStorage).filter((key) => key.startsWith("wb-gitee-import-filters::")),
+      );
+      expect(savedKeys).toHaveLength(1);
+
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), {
+        timeout: 10_000,
+      });
+
+      // 模拟 localStorage 配额不足：筛选写入抛错，旧记录必须被清除。
+      await page.evaluate(() => {
+        const proto = Storage.prototype;
+        const original = proto.setItem;
+        proto.setItem = function (this: Storage, key: string, value: string) {
+          if (key.startsWith("wb-gitee-import-filters::")) {
+            throw new DOMException("Quota exceeded", "QuotaExceededError");
+          }
+          original.call(this, key, value);
+        };
+      });
+
+      await openImport();
+      await selectUiOption(page, '[data-testid="gitee-owner-filter"]', "created");
+      await page.waitForFunction(
+        () => (document.querySelector('[data-testid="gitee-owner-filter"]')?.textContent ?? "").includes("我创建的"),
+        { timeout: 10_000 },
+      );
+      const remainingKeys = await page.evaluate(() =>
+        Object.keys(localStorage).filter((key) => key.startsWith("wb-gitee-import-filters::")),
+      );
+      expect(remainingKeys).toHaveLength(0);
+
+      await page.keyboard.press("Escape");
+      await page.waitForFunction(() => !document.querySelector('[data-testid="new-req-modal"]'), {
+        timeout: 10_000,
+      });
+      await openImport();
+
+      const ownerText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-owner-filter"]')?.textContent ?? "",
+      );
+      expect(ownerText).toContain("负责或创建");
+      const statusText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-status-filter"]')?.textContent ?? "",
+      );
+      expect(statusText).not.toContain("开发中");
+      const projectText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-project-filter"]')?.textContent ?? "",
+      );
+      expect(projectText).not.toContain("DeepMDT 3.0");
+      const chipsText = await page.evaluate(
+        () => document.querySelector('[data-testid="gitee-active-filters"]')?.textContent ?? null,
+      );
+      expect(chipsText).toBeNull();
+      await page.waitForSelector('[data-testid="gitee-issue-item-I8WEB2"]', { timeout: 10_000 });
+      await page.click('[data-testid="gitee-issue-item-I8WEB1"]');
+      await page.waitForSelector('[data-testid="import-issue-draft-btn"]', { timeout: 10_000 });
+    } finally {
+      await page.close();
+    }
+  }, { timeout: 45_000 });
 
   test("allows manually switching an SSH-aliased project to Gitee in Project Settings", async () => {
     makeTempHub();

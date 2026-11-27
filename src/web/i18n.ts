@@ -1283,10 +1283,9 @@ const zhCN = {
   "gitee.needTokenFallback": "尚未配置有效的 Gitee 私人令牌",
   "gitee.gotoSettings": "前往全局设置配置 Gitee Token",
   "gitee.filterAria": "Gitee 工作项归属筛选",
-  "gitee.filterCollaborator": "我协作的",
   "gitee.filterAssigned": "我负责的",
   "gitee.filterCreated": "我创建的",
-  "gitee.filterAll": "全部与我相关",
+  "gitee.filterAll": "负责或创建",
   "gitee.statusFilterLabel": "工作项状态",
   "gitee.projectFilterLabel": "关联项目",
   "gitee.filterSearchPlaceholder": "搜索…",
@@ -1298,7 +1297,6 @@ const zhCN = {
   "gitee.noMatchingOptions": "无匹配选项",
   "gitee.selectHint": "选择一项工作项，或输入编号 / URL",
   "gitee.willImport": "将导入",
-  "gitee.collaboratorHint": "协作者筛选依赖企业空间；当前项目未配置 enterprise",
   "gitee.refresh": "刷新",
   "gitee.searchPlaceholder": "按工作项编号（如 I8ABCD）、标题或所属项目过滤…",
   "gitee.loading": "正在从 Gitee 拉取与你相关的工作项…",
@@ -2963,10 +2961,9 @@ const en: Record<MessageKey, string> = {
   "gitee.needTokenFallback": "Valid Gitee personal access token is not configured yet",
   "gitee.gotoSettings": "Open global settings to configure Gitee token",
   "gitee.filterAria": "Filter Gitee work items by ownership",
-  "gitee.filterCollaborator": "Collaborating",
   "gitee.filterAssigned": "Assigned to me",
   "gitee.filterCreated": "Created by me",
-  "gitee.filterAll": "All related",
+  "gitee.filterAll": "Assigned or created",
   "gitee.statusFilterLabel": "Status",
   "gitee.projectFilterLabel": "Project",
   "gitee.filterSearchPlaceholder": "Search…",
@@ -2978,7 +2975,6 @@ const en: Record<MessageKey, string> = {
   "gitee.noMatchingOptions": "No matching options",
   "gitee.selectHint": "Select a work item, or enter an ID / URL",
   "gitee.willImport": "Will import",
-  "gitee.collaboratorHint": "Collaborator filter relies on the enterprise space; none is configured for this project",
   "gitee.refresh": "Refresh",
   "gitee.searchPlaceholder": "Filter by work item ID (e.g. I8ABCD), title, or project…",
   "gitee.loading": "Fetching your Gitee work items…",
@@ -3391,6 +3387,7 @@ export function normalizeUiLanguage(raw: unknown): UiLanguage | undefined {
 export interface UiLanguageStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 function safeStorage(): UiLanguageStorage | null {
@@ -3418,6 +3415,20 @@ export function writeStorageItem(
   if (!storage) return false;
   try {
     storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes one stored value. Returns false when storage or removeItem is unavailable. */
+export function removeStorageItem(
+  key: string,
+  storage: UiLanguageStorage | null = safeStorage(),
+): boolean {
+  if (!storage?.removeItem) return false;
+  try {
+    storage.removeItem(key);
     return true;
   } catch {
     return false;

@@ -1,3 +1,4 @@
+import type { GiteeIssueFilter } from "../core/gitee.ts";
 import type {
   AgentAction,
   AgentRunRecord,
@@ -60,7 +61,7 @@ export type ModalState =
       tier?: RequirementTier;
       mode?: "create" | "import_issue";
       issueRef?: string;
-      giteeFilter?: "collaborator" | "assigned" | "created" | "all";
+      giteeFilter?: GiteeIssueFilter;
       giteeStatuses?: string[];
       giteeProjects?: string[];
       giteeSearch?: string;

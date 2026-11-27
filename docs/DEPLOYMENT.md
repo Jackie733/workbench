@@ -209,7 +209,7 @@ wb service uninstall
 bun run src/cli/index.ts serve --hub --host 127.0.0.1 --port 4318 --root "$HOME"
 ```
 
-保持终端存活；不要在已托管同一 Hub 时另开此前台进程。未安装服务时，`wb start`/`wb open` 仍提供原有未托管后台模式。普通 `serve` 的随机端口不等于固定 4318。omp 的项目级服务器保持独立，不由 Hub service stop/uninstall 管理。
+保持终端存活；不要在已托管同一 Hub 时另开此前台进程。未安装服务时，`wb start`/`wb open` 仍提供原有未托管后台模式。普通 `serve` 默认也监听 `127.0.0.1:4318`，以保证重启后浏览器 origin 不变、同一仓库的筛选偏好可恢复；确需随机端口时显式传入 `--port 0`。omp 的项目级服务器保持独立，不由 Hub service stop/uninstall 管理。
 
 ## 7. MCP 客户端与 Windows 边界
 

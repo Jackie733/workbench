@@ -67,6 +67,7 @@ import {
   viewGiteeIssue,
   viewGiteePr,
   type GiteeApiDeps,
+  type GiteeIssueFilter,
   type GiteeIssueItem,
 } from "../core/gitee.ts";
 import {
@@ -602,10 +603,8 @@ export function createProjectApiHandler(deps: ProjectApiDeps) {
         status.project?.gitee?.enterprise ||
         extractGiteeOwner(remoteRepo);
       const rawFilter = url.searchParams.get("filter");
-      const filter =
-        rawFilter === "collaborator" || rawFilter === "created" || rawFilter === "all"
-          ? rawFilter
-          : "assigned";
+      const filter: GiteeIssueFilter =
+        rawFilter === "assigned" || rawFilter === "created" || rawFilter === "all" ? rawFilter : "all";
       const rawState = url.searchParams.get("state");
       const state =
         rawState === "open" || rawState === "progressing" || rawState === "closed" || rawState === "all"

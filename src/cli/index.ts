@@ -63,6 +63,17 @@ interface ParsedArgs {
   attachments: string[];
 }
 
+/**
+ * 前台 `wb serve` 的默认地址必须保持稳定：浏览器 localStorage 按 origin 隔离，
+ * 每次重启都换随机端口会让同一仓库的 Gitee 筛选偏好看起来“丢失”。
+ * 仍可通过显式 `--port 0` 申请随机端口。
+ */
+export const DEFAULT_FOREGROUND_SERVE_PORT = 4318;
+
+export function resolveForegroundServePort(portFlag: string | boolean | undefined): number {
+  return typeof portFlag === "string" ? Number(portFlag) : DEFAULT_FOREGROUND_SERVE_PORT;
+}
+
 function parseCliArgs(argv: string[]): ParsedArgs {
   const flags = new Map<string, string | boolean>();
   const positionals: string[] = [];
@@ -495,7 +506,7 @@ export async function runCli(argv: string[], services: Pick<typeof userService, 
         const portFlag = parsed.flags.get("port");
         const hostFlag = parsed.flags.get("host");
         const hubMode = parsed.flags.get("hub") === true;
-        const port = typeof portFlag === "string" ? Number(portFlag) : hubMode ? 4318 : 0;
+        const port = resolveForegroundServePort(portFlag);
         const hostname = typeof hostFlag === "string" ? hostFlag : "127.0.0.1";
         if (!Number.isSafeInteger(port) || port < 0 || port > 65535) {
           throw new WorkbenchError("invalid_input", `无效端口号: ${String(portFlag)}`);

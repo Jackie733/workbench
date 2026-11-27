@@ -522,18 +522,20 @@ export function buildGiteeReasonMessageDetails(
   return { messageKey: "gitee.reasonRepoMissing" };
 }
 
+export type GiteeIssueFilter = "assigned" | "created" | "all";
+
 /**
  * Fetches Gitee issues relevant to the authenticated user.
  * Combines `/v5/user/issues` and `/v5/enterprises/{enterprise}/issues` so issues with
  * `repository: null` (unlinked enterprise work items) are reliably retrieved.
- * `filter: "collaborator"` only queries the enterprise endpoint (the personal endpoint
- * has no collaborator scope) and maps to the enterprise `collaborator` role.
+ * Gitee v5 only supports `assigned` / `created` / `all`; the enterprise endpoint maps
+ * these to `assignee` / `creator` / both and has no collaborator filter.
  */
 export async function listGiteeMyIssues(
   input: {
     token: string;
     enterprise?: string | null;
-    filter?: "collaborator" | "assigned" | "created" | "all";
+    filter?: GiteeIssueFilter;
     state?: "active" | "open" | "progressing" | "closed" | "all";
     search?: string;
     perPage?: number;
@@ -547,7 +549,7 @@ export async function listGiteeMyIssues(
     });
   }
 
-  const filter = input.filter ?? "assigned";
+  const filter = input.filter ?? "all";
   const stateFilter = input.state ?? "active";
   const perPage = Math.min(100, Math.max(10, input.perPage ?? 50));
   const enterprise = input.enterprise ? validateGiteeEnterpriseSlug(input.enterprise) : null;
@@ -569,37 +571,29 @@ export async function listGiteeMyIssues(
   const requests: Array<Promise<IssueBatchResult>> = [];
 
   for (const st of apiStates) {
-    if (filter !== "collaborator") {
-      const qs = new URLSearchParams({
-        filter,
-        state: st,
-        sort: "updated",
-        direction: "desc",
-        page: "1",
-        per_page: String(perPage),
-      });
-      requests.push(
-        giteeRequest<RawGiteeIssue[]>(`/user/issues?${qs.toString()}`, token, {}, deps)
-          .then(
-            (res): IssueBatchResult => ({
-              ok: true,
-              sourceEnterprise: null,
-              list: Array.isArray(res.data) ? res.data : [],
-            }),
-          )
-          .catch((error): IssueBatchResult => ({ ok: false, error })),
-      );
-    }
+    const qs = new URLSearchParams({
+      filter,
+      state: st,
+      sort: "updated",
+      direction: "desc",
+      page: "1",
+      per_page: String(perPage),
+    });
+    requests.push(
+      giteeRequest<RawGiteeIssue[]>(`/user/issues?${qs.toString()}`, token, {}, deps)
+        .then(
+          (res): IssueBatchResult => ({
+            ok: true,
+            sourceEnterprise: null,
+            list: Array.isArray(res.data) ? res.data : [],
+          }),
+        )
+        .catch((error): IssueBatchResult => ({ ok: false, error })),
+    );
 
     if (enterprise) {
-      const roles: Array<"assignee" | "creator" | "collaborator"> =
-        filter === "assigned"
-          ? ["assignee"]
-          : filter === "created"
-            ? ["creator"]
-            : filter === "collaborator"
-              ? ["collaborator"]
-              : ["assignee", "creator", "collaborator"];
+      const roles: Array<"assignee" | "creator"> =
+        filter === "assigned" ? ["assignee"] : filter === "created" ? ["creator"] : ["assignee", "creator"];
       for (const role of roles) {
         const entQs = new URLSearchParams({
           state: st,
@@ -627,11 +621,6 @@ export async function listGiteeMyIssues(
         );
       }
     }
-  }
-
-  if (requests.length === 0) {
-    // collaborator scope is enterprise-only; without an enterprise there is nothing to query.
-    return { account, enterprise, items: [] };
   }
 
   const results = await Promise.all(requests);

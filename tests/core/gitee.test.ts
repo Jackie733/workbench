@@ -480,32 +480,49 @@ describe("Gitee V5 integration", () => {
     expect(issueWriteCalls).toHaveLength(0);
   });
 
-  test("listGiteeMyIssues collaborator scope queries the enterprise collaborator role only", async () => {
-    const { fetchMock, calls } = createMockGiteeFetch();
-    const deps: GiteeApiDeps = { fetch: fetchMock };
+  test("listGiteeMyIssues maps ownership filters to Gitee v5 assignee/creator parameters only", async () => {
+    const cases = [
+      { filter: "assigned", roles: ["assignee"], absentRoles: ["creator"] },
+      { filter: "created", roles: ["creator"], absentRoles: ["assignee"] },
+      { filter: "all", roles: ["assignee", "creator"], absentRoles: [] },
+    ] as const;
 
-    const listed = await listGiteeMyIssues(
-      { token: "valid-gitee-token", enterprise: "openstring", filter: "collaborator", state: "all" },
-      deps,
-    );
-    expect(listed.items.map((item) => item.ident).sort()).toEqual(["I8COL3", "I8ENT2"]);
+    for (const item of cases) {
+      const { fetchMock, calls } = createMockGiteeFetch();
+      const listed = await listGiteeMyIssues(
+        { token: "valid-gitee-token", enterprise: "openstring", filter: item.filter, state: "all" },
+        { fetch: fetchMock },
+      );
+      expect(listed.account).toBe("jackie");
 
-    const issueCalls = calls.filter((call) => call.url.includes("/issues"));
-    expect(issueCalls.length).toBeGreaterThan(0);
-    expect(issueCalls.every((call) => !call.url.includes("/user/issues"))).toBe(true);
-    expect(
-      issueCalls.some((call) => {
-        const u = new URL(call.url);
-        return u.pathname === "/api/v5/enterprises/openstring/issues" && u.searchParams.get("collaborator") === "jackie";
-      }),
-    ).toBe(true);
+      const issueCalls = calls
+        .filter((call) => call.url.includes("/issues"))
+        .map((call) => new URL(call.url));
+      const personalCalls = issueCalls.filter((url) => url.pathname === "/api/v5/user/issues");
+      expect(personalCalls).toHaveLength(1);
+      expect(personalCalls[0]?.searchParams.get("filter")).toBe(item.filter);
 
-    // Without an enterprise there is no collaborator scope to query; degrade to an empty list.
+      const enterpriseCalls = issueCalls.filter(
+        (url) => url.pathname === "/api/v5/enterprises/openstring/issues",
+      );
+      expect(enterpriseCalls).toHaveLength(item.roles.length);
+      for (const role of item.roles) {
+        expect(enterpriseCalls.some((url) => url.searchParams.get(role) === "jackie")).toBe(true);
+      }
+      for (const role of item.absentRoles) {
+        expect(enterpriseCalls.every((url) => !url.searchParams.has(role))).toBe(true);
+      }
+      expect(issueCalls.every((url) => !url.searchParams.has("collaborator"))).toBe(true);
+    }
+
+    // Without an enterprise space, the personal endpoint still honors assigned/created/all.
+    const { fetchMock } = createMockGiteeFetch();
     const noEnterprise = await listGiteeMyIssues(
-      { token: "valid-gitee-token", filter: "collaborator", state: "all" },
-      deps,
+      { token: "valid-gitee-token", filter: "assigned", state: "progressing" },
+      { fetch: fetchMock },
     );
-    expect(noEnterprise.items).toEqual([]);
+    expect(noEnterprise.enterprise).toBeNull();
+    expect(noEnterprise.items.map((item) => item.ident)).toEqual(["I8UNL1"]);
   });
 
   test("listGiteeMyIssues throws when all sub-requests fail and preserves partial results without polluting enterprise", async () => {

@@ -34,7 +34,7 @@ import type {
 import type { ProjectContextSummary } from "../core/context.ts";
 import type { StructuredMessageRef } from "../core/errors.ts";
 import type { GitObservation } from "../core/git.ts";
-import type { GiteeEnvironmentStatus, GiteeIssueItem } from "../core/gitee.ts";
+import type { GiteeEnvironmentStatus, GiteeIssueFilter, GiteeIssueItem } from "../core/gitee.ts";
 import type { GitHubEnvironmentStatus, ImportedGitHubIssue } from "../core/github.ts";
 import type { SandboxRecord } from "../core/sandbox.ts";
 import type { InsightsQueryFilter, InsightsResponse } from "../hub/ledger.ts";
@@ -326,7 +326,7 @@ export const api = {
   getGitHubStatus: () => requestJson<GitHubEnvironmentStatus>(withProjectParam("/api/github/status")),
   getGiteeStatus: () => requestJson<GiteeEnvironmentStatus>(withProjectParam("/api/gitee/status")),
   listGiteeIssues: (params?: {
-    filter?: "collaborator" | "assigned" | "created" | "all";
+    filter?: GiteeIssueFilter;
     state?: "active" | "open" | "progressing" | "closed" | "all";
     q?: string;
     enterprise?: string;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -39,6 +39,7 @@ import {
   XCircle,
   Zap,
 } from "lucide-react";
+import type { GiteeIssueFilter } from "../../core/gitee.ts";
 import type { PrivacyMode, RequirementKind, RequirementTier, RunBillingMode, Track } from "../../core/types.ts";
 import type { ModelPriceOverride } from "../../hub/types.ts";
 import { api, setApiProjectScope } from "../api.ts";
@@ -78,6 +79,12 @@ import {
   resolveWarningParam,
   t,
 } from "../i18n.ts";
+import {
+  DEFAULT_GITEE_IMPORT_FILTER_PREFS,
+  giteeFilterMemoryScope,
+  loadGiteeImportFilterPrefs,
+  saveGiteeImportFilterPrefs,
+} from "../giteeFilterPrefs.ts";
 import { formatBytes, formatReviewFixFeedback, relativeTime } from "../state.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { AttachmentPicker } from "./AttachmentPicker.tsx";
@@ -557,9 +564,19 @@ export function Modals() {
   );
   const isGiteeProject =
     project?.remoteProvider === "gitee" || Boolean(project?.project?.gitee);
-  const giteeFilter = m?.kind === "new_req" ? (m.giteeFilter ?? "collaborator") : "collaborator";
-  const giteeStatuses = m?.kind === "new_req" ? (m.giteeStatuses ?? []) : [];
-  const giteeProjects = m?.kind === "new_req" ? (m.giteeProjects ?? []) : [];
+  const giteeScope = giteeFilterMemoryScope({
+    repo: project?.remoteRepo,
+    projectId: project?.project?.projectId,
+    activeProjectId,
+  });
+  const storedGiteeFilters = useMemo(
+    () => loadGiteeImportFilterPrefs(giteeScope),
+    [giteeScope, modalInstanceId],
+  );
+  const giteeFilter: GiteeIssueFilter =
+    m?.kind === "new_req" ? (m.giteeFilter ?? storedGiteeFilters.filter) : DEFAULT_GITEE_IMPORT_FILTER_PREFS.filter;
+  const giteeStatuses = m?.kind === "new_req" ? (m.giteeStatuses ?? storedGiteeFilters.statuses) : [];
+  const giteeProjects = m?.kind === "new_req" ? (m.giteeProjects ?? storedGiteeFilters.projects) : [];
   const giteeSearch = m?.kind === "new_req" ? (m.giteeSearch ?? "") : "";
   const giteeIssuesQuery = useGiteeIssuesQuery(
     activeProjectId,
@@ -604,6 +621,26 @@ export function Modals() {
       }))
       .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "zh-CN"));
   })();
+  // Keep remembered facets visible even when the current result page no longer contains them,
+  // otherwise the stored filter would silently hide every item with no way to clear it.
+  for (const value of giteeStatuses) {
+    if (giteeStatusOptions.some((opt) => opt.value === value)) continue;
+    giteeStatusOptions.push({
+      value,
+      label: value,
+      count: 0,
+      color: giteeStatusDotColor(value),
+    });
+  }
+  for (const value of giteeProjects) {
+    if (giteeProjectOptions.some((opt) => opt.value === value)) continue;
+    giteeProjectOptions.push({
+      value,
+      label: value === GITEE_NO_PROGRAM_KEY ? t(language, "gitee.noProgram") : value,
+      count: 0,
+      color: value === GITEE_NO_PROGRAM_KEY ? undefined : giteeProjectDotColor(value),
+    });
+  }
   const giteeVisibleItems = giteeItems.filter((item) => {
     const statusKey = item.stateName ?? item.state;
     if (giteeStatuses.length > 0 && !giteeStatuses.includes(statusKey)) return false;
@@ -613,14 +650,26 @@ export function Modals() {
   });
   const hasGiteeFacetFilters = giteeStatuses.length > 0 || giteeProjects.length > 0;
   const patchGiteeFilters = (patch: {
-    giteeFilter?: "collaborator" | "assigned" | "created" | "all";
+    giteeFilter?: GiteeIssueFilter;
     giteeStatuses?: string[];
     giteeProjects?: string[];
     giteeSearch?: string;
-  }) =>
+  }) => {
+    const touchesPrefs =
+      patch.giteeFilter !== undefined ||
+      patch.giteeStatuses !== undefined ||
+      patch.giteeProjects !== undefined;
+    if (touchesPrefs) {
+      saveGiteeImportFilterPrefs(giteeScope, {
+        filter: patch.giteeFilter ?? giteeFilter,
+        statuses: patch.giteeStatuses ?? giteeStatuses,
+        projects: patch.giteeProjects ?? giteeProjects,
+      });
+    }
     setModal((prev) =>
       prev?.kind === "new_req" ? { ...prev, ...patch, selectedGiteeIssue: null } : prev,
     );
+  };
 
   if (!m) return null;
 
@@ -907,43 +956,23 @@ export function Modals() {
               ) : (
                 <>
                   <div className="flex flex-wrap items-center gap-2">
-                    <SegmentedControl
+                    <SimpleSelect
                       size="sm"
+                      className="w-44"
                       aria-label={t(language, "gitee.filterAria")}
-                      render={
-                        <RadioGroupPrimitive
-                          className="flex flex-wrap items-center"
-                          value={giteeFilter}
-                          onValueChange={(next) => {
-                            if (next === "collaborator" || next === "assigned" || next === "created" || next === "all") {
-                              patchGiteeFilters({ giteeFilter: next, giteeStatuses: [], giteeProjects: [] });
-                            }
-                          }}
-                        />
-                      }
-                    >
-                      {(
-                        [
-                          ["collaborator", t(language, "gitee.filterCollaborator")],
-                          ["assigned", t(language, "gitee.filterAssigned")],
-                          ["created", t(language, "gitee.filterCreated")],
-                          ["all", t(language, "gitee.filterAll")],
-                        ] as const
-                      ).map(([val, label]) => (
-                        <SegmentedControlItem
-                          key={val}
-                          render={<RadioPrimitive.Root value={val} data-testid={`gitee-filter-${val}`} />}
-                        >
-                          {label}
-                        </SegmentedControlItem>
-                      ))}
-                    </SegmentedControl>
-                  </div>
-                  {giteeFilter === "collaborator" && giteeStatus && !giteeStatus.enterprise && (
-                    <div className="text-xs text-muted-foreground">{t(language, "gitee.collaboratorHint")}</div>
-                  )}
-
-                  <div className="flex flex-wrap items-center gap-2">
+                      data-testid="gitee-owner-filter"
+                      value={giteeFilter}
+                      onValueChange={(next) => {
+                        if (next === "assigned" || next === "created" || next === "all") {
+                          patchGiteeFilters({ giteeFilter: next, giteeStatuses: [], giteeProjects: [] });
+                        }
+                      }}
+                      options={[
+                        { value: "assigned", label: t(language, "gitee.filterAssigned") },
+                        { value: "created", label: t(language, "gitee.filterCreated") },
+                        { value: "all", label: t(language, "gitee.filterAll") },
+                      ]}
+                    />
                     <GiteeFilterSelect
                       testId="gitee-status-filter"
                       label={t(language, "gitee.statusFilterLabel")}
